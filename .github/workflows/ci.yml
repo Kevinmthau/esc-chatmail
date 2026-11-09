@@ -64,15 +64,21 @@ jobs:
           retention-days: 7
 
   # The Mac destination of the esc-chatmail target (docs/mac-app-plan.md). It catches the
-  # UIKit-only call that every iOS change can now break on macOS. Build only: no tests, and
-  # unsigned, because the Mac entitlements' keychain-access-groups needs a provisioning
-  # profile that CI does not have. A hosted Mac test run would also launch the app, and an
-  # unsigned build carries no App Sandbox entitlement (the Mac test plan runs locally, see
-  # CLAUDE.md). macOS runner minutes bill at 10x, so keep this job to the one build.
+  # UIKit-only call that every iOS change can now break on macOS, in the app and in the
+  # test target: build-for-testing compiles both. Before, only the app was built here, so
+  # a test that used UIKit without an `#if os(iOS)` guard broke the Mac test build with
+  # every check green.
+  #
+  # It compiles the tests and runs none. The build is unsigned, because the Mac
+  # entitlements' keychain-access-groups needs a provisioning profile that CI does not
+  # have, and an unsigned build carries no App Sandbox entitlement, so its test host must
+  # not launch (the Mac test plan runs locally, see CLAUDE.md). macOS runner minutes bill
+  # at 10x, so keep this job to the one build.
   build-macos:
     name: Build (macOS)
     runs-on: macos-26
-    # A clean Mac build is about the same size as the iOS build step (~4m).
+    # The app alone took 2-4 minutes here. What the test target adds is not measured yet:
+    # check the first runs.
     timeout-minutes: 20
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
@@ -82,8 +88,8 @@ jobs:
       - name: Show toolchain
         run: xcodebuild -version
 
-      - name: Build (macOS, unsigned)
-        run: DESTINATION='platform=macOS' bash Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO
+      - name: Build app and tests (macOS, unsigned, nothing launched)
+        run: DESTINATION='platform=macOS' bash Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO
 
   lint:
     name: SwiftLint (advisory)

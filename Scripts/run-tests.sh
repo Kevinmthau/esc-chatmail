@@ -14,10 +14,24 @@ if [[ -z "${DESTINATION}" ]]; then
   DESTINATION="platform=iOS Simulator,id=${DEVICE_ID}"
 fi
 
-IS_MAC_DESTINATION=false
-if [[ "${DESTINATION}" == *"platform=macOS"* ]]; then
-  IS_MAC_DESTINATION=true
-fi
+# The platform is read from DESTINATION alone: it picks the test plan and, on
+# the Mac, the sandbox check below. So DESTINATION must name its platform (in
+# any letter case). One that names none, such as a bare id=..., could be the
+# Mac, and is refused rather than run as an iOS destination: the full plan in
+# a Mac test host, with no check.
+DESTINATION_LOWERCASED="$(printf '%s' "${DESTINATION}" | tr '[:upper:]' '[:lower:]')"
+case "${DESTINATION_LOWERCASED}" in
+  *"platform=macos"* | *"platform=os x"*)
+    IS_MAC_DESTINATION=true
+    ;;
+  *"platform=ios"*)
+    IS_MAC_DESTINATION=false
+    ;;
+  *)
+    echo "DESTINATION must name its platform, for example 'platform=iOS Simulator,id=<udid>' or 'platform=macOS'. Got: ${DESTINATION}" >&2
+    exit 1
+    ;;
+esac
 
 ARGS=()
 RUN_PERFORMANCE_TESTS=false
@@ -26,6 +40,19 @@ while [[ $# -gt 0 ]]; do
     --performance)
       RUN_PERFORMANCE_TESTS=true
       shift
+      ;;
+    -destination)
+      # xcodebuild runs every destination it is given, so a second one here
+      # would get the plan picked for DESTINATION. Were it the Mac, that is
+      # the full iOS plan in a Mac test host with no sandbox check.
+      echo "Set DESTINATION instead of passing -destination: the test plan and the Mac sandbox check follow DESTINATION." >&2
+      exit 1
+      ;;
+    -testPlan)
+      # Same hole from the other side: -testPlan esc-chatmail with a Mac
+      # DESTINATION is the full iOS plan in a Mac test host.
+      echo "The test plan follows DESTINATION (and --performance); -testPlan cannot be passed." >&2
+      exit 1
       ;;
     *)
       ARGS+=("$1")
@@ -69,6 +96,15 @@ fi
 
 # Everything but the result bundle goes to the build too: a build that wrote
 # the bundle would make the test run fail on an existing path.
+#
+# The host lookup below must resolve the same product the build writes and the
+# test run launches, so it gets every argument that decides where products go:
+# build settings (NAME=value) and the options in the second case. Without
+# -configuration, for one, the lookup named the Debug host while the tests
+# launched the Release one, and a stale signed Debug host passed the check for
+# an unsigned Release build. The app checks itself as well
+# (MacUnitTestHostGuard), so a lookup that is still wrong cannot run tests
+# outside the sandbox.
 BUILD_ARGS=()
 SETTINGS_ARGS=()
 i=0
@@ -79,7 +115,7 @@ while [[ ${i} -lt ${#ARGS[@]} ]]; do
       i=$((i + 2))
       continue
       ;;
-    -derivedDataPath)
+    -derivedDataPath | -configuration | -xcconfig | -sdk | -arch | -toolchain | -scheme | -project | -workspace)
       BUILD_ARGS+=("${arg}" "${ARGS[$((i + 1))]}")
       SETTINGS_ARGS+=("${arg}" "${ARGS[$((i + 1))]}")
       i=$((i + 2))
