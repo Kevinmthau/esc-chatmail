@@ -124,6 +124,35 @@ final class SSRFGuardIntegrationTests: XCTestCase {
         XCTAssertEqual(FailOnUseURLProtocol.startCount, 0, "Session should not have been used for private-IP image URL")
     }
 
+    /// The no-click path: a remote image whose host is a private address written with a trailing
+    /// dot must be refused before any request leaves. `getaddrinfo` resolves `192.168.1.1.` to
+    /// 192.168.1.1 (measured on the iOS 27.0 simulator), so the dotted host is as reachable as the
+    /// plain one.
+    ///
+    /// Revert-check: classifying `url.host` as given in
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)`, without dropping the trailing dot,
+    /// makes this fail: the fetcher starts a request.
+    func testRemoteImageFetcher_rejectsTrailingDotPrivateIPBeforeNetwork() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [FailOnUseURLProtocol.self]
+        FailOnUseURLProtocol.reset()
+        let session = URLSession(configuration: config)
+        let fetcher = RemoteImageFetcher(session: session)
+
+        for urlString in ["http://169.254.169.254./latest/meta-data/", "http://192.168.1.1./cgi-bin/reboot"] {
+            do {
+                _ = try await fetcher.imageData(from: urlString)
+                XCTFail("Expected \(urlString) to be rejected")
+            } catch RemoteImageFetchError.privateOrReservedHost {
+                // Expected.
+            } catch {
+                XCTFail("Unexpected error for \(urlString): \(error)")
+            }
+        }
+
+        XCTAssertEqual(FailOnUseURLProtocol.startCount, 0, "Session should not have been used for a trailing-dot private-IP image URL")
+    }
+
     func testRemoteImageFetcher_rejectsNonImageContentType() async {
         RemoteImageURLProtocol.reset()
         let config = URLSessionConfiguration.ephemeral

@@ -1482,6 +1482,25 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(decide(.linkActivated, trackingURL), .blockedPrivateNetwork(loopback))
     }
 
+    /// A private address written with a trailing dot opens the same host: WebKit's URL parser reads
+    /// `192.168.0.1.` as `192.168.0.1` (measured on the iOS 27.0 simulator). The unwrapped tracking
+    /// destination matters most, because Foundation parses it and nothing normalizes its host
+    /// before the check.
+    ///
+    /// Revert-check: classifying `url.host` as given in
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)`, without dropping the trailing dot,
+    /// makes this fail with `.openExternally`.
+    func testPrivateHostWithTrailingDot_directOrBehindTrackingLink_isBlocked() {
+        let direct = "http://192.168.0.1./admin?action=reset"
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F127.0.0.1.%2Fadmin/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, direct), .blockedPrivateNetwork(URL(string: direct)!))
+        XCTAssertEqual(
+            decide(.linkActivated, trackingURL),
+            .blockedPrivateNetwork(URL(string: "http://127.0.0.1./admin")!)
+        )
+    }
+
     // MARK: Tracking links as WebKit delivers them
 
     /// `decide` builds its URL with `URL(string:)`, but the live delegate gets
