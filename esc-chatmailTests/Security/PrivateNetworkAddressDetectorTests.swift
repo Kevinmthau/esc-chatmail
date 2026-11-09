@@ -157,6 +157,91 @@ final class PrivateNetworkAddressDetectorTests: XCTestCase {
         assertBlocked("http://printer/")
     }
 
+    // MARK: - Trailing-dot (fully qualified) hosts
+
+    /// One trailing dot only marks a name as fully qualified, and whatever opens the URL drops
+    /// it. Measured on the iOS 27.0 simulator: WebKit's URL parser reads `http://192.168.0.1./` as
+    /// the host `192.168.0.1`, and `getaddrinfo("192.168.0.1.")` resolves to 192.168.0.1.
+    ///
+    /// Revert-check: classifying `url.host` as given in
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)`, without dropping the trailing dot,
+    /// makes this fail: `inet_aton` rejects the dotted form and the host falls through to public.
+    func testIPv4_trailingDot_isBlocked() {
+        assertBlocked("http://192.168.0.1./admin?action=reset")
+        assertBlocked("http://127.0.0.1./")
+        assertBlocked("http://10.0.0.1./")
+        assertBlocked("http://169.254.169.254./latest/meta-data/")
+    }
+
+    /// WebKit reads the first four as 127.0.0.1, `127.` as 0.0.0.127 and `0.` as 0.0.0.0.
+    ///
+    /// Revert-check: the same revert makes this fail.
+    func testIPv4_legacyFormsWithTrailingDot_areBlocked() {
+        assertBlocked("http://127.1./")
+        assertBlocked("http://2130706433./")
+        assertBlocked("http://0x7f.1./")
+        assertBlocked("http://0177.0.0.1./")
+        assertBlocked("http://127./")
+        assertBlocked("http://0./")
+    }
+
+    /// Foundation hands both of these to the detector as the host `192.168.0.1.`.
+    ///
+    /// Revert-check: the same revert makes this fail.
+    func testIPv4_encodedOrIdeographicTrailingDot_isBlocked() {
+        assertBlocked("http://192.168.0.1%2E/")
+        assertBlocked("http://192.168.0.1\u{3002}/")
+    }
+
+    /// A URL bridged from `NSURL`, which is what a redirect and a WebView click deliver, carries
+    /// the same dotted host.
+    ///
+    /// Revert-check: the same revert makes this fail.
+    func testIPv4_trailingDot_bridgedFromNSURL_isBlocked() throws {
+        let url = try XCTUnwrap(NSURL(string: "http://192.168.0.1./admin")) as URL
+
+        XCTAssertEqual(url.host, "192.168.0.1.")
+        XCTAssertTrue(PrivateNetworkAddressDetector.isPrivateOrReserved(url))
+    }
+
+    /// With the dot, `printer.` did not look like a single label.
+    ///
+    /// Revert-check: the same revert makes this fail.
+    func testSingleLabelHostname_trailingDot_isBlocked() {
+        assertBlocked("http://intranet-server./")
+        assertBlocked("http://printer./")
+    }
+
+    /// HONEST SCOPE: these were blocked before the trailing dot was dropped, by the reserved-TLD
+    /// check, which skips empty labels. They pin that the change keeps them blocked.
+    func testReservedNames_trailingDot_areBlocked() {
+        assertBlocked("http://localhost./")
+        assertBlocked("http://LOCALHOST./")
+        assertBlocked("http://printer.local./")
+    }
+
+    /// A host with an empty label is not a usable name: WebKit kept `192.168.0.1..` as a name and
+    /// `getaddrinfo` failed on it and on `.`.
+    ///
+    /// Revert-check: removing the `!host.hasSuffix(".")` and `!host.isEmpty` refusals after the
+    /// dot is dropped in `PrivateNetworkAddressDetector.classifiableHost(of:)` makes this fail.
+    func testHostWithEmptyLabel_isBlocked() {
+        assertBlocked("http://192.168.0.1../")
+        assertBlocked("http://example.com../")
+        assertBlocked("http://./")
+    }
+
+    /// Dropping the dot must not turn a public name private.
+    ///
+    /// Revert-check: refusing every host that ends in a dot in
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)`, instead of dropping the dot, makes
+    /// this fail.
+    func testPublicHosts_trailingDot_areAllowed() {
+        assertAllowed("https://example.com./")
+        assertAllowed("https://docs.google.com./document/d/abc/edit")
+        assertAllowed("https://8.8.8.8./")
+    }
+
     // MARK: - Malformed URLs
 
     func testEmptyHost_isBlocked() {

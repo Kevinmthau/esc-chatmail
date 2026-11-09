@@ -116,11 +116,48 @@ describe('isPrivateOrReservedHost', () => {
     expect(isPrivateOrReservedHost('[]')).toBe(true)
   })
 
+  // Revert-check: the trailing-dot drop in isPrivateOrReservedHost
+  it('privateNetworkAddress_trailingDot_classifiesLikeTheDotlessHost', () => {
+    for (const host of [
+      '192.168.0.1.',
+      '127.0.0.1.',
+      '169.254.169.254.',
+      '127.1.',
+      '2130706433.',
+      '0x7f.1.',
+      '0177.0.0.1.',
+      'intranet.',
+      'printer.',
+      '[::1].',
+    ]) {
+      expect(isPrivateOrReservedHost(host), host).toBe(true)
+    }
+    for (const host of ['example.com.', 'mail.google.com.', '8.8.8.8.']) {
+      expect(isPrivateOrReservedHost(host), host).toBe(false)
+    }
+  })
+
+  // Revert-check: the empty-label refusal after the trailing-dot drop
+  it('privateNetworkAddress_hostWithEmptyLabel_failsClosed', () => {
+    for (const host of ['.', '192.168.0.1..', 'example.com..']) {
+      expect(isPrivateOrReservedHost(host), host).toBe(true)
+    }
+  })
+
   it('privateNetworkAddress_url_classifiesByHostname', () => {
     expect(isPrivateOrReservedUrl(new URL('http://192.168.0.1/cgi-bin/reboot'))).toBe(true)
     expect(isPrivateOrReservedUrl(new URL('http://[::1]:8080/'))).toBe(true)
     // The WHATWG parser canonicalizes the legacy spelling before hostname is read.
     expect(isPrivateOrReservedUrl(new URL('http://0x7f.1/'))).toBe(true)
     expect(isPrivateOrReservedUrl(new URL('https://example.com/x'))).toBe(false)
+  })
+
+  // Revert-check: the trailing-dot drop in isPrivateOrReservedHost ("printer."
+  // keeps its dot through the WHATWG parser; the IPv4 host loses it there).
+  it('privateNetworkAddress_url_trailingDotHost_classifiesLikeTheDotlessHost', () => {
+    expect(new URL('http://printer./').hostname).toBe('printer.')
+    expect(isPrivateOrReservedUrl(new URL('http://printer./'))).toBe(true)
+    expect(isPrivateOrReservedUrl(new URL('http://192.168.0.1./cgi-bin/reboot'))).toBe(true)
+    expect(isPrivateOrReservedUrl(new URL('https://example.com./x'))).toBe(false)
   })
 })

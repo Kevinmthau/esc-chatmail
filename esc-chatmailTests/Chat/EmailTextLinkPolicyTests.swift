@@ -128,4 +128,16 @@ final class EmailTextLinkPolicyTests: XCTestCase {
 
         XCTAssertEqual(EmailTextLinkPolicy.action(for: link), .blockedPrivateNetwork(link))
     }
+
+    /// The detector links the dotted host as written, and the browser then opens `192.168.0.1`.
+    ///
+    /// Revert-check: classifying `url.host` as given in
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)`, without dropping the trailing dot,
+    /// makes this fail with `.openExternally`.
+    func testAction_detectedPrivateHostLinkWithTrailingDot_isBlocked() throws {
+        let link = try detectedLink(in: "Router setup: http://192.168.0.1./admin?action=reset")
+
+        XCTAssertEqual(link.host, "192.168.0.1.")
+        XCTAssertEqual(EmailTextLinkPolicy.action(for: link), .blockedPrivateNetwork(link))
+    }
 }

@@ -13,7 +13,7 @@ enum PrivateNetworkAddressDetector {
     /// Returns true if the URL's host refers to a reserved or private network
     /// address that an untrusted fetch should not be allowed to reach.
     static func isPrivateOrReserved(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased(), !host.isEmpty else {
+        guard let host = classifiableHost(of: url) else {
             return true
         }
 
@@ -50,6 +50,37 @@ enum PrivateNetworkAddressDetector {
         }
 
         return false
+    }
+
+    /// The lowercased host to classify, or nil when the URL has no usable host and must be
+    /// refused.
+    ///
+    /// One trailing dot is dropped first. It only marks a name as fully qualified, but every check
+    /// below reads it as part of the name: `inet_aton` rejects `192.168.0.1.`, and `printer.` no
+    /// longer looks like a single label, so both fell through to "public" while the URL still
+    /// reached the private host. Measured on the iOS 27.0 simulator: WebKit's URL parser turns
+    /// `http://192.168.0.1./` into the host `192.168.0.1` (and `127.1.`, `2130706433.`, `0x7f.1.`
+    /// and `0177.0.0.1.` into `127.0.0.1`), and `getaddrinfo("192.168.0.1.")` resolves to
+    /// 192.168.0.1. Foundation hands over the same dotted host for `192.168.0.1%2E` and for an
+    /// ideographic full stop (`192.168.0.1。`).
+    ///
+    /// A host that is empty or still ends in a dot after that (`.`, `192.168.0.1..`) has an empty
+    /// label. On the same simulator WebKit kept such a host as a name and `getaddrinfo` failed on
+    /// it, so it is refused rather than guessed at.
+    private static func classifiableHost(of url: URL) -> String? {
+        guard var host = url.host?.lowercased(), !host.isEmpty else {
+            return nil
+        }
+
+        if host.hasSuffix(".") {
+            host.removeLast()
+        }
+
+        guard !host.isEmpty, !host.hasSuffix(".") else {
+            return nil
+        }
+
+        return host
     }
 
     // MARK: - Reserved names

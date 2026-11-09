@@ -52,6 +52,15 @@ export function isPrivateOrReservedUrl(url: URL): boolean {
  */
 export function isPrivateOrReservedHost(rawHost: string): boolean {
   let host = rawHost.trim().toLowerCase()
+  // One trailing dot only marks a name as fully qualified, and the resolver
+  // drops it, while the checks below read it as part of the name: "printer."
+  // no longer looks like a single label, and a raw "192.168.0.1." is not an
+  // IPv4 literal. The WHATWG parser removes the dot from an IPv4 host before
+  // `hostname` is read, but keeps it on a name. What is left after dropping it
+  // must still be a name: empty, or ending in another dot, has an empty label
+  // and fails closed. Same rule as classifiableHost(of:) in the Swift detector.
+  if (host.endsWith('.')) host = host.slice(0, -1)
+  if (host.length === 0 || host.endsWith('.')) return true
   if (host.startsWith('[') && host.endsWith(']')) host = host.slice(1, -1)
   if (host.length === 0) return true
 
