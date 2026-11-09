@@ -4,7 +4,7 @@ import SwiftUI
 /// the placeholder. A loaded image with nothing to see in it takes the placeholder too, as it does
 /// in `ImageAttachmentBubbleContent`.
 struct AttachmentGridThumbnail: View {
-    let image: UIImage?
+    let image: PlatformImage?
     var backdrop: ImageBackdropPolicy = .none
     let isLoading: Bool
     let placeholderIconName: String
@@ -22,14 +22,14 @@ struct AttachmentGridThumbnail: View {
                     pixelWidth: pixelSize.width, pixelHeight: pixelSize.height,
                     maxWidth: max(0, cellSize.width - 16), displayScale: displayScale
                 )
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fit)
                     .frame(width: size.width, height: min(size.height, max(0, cellSize.height - 16)))
                     .frame(width: cellSize.width, height: cellSize.height)
                     .background(card ?? .clear)
             } else {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: cellSize.width, height: cellSize.height)

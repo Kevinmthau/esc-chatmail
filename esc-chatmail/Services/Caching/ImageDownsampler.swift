@@ -1,10 +1,11 @@
+import Foundation
+import ImageIO
 #if canImport(UIKit)
 import UIKit
 #endif
-import ImageIO
 
 /// Data-based analog of AttachmentCacheActor's URL downsampler: decodes image
-/// bytes into a UIImage capped at a maximum pixel dimension without first
+/// bytes into a PlatformImage capped at a maximum pixel dimension without first
 /// materializing the full-resolution bitmap (CGImageSource thumbnailing).
 enum ImageDownsampler {
 
@@ -16,10 +17,10 @@ enum ImageDownsampler {
     /// UIScreen read: callers include non-main actors.
     static let defaultMaxPixelDimension: CGFloat = 1440
 
-    /// Decodes `data` into a UIImage whose larger pixel dimension is at most
+    /// Decodes `data` into a PlatformImage whose larger pixel dimension is at most
     /// `maxPixelDimension`. Images already within the cap decode directly
     /// (dimension gate); undecodable data returns nil.
-    static func decode(data: Data, maxPixelDimension: CGFloat = defaultMaxPixelDimension) -> UIImage? {
+    static func decode(data: Data, maxPixelDimension: CGFloat = defaultMaxPixelDimension) -> PlatformImage? {
         guard !data.isEmpty, maxPixelDimension > 0, maxPixelDimension.isFinite else {
             return nil
         }
@@ -35,7 +36,7 @@ enum ImageDownsampler {
            let width = properties[kCGImagePropertyPixelWidth] as? CGFloat,
            let height = properties[kCGImagePropertyPixelHeight] as? CGFloat,
            width <= maxPixelDimension, height <= maxPixelDimension {
-            return UIImage(data: data)
+            return PlatformImage(data: data)
         }
 
         let thumbnailOptions = [
@@ -47,8 +48,8 @@ enum ImageDownsampler {
 
         guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
             // Prefer a full-resolution decode over dropping the image.
-            return UIImage(data: data)
+            return PlatformImage(data: data)
         }
-        return UIImage(cgImage: cgImage)
+        return PlatformImage(cgImage: cgImage)
     }
 }

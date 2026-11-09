@@ -66,7 +66,7 @@ enum FullInteractiveEmailWebView {
         webView.isOpaque = false
         webView.overrideUserInterfaceStyle = .light
         let theme = HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .original)
-        let backgroundColor = UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
+        let backgroundColor = PlatformColor(hex: theme.backgroundColorHex) ?? .systemBackground
         webView.backgroundColor = backgroundColor
         webView.scrollView.backgroundColor = backgroundColor
         webView.underPageBackgroundColor = backgroundColor

@@ -58,7 +58,7 @@ private struct LegacySharedDocumentLinkCard: View {
                     .foregroundColor(.blue)
             }
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
+            .background(Color.secondarySystemBackground)
             .cornerRadius(12)
         }
         .buttonStyle(.plain)

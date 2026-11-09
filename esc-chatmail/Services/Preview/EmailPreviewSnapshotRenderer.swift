@@ -14,7 +14,7 @@ struct EmailPreviewSnapshotRequest {
 }
 
 struct EmailPreviewSnapshotResult {
-    let image: UIImage
+    let image: PlatformImage
     let displayHeight: CGFloat
     let pixelScale: CGFloat
     let cacheKey: String
@@ -506,7 +506,7 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
             isDarkMode: request.isDarkMode
         )
         let theme = EmailPreviewSnapshotAppearance.theme(isDarkMode: request.isDarkMode)
-        let color = UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
+        let color = PlatformColor(hex: theme.backgroundColorHex) ?? .systemBackground
         webView.backgroundColor = color
         webView.scrollView.backgroundColor = color
         webView.underPageBackgroundColor = color
@@ -596,7 +596,7 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
         }
     }
 
-    private func snapshot(displayHeight: CGFloat) async throws -> UIImage {
+    private func snapshot(displayHeight: CGFloat) async throws -> PlatformImage {
         try await withCheckedThrowingContinuation { continuation in
             let configuration = WKSnapshotConfiguration()
             configuration.rect = CGRect(

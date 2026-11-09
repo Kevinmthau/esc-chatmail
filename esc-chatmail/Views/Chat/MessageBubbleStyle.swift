@@ -78,7 +78,7 @@ enum MessageBubbleStyle {
         case .standard:
             return Color.gray.opacity(0.2)
         case .compact:
-            return Color(.systemGray5)
+            return Color.systemGray5
         }
     }
 

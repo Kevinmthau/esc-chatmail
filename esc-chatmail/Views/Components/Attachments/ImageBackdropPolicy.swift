@@ -57,7 +57,7 @@ enum ImageBackdropPolicy: Equatable {
     /// The image worth drawing, or nil when the slot should show its placeholder: a loaded image
     /// with nothing to see in it takes the placeholder too. The bubble and the grid both decide
     /// this here, so they can't drift apart.
-    func visibleImage(_ image: UIImage?) -> UIImage? {
+    func visibleImage(_ image: PlatformImage?) -> PlatformImage? {
         self == .nothingVisible ? nil : image
     }
 
@@ -80,7 +80,7 @@ enum ImageBackdropPolicy: Equatable {
     /// started finishes and stores its verdict, sparing the next mount the work. One that hasn't
     /// started answers `.none`, which only a cancelled caller sees, and stores nothing.
     static func resolve(
-        for image: UIImage?,
+        for image: PlatformImage?,
         analyze: @escaping @Sendable (CGImage) -> Self = { ImageBackdropPolicy.resolve(for: $0) }
     ) async -> Self {
         guard let image, let cgImage = image.cgImage, mayHaveTransparency(cgImage) else { return .none }
@@ -101,11 +101,11 @@ enum ImageBackdropPolicy: Equatable {
     }
 
     /// The verdict already read from this image, if any.
-    static func storedVerdict(for image: UIImage) -> Self? {
+    static func storedVerdict(for image: PlatformImage) -> Self? {
         objc_getAssociatedObject(image, verdictKey) as? Self
     }
 
-    private static func store(_ verdict: Self, for image: UIImage) {
+    private static func store(_ verdict: Self, for image: PlatformImage) {
         objc_setAssociatedObject(image, verdictKey, verdict, .OBJC_ASSOCIATION_RETAIN)
     }
 
@@ -286,7 +286,7 @@ enum ImageBackdropPolicy: Equatable {
         let encoded = Double(value) / 255
         return encoded <= 0.04045 ? encoded / 12.92 : pow((encoded + 0.055) / 1.055, 2.4)
     }
-    /// Identifies the stored verdict among a `UIImage`'s associated objects, by address only.
+    /// Identifies the stored verdict among a `PlatformImage`'s associated objects, by address only.
     private static let verdictKey = UnsafeRawPointer(
         UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
     )

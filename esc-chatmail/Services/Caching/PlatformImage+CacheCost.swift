@@ -1,8 +1,9 @@
+import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
 
-extension UIImage {
+extension PlatformImage {
     /// Estimated decoded bitmap footprint in bytes, for NSCache cost
     /// accounting: pixel dimensions (points × scale) at 4 bytes per pixel.
     /// Same formula as AttachmentCacheActor's full-image cost, so eviction

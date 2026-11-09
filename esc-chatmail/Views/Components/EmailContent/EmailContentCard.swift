@@ -15,7 +15,7 @@ private struct EmailPreviewCardChromeModifier: ViewModifier {
         content
             .background(
                 RoundedRectangle(cornerRadius: EmailPreviewCardStyle.cornerRadius, style: .continuous)
-                    .fill(Color(uiColor: .secondarySystemBackground))
+                    .fill(Color.secondarySystemBackground)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: EmailPreviewCardStyle.cornerRadius, style: .continuous)

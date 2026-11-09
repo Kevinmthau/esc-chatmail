@@ -10,8 +10,8 @@ struct PDFAttachmentCard: View {
         Button(action: onTap) {
             HStack(spacing: 12) {
                 // Thumbnail
-                if let uiImage = thumbnailLoader.image {
-                    Image(uiImage: uiImage)
+                if let image = thumbnailLoader.image {
+                    Image(platformImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
                         .frame(width: 60, height: 80)
@@ -76,7 +76,7 @@ struct PDFAttachmentCard: View {
                 )
             }
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
+            .background(Color.secondarySystemBackground)
             .cornerRadius(12)
         }
         .buttonStyle(PlainButtonStyle())

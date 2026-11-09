@@ -133,7 +133,7 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
 
     @discardableResult
     func store(
-        image: UIImage,
+        image: PlatformImage,
         displayHeight: CGFloat,
         pixelScale: CGFloat,
         for cacheKey: String,

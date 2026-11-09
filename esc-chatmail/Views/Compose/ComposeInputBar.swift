@@ -30,7 +30,7 @@ struct ComposeInputBar: View {
     @State private var documentProcessingID = UUID()
 
     private var iMessageButtonBackground: Color {
-        Color(.systemGray6)
+        Color.systemGray6
     }
 
     private var iMessageBorderColor: Color {
@@ -38,7 +38,7 @@ struct ComposeInputBar: View {
     }
 
     private var iMessageFieldBackground: Color {
-        Color(.systemGray6)
+        Color.systemGray6
     }
 
     private var hasTypedContent: Bool {
@@ -83,7 +83,7 @@ struct ComposeInputBar: View {
                     placeholder: "iMessage",
                     lineLimit: style == .iMessage ? 1...4 : 1...5,
                     cornerRadius: style == .iMessage ? 24 : 18,
-                    backgroundColor: style == .iMessage ? iMessageFieldBackground : Color(.systemGray6),
+                    backgroundColor: style == .iMessage ? iMessageFieldBackground : Color.systemGray6,
                     textFont: style == .iMessage ? .system(size: 18) : .body,
                     horizontalPadding: style == .iMessage ? 16 : 12,
                     verticalPadding: style == .iMessage ? 10 : 8,
@@ -109,7 +109,7 @@ struct ComposeInputBar: View {
             .padding(.horizontal, 16)
             .padding(.top, style == .iMessage ? 10 : 8)
             .padding(.bottom, style == .iMessage ? 10 : 8)
-            .background(Color(.systemBackground))
+            .background(Color.systemBackground)
         }
         .disabled(viewModel.isSending)
         .photosPicker(

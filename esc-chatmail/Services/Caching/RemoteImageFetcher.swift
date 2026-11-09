@@ -4,7 +4,7 @@ import UIKit
 #endif
 
 protocol RemoteImageFetching: Sendable {
-    func image(from urlString: String) async -> UIImage?
+    func image(from urlString: String) async -> PlatformImage?
 }
 
 enum RemoteImageFetchError: Error, Equatable {
@@ -37,14 +37,14 @@ actor RemoteImageFetcher: RemoteImageFetching {
         self.remoteConfig = remoteConfig
     }
 
-    func image(from urlString: String) async -> UIImage? {
+    func image(from urlString: String) async -> PlatformImage? {
         guard await remoteConfig.isEnabled(.remoteImageLoadingEnabled) else {
             return nil
         }
 
         do {
             let data = try await imageData(from: urlString)
-            guard let image = UIImage(data: data) else {
+            guard let image = PlatformImage(data: data) else {
                 throw RemoteImageFetchError.undecodableImage
             }
             return image

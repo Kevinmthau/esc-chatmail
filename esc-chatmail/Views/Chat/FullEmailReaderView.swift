@@ -6,7 +6,7 @@ import UIKit
 struct FullEmailReaderView: View {
     @ObservedObject var session: FullEmailOpenSession
     /// The already-rendered chat preview snapshot, shown instantly until the live WebView confirms paint.
-    @State private var snapshotPlaceholder: UIImage?
+    @State private var snapshotPlaceholder: PlatformImage?
     /// Set once the live WebView reports paint-confirmed readiness, cross-fading the snapshot away.
     @State private var webViewPainted = false
     @State private var loadedContentSignature: String?
@@ -153,16 +153,16 @@ struct FullEmailReaderView: View {
         }
     }
 
-    private func snapshotPlaceholderView(_ image: UIImage) -> some View {
+    private func snapshotPlaceholderView(_ image: PlatformImage) -> some View {
         GeometryReader { geometry in
-            Image(uiImage: image)
+            Image(platformImage: image)
                 .resizable()
                 .interpolation(.medium)
                 .scaledToFit()
                 .frame(width: geometry.size.width, height: geometry.size.height, alignment: .top)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(Color.systemBackground)
     }
 
     private func loadingBanner(text: String) -> some View {
@@ -201,7 +201,7 @@ struct FullEmailReaderView: View {
               let message = session.message,
               let metadata = await RenderedMessageCache.shared.latestSnapshotMetadata(messageId: message.id),
               let entry = await EmailPreviewSnapshotCache.shared.load(for: metadata.snapshotCacheKey),
-              let image = UIImage(data: entry.imageData),
+              let image = PlatformImage(data: entry.imageData),
               !Task.isCancelled else {
             return
         }
@@ -270,7 +270,7 @@ private struct FullEmailPlaceholderSurface: View {
         .padding(.horizontal, 24)
         .padding(.vertical, 22)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color(uiColor: .systemBackground))
+        .background(Color.systemBackground)
         .overlay(alignment: .bottom) {
             overlay
         }
@@ -315,7 +315,7 @@ private struct OriginalEmailReadableView: View {
                 .textSelection(.enabled)
                 .padding(18)
         }
-        .background(Color(uiColor: .systemBackground))
+        .background(Color.systemBackground)
         .tint(.blue)
     }
 
@@ -324,7 +324,7 @@ private struct OriginalEmailReadableView: View {
             string: text,
             attributes: [
                 .font: UIFont.preferredFont(forTextStyle: .body),
-                .foregroundColor: UIColor.label
+                .foregroundColor: PlatformColor.label
             ]
         )
 

@@ -20,7 +20,7 @@ struct ComposeView: View {
     private let onSendConversation: ((ConversationReference) -> Void)?
 
     private var iMessageCanvasColor: Color {
-        Color(.systemGroupedBackground)
+        Color.systemGroupedBackground
     }
 
     private var isDarkMode: Bool {
@@ -125,7 +125,7 @@ struct ComposeView: View {
                     }
                 }
                 .background(
-                    usesIMessagePresentation ? iMessageCanvasColor : Color(.systemBackground)
+                    usesIMessagePresentation ? iMessageCanvasColor : Color.systemBackground
                 )
 
                 // Autocomplete overlay - positioned below recipient row
@@ -220,7 +220,7 @@ struct ComposeView: View {
                         .frame(width: 50, height: 50)
                         .background(
                             Circle()
-                                .fill(Color(.systemGray5))
+                                .fill(Color.systemGray5)
                         )
                 }
                 .buttonStyle(.plain)
@@ -362,7 +362,7 @@ struct ComposeView: View {
                         .padding(10)
                 }
                 .frame(height: 160)
-                .background(Color(.secondarySystemBackground))
+                .background(Color.secondarySystemBackground)
                 .cornerRadius(10)
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)

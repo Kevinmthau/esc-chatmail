@@ -462,10 +462,10 @@ struct ProfilePhoto {
     let imageData: Data?
     let url: String?
 
-    /// Returns UIImage from either imageData or by loading from URL
-    func loadImage() async -> UIImage? {
+    /// Returns PlatformImage from either imageData or by loading from URL
+    func loadImage() async -> PlatformImage? {
         if let data = imageData {
-            return UIImage(data: data)
+            return PlatformImage(data: data)
         }
 
         if let urlString = url {

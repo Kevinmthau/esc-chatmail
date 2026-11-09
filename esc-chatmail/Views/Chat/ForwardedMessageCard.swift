@@ -101,7 +101,7 @@ struct ForwardedMessageCard: View {
     }
 
     private var cardBackgroundColor: Color {
-        isFromMe ? Color.white.opacity(0.14) : Color(.systemBackground).opacity(0.68)
+        isFromMe ? Color.white.opacity(0.14) : Color.systemBackground.opacity(0.68)
     }
 
     private var strokeColor: Color {

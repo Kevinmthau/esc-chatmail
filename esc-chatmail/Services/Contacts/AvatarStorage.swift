@@ -35,7 +35,7 @@ actor AvatarStorage {
         do {
             // Compress image if it's too large (> 50KB)
             let dataToSave: Data
-            if imageData.count > 50_000, let image = UIImage(data: imageData) {
+            if imageData.count > 50_000, let image = PlatformImage(data: imageData) {
                 dataToSave = image.jpegData(compressionQuality: 0.7) ?? imageData
             } else {
                 dataToSave = imageData

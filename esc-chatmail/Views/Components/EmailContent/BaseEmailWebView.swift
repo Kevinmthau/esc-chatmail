@@ -267,7 +267,7 @@ struct BaseEmailWebView: UIViewRepresentable {
             }
         }
 
-        private func nativeBackgroundColor(for mode: EmailWebViewMode) -> UIColor? {
+        private func nativeBackgroundColor(for mode: EmailWebViewMode) -> PlatformColor? {
             if case .simplePreview = mode, parent.isDarkMode == nil {
                 // Preserve the old transparent simple-preview surface unless the caller opts into theming.
                 return .clear
@@ -277,7 +277,7 @@ struct BaseEmailWebView: UIViewRepresentable {
                 isDarkMode: parent.isDarkMode ?? false,
                 displayPurpose: mode.displayPurpose
             )
-            return UIColor(hex: theme.backgroundColorHex) ?? .systemBackground
+            return PlatformColor(hex: theme.backgroundColorHex) ?? .systemBackground
         }
 
         /// Derives a baseURL from the sender's email domain for proper Referer headers.

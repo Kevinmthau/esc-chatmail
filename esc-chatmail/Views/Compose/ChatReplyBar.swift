@@ -95,7 +95,7 @@ struct ChatReplyBar: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
-            .background(Color(UIColor.systemBackground))
+            .background(Color.systemBackground)
         }
     }
     

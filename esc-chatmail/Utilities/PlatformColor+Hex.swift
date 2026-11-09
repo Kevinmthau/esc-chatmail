@@ -1,8 +1,9 @@
+import Foundation
 #if canImport(UIKit)
 import UIKit
 #endif
 
-extension UIColor {
+extension PlatformColor {
     /// Creates a color from a 6-digit RGB hex string, with or without a leading `#`.
     /// Returns `nil` for any other length or non-hex content.
     convenience init?(hex: String) {

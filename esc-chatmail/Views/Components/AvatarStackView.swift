@@ -239,7 +239,7 @@ struct GroupAvatarView: View {
         ZStack {
             // Background circle
             Circle()
-                .fill(Color(UIColor.systemGray6))
+                .fill(Color.systemGray6)
                 .frame(width: mainSize, height: mainSize)
 
             // No resolved participants (load pending or failed): monogram the
@@ -270,7 +270,7 @@ struct GroupAvatarView: View {
                     } else {
                         // Fallback to person icon
                         Circle()
-                            .fill(Color(UIColor.systemGray4))
+                            .fill(Color.systemGray4)
                             .frame(width: smallSize, height: smallSize)
                             .overlay(
                                 Image(systemName: "person.fill")
@@ -279,7 +279,7 @@ struct GroupAvatarView: View {
                             )
                             .overlay(
                                 Circle()
-                                    .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                                    .stroke(Color.systemBackground, lineWidth: 1.5)
                             )
                     }
                 }
@@ -373,14 +373,14 @@ struct SmallCachedAvatarView: View {
             imageURL: photo.url,
             size: size,
             showsProgressWhileLoading: false,
-            imageBorderColor: Color(UIColor.systemBackground),
+            imageBorderColor: Color.systemBackground,
             imageBorderWidth: 1.5
         ) {
             if let name {
                 InitialsAvatarView(name: name, style: .compact)
             } else {
                 Circle()
-                    .fill(Color(UIColor.systemGray4))
+                    .fill(Color.systemGray4)
                     .frame(width: size, height: size)
                     .overlay(
                         Image(systemName: "person.fill")
@@ -389,7 +389,7 @@ struct SmallCachedAvatarView: View {
                     )
                     .overlay(
                         Circle()
-                            .stroke(Color(UIColor.systemBackground), lineWidth: 1.5)
+                            .stroke(Color.systemBackground, lineWidth: 1.5)
                     )
             }
         }

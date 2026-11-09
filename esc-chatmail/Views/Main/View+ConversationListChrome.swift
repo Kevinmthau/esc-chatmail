@@ -59,7 +59,7 @@ extension View {
 private func legacyGlassSurface<S: InsettableShape>(_ shape: S, material: Material?) -> some View {
     ZStack {
         shape
-            .fill(Color(UIColor.systemBackground).opacity(0.95))
+            .fill(Color.systemBackground.opacity(0.95))
         if let material {
             shape
                 .fill(material)

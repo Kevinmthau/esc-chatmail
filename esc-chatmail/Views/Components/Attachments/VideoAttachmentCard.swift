@@ -51,7 +51,7 @@ struct VideoAttachmentCard: View {
                 downloadIndicator
             }
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
+            .background(Color.secondarySystemBackground)
             .cornerRadius(12)
         }
         .buttonStyle(PlainButtonStyle())
@@ -76,19 +76,19 @@ struct VideoAttachmentCard: View {
     private var videoThumbnail: some View {
         ZStack {
             if let image = thumbnailLoader.image {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else if thumbnailLoader.isLoading {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(UIColor.tertiarySystemFill))
+                    .fill(Color.tertiarySystemFill)
                     .overlay(
                         ProgressView()
                             .scaleEffect(0.7)
                     )
             } else {
                 RoundedRectangle(cornerRadius: 8)
-                    .fill(Color(UIColor.tertiarySystemFill))
+                    .fill(Color.tertiarySystemFill)
                     .overlay(
                         Image(systemName: "video.fill")
                             .font(.system(size: 22))

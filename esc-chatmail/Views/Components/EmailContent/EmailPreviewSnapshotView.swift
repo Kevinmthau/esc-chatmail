@@ -81,7 +81,7 @@ struct EmailPreviewSnapshotView: View {
     @ViewBuilder
     private func content(width: CGFloat) -> some View {
         if let snapshotImage = viewModel.snapshotImage {
-            Image(uiImage: snapshotImage)
+            Image(platformImage: snapshotImage)
                 .resizable()
                 .interpolation(.medium)
                 .scaledToFill()
@@ -95,7 +95,7 @@ struct EmailPreviewSnapshotView: View {
     private var loadingPreview: some View {
         ZStack {
             Rectangle()
-                .fill(Color(uiColor: isDarkMode ? .systemGray6 : .secondarySystemBackground))
+                .fill(isDarkMode ? Color.systemGray6 : Color.secondarySystemBackground)
             ProgressView()
                 .controlSize(.small)
         }
@@ -125,7 +125,7 @@ struct EmailPreviewSnapshotView: View {
 
 @MainActor
 final class EmailPreviewSnapshotViewModel: ObservableObject {
-    @Published private(set) var snapshotImage: UIImage?
+    @Published private(set) var snapshotImage: PlatformImage?
     @Published private(set) var displayHeight: CGFloat = HTMLPreviewSizing.defaultPreviewHeight
     @Published private(set) var completedCacheKey: String?
     @Published private(set) var lastContainerWidth: CGFloat = 0
@@ -240,7 +240,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 return
             }
 
-            if let image = UIImage(data: cached.imageData) {
+            if let image = PlatformImage(data: cached.imageData) {
                 EmailPreviewSnapshotDiagnostics.logCacheHit(
                     cacheKey: cacheKey,
                     messageId: diagnosticMessageId

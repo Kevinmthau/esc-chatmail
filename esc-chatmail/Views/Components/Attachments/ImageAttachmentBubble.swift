@@ -117,7 +117,7 @@ struct ImageAttachmentBubble: View {
 /// Pure presentation shared by cold, cached, and failed thumbnail loads. The outer
 /// frame belongs to the attachment metadata, never to the image or placeholder.
 struct ImageAttachmentBubbleContent: View {
-    let image: UIImage?
+    let image: PlatformImage?
     let isLoading: Bool
     let filename: String
     let presentation: InlineImagePresentationPolicy
@@ -126,7 +126,7 @@ struct ImageAttachmentBubbleContent: View {
 
     /// A loaded image with nothing to see in it takes the failed thumbnail's placeholder, which
     /// at least names the attachment, rather than holding the reserved frame empty.
-    private var visibleImage: UIImage? {
+    private var visibleImage: PlatformImage? {
         backdrop.visibleImage(image)
     }
 
@@ -134,7 +134,7 @@ struct ImageAttachmentBubbleContent: View {
         let padding: CGFloat = presentation == .compact ? min(8, size.width / 2) : 0
         ZStack {
             if let image = visibleImage {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(

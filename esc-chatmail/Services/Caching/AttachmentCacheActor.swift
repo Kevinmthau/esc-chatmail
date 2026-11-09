@@ -14,10 +14,10 @@ actor AttachmentCacheActor: MemoryWarningHandler {
 
     // MARK: - Cache Instances
 
-    private let thumbnailCache: LRUCacheActor<String, UIImage>
-    private let fullImageCache: LRUCacheActor<String, UIImage>
+    private let thumbnailCache: LRUCacheActor<String, PlatformImage>
+    private let fullImageCache: LRUCacheActor<String, PlatformImage>
     private let dataCache: LRUCacheActor<String, Data>
-    private let requestManager = InFlightRequestManager<String, UIImage>()
+    private let requestManager = InFlightRequestManager<String, PlatformImage>()
     private let memoryObserver = MemoryWarningObserver()
     private let loadAttachmentData: @Sendable (String?) async -> Data?
     private var cacheIdentitiesByAttachmentId: [String: Set<String>] = [:]
@@ -123,7 +123,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         for attachmentId: String,
         messageId: String? = nil,
         from path: String?
-    ) async -> UIImage? {
+    ) async -> PlatformImage? {
         guard acceptsAccountWork,
               let path,
               AttachmentPaths.isReadableStoragePath(
@@ -159,7 +159,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
             }
 
             // Decode image
-            return UIImage(data: data)
+            return PlatformImage(data: data)
         }
 
         guard acceptsAccountWork, generation == accountGeneration else { return nil }
@@ -190,7 +190,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         messageId: String? = nil,
         from path: String?,
         targetSize: CGSize
-    ) async -> UIImage? {
+    ) async -> PlatformImage? {
         guard targetSize.width > 0, targetSize.height > 0,
               targetSize.width.isFinite, targetSize.height.isFinite else {
             return nil
@@ -228,7 +228,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
 
         // Capture screen scale on main actor so the frame is sized for the
         // display, not a fixed oversize.
-        let scale = await MainActor.run { UIScreen.main.scale }
+        let scale = await MainActor.run { PlatformScreen.scale }
         let maximumPixelSize = CGSize(
             width: targetSize.width * scale,
             height: targetSize.height * scale
@@ -256,15 +256,15 @@ actor AttachmentCacheActor: MemoryWarningHandler {
     private static func extractVideoPosterFrame(
         at url: URL,
         maximumPixelSize: CGSize
-    ) async -> UIImage? {
-        let asset = AVAsset(url: url)
+    ) async -> PlatformImage? {
+        let asset = AVURLAsset(url: url)
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = maximumPixelSize
         let time = CMTime(seconds: 0.5, preferredTimescale: 600)
         do {
             let (cgImage, _) = try await generator.image(at: time)
-            return UIImage(cgImage: cgImage)
+            return PlatformImage(cgImage: cgImage)
         } catch is CancellationError {
             // Not currently reachable: the request manager runs this in its
             // own unstructured Task that no caller cancels — frames complete
@@ -287,9 +287,8 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         for attachmentId: String,
         messageId: String? = nil,
         from path: String?,
-        targetSize: CGSize,
-        contentMode: UIView.ContentMode = .scaleAspectFill
-    ) async -> UIImage? {
+        targetSize: CGSize
+    ) async -> PlatformImage? {
         guard targetSize.width > 0, targetSize.height > 0,
               targetSize.width.isFinite, targetSize.height.isFinite else {
             Log.debug("Skipping downsample for \(attachmentId): invalid target size \(targetSize)", category: .attachment)
@@ -329,10 +328,10 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         }
 
         // Capture screen scale on main actor before detached task
-        let scale = await MainActor.run { UIScreen.main.scale }
+        let scale = await MainActor.run { PlatformScreen.scale }
 
         let image = await Task.detached(priority: .userInitiated) {
-            self.downsampleImage(at: url, to: targetSize, contentMode: contentMode, scale: scale)
+            self.downsampleImage(at: url, to: targetSize, scale: scale)
         }.value
 
         guard acceptsAccountWork, generation == accountGeneration else { return nil }
@@ -354,9 +353,8 @@ actor AttachmentCacheActor: MemoryWarningHandler {
     private nonisolated func downsampleImage(
         at url: URL,
         to targetSize: CGSize,
-        contentMode: UIView.ContentMode,
         scale: CGFloat
-    ) -> UIImage? {
+    ) -> PlatformImage? {
         guard targetSize.width > 0, targetSize.height > 0,
               targetSize.width.isFinite, targetSize.height.isFinite,
               scale > 0, scale.isFinite else {
@@ -384,7 +382,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
             return nil
         }
 
-        return UIImage(cgImage: downsampledImage)
+        return PlatformImage(cgImage: downsampledImage)
     }
 
     // MARK: - Full Image Loading
@@ -393,7 +391,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         for attachmentId: String,
         messageId: String? = nil,
         from path: String?
-    ) async -> UIImage? {
+    ) async -> PlatformImage? {
         guard acceptsAccountWork,
               let path,
               AttachmentPaths.isReadableStoragePath(
@@ -426,7 +424,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         }
 
         // Capture screen scale on main actor before detached task
-        let scale = await MainActor.run { UIScreen.main.scale }
+        let scale = await MainActor.run { PlatformScreen.scale }
 
         let image = await Task.detached(priority: .userInitiated) {
             // Use downsampling for very large images
@@ -451,7 +449,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         return image
     }
 
-    private nonisolated func loadImageWithSizeLimit(at url: URL, maxSize: CGSize, scale: CGFloat) -> UIImage? {
+    private nonisolated func loadImageWithSizeLimit(at url: URL, maxSize: CGSize, scale: CGFloat) -> PlatformImage? {
         // First, get image dimensions without loading the full image
         let imageSourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, imageSourceOptions),
@@ -463,11 +461,11 @@ actor AttachmentCacheActor: MemoryWarningHandler {
 
         // If image is small enough, load it directly
         if width <= maxSize.width && height <= maxSize.height {
-            return UIImage(contentsOfFile: url.path)
+            return PlatformImage(contentsOfFile: url.path)
         }
 
         // Otherwise, downsample it
-        return downsampleImage(at: url, to: maxSize, contentMode: .scaleAspectFit, scale: scale)
+        return downsampleImage(at: url, to: maxSize, scale: scale)
     }
 
     // MARK: - Data Cache
@@ -602,7 +600,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         messageId: String?,
         from path: String?,
         expectedGeneration: UInt64
-    ) async -> UIImage? {
+    ) async -> PlatformImage? {
         guard acceptsAccountWork, expectedGeneration == accountGeneration else { return nil }
         return await loadThumbnail(
             for: attachmentId,
