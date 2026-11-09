@@ -65,6 +65,25 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
+    /// The Mac pre-renders visible rows at the reader's own width, which only the open reader can
+    /// measure (`FullEmailReaderWarmWidthSource`).
+    ///
+    /// Revert-check: removing the `FullEmailReaderWarmWidthSource.recordMeasuredReaderWidth(width)`
+    /// call from `FullEmailOpenSession.prepareForMeasuredReaderWidth` fails this.
+    func testPrepareForMeasuredReaderWidth_measuredWidth_isRecordedForMacRowWarming() {
+        FullEmailReaderWarmWidthSource.resetForTesting()
+        defer { FullEmailReaderWarmWidthSource.resetForTesting() }
+        let message = makeMessage(id: "recorded-width-message")
+        let opener = MockFullEmailReaderOpener(preparedArtifact: makeArtifact(message: message))
+        let session = FullEmailReaderCoordinator(fullEmailOpener: opener).openSession(for: message)
+
+        session.prepareForMeasuredReaderWidth(0)
+        XCTAssertNil(FullEmailReaderWarmWidthSource.lastMeasuredReaderWidth)
+
+        session.prepareForMeasuredReaderWidth(412)
+        XCTAssertEqual(FullEmailReaderWarmWidthSource.lastMeasuredReaderWidth, 412)
+    }
+
     func testOpenSession_preparedArtifactOnlyPrepaintsOncePerMeasuredWidth() {
         let message = makeMessage(
             id: "warming-prepared-message",

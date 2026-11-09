@@ -1,4 +1,6 @@
-#if DEBUG
+// iOS-only debug tool: it drives `WKWebView.scrollView` and `UIViewRepresentable` directly, and the Mac
+// port (docs/mac-app-plan.md, PR E) deliberately leaves it behind.
+#if DEBUG && os(iOS)
 import SwiftUI
 import WebKit
 

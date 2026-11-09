@@ -933,7 +933,7 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
                 XCTAssertNil(
-                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(sceneScreenWidth: 390)
+                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(readerWidthEstimate: 390)
                 )
             }
         }
@@ -943,7 +943,7 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
                 XCTAssertEqual(
-                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(sceneScreenWidth: 390),
+                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(readerWidthEstimate: 390),
                     390
                 )
             }
