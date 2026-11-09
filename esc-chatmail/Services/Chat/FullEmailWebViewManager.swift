@@ -81,7 +81,6 @@ enum FullInteractiveEmailWebView {
     }
 
     private static let unsupportedNavigationSchemes = ["javascript", "vbscript", "file"]
-    private static let allowedUnwrappedAmazonSESDestinationSchemes = ["http", "https", "mailto", "tel"]
 
     /// Pure navigation decision for the full-interactive WebView, shared by the live `Coordinator`
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
@@ -149,6 +148,13 @@ enum FullInteractiveEmailWebView {
         return .allow
     }
 
+    /// The one log line for a `.blockedPrivateNetwork` link. It is a side effect of the callers, not
+    /// of the pure decision: the WebView reader's coordinator and the plain-text reader's link action
+    /// (`View.opensEmailTextLinksWithReaderPolicy()`) both log through it.
+    static func logBlockedPrivateNetworkLink(_ url: URL) {
+        Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
+    }
+
     private static func isUnsupportedNavigationURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         return unsupportedNavigationSchemes.contains(scheme)
@@ -180,19 +186,11 @@ enum FullInteractiveEmailWebView {
             return .blockedDestination
         }
 
-        guard isAllowedUnwrappedAmazonSESDestination(destination) else {
+        guard EmailLinkSchemePolicy.allowsAmazonSESDestination(destination) else {
             return .blockedDestination
         }
 
         return .destination(destination)
-    }
-
-    private static func isAllowedUnwrappedAmazonSESDestination(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else {
-            return false
-        }
-
-        return allowedUnwrappedAmazonSESDestinationSchemes.contains(scheme)
     }
 
     private static func isAmazonSESTrackingHost(_ host: String?) -> Bool {

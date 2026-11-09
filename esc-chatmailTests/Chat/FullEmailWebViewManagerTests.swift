@@ -440,6 +440,12 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
     // was never released under memory pressure; that observer never sees this
     // test's private center. The warning goes to a private center because one
     // posted to the default center would clear every shared cache in the host.
+    //
+    // HONEST SCOPE: this drives the source's iOS branch (the memory-warning
+    // notification). The test target is iOS-only, and a dispatch
+    // memory-pressure event cannot be raised from a test, so nothing covers
+    // the Mac branch of `MemoryPressureEventSource.start` delivering to this
+    // pool; breaking that branch fails no test.
     func testMemoryWarning_fromInjectedEventSource_clearsIdlePool() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
             let center = NotificationCenter()

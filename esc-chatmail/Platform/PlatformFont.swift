@@ -13,6 +13,7 @@ typealias PlatformFont = UIFont
 /// No extension is needed for the one call the shared code makes:
 /// `NSFont.preferredFont(forTextStyle:options:)` imports with a defaulted `options`, so UIKit's
 /// spelling, `preferredFont(forTextStyle: .body)`, already compiles against `NSFont` and returns
-/// the Mac's Dynamic Type body font.
+/// the Mac's body text-style font. The Mac has no Dynamic Type: that font's size is fixed, so it
+/// does not follow an accessibility text-size setting the way the iOS body font does.
 typealias PlatformFont = NSFont
 #endif
