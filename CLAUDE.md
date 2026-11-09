@@ -26,6 +26,7 @@ cd web && corepack pnpm test:e2e
 ```
 
 - One scheme (`esc-chatmail`), project container `esc-chatmail.xcodeproj` — never a `.xcworkspace`.
+- The `esc-chatmail` target also lists macOS (Phase 0 of `docs/mac-app-plan.md`): every Mac setting is `[sdk=macosx*]`-scoped and the test target is still iOS-only. The Mac build does not compile until that plan's Phase 1 lands, and nothing may launch a Mac build before its sandbox tripwire (PR C) does: unsandboxed, the fresh-install and sign-out cleanup delete the user's real `~/Documents/Messages` and `~/Documents/Attachments`. `ENABLE_APP_SANDBOX` and the other `ENABLE_*` sandbox settings on the target are what sandbox the Mac build, not iOS leftovers.
 - Start with the narrowest suite; the full run is thousands of tests and slow.
 - `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES` in Debug/Release xcconfigs: a new warning fails the build.
 - SwiftLint is advisory by design (`|| true`, no `severity: error`, size/complexity rules disabled, tests excluded). Do not reshape code to satisfy it, and do not make it blocking.
