@@ -323,7 +323,7 @@ private struct OriginalEmailReadableView: View {
         let attributed = NSMutableAttributedString(
             string: text,
             attributes: [
-                .font: UIFont.preferredFont(forTextStyle: .body),
+                .font: PlatformFont.preferredFont(forTextStyle: .body),
                 .foregroundColor: PlatformColor.label
             ]
         )

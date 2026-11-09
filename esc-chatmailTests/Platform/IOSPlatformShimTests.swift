@@ -22,6 +22,19 @@ final class IOSPlatformShimTests: XCTestCase {
         XCTAssertEqual(MessageBubbleStyle.standard.maxBubbleWidth, 280)
     }
 
+    /// The plain-text original-email reader sets its body font through `PlatformFont`; on iOS it
+    /// must stay UIKit's Dynamic Type body font.
+    ///
+    /// Revert-check: pointing the iOS `PlatformFont` typealias anywhere but `UIFont` makes this
+    /// fail.
+    func testPlatformFontPreferredBody_onIOS_isUIFontPreferredBody() {
+        XCTAssertTrue(PlatformFont.self == UIFont.self)
+        XCTAssertEqual(
+            PlatformFont.preferredFont(forTextStyle: .body),
+            UIFont.preferredFont(forTextStyle: .body)
+        )
+    }
+
     /// Revert-check: changing the iOS branch of `PlatformSettingsURL.contactsAccess` makes this fail.
     func testContactsAccessSettingsURL_onIOS_isAppSettingsPage() {
         XCTAssertEqual(PlatformSettingsURL.contactsAccess, URL(string: UIApplication.openSettingsURLString))

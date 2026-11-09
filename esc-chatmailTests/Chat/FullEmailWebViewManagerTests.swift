@@ -1,3 +1,4 @@
+import UIKit
 import WebKit
 import XCTest
 @testable import esc_chatmail
@@ -430,6 +431,44 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
 
             XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
             XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        }
+    }
+
+    // Revert-check: fails if `FullEmailWebViewManager.init` stops calling
+    // `memoryPressureEventSource.start` with `clear()`. Before, only an
+    // iOS-only observer on the default center cleared the pool, so a Mac pool
+    // was never released under memory pressure; that observer never sees this
+    // test's private center. The warning goes to a private center because one
+    // posted to the default center would clear every shared cache in the host.
+    func testMemoryWarning_fromInjectedEventSource_clearsIdlePool() {
+        withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
+            let center = NotificationCenter()
+            let testStack = TestCoreDataStack()
+            let messageId = "memory-warning-clear-\(UUID().uuidString)"
+            let message = MessageBuilder()
+                .withId(messageId)
+                .withSubject("Subject")
+                .withSender(email: "sender@example.com", name: "Sender")
+                .withBody("Body \(messageId)")
+                .build(in: testStack.viewContext)
+            let manager = FullEmailWebViewManager(
+                memoryPressureEventSource: MemoryPressureEventSource(notificationCenter: center)
+            )
+            defer { manager.clear() }
+
+            manager.prepaintAfterExplicitOpen(
+                request: makeRequest(messageId: messageId),
+                message: message,
+                artifact: makeArtifact(message: message, html: simpleHTML(title: "Memory warning")),
+                width: 390
+            )
+            XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+            XCTAssertTrue(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+
+            center.post(name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
+
+            XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: messageId))
+            XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
         }
     }
 

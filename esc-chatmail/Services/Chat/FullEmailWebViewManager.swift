@@ -995,6 +995,8 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     private let capacity: Int
     private let loader: OriginalEmailSourceLoader
+    /// Held for the manager's lifetime: its `deinit` ends the observation.
+    private let memoryPressureEventSource: MemoryPressureEventSource
     private let host = OffscreenWebViewHost()
     private var entries: [String: Entry] = [:]
     private var preparedPayloads = FullEmailPreparedOpenPayloadBookkeeping()
@@ -1016,24 +1018,26 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         }
     }
 
-    init(capacity: Int = 4, loader: OriginalEmailSourceLoader = .shared) {
+    /// `memoryPressureEventSource` is a seam for tests, which give it their own notification center:
+    /// a memory warning posted to the default center would clear every shared cache in the test host.
+    init(
+        capacity: Int = 4,
+        loader: OriginalEmailSourceLoader = .shared,
+        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource()
+    ) {
         self.capacity = max(1, capacity)
         self.loader = loader
         self.bookkeeping = FullEmailWebViewPoolBookkeeping(capacity: capacity)
+        self.memoryPressureEventSource = memoryPressureEventSource
 
-        // macOS has no memory-warning notification. The Mac pool is not yet cleared under memory
-        // pressure; that hookup waits for the memory-pressure source of the Mac plan's PR B.
-        #if os(iOS)
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didReceiveMemoryWarningNotification,
-            object: nil,
-            queue: nil
-        ) { [weak self] _ in
-            Task { @MainActor in
-                self?.clear()
-            }
+        // Low memory drops every idle pre-rendered WebView and prepared payload (`clear()` keeps a
+        // checked-out reader). The source delivers UIKit's memory warning on iOS and a dispatch
+        // memory-pressure event on the Mac, which has no memory-warning notification, so the Mac
+        // pool is released too. Delivery is already on the main actor, so `clear()` runs in the
+        // callback rather than one task hop later.
+        memoryPressureEventSource.start { [weak self] in
+            self?.clear()
         }
-        #endif
 
         NotificationCenter.default.addObserver(
             forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
