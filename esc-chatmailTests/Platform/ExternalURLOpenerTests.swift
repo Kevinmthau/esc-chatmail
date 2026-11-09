@@ -47,9 +47,8 @@ final class ExternalURLOpenerTests: XCTestCase {
         XCTAssertEqual(opened, [URL(string: "https://example.com/path")!, URL(string: "mailto:someone@example.com")!])
     }
 
-    /// `canOpenURL` refuses `mailto:`, `tel:` and `facetime:` on a device where no Apple app claims
-    /// them (measured on the iOS 27.0 simulator, which has no Mail, Phone or FaceTime), so iOS must
-    /// not ask it for the shared list: `UIApplication.open` still reaches the default app.
+    /// `canOpenURL` refused `mailto:`, `tel:` and `facetime:` on the iOS 27.0 simulator, which has
+    /// no Mail, Phone or FaceTime to claim them, so iOS must not ask it for the shared list.
     ///
     /// Revert-check: dropping `opensOnEveryPlatform ||` from the `.iOS` guard in
     /// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)`, so every link waits on the query

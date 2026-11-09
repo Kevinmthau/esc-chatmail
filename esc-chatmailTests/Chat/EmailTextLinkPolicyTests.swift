@@ -113,6 +113,9 @@ final class EmailTextLinkPolicyTests: XCTestCase {
     /// The detector links a bare address as `mailto:`, the most common link in a plain-text email.
     /// It goes to `ExternalURLOpener`, which opens it on iOS without asking `canOpenURL`
     /// (`ExternalURLOpenerTests`).
+    ///
+    /// HONEST SCOPE: this and the next case do not guard a fix. They pin what the detector's own
+    /// URLs get, beside the `URL(string:)` cases above.
     func testAction_detectedEmailAddress_opensMailtoExternally() throws {
         let link = try detectedLink(in: "Questions? Write to someone@example.com any time.")
 

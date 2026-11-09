@@ -38,9 +38,10 @@ enum ExternalURLOpener {
             }
         case .iOS:
             // The shared list goes straight to `UIApplication.open`, which needs no declared query
-            // scheme and reaches the user's default app. `canOpenURL` answers false for `mailto:`,
-            // `tel:` and `facetime:` when no Apple app on the device claims them, so asking it first
-            // would refuse an email address in a message on a device without Apple Mail.
+            // scheme. `canOpenURL` answered false for `mailto:`, `tel:` and `facetime:` on a
+            // simulator where no Apple app claims them (`EmailLinkSchemePolicy` has the
+            // measurement), so asking it first is expected to refuse an email address in a message
+            // on a device without Apple Mail.
             guard opensOnEveryPlatform || systemCanOpen(url) else {
                 return
             }

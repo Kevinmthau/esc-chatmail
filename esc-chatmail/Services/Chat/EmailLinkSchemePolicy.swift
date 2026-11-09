@@ -17,17 +17,20 @@ import Foundation
 /// `canOpenURL` accepts it. The query is not asked for the list because it is the wrong gate for
 /// it. Measured on the iOS 27.0 simulator, which ships no Mail, Phone or FaceTime, with this app's
 /// Info.plist: `canOpenURL` refused `mailto:`, `tel:`, `facetime:` and `facetime-audio:` as schemes
-/// the app is not allowed to query. An undeclared scheme passed only while an Apple app on the
-/// device claimed it, so gating on the query would refuse an email address in a message on a
-/// device without Apple Mail, although `UIApplication.open` reaches the user's default mail app.
+/// the app is not allowed to query, and accepted `sms:`, whose app (Messages) that simulator does
+/// have. So an undeclared scheme passed only while an Apple app on the device claimed it. From
+/// that, gating on the query is expected to refuse an email address in a message on a device
+/// without Apple Mail. That step is an inference, not a measurement: no simulator has a
+/// third-party default mail app for `UIApplication.open` to reach.
 ///
-/// For every other scheme iOS's `canOpenURL` is wider than the Mac's list, not equal to it. On the
-/// same simulator it accepted, undeclared, `sms:`, `maps:`, `shortcuts:`, `smb:`,
+/// For a scheme outside the list, iOS's `canOpenURL` is wider than the Mac's rule, not equal to
+/// it. On the same simulator it accepted, undeclared, `maps:`, `shortcuts:`, `smb:`,
 /// `x-apple-reminderkit:` and `app-settings:`, and it also admits the two schemes Info.plist does
 /// list under `LSApplicationQueriesSchemes`: `google` and the app's own Google OAuth redirect
 /// scheme (`GOOGLE_REDIRECT_URI`). A third-party app's undeclared scheme (`zoommtg:`) is refused.
-/// The Mac refuses all of those, including the two queried schemes: it has no Google app, and an
-/// email link must never feed the app's own sign-in redirect.
+/// The Mac refuses all of those. That includes the two queried schemes: the Mac has no Google app,
+/// and an email link should not feed the app's own sign-in redirect. Only the Mac enforces that;
+/// on iOS the redirect scheme still passes `canOpenURL`.
 ///
 /// The policy has no platform code, so the iOS-hosted unit tests pin it.
 enum EmailLinkSchemePolicy {
