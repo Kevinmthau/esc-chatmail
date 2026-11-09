@@ -81,14 +81,22 @@ final class SyncReconciliation: Sendable {
 
     private let messageFetcher: MessageFetcher
     private let failureTracker: SyncFailureTracker
+    /// Holds the missed-message pagination cursor, and is where the
+    /// reconciliation window reads `lastSuccessfulSyncTime` from. It must be
+    /// the store the orchestrator and `failureTracker` were given.
+    /// `UserDefaults` is thread-safe but not `Sendable`, so
+    /// `nonisolated(unsafe)`, as on `DataCleanupService`'s defaults.
+    nonisolated(unsafe) private let defaults: UserDefaults
     private let log = LogCategory.sync.logger
 
     init(
         messageFetcher: MessageFetcher,
-        failureTracker: SyncFailureTracker = .shared
+        failureTracker: SyncFailureTracker = .shared,
+        defaults: UserDefaults = .standard
     ) {
         self.messageFetcher = messageFetcher
         self.failureTracker = failureTracker
+        self.defaults = defaults
     }
 
     // MARK: - Missed Message Detection
@@ -385,7 +393,6 @@ final class SyncReconciliation: Sendable {
     }
 
     private func loadMissedMessageReconciliationCursors() -> [MissedMessageReconciliationCursor] {
-        let defaults = UserDefaults.standard
         guard let data = defaults.data(forKey: SyncConfig.missedMessageReconciliationCursorKey) else {
             return []
         }
@@ -438,7 +445,7 @@ final class SyncReconciliation: Sendable {
 
         do {
             let data = try JSONEncoder().encode(validCursors)
-            UserDefaults.standard.set(data, forKey: SyncConfig.missedMessageReconciliationCursorKey)
+            defaults.set(data, forKey: SyncConfig.missedMessageReconciliationCursorKey)
         } catch {
             clearMissedMessageReconciliationCursor()
         }
@@ -478,12 +485,11 @@ final class SyncReconciliation: Sendable {
     }
 
     private func clearMissedMessageReconciliationCursor() {
-        UserDefaults.standard.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
+        defaults.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
     }
 
     /// Calculates the start time for reconciliation window
     private func calculateReconciliationStartTime(installTimestamp: TimeInterval) -> Date {
-        let defaults = UserDefaults.standard
         let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
 
         if lastSuccessfulSync > 0 {
@@ -495,7 +501,8 @@ final class SyncReconciliation: Sendable {
 
         return SyncTimeCalculator.calculateStartDate(
             config: .reconciliation,
-            installTimestamp: installTimestamp
+            installTimestamp: installTimestamp,
+            defaults: defaults
         )
     }
 

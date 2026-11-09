@@ -88,13 +88,14 @@ struct SyncTimeCalculator {
     ///   - config: Configuration determining which timestamps to check and buffers to apply
     ///   - installTimestamp: Optional explicit install timestamp (defaults to UserDefaults value)
     ///   - now: Optional explicit current time (defaults to the system clock)
+    ///   - defaults: Where `lastSuccessfulSyncTime` and `installTimestamp` are read from
     /// - Returns: The calculated start timestamp as TimeInterval since 1970
     static func calculateStartTime(
         config: Config,
         installTimestamp: TimeInterval? = nil,
-        now: TimeInterval? = nil
+        now: TimeInterval? = nil,
+        defaults: UserDefaults = .standard
     ) -> TimeInterval {
-        let defaults = UserDefaults.standard
         let now = now ?? Date().timeIntervalSince1970
         let install = installTimestamp ?? defaults.double(forKey: "installTimestamp")
 
@@ -142,9 +143,10 @@ struct SyncTimeCalculator {
     /// Calculates the start time as a Date
     static func calculateStartDate(
         config: Config,
-        installTimestamp: TimeInterval? = nil
+        installTimestamp: TimeInterval? = nil,
+        defaults: UserDefaults = .standard
     ) -> Date {
-        let timestamp = calculateStartTime(config: config, installTimestamp: installTimestamp)
+        let timestamp = calculateStartTime(config: config, installTimestamp: installTimestamp, defaults: defaults)
         return Date(timeIntervalSince1970: timestamp)
     }
 
@@ -163,10 +165,11 @@ struct SyncTimeCalculator {
     static func historyRecoveryInstallBranchStartTime(
         newestReceivedInternalDate: TimeInterval?,
         installTimestamp: TimeInterval? = nil,
-        now: TimeInterval? = nil
+        now: TimeInterval? = nil,
+        defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let config = Config.historyRecovery
-        let install = installTimestamp ?? UserDefaults.standard.double(forKey: "installTimestamp")
+        let install = installTimestamp ?? defaults.double(forKey: "installTimestamp")
         let now = now ?? Date().timeIntervalSince1970
         guard let newestReceivedInternalDate else {
             if install > 0 {

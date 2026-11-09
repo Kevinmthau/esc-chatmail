@@ -51,6 +51,13 @@ final class IncrementalSyncOrchestrator {
     private let recoveryWindowCheckpointStore: SyncWindowCheckpointStore
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
+    /// Where the run reads `lastSuccessfulSyncTime` and `installTimestamp` and
+    /// keeps `lastReconciliationTime`. It must be the store `failureTracker`
+    /// and `reconciliation` were given: the tracker writes the last-sync time
+    /// that this run's recovery reads. Injected so a test run stays out of
+    /// `UserDefaults.standard`, which in a Mac test host is the preferences of
+    /// the Mac app the user runs.
+    private let defaults: UserDefaults
     private let historyPageLimit: Int
     private let historyPageSize: Int
     /// Production supplies AuthSession's current-or-persisted email. Keeping
@@ -80,7 +87,8 @@ final class IncrementalSyncOrchestrator {
     private lazy var reconciliationPhase = ReconciliationPhase(
         reconciliation: reconciliation,
         messageFetcher: messageFetcher,
-        messagePersister: messagePersister
+        messagePersister: messagePersister,
+        defaults: defaults
     )
 
     private lazy var conversationUpdatePhase = ConversationUpdatePhase(
@@ -103,6 +111,7 @@ final class IncrementalSyncOrchestrator {
         recoveryWindowCheckpointStore: SyncWindowCheckpointStore = .historyRecovery,
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        defaults: UserDefaults = .standard,
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
         historyPageSize: Int = SyncConfig.maxHistoryResultsPerRequest,
         authenticatedAccountEmail: (() -> String?)? = nil,
@@ -121,6 +130,7 @@ final class IncrementalSyncOrchestrator {
         self.recoveryWindowCheckpointStore = recoveryWindowCheckpointStore
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
+        self.defaults = defaults
         self.historyPageLimit = historyPageLimit
         self.historyPageSize = historyPageSize
         self.authenticatedAccountEmail = authenticatedAccountEmail
@@ -380,7 +390,7 @@ final class IncrementalSyncOrchestrator {
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
             let shouldSkipReconciliation = Self.shouldSkipLabelReconciliation(
                 noHistoryChanges: noHistoryChanges,
-                lastReconciliation: UserDefaults.standard.double(forKey: SyncConfig.lastReconciliationTimeKey),
+                lastReconciliation: defaults.double(forKey: SyncConfig.lastReconciliationTimeKey),
                 now: Date().timeIntervalSince1970
             )
             let reconciliationTimer = timing.start("reconciliation")
@@ -912,14 +922,15 @@ final class IncrementalSyncOrchestrator {
         }
 
         let windowStart: TimeInterval
-        if UserDefaults.standard.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
-            windowStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery)
+        if defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
+            windowStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, defaults: defaults)
         } else {
             // A failed read throws and holds the run: falling back to the
             // unbounded install branch is the whole-mailbox re-list this bounds.
             let newestReceived = try await Self.newestReceivedInternalDate(in: context)
             windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
-                newestReceivedInternalDate: newestReceived
+                newestReceivedInternalDate: newestReceived,
+                defaults: defaults
             )
         }
         // Frozen in either branch: a teardown between attempts can clear
@@ -1047,7 +1058,7 @@ final class IncrementalSyncOrchestrator {
 
     /// Records the current time as the last reconciliation time
     private func recordReconciliationTime() {
-        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
+        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastReconciliationTimeKey)
     }
 
     nonisolated static func allowsIntermediateContextSaves(for records: [HistoryRecord]) -> Bool {
