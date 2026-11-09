@@ -81,7 +81,6 @@ enum FullInteractiveEmailWebView {
     }
 
     private static let unsupportedNavigationSchemes = ["javascript", "vbscript", "file"]
-    private static let allowedUnwrappedAmazonSESDestinationSchemes = ["http", "https", "mailto", "tel"]
 
     /// Pure navigation decision for the full-interactive WebView, shared by the live `Coordinator`
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
@@ -149,6 +148,13 @@ enum FullInteractiveEmailWebView {
         return .allow
     }
 
+    /// The one log line for a `.blockedPrivateNetwork` link. It is a side effect of the callers, not
+    /// of the pure decision: the WebView reader's coordinator and the plain-text reader's link action
+    /// (`View.opensEmailTextLinksWithReaderPolicy()`) both log through it.
+    static func logBlockedPrivateNetworkLink(_ url: URL) {
+        Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
+    }
+
     private static func isUnsupportedNavigationURL(_ url: URL) -> Bool {
         let scheme = url.scheme?.lowercased() ?? ""
         return unsupportedNavigationSchemes.contains(scheme)
@@ -166,33 +172,37 @@ enum FullInteractiveEmailWebView {
     }
 
     private static func amazonSESTrackingDestination(from url: URL) -> AmazonSESTrackingDestination {
-        guard isAmazonSESTrackingHost(url.host),
-              let trackingMarkerIndex = url.pathComponents.firstIndex(of: "L0") else {
+        guard isAmazonSESTrackingHost(url.host) else {
             return .notTrackingURL
         }
 
-        let destinationIndex = url.pathComponents.index(after: trackingMarkerIndex)
-        guard destinationIndex < url.pathComponents.endIndex else {
+        // Split the percent-encoded path and decode each segment, rather than reading
+        // `url.pathComponents`. The destination is one segment with its slashes encoded
+        // (`https:%2F%2Fhost%2Fpath`), and `pathComponents` keeps it whole only for a URL Swift
+        // parsed itself. For a URL bridged from `NSURL`, which is what
+        // `WKNavigationAction.request.url` and the plain-text reader's `NSDataDetector` hand over,
+        // it decodes the path before splitting it (measured on the iOS 27.0 simulator). The segment
+        // after `L0` then read `https:`, so every real tracking link was blocked as a host-less
+        // private link while the tests, which built their URLs with `URL(string:)`, passed.
+        let segments = url.path(percentEncoded: true)
+            .split(separator: "/")
+            .map { $0.removingPercentEncoding }
+        guard let trackingMarkerIndex = segments.firstIndex(of: "L0") else {
+            return .notTrackingURL
+        }
+
+        let destinationIndex = segments.index(after: trackingMarkerIndex)
+        guard destinationIndex < segments.endIndex,
+              let destinationString = segments[destinationIndex],
+              let destination = URL(string: destinationString) else {
             return .blockedDestination
         }
 
-        guard let destination = URL(string: url.pathComponents[destinationIndex]) else {
-            return .blockedDestination
-        }
-
-        guard isAllowedUnwrappedAmazonSESDestination(destination) else {
+        guard EmailLinkSchemePolicy.allowsAmazonSESDestination(destination) else {
             return .blockedDestination
         }
 
         return .destination(destination)
-    }
-
-    private static func isAllowedUnwrappedAmazonSESDestination(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased() else {
-            return false
-        }
-
-        return allowedUnwrappedAmazonSESDestinationSchemes.contains(scheme)
     }
 
     private static func isAmazonSESTrackingHost(_ host: String?) -> Bool {

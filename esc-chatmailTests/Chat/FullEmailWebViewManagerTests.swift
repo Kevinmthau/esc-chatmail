@@ -440,6 +440,12 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
     // was never released under memory pressure; that observer never sees this
     // test's private center. The warning goes to a private center because one
     // posted to the default center would clear every shared cache in the host.
+    //
+    // HONEST SCOPE: this drives the source's iOS branch (the memory-warning
+    // notification). The test target is iOS-only, and a dispatch
+    // memory-pressure event cannot be raised from a test, so nothing covers
+    // the Mac branch of `MemoryPressureEventSource.start` delivering to this
+    // pool; breaking that branch fails no test.
     func testMemoryWarning_fromInjectedEventSource_clearsIdlePool() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
             let center = NotificationCenter()
@@ -1474,6 +1480,93 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F127.0.0.1%2Fadmin/1/message-id/signature=258"
 
         XCTAssertEqual(decide(.linkActivated, trackingURL), .blockedPrivateNetwork(loopback))
+    }
+
+    // MARK: Tracking links as WebKit delivers them
+
+    /// `decide` builds its URL with `URL(string:)`, but the live delegate gets
+    /// `WKNavigationAction.request.url`, a URL bridged from `NSURL`. The two read a path differently:
+    /// measured on the iOS 27.0 simulator with a real `WKWebView` click, the bridged URL's
+    /// `pathComponents` decodes the path before splitting it, so the encoded destination came back
+    /// as `https:`. These cases repeat the tracking-link ones above with a bridged URL.
+    ///
+    /// HONEST SCOPE: the Revert-check claims below were run on iOS 27.0 only. On a runtime whose
+    /// bridged URLs split a path the way Swift's own do, they pass with or without the fix.
+    private func decideBridged(_ type: WKNavigationType, _ urlString: String) throws -> FullInteractiveEmailWebView.NavigationDecision {
+        FullInteractiveEmailWebView.navigationDecision(
+            navigationType: type,
+            url: try XCTUnwrap(NSURL(string: urlString)) as URL
+        )
+    }
+
+    /// Revert-check: reading the destination from `url.pathComponents` again in
+    /// `FullInteractiveEmailWebView.amazonSESTrackingDestination(from:)` makes this fail with
+    /// `.blockedPrivateNetwork(https:)`: every tracking link clicked in the reader was blocked.
+    func testAmazonSESTrackingLink_bridgedFromNSURL_opensEmbeddedDestinationExternally() throws {
+        let destination = URL(string: "https://api2.baback.co/public/labels/example-label")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/https:%2F%2Fapi2.baback.co%2Fpublic%2Flabels%2Fexample-label/1/message-id/signature=258"
+
+        XCTAssertEqual(try decideBridged(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    /// Revert-check: the same `url.pathComponents` revert makes this fail.
+    func testAmazonSESTrackingLink_bridgedFromNSURL_preservesEncodedDestinationQuery() throws {
+        let destination = URL(string: "https://locator.dhl.com/results?countryCode=US&address=128%20E%2074th%20St.,New%20York")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/https:%2F%2Flocator.dhl.com%2Fresults%3FcountryCode=US%26address=128%2520E%252074th%2520St.,New%2520York/1/message-id/signature=258"
+
+        XCTAssertEqual(try decideBridged(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    /// Revert-check: the same `url.pathComponents` revert makes this fail: the block then carries
+    /// `http:` instead of the private destination.
+    func testAmazonSESTrackingLink_bridgedFromNSURL_toPrivateHostIsBlocked() throws {
+        let loopback = URL(string: "http://127.0.0.1/admin")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F127.0.0.1%2Fadmin/1/message-id/signature=258"
+
+        XCTAssertEqual(try decideBridged(.linkActivated, trackingURL), .blockedPrivateNetwork(loopback))
+    }
+
+    /// HONEST SCOPE: this does not guard the fix. With `url.pathComponents` restored a bridged URL
+    /// yields `facetime:` or `javascript:alert(1)` as the destination, which is cancelled too. It
+    /// pins that a bridged URL keeps the refusals.
+    func testAmazonSESTrackingLink_bridgedFromNSURL_toDisallowedOrMalformedDestinationIsCancelled() throws {
+        let disallowed = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/facetime:%2F%2Fuser@example.com/1/message-id/signature=258"
+        let malformed = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/%20facetime:%2F%2Fuser@example.com/1/message-id/signature=258"
+        // An allowed scheme behind a leading space: cancelled because it does not parse as a
+        // scheme, not because the scheme is refused.
+        let malformedAllowedScheme = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/%20https:%2F%2Fexample.com/1/message-id/signature=258"
+        let unsupported = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/javascript:alert(1)/1/message-id/signature=258"
+
+        XCTAssertEqual(try decideBridged(.linkActivated, disallowed), .cancel)
+        XCTAssertEqual(try decideBridged(.linkActivated, malformed), .cancel)
+        XCTAssertEqual(try decideBridged(.linkActivated, malformedAllowedScheme), .cancel)
+        XCTAssertEqual(decide(.linkActivated, malformedAllowedScheme), .cancel)
+        XCTAssertEqual(try decideBridged(.linkActivated, unsupported), .cancel)
+    }
+
+    /// A destination whose path carries a `;` parameter and an encoded query unwraps whole, from
+    /// either kind of URL.
+    ///
+    /// HONEST SCOPE: not run against a revert.
+    func testAmazonSESTrackingLink_destinationWithSemicolonAndQuery_unwrapsWhole() throws {
+        let destination = URL(string: "https://example.com/a;b=1?q=2")!
+        let trackingURL = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/https:%2F%2Fexample.com%2Fa;b=1%3Fq=2/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, trackingURL), .openExternally(destination))
+        XCTAssertEqual(try decideBridged(.linkActivated, trackingURL), .openExternally(destination))
+    }
+
+    /// A tracking host with nothing after the marker, or no marker at all.
+    ///
+    /// HONEST SCOPE: this does not guard the fix; it passes with `url.pathComponents` restored.
+    func testAmazonSESTrackingLink_withoutDestination_isCancelledOrOpenedAsIs() throws {
+        let noDestination = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0"
+        let noMarker = "https://vvd2lqhy.r.eu-west-3.awstrack.me/unsubscribe/abc"
+
+        XCTAssertEqual(decide(.linkActivated, noDestination), .cancel)
+        XCTAssertEqual(try decideBridged(.linkActivated, noDestination), .cancel)
+        XCTAssertEqual(decide(.linkActivated, noMarker), .openExternally(URL(string: noMarker)!))
+        XCTAssertEqual(try decideBridged(.linkActivated, noMarker), .openExternally(URL(string: noMarker)!))
     }
 
     func testFormSubmissionsAreCancelled() {

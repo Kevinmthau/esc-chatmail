@@ -470,7 +470,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             case .cancel:
                 decisionHandler(.cancel)
             case .blockedPrivateNetwork(let url):
-                Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
+                FullInteractiveEmailWebView.logBlockedPrivateNetworkLink(url)
                 decisionHandler(.cancel)
             case .openExternally(let url):
                 ExternalURLOpener.open(url)
