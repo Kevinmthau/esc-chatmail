@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct NewsletterPreviewCard: View {
     let model: NewsletterPreviewModel

@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.

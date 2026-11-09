@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct EmailPreviewSnapshotCacheEntry: Equatable, Sendable {
     let imageData: Data

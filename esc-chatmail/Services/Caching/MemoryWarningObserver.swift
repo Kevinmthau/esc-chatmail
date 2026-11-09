@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Protocol for types that respond to memory warnings
 protocol MemoryWarningHandler: AnyObject, Sendable {

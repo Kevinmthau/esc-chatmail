@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Stores avatar images as binary files on disk instead of base64 strings in Core Data.
 /// This reduces database bloat by ~33% and improves query performance.

@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Reusable thumbnail loader for attachment views
 /// Eliminates duplicate loading logic across ImageAttachmentBubble, AttachmentGridItem, PDFAttachmentCard, etc.

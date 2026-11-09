@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Presents the confirmation for a Settings-app sign-out request, as a UIKit
 /// alert from the topmost presentable view controller.

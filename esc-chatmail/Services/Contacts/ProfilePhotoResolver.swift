@@ -1,6 +1,8 @@
 import Foundation
 import CoreData
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Resolves profile photos for email addresses using multiple sources:
 /// 1. Local device Contacts

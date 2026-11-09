@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 
 extension UIColor {
     /// Creates a color from a 6-digit RGB hex string, with or without a leading `#`.

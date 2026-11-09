@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct GoogleDriveSharedFileCardView: View {
     let link: SharedDocumentLink

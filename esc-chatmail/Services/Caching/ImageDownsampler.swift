@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 import ImageIO
 
 /// Data-based analog of AttachmentCacheActor's URL downsampler: decodes image

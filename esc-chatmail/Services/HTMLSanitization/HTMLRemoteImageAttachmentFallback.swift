@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct HTMLRemoteImageAccountGeneration: Equatable, Sendable {
     fileprivate let value: UInt64

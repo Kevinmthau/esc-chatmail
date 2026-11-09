@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 protocol RemoteImageFetching: Sendable {
     func image(from urlString: String) async -> UIImage?

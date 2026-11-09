@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 import WebKit
 
 // `LayoutAwareWKWebView` lives in `FullEmailWebViewManager.swift` so preview WebViews, the full

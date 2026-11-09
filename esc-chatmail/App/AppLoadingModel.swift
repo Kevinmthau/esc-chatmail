@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Carries a store-load failure from the startup bootstrap to
 /// `AppLoadingView`, and its Try Again and Reset Mailbox actions back. Before

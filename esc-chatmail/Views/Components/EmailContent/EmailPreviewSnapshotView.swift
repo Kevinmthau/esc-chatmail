@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct EmailPreviewSnapshotView: View {
     let htmlContent: String

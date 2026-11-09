@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Two-tier image cache: fast memory cache backed by persistent disk cache
 actor EnhancedImageCache: MemoryWarningHandler {

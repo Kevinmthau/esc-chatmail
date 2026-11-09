@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreData
+#if canImport(UIKit)
 import UIKit
+#endif
 import Contacts
 import Combine
 

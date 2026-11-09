@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Actor for in-flight HTTP image request deduplication.
 /// Prevents duplicate network requests for the same URL and tracks failed URLs.

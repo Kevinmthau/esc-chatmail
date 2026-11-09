@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 import QuickLook
 
 /// Quick Look presented as its own UIKit modal, the way Mail and Files show it.

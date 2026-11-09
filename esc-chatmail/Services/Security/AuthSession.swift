@@ -2,7 +2,9 @@ import CoreData
 import Foundation
 import GoogleSignIn
 import Security
+#if canImport(UIKit)
 import UIKit
+#endif
 
 enum GoogleSignInKeychainPresence: Equatable, Sendable {
     case present

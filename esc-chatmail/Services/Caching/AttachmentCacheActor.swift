@@ -1,5 +1,7 @@
 import AVFoundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct AttachmentCacheAccountGeneration: Equatable, Sendable {
     fileprivate let value: UInt64

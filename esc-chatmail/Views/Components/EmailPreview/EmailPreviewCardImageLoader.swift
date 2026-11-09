@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Shared load path for remote images shown on native preview cards.
 /// Every card image fetch goes through the auto-load gate here so the

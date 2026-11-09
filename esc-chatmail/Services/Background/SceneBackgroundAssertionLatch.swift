@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Ends a scene-background execution assertion exactly once, whether the arm
 /// completes normally or UIKit's expiration handler fires first — whichever
