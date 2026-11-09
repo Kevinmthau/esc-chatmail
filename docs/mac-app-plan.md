@@ -303,11 +303,12 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 - **Done 2026-11-09:**
   - **Test target.** It gained macOS, with Kevin's permission to edit `project.pbxproj`. The same `-showBuildSettings` diff as Phase 0 showed the app target unchanged. On the test target, only `SUPPORTED_PLATFORMS`, `MACOSX_DEPLOYMENT_TARGET` and `SUPPORTS_MACCATALYST` changed; the last went from YES to NO, as on the app target.
   - **Test files.** 31 of the 336 test files are wrapped whole in `#if os(iOS)`. 12 more got narrow guards or a macOS branch: `AuthSessionTests` now uses `PresentationAnchor`, and the `Platform/` shim tests and the hosted-view helper have Mac versions.
-  - **Mac test plan.** `Mac.xctestplan` has 15 suites and 209 tests, and all passed in a team-signed, sandboxed test host.
+  - **Mac test plan.** `Mac.xctestplan` has 16 suites and 211 tests, and all passed in a team-signed, sandboxed test host.
     - Signing used a Mac Team Provisioning Profile for `com.esc.inboxchat`, which `-allowProvisioningUpdates` created that day.
     - `run-tests.sh` refuses to run the tests unless `codesign` finds `com.apple.security.app-sandbox` in the host's signature.
     - The run confirmed that `APP_SANDBOX_CONTAINER_ID` is set in a sandboxed launch of this app (PR C's tripwire signal), and that the data-protection keychain works with the access group.
   - **Test-host entitlements.** A build for testing also carries Xcode's testing exceptions: read-only access to `/`, which lets the source-reading tests work, and mach lookups for `testmanagerd`. Writes stay confined to the container.
+  - **Test-host store.** The container is the Mac app's real one, and the host loads `CoreDataStack.shared` at launch. At the default URL that opened the app's mailbox with the checkout's model: a newer model would migrate it, after which the installed app's recovery ladder would delete it, and an older model would make the host's own ladder delete it. In a Mac test host the shared stack now loads a throwaway store under the temporary directory (`MacUnitTestHostStoreTests`). The container's files, `UserDefaults.standard` and keychain are still the real ones.
   - **Not covered.** CI builds the Mac app but not the Mac tests.
 
 **Phase 1 is done when** all of the following work on the Mac: sign in, initial sync, open a chat, send a reply, archive, sign out and sign back in. The iOS suite stays green, and the Mac CI build is green.
