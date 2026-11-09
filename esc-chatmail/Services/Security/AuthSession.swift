@@ -261,7 +261,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         @escaping (GIDGoogleUser?, Error?) -> Void
     ) -> Void
     private let interactiveGoogleSignIn: @MainActor @Sendable (
-        UIViewController,
+        PresentationAnchor,
         String?,
         @escaping @Sendable (GIDSignInResult?, Error?) -> Void
     ) -> Void
@@ -308,7 +308,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         },
         interactiveGoogleSignIn: @escaping @MainActor @Sendable (
-            UIViewController,
+            PresentationAnchor,
             String?,
             @escaping @Sendable (GIDSignInResult?, Error?) -> Void
         ) -> Void = { viewController, loginHint, completion in
@@ -643,7 +643,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    func signIn(presenting viewController: UIViewController, loginHint: String? = nil) async throws {
+    func signIn(presenting viewController: PresentationAnchor, loginHint: String? = nil) async throws {
         await beginAuthenticationTransition()
         var shouldSweepBackgroundTasksOnTransitionEnd = false
         defer {
@@ -710,7 +710,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
 
     private func performSignIn(
-        presenting viewController: UIViewController,
+        presenting viewController: PresentationAnchor,
         loginHint: String?,
         stagedUser: AuthenticatedGoogleUserBox
     ) async throws {

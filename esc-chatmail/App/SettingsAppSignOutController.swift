@@ -17,15 +17,21 @@ final class SettingsAppSignOutController: ObservableObject {
     private let preferences: SettingsAppPreferences
     private let prompter: SettingsAppSignOutPrompting
 
-    /// `prompter` defaults inside the body: `SettingsAppSignOutPrompter` is
-    /// main-actor isolated, and a default argument is evaluated in the
+    /// `prompter` defaults inside the body: `PlatformSettingsAppSignOutPrompter`
+    /// is main-actor isolated, and a default argument is evaluated in the
     /// caller's (here nonisolated) context.
     init(
         preferences: SettingsAppPreferences = SettingsAppPreferences(),
         prompter: SettingsAppSignOutPrompting? = nil
     ) {
         self.preferences = preferences
-        self.prompter = prompter ?? SettingsAppSignOutPrompter()
+        self.prompter = prompter ?? PlatformSettingsAppSignOutPrompter()
+    }
+
+    /// The prompter when it is the SwiftUI-alert one (the Mac's default), which
+    /// `ContentView` must host; nil for UIKit or injected prompters.
+    var alertPrompter: SettingsAppSignOutAlertPrompter? {
+        prompter as? SettingsAppSignOutAlertPrompter
     }
 
     /// Acts on the Settings app's Sign Out switch (`SettingsAppSignOutPolicy`).

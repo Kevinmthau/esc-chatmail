@@ -44,10 +44,13 @@ enum MessageBubbleStyle {
         }
     }
 
+    /// Main-actor isolated because `.compact` reads the screen width (`PlatformScreen`); every
+    /// caller is a view.
+    @MainActor
     var maxBubbleWidth: CGFloat {
         switch self {
         case .standard: return 280
-        case .compact: return min(UIScreen.main.bounds.width * 0.75, 320)
+        case .compact: return min(PlatformScreen.width * 0.75, 320)
         }
     }
 

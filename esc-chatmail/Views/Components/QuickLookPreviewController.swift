@@ -1,3 +1,6 @@
+#if os(iOS)
+// iOS presents Quick Look as its own UIKit modal. The Mac shows it with SwiftUI's
+// `.quickLookPreview` (`AttachmentQuickLookModifier`).
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -101,3 +104,4 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
         onDismiss?()
     }
 }
+#endif

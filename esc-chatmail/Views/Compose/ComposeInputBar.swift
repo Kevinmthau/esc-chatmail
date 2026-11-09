@@ -139,21 +139,25 @@ struct ComposeInputBar: View {
             photoProcessingTask?.cancel()
             documentProcessingTask?.cancel()
         }
-        .sheet(isPresented: $showDocumentPicker) {
-            DocumentPicker(attachments: Binding(
+        .documentAttachmentPicker(
+            isPresented: $showDocumentPicker,
+            attachments: Binding(
                 get: { viewModel.attachmentManager.attachments },
                 set: { viewModel.attachmentManager.attachments = $0 }
-            ), onProcessingChanged: { isProcessing in
+            ),
+            onProcessingChanged: { isProcessing in
                 viewModel.setAttachmentImportInProgress(
                     isProcessing,
                     id: documentProcessingID
                 )
-            }, onOperationChanged: { documentProcessingTask = $0 }, onImportFailures: { failures in
+            },
+            onOperationChanged: { documentProcessingTask = $0 },
+            onImportFailures: { failures in
                 if let message = DraftAttachmentImport.failureMessage(failures) {
                     viewModel.errorAlert = ComposeErrorAlert(message: message)
                 }
-            })
-        }
+            }
+        )
         .confirmationDialog("Add Attachment", isPresented: $showAttachmentOptions) {
             Button("Photo Library") {
                 showPhotoPicker = true

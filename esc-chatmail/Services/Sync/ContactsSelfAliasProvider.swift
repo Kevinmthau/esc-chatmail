@@ -39,8 +39,11 @@ private final class DefaultSelfAliasContactStore: SelfAliasContactStore, @unchec
     }
 
 #if os(macOS)
+    /// The Mac's "me" card (`unifiedMeContactWithKeys(toFetch:)`, which iOS lacks). This block
+    /// was the repo's only `#if os(macOS)` code before the Mac port and had never compiled: it
+    /// called `unifiedMeContact(withKeysToFetch:)`, which `CNContactStore` does not have.
     func unifiedMeContact(withKeysToFetch keys: [CNKeyDescriptor]) throws -> CNContact {
-        try contactStore.unifiedMeContact(withKeysToFetch: keys)
+        try contactStore.unifiedMeContactWithKeys(toFetch: keys)
     }
 #endif
 }
@@ -138,7 +141,7 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
             return true
         }
 
-        if #available(iOS 18.0, *), status == .limited {
+        if status.isLimitedAccess {
             return true
         }
 

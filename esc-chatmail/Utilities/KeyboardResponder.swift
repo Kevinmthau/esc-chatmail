@@ -1,6 +1,14 @@
 import SwiftUI
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
+/// Publishes the iOS on-screen keyboard's visible height for the chat transcript's bottom inset
+/// (`ChatBottomInsetPolicy`).
+///
+/// The Mac has no on-screen keyboard, so there it never subscribes and stays at zero height and
+/// hidden; the transcript then lays out as it does on iOS with the keyboard down.
 @MainActor
 final class KeyboardResponder: ObservableObject {
     @Published var currentHeight: CGFloat = 0
@@ -20,6 +28,7 @@ final class KeyboardResponder: ObservableObject {
     static let shared = KeyboardResponder()
 
     private init() {
+        #if os(iOS)
         // Use .default queue to avoid main thread congestion
         let willShow = NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
         let willHide = NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
@@ -31,8 +40,10 @@ final class KeyboardResponder: ObservableObject {
                 self?.handleKeyboardNotification(notification)
             }
             .store(in: &cancellables)
+        #endif
     }
 
+    #if os(iOS)
     private func handleKeyboardNotification(_ notification: Notification) {
         // Safely extract userInfo - iOS sometimes sends notifications with nil userInfo
         guard let userInfo = notification.userInfo else {
@@ -83,6 +94,7 @@ final class KeyboardResponder: ObservableObject {
         let visibleHeight = max(0, screenBottom - keyboardFrame.minY)
         return min(keyboardFrame.height, visibleHeight)
     }
+    #endif
 
     deinit {
         cancellables.removeAll()

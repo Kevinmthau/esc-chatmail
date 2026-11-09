@@ -895,10 +895,7 @@ struct ChatMessagesView: View {
     }
 
     private var currentBottomSafeAreaInset: CGFloat {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        let activeScene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
-        let window = activeScene?.windows.first { $0.isKeyWindow } ?? activeScene?.windows.first
-        return window?.safeAreaInsets.bottom ?? 0
+        KeyWindowSafeArea.bottomInset
     }
 
     private func totalMessageCountForCoordinator() -> Int {

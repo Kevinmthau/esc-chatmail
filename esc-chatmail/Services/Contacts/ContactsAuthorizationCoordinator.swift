@@ -95,7 +95,7 @@ final class ContactsAuthorizationCoordinator {
         // a store-change notification or on the next foreground.
         let names: [Notification.Name] = [
             .CNContactStoreDidChange,
-            UIApplication.didBecomeActiveNotification
+            PlatformNotificationNames.applicationDidBecomeActive
         ]
         for name in names {
             let token = notificationCenter.addObserver(
