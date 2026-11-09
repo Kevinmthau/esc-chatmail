@@ -4,7 +4,7 @@ import UIKit
 #endif
 import WebKit
 
-// `LayoutAwareWKWebView` lives in `FullEmailWebViewManager.swift` so preview WebViews, the full
+// `LayoutAwareWKWebView` lives in `esc-chatmail/Platform/` so preview WebViews, the full
 // reader, and the pre-rendered pool can share a single layout-reporting WebView type.
 
 /// Configuration mode for non-interactive email preview rendering.
@@ -26,14 +26,14 @@ extension EmailWebViewMode {
         .preview
     }
 
-    var webViewUserInterfaceStyle: UIUserInterfaceStyle {
+    var webViewUserInterfaceStyle: PlatformInterfaceStyle {
         .unspecified
     }
 }
 
 /// Unified preview WebView for rendering non-interactive email HTML content.
 /// Used by compose previews and the MiniEmailWebView snapshot-failure fallback.
-struct BaseEmailWebView: UIViewRepresentable {
+struct BaseEmailWebView: WebViewRepresentable {
     let htmlContent: String
     let mode: EmailWebViewMode
     var isDarkMode: Bool? = nil
@@ -45,11 +45,11 @@ struct BaseEmailWebView: UIViewRepresentable {
     /// Optional callback for non-interactive previews that need their rendered height.
     var onPreviewHeightChange: ((CGFloat) -> Void)? = nil
 
-    func makeUIView(context: Context) -> WKWebView {
-        makePreviewUIView(context: context)
+    func makeWebView(context: Context) -> WKWebView {
+        makePreviewWebView(context: context)
     }
 
-    private func makePreviewUIView(context: Context) -> WKWebView {
+    private func makePreviewWebView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
 
         // Register cid: scheme handler for inline attachments.
@@ -64,15 +64,13 @@ struct BaseEmailWebView: UIViewRepresentable {
             coordinator?.loadContentIfReady(in: webView)
         }
 
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
-        webView.isUserInteractionEnabled = false
+        webView.makeNonInteractive()
 
         context.coordinator.applyBackgroundAppearance(to: webView)
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
+    func updateWebView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateParent(self)
         context.coordinator.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
@@ -221,12 +219,8 @@ struct BaseEmailWebView: UIViewRepresentable {
         }
 
         func applyBackgroundAppearance(to webView: WKWebView) {
-            webView.isOpaque = false
-            webView.overrideUserInterfaceStyle = parent.mode.webViewUserInterfaceStyle
-            let backgroundColor = nativeBackgroundColor(for: parent.mode) ?? .clear
-            webView.backgroundColor = backgroundColor
-            webView.scrollView.backgroundColor = backgroundColor
-            webView.underPageBackgroundColor = backgroundColor
+            webView.applyInterfaceStyle(parent.mode.webViewUserInterfaceStyle)
+            webView.applyNativeBackgroundColor(nativeBackgroundColor(for: parent.mode) ?? .clear)
         }
 
         private func reloadSignature() -> String {

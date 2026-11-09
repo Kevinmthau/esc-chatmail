@@ -9,7 +9,7 @@ import CoreData
 ///
 /// Full original emails force the light rendering policy and keep interactive navigation, CID
 /// attachment reloads, and guarded pre-rendered WebView adoption isolated from preview WebViews.
-struct FullEmailReaderWebView: UIViewRepresentable {
+struct FullEmailReaderWebView: WebViewRepresentable {
     let htmlContent: String
     let sourceSignature: String?
     var readerWidth: CGFloat = 0
@@ -22,7 +22,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
     var onLoadFailed: (() -> Void)? = nil
     var onAdoptedPrerendered: (() -> Void)?
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeWebView(context: Context) -> WKWebView {
         if let message,
            EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
            let checkout = webViewAdoptionProvider?.checkout(
@@ -80,21 +80,21 @@ struct FullEmailReaderWebView: UIViewRepresentable {
         return webView
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
+    func updateWebView(_ webView: WKWebView, context: Context) {
         context.coordinator.updateParent(self)
         context.coordinator.observeAttachmentAvailabilityChanges(reloading: webView)
         FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
         context.coordinator.loadContentIfReady(in: webView)
     }
 
-    static func dismantleUIView(_ uiView: WKWebView, coordinator: Coordinator) {
-        let wasRehosted = coordinator.reclaimPrerenderedWebViewIfNeeded(uiView)
+    static func dismantleWebView(_ webView: WKWebView, coordinator: Coordinator) {
+        let wasRehosted = coordinator.reclaimPrerenderedWebViewIfNeeded(webView)
         if wasRehosted {
             coordinator.detachAfterSuccessfulCheckin()
         } else {
-            coordinator.scrubForAccountBoundary(uiView)
+            coordinator.scrubForAccountBoundary(webView)
         }
-        FullEmailReaderAccountBoundaryRegistry.shared.unregister(webView: uiView)
+        FullEmailReaderAccountBoundaryRegistry.shared.unregister(webView: webView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -473,9 +473,7 @@ struct FullEmailReaderWebView: UIViewRepresentable {
                 Log.warning("Blocked private/reserved email link: \(Log.redact(url: url))", category: .ui)
                 decisionHandler(.cancel)
             case .openExternally(let url):
-                if UIApplication.shared.canOpenURL(url) {
-                    UIApplication.shared.open(url)
-                }
+                ExternalURLOpener.open(url)
                 decisionHandler(.cancel)
             }
         }

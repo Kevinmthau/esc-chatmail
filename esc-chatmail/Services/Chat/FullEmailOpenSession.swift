@@ -433,6 +433,8 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
               let message else {
             return
         }
+        // Only the Mac reads this back, as the width visible rows pre-render at.
+        FullEmailReaderWarmWidthSource.recordMeasuredReaderWidth(width)
 
         guard let artifact = readerState.artifact else {
             fullEmailOpener?.prewarmOnOpen(message: message, width: width)

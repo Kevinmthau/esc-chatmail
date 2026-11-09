@@ -4,26 +4,8 @@ import UIKit
 #endif
 import WebKit
 
-// MARK: - Reusable layout-aware WKWebView
-
-/// A `WKWebView` subclass that reports layout/window changes so email WebView coordinators can
-/// (re)load content once they have a window and valid dimensions.
-///
-/// Shared by preview WebViews, the full reader, and the pre-rendered `FullEmailWebViewManager` so a
-/// warmed full-reader instance can be adopted without losing its layout callbacks.
-final class LayoutAwareWKWebView: WKWebView {
-    var onLayoutChange: ((WKWebView) -> Void)?
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        onLayoutChange?(self)
-    }
-
-    override func didMoveToWindow() {
-        super.didMoveToWindow()
-        onLayoutChange?(self)
-    }
-}
+// `LayoutAwareWKWebView` and the pool's `OffscreenWebViewHost` live in `esc-chatmail/Platform/`,
+// because their UIKit and AppKit versions differ.
 
 // MARK: - Shared full-interactive configuration / navigation policy
 
@@ -38,8 +20,7 @@ enum FullInteractiveEmailWebView {
         let configuration = WKWebViewConfiguration()
         // Register cid: scheme handler for inline attachments.
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
-        configuration.allowsInlineMediaPlayback = false
-        configuration.dataDetectorTypes = [.phoneNumber, .link, .address]
+        configuration.applyFullReaderMediaAndDataDetectorSettings()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
         configuration.allowsAirPlayForMediaPlayback = false
         configuration.mediaTypesRequiringUserActionForPlayback = .all
@@ -50,11 +31,10 @@ enum FullInteractiveEmailWebView {
     /// colors), mobile user agent (trigger responsive media queries), and no minimum font size.
     static func applySettings(to webView: WKWebView) {
         // Match Apple Mail's WebView behavior.
-        webView.scrollView.contentInsetAdjustmentBehavior = .never
-        webView.scrollView.automaticallyAdjustsScrollIndicatorInsets = true
+        webView.applyFullReaderScrollInsets()
         // Full original emails force a light trait environment to preserve the author's intended
         // presentation instead of opting the document into app dark mode.
-        webView.overrideUserInterfaceStyle = .light
+        webView.applyInterfaceStyle(.light)
         // Use mobile user agent to trigger responsive media queries.
         webView.customUserAgent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
         // Prevent automatic font size adjustment that can break layouts.
@@ -63,13 +43,10 @@ enum FullInteractiveEmailWebView {
 
     /// Applies the opaque/background appearance for the forced-light original-email surface.
     static func applyBackgroundAppearance(to webView: WKWebView) {
-        webView.isOpaque = false
-        webView.overrideUserInterfaceStyle = .light
+        webView.applyInterfaceStyle(.light)
         let theme = HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .original)
         let backgroundColor = PlatformColor(hex: theme.backgroundColorHex) ?? .systemBackground
-        webView.backgroundColor = backgroundColor
-        webView.scrollView.backgroundColor = backgroundColor
-        webView.underPageBackgroundColor = backgroundColor
+        webView.applyNativeBackgroundColor(backgroundColor)
     }
 
     /// Sender-domain base URL so CDN images relying on Referer (e.g. Beehiiv hotlink protection) load.
@@ -236,30 +213,22 @@ enum EmailReaderRenderingConfiguration {
         FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption
     }
 
-    static func visibleRowWarmWidthEstimate(sceneScreenWidth: CGFloat?) -> CGFloat? {
+    static func visibleRowWarmWidthEstimate(readerWidthEstimate: CGFloat?) -> CGFloat? {
         guard enablesOffscreenWebViewAdoption,
-              let sceneScreenWidth,
-              sceneScreenWidth > 1 else {
+              let readerWidthEstimate,
+              readerWidthEstimate > 1 else {
             return nil
         }
-        return sceneScreenWidth
+        return readerWidthEstimate
     }
 
+    /// The scene's screen width on iOS, the reader's last measured width on the Mac
+    /// (`FullEmailReaderWarmWidthSource`).
     @MainActor
     static func currentVisibleRowWarmWidthEstimate() -> CGFloat? {
         visibleRowWarmWidthEstimate(
-            sceneScreenWidth: FullEmailWebViewMetrics.activeWindowScene()?.screen.bounds.width
+            readerWidthEstimate: FullEmailReaderWarmWidthSource.currentWidth
         )
-    }
-}
-
-// MARK: - Metrics
-
-enum FullEmailWebViewMetrics {
-    @MainActor
-    static func activeWindowScene() -> UIWindowScene? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
     }
 }
 
@@ -1052,6 +1021,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         self.loader = loader
         self.bookkeeping = FullEmailWebViewPoolBookkeeping(capacity: capacity)
 
+        // macOS has no memory-warning notification. The Mac pool is not yet cleared under memory
+        // pressure; that hookup waits for the memory-pressure source of the Mac plan's PR B.
+        #if os(iOS)
         NotificationCenter.default.addObserver(
             forName: UIApplication.didReceiveMemoryWarningNotification,
             object: nil,
@@ -1061,6 +1033,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
                 self?.clear()
             }
         }
+        #endif
 
         NotificationCenter.default.addObserver(
             forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
@@ -1505,7 +1478,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         entry.cidHandler.message = nil
         entry.webView.navigationDelegate = entry.delegate
         entry.webView.onLayoutChange = nil
-        entry.webView.scrollView.setContentOffset(.zero, animated: false)
+        entry.webView.resetScrollPosition()
         host.host(entry.webView, width: CGFloat(entry.key.widthBucket))
         applyEvictions(bookkeeping.touch(messageId))
         return entries[messageId] === entry
@@ -1947,63 +1920,5 @@ private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
         case .cancel, .blockedPrivateNetwork, .openExternally:
             decisionHandler(.cancel)
         }
-    }
-}
-
-// MARK: - Off-screen hosting window
-
-/// Hosts pre-rendering WebViews in a window that is part of the active scene but positioned beyond
-/// the screen edge, so WebKit actually lays out and paints content (a windowless WebView may defer
-/// rasterization until first display, which would reintroduce a paint when adopted).
-@MainActor
-private final class OffscreenWebViewHost {
-    private var window: UIWindow?
-
-    func host(_ view: UIView, width: CGFloat) {
-        guard let window = ensureWindow() else {
-            return
-        }
-        view.frame = CGRect(
-            origin: .zero,
-            size: CGSize(width: width, height: window.bounds.height)
-        )
-        view.autoresizingMask = []
-        window.rootViewController?.view.addSubview(view)
-    }
-
-    func remove(_ view: UIView) {
-        view.removeFromSuperview()
-    }
-
-    func preferredHeight() -> CGFloat {
-        ensureWindow()?.bounds.height ?? FullEmailWebViewMetrics.activeWindowScene()?.screen.bounds.height ?? 0
-    }
-
-    private func ensureWindow() -> UIWindow? {
-        if let window {
-            return window
-        }
-        guard let scene = FullEmailWebViewMetrics.activeWindowScene() else {
-            return nil
-        }
-
-        let screenBounds = scene.screen.bounds
-        let window = UIWindow(windowScene: scene)
-        // Positioned fully beyond the left edge: never visible to the user, but still part of the
-        // scene so the render server composites it and WebKit paints the content.
-        window.frame = CGRect(
-            x: -screenBounds.width - 100,
-            y: 0,
-            width: screenBounds.width,
-            height: screenBounds.height
-        )
-        window.windowLevel = UIWindow.Level.normal - 1
-        window.isUserInteractionEnabled = false
-        let rootViewController = UIViewController()
-        rootViewController.view.backgroundColor = .clear
-        window.rootViewController = rootViewController
-        window.isHidden = false
-        self.window = window
-        return window
     }
 }

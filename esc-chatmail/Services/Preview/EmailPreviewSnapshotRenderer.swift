@@ -34,7 +34,7 @@ enum EmailPreviewSnapshotRenderError: Error {
 enum EmailPreviewSnapshotAppearance {
     /// Snapshot previews follow the preview policy, not the original-email policy:
     /// render against the requested app appearance so cached images match chat UI.
-    static func userInterfaceStyle(isDarkMode: Bool) -> UIUserInterfaceStyle {
+    static func userInterfaceStyle(isDarkMode: Bool) -> PlatformInterfaceStyle {
         isDarkMode ? .dark : .light
     }
 
@@ -417,7 +417,9 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
 @MainActor
 private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
     private let request: EmailPreviewSnapshotRequest
-    private let webView: WKWebView
+    /// Never in a window, so no input can reach it; `makeNonInteractive()` keeps it display-only
+    /// anyway, as every non-interactive web view in the app is.
+    private let webView: LayoutAwareWKWebView
     private let cidHandler: CIDSchemeHandler
     private var continuation: CheckedContinuation<EmailPreviewSnapshotResult, Error>?
     private var timeoutTask: Task<Void, Never>?
@@ -444,7 +446,7 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
         self.cidHandler = cidHandler
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
 
-        self.webView = WKWebView(
+        self.webView = LayoutAwareWKWebView(
             frame: CGRect(
                 x: 0,
                 y: 0,
@@ -457,9 +459,7 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
         super.init()
 
         webView.navigationDelegate = self
-        webView.scrollView.isScrollEnabled = false
-        webView.scrollView.bounces = false
-        webView.isUserInteractionEnabled = false
+        webView.makeNonInteractive()
         applyBackgroundAppearance()
     }
 
@@ -499,17 +499,14 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
     }
 
     private func applyBackgroundAppearance() {
-        webView.isOpaque = false
         // Snapshot previews explicitly set dark/light traits from the request so
         // offscreen rendering matches the app appearance encoded into the cache key.
-        webView.overrideUserInterfaceStyle = EmailPreviewSnapshotAppearance.userInterfaceStyle(
+        webView.applyInterfaceStyle(EmailPreviewSnapshotAppearance.userInterfaceStyle(
             isDarkMode: request.isDarkMode
-        )
+        ))
         let theme = EmailPreviewSnapshotAppearance.theme(isDarkMode: request.isDarkMode)
         let color = PlatformColor(hex: theme.backgroundColorHex) ?? .systemBackground
-        webView.backgroundColor = color
-        webView.scrollView.backgroundColor = color
-        webView.underPageBackgroundColor = color
+        webView.applyNativeBackgroundColor(color)
     }
 
     private func finish(_ result: Result<EmailPreviewSnapshotResult, Error>) {
