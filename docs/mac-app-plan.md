@@ -129,6 +129,7 @@ The Mac build stays red until Phase 1 lands, and nobody launches it before PR C.
 - Render a chat that has an HTML preview card on macOS, scroll past the card with a trackpad, and open the full reader.
 - Compare a `WKWebView` wrapped in `NSViewRepresentable` with SwiftUI's `WebView`/`WebPage` (macOS 26 and later).
 - The result decides how PR E is built.
+- **Done 2026-11-09:** use `WKWebView` in `NSViewRepresentable`. The results are under PR E.
 
 **PR A: image and color shims (do first; the others build on it).** About 115 errors: `UIImage` 83, `UIColor` 26, `UIGraphics` 6.
 
@@ -188,7 +189,7 @@ The Mac build stays red until Phase 1 lands, and nobody launches it before PR C.
   - Toolbar placements: `topBarLeading`, `topBarTrailing` and `navigationBarTrailing` become `.navigation` or `.primaryAction`.
   - `navigationBarTitleDisplayMode` and `textInputAutocapitalization` stay iOS-only.
 
-**PR E: WebKit (about 90 errors).** The spike decides the approach.
+**PR E: WebKit (about 90 errors).** Build it on `WKWebView` wrapped in `NSViewRepresentable`, as the WebKit spike found (results below).
 
 - **Where:**
   - `FullEmailWebViewManager` (36 errors)
@@ -203,15 +204,91 @@ The Mac build stays red until Phase 1 lands, and nobody launches it before PR C.
   - `layoutSubviews` and `didMoveToWindow` overrides
   - `dataDetectorTypes` and `allowsInlineMediaPlayback`
   - `UIViewRepresentable` and UIGraphics snapshots
-- **Mac equivalents:**
-  - Wrap the web view in `NSViewRepresentable`.
-  - Inline web views, which don't scroll themselves, pass trackpad scrolling (`scrollWheel`) to the transcript and size themselves from a height measured in JavaScript.
-  - Set dark or light mode through `NSAppearance` and transparency through `underPageBackgroundColor`.
-  - `takeSnapshot` returns an `NSImage`.
 - **What to test:**
   - AGENTS.md warns that changes to snapshot sizing and to `MiniEmailWebView`'s fallback height can destabilize chat scrolling.
   - The transcript's check for when to reveal the newest message (`ChatTranscriptRealizationPolicy`) was tuned on iOS.
   - So test long chats and window resizing on the Mac.
+
+**Mac equivalents.** These WebKit APIs worked on the Mac as they do on iOS, so the code that calls them carries over: `WKNavigationDelegate` and its policy decisions, a `WKURLSchemeHandler` such as `CIDSchemeHandler`, `loadHTMLString`, `evaluateJavaScript` and `takeSnapshot`. The iOS-only API maps like this. The spike checked every row except the last three, which come from reading the code:
+
+| iOS | Mac |
+|---|---|
+| `UIViewRepresentable` | `NSViewRepresentable` |
+| `layoutSubviews` and `didMoveToWindow` overrides | `setFrameSize(_:)` and `viewDidMoveToWindow()`. `layout()` also fires, but only for about a quarter of SwiftUI's frame changes |
+| `isUserInteractionEnabled = false` | Override `hitTest(_:)` to return nil |
+| `scrollView.isScrollEnabled = false`, `bounces = false` | Nothing more: when `hitTest` returns nil, no wheel event reaches the web view |
+| `scrollView.setContentOffset(.zero)` at pool checkin | `evaluateJavaScript("window.scrollTo(0, 0)")`. It works with page JavaScript turned off |
+| `scrollView.contentInsetAdjustmentBehavior = .never` | Nothing in the Phase 1 window. Use `obscuredContentInsets` (macOS 26) if the reader later sits under a transparent toolbar |
+| `overrideUserInterfaceStyle` set to `.light`, `.dark` or `.unspecified` | `appearance` set to `NSAppearance(named: .aqua)`, `NSAppearance(named: .darkAqua)` or nil. CSS `prefers-color-scheme` follows, even for a web view in no window. A SwiftUI `colorScheme` environment value also reaches a hosted web view |
+| `isOpaque = false`, `backgroundColor`, `scrollView.backgroundColor` | `underPageBackgroundColor`, plus `setValue(false, forKey: "drawsBackground")` for a see-through page. That key is private API, so check `responds(to: NSSelectorFromString("_setDrawsBackground:"))` first. `underPageBackgroundColor = .clear` alone leaves the page white |
+| `dataDetectorTypes` | Not available. The `x-apple-data-detectors` branch of the navigation policy never runs on the Mac |
+| `allowsInlineMediaPlayback` | Not available; the Mac always plays inline. `mediaTypesRequiringUserActionForPlayback` and `allowsAirPlayForMediaPlayback` exist on both |
+| `takeSnapshot` returns a `UIImage`, and `image.scale` gives its pixel scale | It returns an `NSImage` sized in points. The pixel scale is the CGImage's width divided by `size.width`: 2 on a Retina screen, even with no window |
+| `jpegData(compressionQuality: 0.82)` | `NSBitmapImageRep(cgImage:).representation(using: .jpeg, properties: [.compressionFactor: 0.82])` |
+| `layoutIfNeeded()` | `layoutSubtreeIfNeeded()` |
+| An offscreen `UIWindow` past the left edge of the screen | A borderless `NSWindow` at (-30000, -30000) with `ignoresMouseEvents`. It doesn't need to be ordered in |
+| Visible-row warm width from the screen's width (`currentVisibleRowWarmWidthEstimate`) | The reader's own width. A Mac screen is far wider than the reader, so a web view warmed at screen width never matches a checkout. Warming after an explicit open already uses the reader's width |
+| `UIApplication.didReceiveMemoryWarningNotification` | PR B's memory-pressure source |
+| `UIApplication.shared.open(url)` | `NSWorkspace.shared.open(url)` |
+
+**WebKit spike results (2026-11-09).**
+
+- **Setup.** A throwaway Mac app, outside the repo, built for macOS 26 and run on macOS 27.2 with a Retina display. Like the Phase 0 settings, it was sandboxed and allowed only outgoing connections.
+  - It rebuilt three things, once with each approach: the chat transcript (an 80-row `LazyVStack` with inline HTML cards), the snapshot renderer, and the full reader with its warm pool.
+  - Trackpad gestures, mouse-wheel clicks and mouse clicks were synthesized inside the app.
+  - Three app files compiled into it unchanged: `HTMLPreviewRenderingSupport.swift`, `HTMLPreviewScaleCalculator.swift` and `EmailWebViewLoadCoordination.swift`.
+- **Why `WKWebView` rather than SwiftUI's `WebView`/`WebPage`:**
+  - The app still supports iOS 17.6, and `WebPage` needs iOS 26. It would mean a second, Mac-only copy of the preview and reader views, the warm pool, `CIDSchemeHandler` (rewritten as an async `URLSchemeHandler`) and the navigation delegates (rewritten as `NavigationDeciding`). With `WKWebView`, both platforms share all of them.
+  - Everything the spike tried worked with `WKWebView`, using the substitutes in the table.
+  - `WebPage` has three blockers, listed under the gotchas below. Its one advantage the app could use is public API for a see-through page (`.webViewContentBackground(.hidden)`).
+
+**Scrolling over an inline card.** How far the transcript moved, in points, for each kind of card:
+
+| Card | 150 pt trackpad gesture over a text bubble | 150 pt trackpad gesture over the card | 3 mouse-wheel clicks over the card | 400 pt gesture that starts over text, with a card sliding under the pointer |
+|---|---|---|---|---|
+| `WKWebView` with no override | 120 | 0 | 0 | 20 |
+| `WKWebView` whose `hitTest` returns nil | 150 | 150 | 90 | 400 |
+| `WKWebView` that forwards `scrollWheel` to `nextResponder` | 150 | 150 | 90 | 400 |
+| `WebView(page)` | 120 | 0 | 0 | 20 |
+| `WebView(page).allowsHitTesting(false)` | 150 | 150 | 90 | 400 |
+| `WebView(page).scrollDisabled(true)` | 120 | 0 | 0 | 20 |
+| Snapshot image (the normal chat path) | 150 | 150 | 90 | 400 |
+
+Use the `hitTest` override for every non-interactive web view. Like `isUserInteractionEnabled = false`, it also blocks clicks, text selection and context menus.
+
+- **Other results:**
+  - **Measured height.** `evaluateJavaScript` works with `allowsContentJavaScript = false` and the wrapper's `script-src 'none'` policy. The first card had its height 0.4 s after the window appeared.
+  - **Long chat.** Cards that left the `LazyVStack` and came back were rebuilt at their cached height, so nothing jumped. Each live card had its own WebContent process: 4 cards, 4 processes. That cost is one more reason to keep snapshots as the normal path.
+  - **Window resizing.** Narrowing the window until a card couldn't fit its email at half scale changed the scale from 0.5 to 0.489, and the card reloaded and was measured again. Widening it changed nothing.
+  - **Snapshot.** A `WKWebView` in no window rendered as it does on iOS:
+    - a 360×320 pt image at 720×640 px
+    - `cid:` and remote images loaded inside the sandbox
+    - light or dark from `appearance`
+
+    A render took about 1.1 s, nearly all of it the existing 250 ms and 750 ms waits.
+  - **Reader.**
+    - It could be forced light inside a dark window, forced dark, or left to follow the window.
+    - It scrolled itself with the trackpad and the mouse wheel.
+    - Paint confirmation through `takeSnapshot(with: nil)` returned 55–165 ms after the load started.
+  - **Warm pool.** Warming in the offscreen window took 50–160 ms. Adoption moved the same `WKWebView` into the reader with no new navigation and at the right width. Checkin moved it back and reset its scroll position.
+- **Gotchas:**
+  - **Without the `hitTest` override, a card swallows scrolling.** In the spike, a transcript scroll also stopped when such a card slid under the pointer.
+  - **Transparency needs private API.** Only `drawsBackground = false` makes the page see-through.
+    - The wrapper paints a theme color behind every preview and the full reader, so only compose's `.simplePreview` with no theme depends on transparency.
+    - Either use the guarded call or give that preview a theme color on the Mac.
+  - **The offscreen pool window counts as hidden.** To macOS, a window that is off every screen isn't visible, so WebKit reports the warm page as `hidden`. On iOS, `OffscreenWebViewHost` relies on its offscreen window to keep the page painting.
+    - `finalizeWarm`'s snapshot still returns, and the page turns `visible` once adopted.
+    - The spike couldn't see whether the first frame after adoption flashes. If it does, `FullEmailWebViewAdoptionPolicy` can turn adoption off on the Mac.
+  - **In an inactive window, the first click only activates the window.** A click on a link reached the page as `.linkActivated` only after the web view returned true from `acceptsFirstMouse(for:)`. Decide which the Mac reader should do.
+  - **`WebPage` blockers:**
+    - A `WebPage` with no `WebView` lays out 1024 px wide and ignores dark mode, and nothing can resize it. So snapshots and warm pages have to be hosted in a sized `WebView` anyway. Its `exported(as: .image(...))` returns PNG data whose `NSImage` reports pixels as points.
+    - On macOS, `ScrollInputKind` has no members, so `webViewScrollInputBehavior` can't turn off wheel scrolling. `.scrollDisabled(true)` doesn't either. Only `.allowsHitTesting(false)` works.
+    - When a `WebView(page)` changes identity, for example when an `if`/`else` branch flips, SwiftUI builds the new `WebView` before removing the old one. `_WebKit_SwiftUI` then traps (`EXC_BREAKPOINT` in `makeViewProvider`, with no message). Removing the old view first works.
+- **Not verified:**
+  - A physical trackpad. All events were synthesized.
+  - What the screen shows. There was no screen-capture permission, so transparency was read from snapshot pixels.
+  - macOS 26 itself.
+  - The app's own views, including `ChatTranscriptRealizationPolicy`.
 
 **PR F: tooling, CI and Mac tests.**
 
