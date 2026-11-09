@@ -1,6 +1,5 @@
 import Foundation
 import CoreData
-import BackgroundTasks
 
 // MARK: - Database Maintenance Service
 
@@ -19,16 +18,20 @@ final class DatabaseMaintenanceService: ObservableObject {
 
     // Internal for extension access
     let coreDataStack = CoreDataStack.shared
-    let taskRegistry: BackgroundTaskRegistry
+    let taskRegistry: any BackgroundTaskRegistering
 
     /// Internal (not private) only so tests can inject a seamed registry.
     /// Never construct a second instance against the default `.shared`
     /// registry: `registerBackgroundTasks()` runs in here, and a repeat
     /// registration of the same identifier with the real `BGTaskScheduler`
     /// is an Apple assertion failure that aborts the process, not a
-    /// recoverable error.
-    init(taskRegistry: BackgroundTaskRegistry = .shared) {
-        self.taskRegistry = taskRegistry
+    /// recoverable error. The default is `BackgroundTaskRegistry` on iOS and
+    /// `BackgroundActivityTaskRegistry` (`NSBackgroundActivityScheduler`) on
+    /// the Mac. It is resolved here rather than in the parameter list because
+    /// the Mac registry's `shared` is main-actor isolated, and a default
+    /// argument is evaluated outside this initializer's isolation.
+    init(taskRegistry: (any BackgroundTaskRegistering)? = nil) {
+        self.taskRegistry = taskRegistry ?? PlatformBackgroundTaskRegistry.shared
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }
@@ -79,6 +82,9 @@ final class DatabaseMaintenanceService: ObservableObject {
     /// re-submits pushed cleanup/analyze eligibility past every overnight
     /// window for a user who launches daily (and vacuum's for anyone launching
     /// within its week), so the cleanup task never ran at all.
+    /// On the Mac a pending activity lives only in this process, so the
+    /// registry instead resumes each job's persisted due date
+    /// (`BackgroundActivitySchedulePolicy`).
     func scheduleMaintenanceTasks() async {
         await taskRegistry.scheduleIfNotPending([
             Self.vacuumTaskIdentifier,

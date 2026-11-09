@@ -361,8 +361,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // the unauthenticated guard runs, so any request that survives a
             // signed-out conclusion wakes the device on the sync cadence
             // forever. Sign-in needs no counterpart: the scene handler re-arms
-            // on the next authenticated backgrounding.
+            // on the next authenticated backgrounding. The Mac submits no
+            // BGTask requests (the BGTask layer is iOS-only), so there it has
+            // nothing to cancel.
+            #if os(iOS)
             BackgroundTaskScheduler.shared.cancelPendingTaskRequests()
+            #endif
         },
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {
             try await CoreDataStack.shared.resetStore()

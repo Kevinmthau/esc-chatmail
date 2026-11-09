@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(UIKit)
-import UIKit
-#endif
 
 /// Carries a store-load failure from the startup bootstrap to
 /// `AppLoadingView`, and its Try Again and Reset Mailbox actions back. Before
@@ -32,7 +29,7 @@ final class AppLoadingModel: ObservableObject {
             StoreVolumeFreeSpace.availableBytes()
         },
         isProtectedDataAvailable: @escaping @MainActor () -> Bool = {
-            UIApplication.shared.isProtectedDataAvailable
+            ProtectedDataAvailability.isAvailable
         }
     ) {
         self.requestRetry = requestRetry ?? {

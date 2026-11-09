@@ -1,7 +1,6 @@
+#if os(iOS)
 import Foundation
-#if canImport(UIKit)
 import UIKit
-#endif
 
 /// Ends a scene-background execution assertion exactly once, whether the arm
 /// completes normally or UIKit's expiration handler fires first — whichever
@@ -14,6 +13,10 @@ import UIKit
 /// handler adopts that isolation synchronously (`MainActor.assumeIsolated`)
 /// because UIKit expects the assertion ended before the handler returns; a
 /// hop through a later main-queue turn leaves it alive past the grant.
+///
+/// iOS only: its one caller is `BackgroundSyncManager`'s scene-background
+/// BGTask arm, which macOS has no counterpart for. The Mac neither suspends a
+/// hidden app nor arms BGTasks, so there is nothing for an assertion to cover.
 @MainActor
 final class SceneBackgroundAssertionLatch {
     private var taskId = UIBackgroundTaskIdentifier.invalid
@@ -46,3 +49,4 @@ final class SceneBackgroundAssertionLatch {
         UIApplication.shared.endBackgroundTask(id)
     }
 }
+#endif

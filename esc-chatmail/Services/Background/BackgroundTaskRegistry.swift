@@ -1,5 +1,10 @@
+#if os(iOS)
 import Foundation
 import BackgroundTasks
+
+/// The iOS maintenance scheduler. On the Mac, where every `BG*` type is
+/// unavailable, `BackgroundActivityTaskRegistry` takes its place.
+typealias PlatformBackgroundTaskRegistry = BackgroundTaskRegistry
 
 /// Centralized registry for managing background tasks
 /// Eliminates repetitive register/schedule/handle code patterns
@@ -204,3 +209,9 @@ final class BackgroundTaskRegistry {
         Array(taskConfigurations.keys)
     }
 }
+
+/// Declared in an extension, not on the class: a conformance on the primary
+/// declaration would infer `@MainActor` for the whole class from the
+/// protocol, and `handleTask` runs on `BGTaskScheduler`'s launch-handler queue.
+extension BackgroundTaskRegistry: BackgroundTaskRegistering {}
+#endif
