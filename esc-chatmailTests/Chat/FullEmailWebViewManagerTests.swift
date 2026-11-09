@@ -1545,6 +1545,27 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
         XCTAssertEqual(try decideBridged(.linkActivated, trackingURL), .blockedPrivateNetwork(loopback))
     }
 
+    /// A tracking link whose destination host is percent-encoded twice unwraps to a URL whose host
+    /// is still percent-encoded, and Foundation hands that host over non-ASCII (`192.168.0.1．`,
+    /// `１２７.0.0.1`). Measured on the iOS 27.0 simulator with a real `WKWebView` click on each of
+    /// these: the decision was `.openExternally`, and WebKit's URL parser reads the destinations'
+    /// hosts as `192.168.0.1` and `127.0.0.1`.
+    ///
+    /// Revert-check: removing the non-ASCII refusal from
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)` makes this fail with
+    /// `.openExternally`.
+    func testAmazonSESTrackingLink_toPercentEncodedNonASCIIPrivateHost_isBlocked() throws {
+        let fullwidthStop = URL(string: "http://192.168.0.1%EF%BC%8E/admin")!
+        let fullwidthStopLink = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F192.168.0.1%25EF%25BC%258E%2Fadmin/1/message-id/signature=258"
+        let fullwidthDigits = URL(string: "http://%EF%BC%91%EF%BC%92%EF%BC%97.0.0.1/admin")!
+        let fullwidthDigitsLink = "https://vvd2lqhy.r.eu-west-3.awstrack.me/L0/http:%2F%2F%25EF%25BC%2591%25EF%25BC%2592%25EF%25BC%2597.0.0.1%2Fadmin/1/message-id/signature=258"
+
+        XCTAssertEqual(decide(.linkActivated, fullwidthStopLink), .blockedPrivateNetwork(fullwidthStop))
+        XCTAssertEqual(try decideBridged(.linkActivated, fullwidthStopLink), .blockedPrivateNetwork(fullwidthStop))
+        XCTAssertEqual(decide(.linkActivated, fullwidthDigitsLink), .blockedPrivateNetwork(fullwidthDigits))
+        XCTAssertEqual(try decideBridged(.linkActivated, fullwidthDigitsLink), .blockedPrivateNetwork(fullwidthDigits))
+    }
+
     /// HONEST SCOPE: this does not guard the fix. With `url.pathComponents` restored a bridged URL
     /// yields `facetime:` or `javascript:alert(1)` as the destination, which is cancelled too. It
     /// pins that a bridged URL keeps the refusals.

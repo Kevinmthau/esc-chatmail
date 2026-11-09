@@ -94,6 +94,65 @@ final class PrivateNetworkAddressDetectorTests: XCTestCase {
         assertBlocked("http://127/")
     }
 
+    // MARK: - IPv4 leading-zero parts (two readings)
+
+    /// A dotted quad with a leading-zero part has two readings: `inet_aton` and WebKit read the
+    /// part as octal, the system resolver reads it as decimal. Measured on the iOS 27.0 simulator:
+    /// `getaddrinfo("0127.0.0.1")` is 127.0.0.1, and a `URLSession` GET of
+    /// `http://0127.0.0.1:<port>/` returned 200 from a loopback listener, while the detector took
+    /// only the octal reading (87.0.0.1) and classed the host public.
+    ///
+    /// Revert-check: returning only the `inet_aton` reading from
+    /// `PrivateNetworkAddressDetector.ipv4Readings(of:)`, without the dotted-decimal one, makes
+    /// this fail.
+    func testIPv4_leadingZeroPart_privateWhenReadAsDecimal_isBlocked() {
+        assertBlocked("http://010.0.0.1/cgi-bin/reboot")             // octal: 8.0.0.1
+        assertBlocked("http://00010.0.0.1/")                         // octal: 8.0.0.1
+        assertBlocked("http://0127.0.0.1/")                          // octal: 87.0.0.1
+        assertBlocked("http://0172.16.0.1/")                         // octal: 122.16.0.1
+        assertBlocked("http://172.016.0.1/")                         // octal: 172.14.0.1
+        assertBlocked("http://169.0254.169.254/latest/meta-data/")   // octal: 169.172.169.254
+        assertBlocked("http://0100.64.0.1/")                         // octal: 64.64.0.1
+        assertBlocked("http://010.0.0.1./")                          // and with a trailing dot
+    }
+
+    /// The octal reading stays, because it is how WebKit reads the host. Measured on the iOS 27.0
+    /// simulator, its URL parser reads these as 10.0.0.1, 127.0.0.1 and 192.168.0.1, although
+    /// `getaddrinfo` reads `0177.0.0.1` as 177.0.0.1.
+    ///
+    /// Revert-check: returning only the dotted-decimal reading from
+    /// `PrivateNetworkAddressDetector.ipv4Readings(of:)`, without the `inet_aton` one, makes this
+    /// fail.
+    func testIPv4_leadingZeroPart_privateWhenReadAsOctal_isBlocked() {
+        assertBlocked("http://012.0.0.1/")       // decimal: 12.0.0.1
+        assertBlocked("http://0177.0.0.1/")      // decimal: 177.0.0.1
+        assertBlocked("http://0300.0250.0.1/")   // octal: 192.168.0.1; not a decimal quad
+    }
+
+    /// `inet_aton` rejects these (8 and 9 are not octal digits), so the decimal reading is the
+    /// only one.
+    ///
+    /// HONEST SCOPE: these were blocked before the two-readings change, by an `inet_pton`
+    /// fallback. They pin that replacing it with the dotted-decimal reading kept them blocked, and
+    /// the same Revert-check as `testIPv4_leadingZeroPart_privateWhenReadAsDecimal_isBlocked`
+    /// makes them fail.
+    func testIPv4_leadingZeroPart_notOctal_isBlocked() {
+        assertBlocked("http://0192.168.0.1/")
+        assertBlocked("http://192.0168.0.1/")
+        assertBlocked("http://192.168.0.09/")
+    }
+
+    /// A leading zero alone must not refuse a host: each of these is public under every reading.
+    ///
+    /// Revert-check: refusing every dotted quad that has a leading-zero part in
+    /// `PrivateNetworkAddressDetector.ipv4Readings(of:)`, instead of classifying its readings,
+    /// makes this fail.
+    func testIPv4_leadingZeroPart_publicUnderEveryReading_isAllowed() {
+        assertAllowed("https://08.8.8.8/")     // not octal; decimal: 8.8.8.8
+        assertAllowed("https://01.1.1.1/")     // 1.1.1.1 either way
+        assertAllowed("https://8.8.8.010/")    // octal: 8.8.8.8; decimal: 8.8.8.10
+    }
+
     // MARK: - IPv6 private ranges
 
     func testIPv6_loopback_isBlocked() {
@@ -240,6 +299,60 @@ final class PrivateNetworkAddressDetectorTests: XCTestCase {
         assertAllowed("https://example.com./")
         assertAllowed("https://docs.google.com./document/d/abc/edit")
         assertAllowed("https://8.8.8.8./")
+    }
+
+    // MARK: - Percent-encoded non-ASCII hosts
+
+    /// Foundation leaves a percent-encoded host alone, so these reach the detector as non-ASCII
+    /// hosts (`127.0.0.1．`, `１２７.0.0.1`) that none of its checks can read, and they were classed
+    /// public. WebKit decodes and maps them when it opens the URL: measured on the iOS 27.0
+    /// simulator, its URL parser reads the first six as `127.0.0.1` and the last as
+    /// `printer.local`.
+    ///
+    /// Revert-check: removing the non-ASCII refusal from
+    /// `PrivateNetworkAddressDetector.classifiableHost(of:)` makes this fail.
+    ///
+    /// HONEST SCOPE: measured on iOS 27.0 only. On a runtime whose Foundation mapped a
+    /// percent-encoded host to ASCII, the other checks would block these with or without the
+    /// refusal.
+    func testPercentEncodedNonASCIIHost_isBlocked() {
+        assertBlocked("http://127.0.0.1%EF%BC%8E/admin")              // fullwidth full stop
+        assertBlocked("http://127.0.0.1%E3%80%82/admin")              // ideographic full stop
+        assertBlocked("http://127.0.0.1%EF%BD%A1/admin")              // halfwidth ideographic full stop
+        assertBlocked("http://%EF%BC%91%EF%BC%92%EF%BC%97.0.0.1/")    // fullwidth digits
+        assertBlocked("http://127.0.0.1%C2%AD/")                      // soft hyphen
+        assertBlocked("http://127.0.0.1%E2%80%8B/")                   // zero-width space
+        assertBlocked("http://printer.%EF%BD%8Cocal/")                // fullwidth "l"
+    }
+
+    /// A URL bridged from `NSURL`, which is what a redirect delivers, carries the same non-ASCII
+    /// host.
+    ///
+    /// Revert-check: the same revert makes this fail. HONEST SCOPE: as above.
+    func testPercentEncodedNonASCIIHost_bridgedFromNSURL_isBlocked() throws {
+        let url = try XCTUnwrap(NSURL(string: "http://192.168.0.1%EF%BC%8E/admin")) as URL
+
+        XCTAssertTrue(PrivateNetworkAddressDetector.isPrivateOrReserved(url))
+    }
+
+    /// The refusal must not reach an ordinary internationalized name. Foundation hands a name
+    /// written in Unicode to the detector in its ASCII `xn--` form, like one written that way.
+    ///
+    /// HONEST SCOPE: this passes with or without the refusal. It pins what the refusal rests on:
+    /// on a runtime whose Foundation handed the Unicode name over unmapped, every such link would
+    /// be refused and this would fail.
+    func testInternationalizedPublicName_isAllowed() {
+        assertAllowed("https://b\u{00FC}cher.example.com/")
+        assertAllowed("https://xn--bcher-kva.example.com/")
+    }
+
+    /// The cost of the refusal: a public name whose host is percent-encoded is refused too. Pinned
+    /// so that accepting such a host again is a decision, not a side effect.
+    ///
+    /// Revert-check: the same revert as `testPercentEncodedNonASCIIHost_isBlocked` makes this
+    /// fail.
+    func testPercentEncodedPublicName_isBlocked() {
+        assertBlocked("https://b%C3%BCcher.example.com/")
     }
 
     // MARK: - Malformed URLs

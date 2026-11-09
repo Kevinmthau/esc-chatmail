@@ -26,8 +26,11 @@ enum PrivateNetworkAddressDetector {
             return true
         }
 
-        if let ipv4 = ipv4FromAnyForm(host) {
-            return isPrivateIPv4(ipv4)
+        // A host can have two IPv4 readings (`ipv4Readings(of:)`). One private reading is enough
+        // to refuse it, because the detector cannot know which one the consumer applies.
+        let readings = ipv4Readings(of: host)
+        if !readings.isEmpty {
+            return readings.contains(where: isPrivateIPv4)
         }
 
         // Scoped IPv6 literals include a zone identifier (for example
@@ -55,20 +58,39 @@ enum PrivateNetworkAddressDetector {
     /// The lowercased host to classify, or nil when the URL has no usable host and must be
     /// refused.
     ///
-    /// One trailing dot is dropped first. It only marks a name as fully qualified, but every check
-    /// below reads it as part of the name: `inet_aton` rejects `192.168.0.1.`, and `printer.` no
-    /// longer looks like a single label, so both fell through to "public" while the URL still
-    /// reached the private host. Measured on the iOS 27.0 simulator: WebKit's URL parser turns
-    /// `http://192.168.0.1./` into the host `192.168.0.1` (and `127.1.`, `2130706433.`, `0x7f.1.`
-    /// and `0177.0.0.1.` into `127.0.0.1`), and `getaddrinfo("192.168.0.1.")` resolves to
-    /// 192.168.0.1. Foundation hands over the same dotted host for `192.168.0.1%2E` and for an
-    /// ideographic full stop (`192.168.0.1。`).
+    /// A host that is not ASCII is refused. Measured on the iOS 27.0 simulator, for `URL(string:)`
+    /// and for a URL bridged from `NSURL`:
+    /// - Foundation maps a non-ASCII host written as such to its ASCII form when it parses the URL
+    ///   (`bücher.example.com` arrives as `xn--bcher-kva.example.com`, `１２７.0.0.1` as
+    ///   `127.0.0.1`), so the only non-ASCII host that reaches here was percent-encoded in the URL,
+    ///   which Foundation leaves alone.
+    /// - WebKit decodes and maps such a host when it opens the URL, and the checks below cannot
+    ///   read what it will become: `192.168.0.1%EF%BC%8E` (a fullwidth full stop) arrives as
+    ///   `192.168.0.1．` and `%EF%BC%91%EF%BC%92%EF%BC%97.0.0.1` as `１２７.0.0.1`, both were classed
+    ///   public, and WebKit's URL parser reads them as `192.168.0.1` and `127.0.0.1`.
+    ///
+    /// An unwrapped Amazon SES destination is where this reached a click. The cost is that a public
+    /// name whose host is percent-encoded (`b%C3%BCcher.example.com`) is refused too.
+    ///
+    /// One trailing dot is then dropped. It only marks a name as fully qualified, but the address
+    /// and single-label checks below read it as part of the name: `inet_aton` rejects
+    /// `192.168.0.1.`, and `printer.` no longer looks like a single label, so both fell through to
+    /// "public" while the URL still reached the private host. Measured on the same simulator:
+    /// WebKit's URL parser turns `http://192.168.0.1./` into the host `192.168.0.1` (and `127.1.`,
+    /// `2130706433.`, `0x7f.1.` and `0177.0.0.1.` into `127.0.0.1`), and
+    /// `getaddrinfo("192.168.0.1.")` resolves to 192.168.0.1. Foundation hands over the same dotted
+    /// host for `192.168.0.1%2E` and for an ideographic full stop written as such
+    /// (`192.168.0.1。`).
     ///
     /// A host that is empty or still ends in a dot after that (`.`, `192.168.0.1..`) has an empty
     /// label. On the same simulator WebKit kept such a host as a name and `getaddrinfo` failed on
     /// it, so it is refused rather than guessed at.
     private static func classifiableHost(of url: URL) -> String? {
         guard var host = url.host?.lowercased(), !host.isEmpty else {
+            return nil
+        }
+
+        guard host.unicodeScalars.allSatisfy(\.isASCII) else {
             return nil
         }
 
@@ -118,23 +140,68 @@ enum PrivateNetworkAddressDetector {
 
     // MARK: - IPv4
 
-    /// Accepts canonical dotted-decimal, plus the legacy octal / hexadecimal /
-    /// integer forms that `getaddrinfo` still resolves. `inet_aton` runs first
-    /// because it matches the resolver's interpretation for leading-zero
-    /// octets (e.g. "0177.0.0.1" → 127.0.0.1); `inet_pton` would otherwise
-    /// parse that as decimal 177 and let loopback through.
-    private static func ipv4FromAnyForm(_ host: String) -> UInt32? {
+    /// Every IPv4 address this host can be read as, in host byte order. Empty when it is not an
+    /// IPv4 literal in any form.
+    ///
+    /// The readings disagree on a dotted quad with a leading-zero part, and each one is what some
+    /// consumer applies (measured on the iOS 27.0 simulator):
+    /// - `inet_aton` reads the part as octal, and also accepts the hexadecimal, integer and short
+    ///   forms. WebKit's URL parser reads a host the same way: `0177.0.0.1` is 127.0.0.1 and
+    ///   `0127.0.0.1` is 87.0.0.1.
+    /// - The system resolver reads every part of a dotted quad as decimal, as Darwin's `inet_pton`
+    ///   does: `getaddrinfo("0177.0.0.1")` is 177.0.0.1 and `getaddrinfo("0127.0.0.1")` is
+    ///   127.0.0.1.
+    ///
+    /// Returning only the `inet_aton` reading classed `010.0.0.1`, `0127.0.0.1`, `172.016.0.1` and
+    /// `169.0254.169.254` as public (8.0.0.1, 87.0.0.1, 172.14.0.1, 169.172.169.254) while a
+    /// `URLSession` request for `http://0127.0.0.1:<port>/` reached a loopback listener.
+    private static func ipv4Readings(of host: String) -> [UInt32] {
+        var readings: [UInt32] = []
+
         var addr = in_addr()
-
         if inet_aton(host, &addr) != 0 {
-            return UInt32(bigEndian: addr.s_addr)
+            readings.append(UInt32(bigEndian: addr.s_addr))
         }
 
-        if inet_pton(AF_INET, host, &addr) == 1 {
-            return UInt32(bigEndian: addr.s_addr)
+        if let decimal = dottedDecimalIPv4(host) {
+            readings.append(decimal)
         }
 
-        return nil
+        return readings
+    }
+
+    /// The address a dotted quad names when every part is read as decimal, leading zeros included
+    /// (`010.0.0.1` is 10.0.0.1), or nil when the host is not four decimal parts of at most 255.
+    ///
+    /// Darwin's `inet_pton(AF_INET)` read every host tried this way on the iOS 27.0 simulator. The
+    /// rule is spelled out here so that the decimal reading is always considered, whether or not a
+    /// given libc's `inet_pton` tolerates leading zeros.
+    private static func dottedDecimalIPv4(_ host: String) -> UInt32? {
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else {
+            return nil
+        }
+
+        var address: UInt32 = 0
+        for part in parts {
+            guard !part.isEmpty else {
+                return nil
+            }
+
+            var value: UInt32 = 0
+            for byte in part.utf8 {
+                guard byte >= UInt8(ascii: "0"), byte <= UInt8(ascii: "9") else {
+                    return nil
+                }
+                value = value * 10 + UInt32(byte - UInt8(ascii: "0"))
+                guard value <= 255 else {
+                    return nil
+                }
+            }
+            address = (address << 8) | value
+        }
+
+        return address
     }
 
     private static func isPrivateIPv4(_ addr: UInt32) -> Bool {
