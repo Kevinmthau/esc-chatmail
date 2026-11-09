@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -113,3 +114,4 @@ private final class SuspendedPresenter {
         pendingCall = nil
     }
 }
+#endif

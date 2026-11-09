@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -55,3 +56,4 @@ final class ImageDownsamplerTests: XCTestCase {
         XCTAssertNil(ImageDownsampler.decode(data: Data(), maxPixelDimension: 1024))
     }
 }
+#endif

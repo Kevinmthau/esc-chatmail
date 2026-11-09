@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftUI
 import UIKit
 import XCTest
@@ -979,3 +980,4 @@ private extension CGImageAlphaInfo {
         }
     }
 }
+#endif

@@ -63,6 +63,28 @@ jobs:
           path: TestResults.xcresult
           retention-days: 7
 
+  # The Mac destination of the esc-chatmail target (docs/mac-app-plan.md). It catches the
+  # UIKit-only call that every iOS change can now break on macOS. Build only: no tests, and
+  # unsigned, because the Mac entitlements' keychain-access-groups needs a provisioning
+  # profile that CI does not have. A hosted Mac test run would also launch the app, and an
+  # unsigned build carries no App Sandbox entitlement (the Mac test plan runs locally, see
+  # CLAUDE.md). macOS runner minutes bill at 10x, so keep this job to the one build.
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-26
+    # A clean Mac build is about the same size as the iOS build step (~4m).
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: xcodebuild -version
+
+      - name: Build (macOS, unsigned)
+        run: DESTINATION='platform=macOS' bash Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO
+
   lint:
     name: SwiftLint (advisory)
     runs-on: macos-26

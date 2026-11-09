@@ -16,6 +16,14 @@ export "$(bash Scripts/prepare-simulator.sh)"       # boots a sim + pre-grants C
 ./Scripts/lint.sh                                   # SwiftLint, advisory; silently exits 0 if swiftlint isn't installed
 ```
 
+macOS (`docs/mac-app-plan.md`):
+
+```bash
+DESTINATION='platform=macOS' ./Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO   # compile check, unsigned: what CI's "Build (macOS)" runs
+DESTINATION='platform=macOS' ./Scripts/codex-test.sh -allowProvisioningUpdates  # Mac.xctestplan; the flag only on a machine's first signed Mac build
+DESTINATION='platform=macOS' ./Scripts/codex-test.sh                            # Mac.xctestplan once the Mac profile exists
+```
+
 All `web/` commands run from `web/` — there is no root `package.json`, and each shell starts at the repo root.
 
 ```bash
@@ -26,7 +34,10 @@ cd web && corepack pnpm test:e2e
 ```
 
 - One scheme (`esc-chatmail`), project container `esc-chatmail.xcodeproj` — never a `.xcworkspace`.
-- The `esc-chatmail` target also lists macOS (Phase 0 of `docs/mac-app-plan.md`): every Mac setting is `[sdk=macosx*]`-scoped and the test target is still iOS-only. The Mac build does not compile until that plan's Phase 1 lands, and nothing may launch a Mac build before its sandbox tripwire (PR C) does: unsandboxed, the fresh-install and sign-out cleanup delete the user's real `~/Documents/Messages` and `~/Documents/Attachments`. `ENABLE_APP_SANDBOX` and the other `ENABLE_*` sandbox settings on the target are what sandbox the Mac build, not iOS leftovers.
+- The `esc-chatmail` target and the test target also build for macOS (`docs/mac-app-plan.md`); every Mac setting is `[sdk=macosx*]`-scoped. A signed Mac build needs a Mac development profile for `com.esc.inboxchat`, because the Mac entitlements' `keychain-access-groups` requires one: without it the plain `DESTINATION='platform=macOS' ./Scripts/codex-build.sh` fails at signing, and the first signed build on a machine passes `-allowProvisioningUpdates` so Xcode creates it. `CODE_SIGNING_ALLOWED=NO` is for compile checks only.
+- **Never launch an unsandboxed Mac build.** Unsandboxed, the fresh-install and sign-out cleanup delete the user's real `~/Documents/Messages` and `~/Documents/Attachments`; PR C's tripwire refuses them, but it is the last line of defense, not the plan. An unsigned build carries no entitlements, so it is unsandboxed yet still launchable: delete its `Build/Products/Debug/esc-chatmail.app` after a compile check. `ENABLE_APP_SANDBOX` and the other `ENABLE_*` sandbox settings on the target are what sandbox the Mac build, not iOS leftovers.
+- A `platform=macOS` destination makes `run-tests.sh` run `Mac.xctestplan`: the PR B and PR C suites, the `Platform/` shim tests, `AuthSessionTests`, `HTMLContentAccountBoundaryTests`, `IncrementalSyncCursorTests` and `MacUnitTestHostStoreTests`. The full suite and `--performance` stay iOS-only. A hosted Mac run launches the app as its test host, so `run-tests.sh` builds first and runs the tests only if `Scripts/verify-mac-test-host.sh` finds the App Sandbox entitlement in the host's signature. The host runs in the app's real container (`~/Library/Containers/com.esc.inboxchat`), the one the Mac app you use keeps its mail in. In a Mac test host `CoreDataStack.shared` therefore loads a throwaway store under the temporary directory (`CoreDataStack.makeUnitTestHostStoreURL()`, pinned by `MacUnitTestHostStoreTests`): the host loads that stack at launch, and at the default URL it opened the real mailbox with the checkout's model, which would migrate it or run the delete-on-failure recovery ladder on it. Everything else in the container is still real (files, `UserDefaults.standard`, the keychain), so a Mac-plan suite must stay in temp directories, in-memory stores, mocks and UUID-named keychain services. The current ones do, except that `IncrementalSyncCursorTests` sets and restores three sync-time keys in `UserDefaults.standard`. Nothing can pre-grant Contacts to a Mac test host: inject `contactEmailLoader`/`accessRequester`. CI builds the Mac app but not the Mac tests.
+- Test files that use UIKit or BGTask types are wrapped whole in `#if os(iOS)`; the `Platform/` shim tests show the per-test `#if os(iOS)`/`#elseif os(macOS)` shape. A new test that uses UIKit or BGTask types needs one or the other, or the Mac test build breaks, which only a local Mac test run catches.
 - Start with the narrowest suite; the full run is thousands of tests and slow.
 - `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES` in Debug/Release xcconfigs: a new warning fails the build.
 - SwiftLint is advisory by design (`|| true`, no `severity: error`, size/complexity rules disabled, tests excluded). Do not reshape code to satisfy it, and do not make it blocking.

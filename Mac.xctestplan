@@ -1,0 +1,49 @@
+{
+  "configurations" : [
+    {
+      "id" : "7E5701A0-0000-0000-0000-0000000000A3",
+      "name" : "Configuration 1",
+      "options" : {
+
+      }
+    }
+  ],
+  "defaultOptions" : {
+    "defaultTestExecutionTimeAllowance" : 120,
+    "maximumTestExecutionTimeAllowance" : 300,
+    "targetForVariableExpansion" : {
+      "containerPath" : "container:esc-chatmail.xcodeproj",
+      "identifier" : "F9399FE02E66521800A7578D",
+      "name" : "esc-chatmail"
+    },
+    "testTimeoutsEnabled" : true
+  },
+  "testTargets" : [
+    {
+      "selectedTests" : [
+        "AppLifecyclePolicyTests",
+        "AuthSessionTests",
+        "BackgroundActivitySchedulePolicyTests",
+        "ContactsAppLinkTests",
+        "ExternalURLOpenerTests",
+        "FullEmailReaderWarmWidthSourceTests",
+        "HTMLContentAccountBoundaryTests",
+        "IncrementalSyncCursorTests",
+        "KeychainServiceTests",
+        "LayoutAwareWKWebViewTests",
+        "MacUnitTestHostStoreTests",
+        "OutboundSendTerminationWaitTests",
+        "SandboxTripwirePolicyTests",
+        "SandboxTripwireTests",
+        "WKWebViewPlatformTests",
+        "WebViewRepresentableTests"
+      ],
+      "target" : {
+        "containerPath" : "container:esc-chatmail.xcodeproj",
+        "identifier" : "F9399FF12E66521800A7578D",
+        "name" : "esc-chatmailTests"
+      }
+    }
+  ],
+  "version" : 1
+}

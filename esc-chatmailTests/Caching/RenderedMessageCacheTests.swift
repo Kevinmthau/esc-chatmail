@@ -1,3 +1,4 @@
+#if os(iOS)
 import UIKit
 import XCTest
 @testable import esc_chatmail
@@ -469,3 +470,4 @@ private actor AsyncGate {
         }
     }
 }
+#endif

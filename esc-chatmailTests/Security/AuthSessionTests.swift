@@ -1,4 +1,9 @@
 import GoogleSignIn
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 import XCTest
 @testable import esc_chatmail
 
@@ -537,7 +542,7 @@ final class AuthSessionTests: XCTestCase {
         )
 
         do {
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
             XCTFail("Expected interactive sign-in cancellation")
         } catch let error as NSError {
             XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
@@ -576,7 +581,7 @@ final class AuthSessionTests: XCTestCase {
         session.isAuthenticated = true
 
         do {
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
             XCTFail("Expected interactive sign-in cancellation")
         } catch let error as NSError {
             XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
@@ -629,7 +634,7 @@ final class AuthSessionTests: XCTestCase {
         session.isAuthenticated = true
 
         do {
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
             XCTFail("Expected interactive sign-in cancellation")
         } catch let error as NSError {
             XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
@@ -700,7 +705,7 @@ final class AuthSessionTests: XCTestCase {
         session.isAuthenticated = true
 
         do {
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
             XCTFail("Expected interactive sign-in cancellation")
         } catch let error as NSError {
             XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
@@ -766,7 +771,7 @@ final class AuthSessionTests: XCTestCase {
         session.isAuthenticated = true
 
         do {
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
             XCTFail("Expected interactive sign-in cancellation")
         } catch let error as NSError {
             XCTAssertEqual(error.domain, kGIDSignInErrorDomain)
@@ -887,7 +892,7 @@ final class AuthSessionTests: XCTestCase {
         // the interactive transition owned it.
         session.isAuthenticated = true
         let signInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilStarted()
         session.isAuthenticated = false
@@ -941,7 +946,7 @@ final class AuthSessionTests: XCTestCase {
             outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
         )
         let signInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilStarted()
 
@@ -973,7 +978,7 @@ final class AuthSessionTests: XCTestCase {
             outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
         )
         let signInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilStarted()
 
@@ -1027,7 +1032,7 @@ final class AuthSessionTests: XCTestCase {
                 outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
             )
             let signInTask = Task { @MainActor in
-                try await session.signIn(presenting: UIViewController())
+                try await session.signIn(presenting: makePresentationAnchor())
             }
             await interactiveSignIn.waitUntilStarted()
 
@@ -2615,7 +2620,7 @@ final class AuthSessionTests: XCTestCase {
             outboundTaskRegistry: OutboundTaskRegistry(admissionOpen: true)
         )
         let signInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilStarted()
 
@@ -2675,7 +2680,7 @@ final class AuthSessionTests: XCTestCase {
         // Hold the auth-transition lease in Google UI while an already-started
         // account preparation suspends inside its destructive cleanup.
         let signInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilStarted()
         let preparationTask = Task { @MainActor in
@@ -2756,7 +2761,7 @@ final class AuthSessionTests: XCTestCase {
         )
 
         let activeSignInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await interactiveSignIn.waitUntilFirstStarted()
 
@@ -2766,7 +2771,7 @@ final class AuthSessionTests: XCTestCase {
         await session.waitUntilAuthenticationTransitionWaiterCountForTesting(1)
 
         let interveningSignInTask = Task { @MainActor in
-            try await session.signIn(presenting: UIViewController())
+            try await session.signIn(presenting: makePresentationAnchor())
         }
         await session.waitUntilAuthenticationTransitionWaiterCountForTesting(2)
 
@@ -2978,6 +2983,17 @@ final class AuthSessionTests: XCTestCase {
         }
     }
 
+    /// A throwaway anchor for `signIn(presenting:)`: a view controller on iOS, a window on the
+    /// Mac (`PresentationAnchor`). Every test injects `interactiveGoogleSignIn`, so nothing is
+    /// ever presented from it.
+    private func makePresentationAnchor() -> PresentationAnchor {
+        #if os(iOS)
+        UIViewController()
+        #elseif os(macOS)
+        NSWindow()
+        #endif
+    }
+
     private func makeAuthSession(
         tokenManagerProvider: @escaping @MainActor @Sendable () -> TokenManagerProtocol = { MockTokenManager() },
         keychainService: KeychainServiceProtocol = MockKeychainService(),
@@ -2987,7 +3003,7 @@ final class AuthSessionTests: XCTestCase {
             @escaping (GIDGoogleUser?, Error?) -> Void
         ) -> Void = { _ in },
         interactiveGoogleSignIn: @escaping @MainActor @Sendable (
-            UIViewController,
+            PresentationAnchor,
             String?,
             @escaping @Sendable (GIDSignInResult?, Error?) -> Void
         ) -> Void = { _, _, _ in },

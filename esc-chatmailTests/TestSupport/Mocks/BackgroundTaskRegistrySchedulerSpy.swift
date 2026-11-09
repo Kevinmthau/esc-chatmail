@@ -1,3 +1,4 @@
+#if os(iOS)
 import Foundation
 import BackgroundTasks
 @testable import esc_chatmail
@@ -29,3 +30,4 @@ final class BackgroundTaskRegistrySchedulerSpy {
         )
     }
 }
+#endif

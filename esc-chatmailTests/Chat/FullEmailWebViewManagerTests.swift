@@ -1,4 +1,6 @@
+#if os(iOS)
 import UIKit
+#endif
 import WebKit
 import XCTest
 @testable import esc_chatmail
@@ -434,6 +436,7 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         }
     }
 
+    #if os(iOS)
     // Revert-check: fails if `FullEmailWebViewManager.init` stops calling
     // `memoryPressureEventSource.start` with `clear()`. Before, only an
     // iOS-only observer on the default center cleared the pool, so a Mac pool
@@ -442,10 +445,10 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
     // posted to the default center would clear every shared cache in the host.
     //
     // HONEST SCOPE: this drives the source's iOS branch (the memory-warning
-    // notification). The test target is iOS-only, and a dispatch
-    // memory-pressure event cannot be raised from a test, so nothing covers
-    // the Mac branch of `MemoryPressureEventSource.start` delivering to this
-    // pool; breaking that branch fails no test.
+    // notification), so it compiles only for iOS. A dispatch memory-pressure
+    // event cannot be raised from a test, so nothing covers the Mac branch of
+    // `MemoryPressureEventSource.start` delivering to this pool; breaking that
+    // branch fails no test.
     func testMemoryWarning_fromInjectedEventSource_clearsIdlePool() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
             let center = NotificationCenter()
@@ -477,6 +480,7 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
             XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
         }
     }
+    #endif
 
     func testPrepaintAfterExplicitOpenCreatesWebViewEntryWhenAdoptionEnabled() {
         // The legacy enable flag is now a no-op; adoption is on regardless, so prepaint still

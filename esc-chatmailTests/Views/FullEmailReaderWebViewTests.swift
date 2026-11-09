@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 import WebKit
@@ -731,3 +732,4 @@ private final class DeferredPaintConfirmer: FullEmailReaderPaintConfirming {
         completions.removeFirst()(didPaint)
     }
 }
+#endif

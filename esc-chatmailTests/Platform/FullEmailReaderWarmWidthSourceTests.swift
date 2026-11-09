@@ -1,11 +1,12 @@
+#if os(iOS)
 import UIKit
+#endif
 import XCTest
 @testable import esc_chatmail
 
 /// Visible rows pre-render the full reader at `FullEmailReaderWarmWidthSource.currentWidth`: the
-/// screen width on iOS, the reader's last measured width on the Mac (PR E). The Mac branch cannot
-/// run until the test target gains macOS (Mac plan, PR F); these pin the recording it reads and
-/// that iOS still ignores it.
+/// screen width on iOS, the reader's last measured width on the Mac (PR E). These pin the
+/// recording the Mac reads, that iOS still ignores it, and that the Mac reads it.
 @MainActor
 final class FullEmailReaderWarmWidthSourceTests: XCTestCase {
     override func setUp() {
@@ -38,6 +39,7 @@ final class FullEmailReaderWarmWidthSourceTests: XCTestCase {
         XCTAssertEqual(FullEmailReaderWarmWidthSource.lastMeasuredReaderWidth, 412.5)
     }
 
+    #if os(iOS)
     /// iOS keeps warming at the scene's screen width, as before the Mac port.
     ///
     /// Revert-check: making `FullEmailReaderWarmWidthSource.currentWidth` return
@@ -51,4 +53,18 @@ final class FullEmailReaderWarmWidthSourceTests: XCTestCase {
         )
         XCTAssertNotEqual(FullEmailReaderWarmWidthSource.currentWidth, 123)
     }
+    #elseif os(macOS)
+    /// A Mac screen is far wider than the reader, so rows warm at the reader's own last width, and
+    /// warm no WebView at all before the first open.
+    ///
+    /// Revert-check: making the AppKit branch of `FullEmailReaderWarmWidthSource.currentWidth`
+    /// return anything but `lastMeasuredReaderWidth` fails this.
+    func testCurrentWidth_onMac_isTheRecordedReaderWidthAndNilBeforeTheFirstOpen() {
+        XCTAssertNil(FullEmailReaderWarmWidthSource.currentWidth)
+
+        FullEmailReaderWarmWidthSource.recordMeasuredReaderWidth(612)
+
+        XCTAssertEqual(FullEmailReaderWarmWidthSource.currentWidth, 612)
+    }
+    #endif
 }

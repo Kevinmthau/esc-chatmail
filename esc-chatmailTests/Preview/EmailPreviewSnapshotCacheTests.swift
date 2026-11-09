@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -1258,3 +1259,4 @@ private final class KeyedDelayedSnapshotRenderer: EmailPreviewSnapshotRendering 
         continuations[cacheKey] = nil
     }
 }
+#endif

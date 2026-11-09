@@ -176,7 +176,7 @@ final class LogRedactionTests: XCTestCase {
 
         for case let fileURL as URL in enumerator where fileURL.pathExtension == "swift" {
             scannedSwiftFiles += 1
-            let contents = try String(contentsOf: fileURL)
+            let contents = try String(contentsOf: fileURL, encoding: .utf8)
             let relativePath = fileURL.path.replacingOccurrences(
                 of: repoRoot.path + "/",
                 with: ""

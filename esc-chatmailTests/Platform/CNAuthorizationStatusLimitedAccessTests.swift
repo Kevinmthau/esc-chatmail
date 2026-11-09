@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import Contacts
 @testable import esc_chatmail
@@ -25,3 +26,4 @@ final class CNAuthorizationStatusLimitedAccessTests: XCTestCase {
         }
     }
 }
+#endif

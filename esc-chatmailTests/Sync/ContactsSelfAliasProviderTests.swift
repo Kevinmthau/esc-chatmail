@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import Contacts
 @testable import esc_chatmail
@@ -96,3 +97,4 @@ private final class StubSelfAliasContactStore: SelfAliasContactStore, @unchecked
         }
     }
 }
+#endif

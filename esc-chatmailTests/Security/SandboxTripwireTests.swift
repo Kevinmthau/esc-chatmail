@@ -3,10 +3,11 @@ import XCTest
 
 /// Pins how the macOS sandbox tripwire is applied (docs/mac-app-plan.md, PR C).
 ///
-/// `SandboxTripwire` itself is platform-neutral, so its tests run here with an
-/// injected environment. The guarded call sites compile only for macOS, and
-/// this target is iOS-only until PR F adds the Mac test plan, so their wiring
-/// is pinned from the source text instead.
+/// `SandboxTripwire` itself is platform-neutral, so its tests run on both
+/// platforms with an injected environment. The guarded call sites compile only
+/// for macOS, and the full suite runs on iOS, so their wiring is pinned from
+/// the source text. The Mac test plan (`Mac.xctestplan`) adds one check of the
+/// real signal in a sandboxed Mac process.
 final class SandboxTripwireTests: XCTestCase {
     private let sandboxedEnvironment = [
         SandboxTripwirePolicy.containerIdentifierEnvironmentKey: "com.esc.inboxchat"
@@ -79,6 +80,31 @@ final class SandboxTripwireTests: XCTestCase {
         }
     }
 
+    #if os(macOS)
+    /// The tripwire's only signal is `APP_SANDBOX_CONTAINER_ID`, which macOS
+    /// sets in a sandboxed process. `Scripts/run-tests.sh` runs the Mac plan
+    /// only in a test host signed with the App Sandbox entitlement, so this is
+    /// where the signal is first seen in a real sandboxed launch of the app.
+    /// Without it, a correctly sandboxed Mac build would refuse every cleanup,
+    /// and every sign-out would fail and keep its reset marker.
+    ///
+    /// HONEST SCOPE: this checks the signal, not a code path; no production
+    /// line can be reverted to make it fail. It checks the real environment
+    /// and calls no cleanup, so it deletes nothing.
+    func testRealProcessEnvironment_inSandboxedMacTestHost_permitsEveryCleanup() {
+        XCTAssertNotNil(
+            ProcessInfo.processInfo.environment[SandboxTripwirePolicy.containerIdentifierEnvironmentKey],
+            "The Mac test host must run in the App Sandbox"
+        )
+        for operation in SandboxTripwire.Operation.allCases {
+            XCTAssertTrue(
+                SandboxTripwire.permitsDestructiveCleanup(operation),
+                "operation: \(operation.rawValue)"
+            )
+        }
+    }
+    #endif
+
     // Revert-check: fails if any guard statement in expectedGuardStatements is
     // removed from FreshInstallHandler.clearAttachmentFiles,
     // AuthSession.deleteAttachmentFilesFromDisk,
@@ -89,7 +115,6 @@ final class SandboxTripwireTests: XCTestCase {
     // the non-throwing form in a throwing cleanup.
     // HONEST SCOPE: this reads source text. It proves each guard is present,
     // first and compiled for macOS; it cannot prove the macOS branch runs.
-    // The Mac test plan (PR F) is where these call sites first execute.
     func testMacOSCleanupCallSites_everyOperation_guardedFirstInItsNamedFunction() throws {
         XCTAssertEqual(
             Set(Self.expectedGuardStatements.keys),

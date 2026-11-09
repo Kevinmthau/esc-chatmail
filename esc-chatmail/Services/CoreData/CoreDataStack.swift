@@ -162,6 +162,14 @@ final class CoreDataStack: @unchecked Sendable {
         description?.shouldMigrateStoreAutomatically = true
         description?.shouldInferMappingModelAutomatically = true
 
+        #if os(macOS)
+        // A Mac unit-test host must never open the default URL
+        // (`makeUnitTestHostStoreURL()` says why).
+        if RuntimeEnvironment.isRunningUnitTests {
+            description?.url = CoreDataStack.makeUnitTestHostStoreURL()
+        }
+        #endif
+
         // History tracking stays on (turning it off after a store has opened
         // with it logs a fault) even though nothing consumes history tokens;
         // DatabaseMaintenanceService purges old transactions during cleanup.
@@ -175,6 +183,57 @@ final class CoreDataStack: @unchecked Sendable {
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return container
     }()
+
+    #if os(macOS)
+    private static let unitTestHostStoreDirectoryPrefix = "UnitTestHostStore-"
+
+    /// A store URL in a new directory under the temporary directory, for a
+    /// stack created in a Mac unit-test host.
+    ///
+    /// A Mac test host is the app itself, launched in the app's own sandbox
+    /// container (`~/Library/Containers/com.esc.inboxchat`), so the default
+    /// store URL there is the mailbox of the Mac app the user runs. The host
+    /// loads the shared stack at launch (`esc_chatmailApp.init`), and every
+    /// `TestCoreDataStack` reads its model from it, so with the default URL
+    /// each Mac test run opened that mailbox with this checkout's model. A
+    /// newer model would migrate it in place, and the installed app, unable
+    /// to open it afterwards, would delete it through its recovery ladder
+    /// (`CoreDataErrorClassifier` maps a version-hash mismatch to migration
+    /// recovery). An older model would fail to open it, and the host's own
+    /// ladder would delete it on the spot.
+    ///
+    /// iOS keeps the default URL: a simulator's container holds nobody's mail.
+    ///
+    /// Directories left by earlier runs are swept first, best-effort. The
+    /// sweep is age-gated, like `TestCoreDataStack`'s, so a host that is
+    /// still running keeps its live store; a day, not an hour, because a
+    /// directory's modification date does not move while its store is only
+    /// written to. If the directory cannot be created the load fails; it
+    /// never falls back to the default URL.
+    private static func makeUnitTestHostStoreURL() -> URL {
+        let fileManager = FileManager.default
+        let temporaryDirectory = fileManager.temporaryDirectory
+
+        let cutoff = Date().addingTimeInterval(-24 * 60 * 60)
+        let entries = (try? fileManager.contentsOfDirectory(
+            at: temporaryDirectory,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? []
+        for url in entries where url.lastPathComponent.hasPrefix(unitTestHostStoreDirectoryPrefix) {
+            let modified = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            if modified < cutoff {
+                try? fileManager.removeItem(at: url)
+            }
+        }
+
+        let directory = temporaryDirectory.appendingPathComponent(
+            unitTestHostStoreDirectoryPrefix + UUID().uuidString,
+            isDirectory: true
+        )
+        try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("ESCChatmail.sqlite")
+    }
+    #endif
 
     // NOTE: a runtime `enforceUniquenessConstraints` mutation lived here from
     // 2026-02 to 2026-07. It was born a no-op — the Message.id constraint has

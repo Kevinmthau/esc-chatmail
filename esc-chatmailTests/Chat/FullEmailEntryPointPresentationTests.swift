@@ -1,3 +1,4 @@
+#if os(iOS)
 import CoreGraphics
 import SwiftUI
 import XCTest
@@ -257,3 +258,4 @@ private final class MockEntryPointFullEmailOpener: FullEmailOpening {
         )
     }
 }
+#endif

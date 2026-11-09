@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 import WebKit
@@ -308,3 +309,4 @@ private final class RecordingPreviewWebView: WKWebView {
         return nil
     }
 }
+#endif
