@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct HTMLRemoteImageAccountGeneration: Equatable, Sendable {
     fileprivate let value: UInt64
@@ -795,7 +797,7 @@ actor HTMLRemoteImageAttachmentFallback {
               data.count <= maxInlineBytes,
               let mimeType = response.mimeType?.lowercased(),
               Self.rewritableSourceImageMimeTypes.contains(mimeType),
-              let image = UIImage(data: data) else {
+              let image = PlatformImage(data: data) else {
             return nil
         }
 

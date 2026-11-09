@@ -47,7 +47,7 @@ struct RecipientInputSection: View {
                 }
             }
         )
-        .background(isIMessageStyle ? Color.clear : Color(.systemBackground))
+        .background(isIMessageStyle ? Color.clear : Color.systemBackground)
         .contentShape(Rectangle())
         .onTapGesture {
             focusedField.wrappedValue = .recipient
@@ -69,7 +69,7 @@ struct RecipientInputSection: View {
         HStack(spacing: 8) {
             Text("To:")
                 .font(.system(size: 18))
-                .foregroundColor(Color(uiColor: .systemGray))
+                .foregroundColor(Color.systemGray)
 
             recipientInputContent
 
@@ -82,7 +82,7 @@ struct RecipientInputSection: View {
         .padding(.trailing, 8)
         .background(
             Capsule()
-                .fill(Color(.systemGray6))
+                .fill(Color.systemGray6)
         )
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -109,7 +109,7 @@ struct RecipientInputSection: View {
                     .keyboardType(.emailAddress)
                     .autocorrectionDisabled()
                     .font(.system(size: 18))
-                    .tint(Color(uiColor: .systemBlue))
+                    .tint(Color.systemBlue)
                     .frame(minWidth: isIMessageStyle ? 80 : 120)
                     .onSubmit {
                         viewModel.addRecipientFromInput()
@@ -147,7 +147,7 @@ struct RecipientInputSection: View {
                 .frame(width: 36, height: 36)
                 .background(
                     Circle()
-                        .fill(Color(.systemGray5))
+                        .fill(Color.systemGray5)
                 )
         }
         .buttonStyle(.plain)
@@ -179,8 +179,8 @@ struct RecipientInputSection: View {
                         } label: {
                             HStack(spacing: 12) {
                                 if let imageData = contact.imageData,
-                                   let uiImage = UIImage(data: imageData) {
-                                    Image(uiImage: uiImage)
+                                   let image = PlatformImage(data: imageData) {
+                                    Image(platformImage: image)
                                         .resizable()
                                         .aspectRatio(contentMode: .fill)
                                         .frame(width: 40, height: 40)
@@ -209,23 +209,23 @@ struct RecipientInputSection: View {
                             .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .background(Color(.systemBackground))
+                        .background(Color.systemBackground)
 
                         Divider()
                             .padding(.leading, 68)
                     }
                 }
             }
-            .background(Color(.systemBackground))
+            .background(Color.systemBackground)
         }
-        .background(Color(.systemBackground))
+        .background(Color.systemBackground)
         .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
     }
 
     private func contactInitialsView(for contact: ContactsService.ContactMatch) -> some View {
         ZStack {
             Circle()
-                .fill(Color(.systemGray4))
+                .fill(Color.systemGray4)
                 .frame(width: 40, height: 40)
             Text(contact.displayName.prefix(1).uppercased())
                 .font(.system(size: 16, weight: .medium))

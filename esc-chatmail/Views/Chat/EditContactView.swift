@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 import Contacts
 import ContactsUI
 

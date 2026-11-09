@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Persistent disk cache for remote images (Google People API photos, etc.)
 /// Survives app restarts, reducing network requests significantly.
@@ -104,7 +106,7 @@ actor DiskImageCache: PeriodicCleanupHandler {
     /// (consumers render at most full-screen width, and the downsampled
     /// result being promoted to the memory cache is the desired behavior —
     /// it is what keeps the memory cache's cost accounting meaningful).
-    func getImage(for urlString: String) -> UIImage? {
+    func getImage(for urlString: String) -> PlatformImage? {
         guard let data = getData(for: urlString) else { return nil }
         return ImageDownsampler.decode(data: data)
     }
@@ -133,8 +135,8 @@ actor DiskImageCache: PeriodicCleanupHandler {
         }
     }
 
-    /// Saves UIImage to cache (as JPEG)
-    func save(_ image: UIImage, for urlString: String, compressionQuality: CGFloat = 0.8) {
+    /// Saves PlatformImage to cache (as JPEG)
+    func save(_ image: PlatformImage, for urlString: String, compressionQuality: CGFloat = 0.8) {
         guard let data = image.jpegData(compressionQuality: compressionQuality) else { return }
         save(data, for: urlString)
     }

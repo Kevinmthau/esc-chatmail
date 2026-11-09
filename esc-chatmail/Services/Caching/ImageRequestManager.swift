@@ -1,10 +1,12 @@
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Actor for in-flight HTTP image request deduplication.
 /// Prevents duplicate network requests for the same URL and tracks failed URLs.
 actor ImageRequestManager {
-    private var inFlightRequests: [String: Task<UIImage?, Never>] = [:]
+    private var inFlightRequests: [String: Task<PlatformImage?, Never>] = [:]
     /// Track URLs that have failed to avoid retrying (auto-prunes oldest 20% when full)
     private var failedURLs = BoundedSet<String>(maxSize: 500, prunePercentage: 0.2)
     private let imageFetcher: any RemoteImageFetching
@@ -18,7 +20,7 @@ actor ImageRequestManager {
         self.remoteConfig = remoteConfig
     }
 
-    func loadImage(from urlString: String, onComplete: @escaping (UIImage?) -> Void) async -> UIImage? {
+    func loadImage(from urlString: String, onComplete: @escaping (PlatformImage?) -> Void) async -> PlatformImage? {
         guard await remoteConfig.isEnabled(.remoteImageLoadingEnabled) else {
             return nil
         }
@@ -35,7 +37,7 @@ actor ImageRequestManager {
 
         // Create new task
         let imageFetcher = imageFetcher
-        let task = Task<UIImage?, Never> {
+        let task = Task<PlatformImage?, Never> {
             await imageFetcher.image(from: urlString)
         }
 

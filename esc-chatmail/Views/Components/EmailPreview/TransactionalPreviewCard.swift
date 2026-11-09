@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct TransactionalPreviewCard: View {
     let model: TransactionalPreviewModel
@@ -95,7 +97,7 @@ struct TransactionalPreviewCard: View {
                     .padding(.vertical, 5)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(Color(uiColor: .tertiarySystemFill))
+                            .fill(Color.tertiarySystemFill)
                     )
                     .lineLimit(1)
             }
@@ -119,7 +121,7 @@ private struct TransactionalPreviewThumbnail: View {
     let imageURL: String
     let style: TransactionalPreviewImageStyle
 
-    @State private var loadedImage: UIImage?
+    @State private var loadedImage: PlatformImage?
     @State private var isLoading = false
     @State private var activeImageURL: String?
 
@@ -140,16 +142,16 @@ private struct TransactionalPreviewThumbnail: View {
     }
 
     @ViewBuilder
-    private func thumbnailImage(for image: UIImage) -> some View {
+    private func thumbnailImage(for image: PlatformImage) -> some View {
         switch style {
         case .avatar:
-            Image(uiImage: image)
+            Image(platformImage: image)
                 .resizable()
                 .scaledToFill()
                 .frame(width: avatarSize, height: avatarSize)
                 .clipShape(Circle())
         case .card:
-            Image(uiImage: image)
+            Image(platformImage: image)
                 .resizable()
                 .scaledToFill()
                 .frame(width: cardSize.width, height: cardSize.height)

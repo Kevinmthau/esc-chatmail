@@ -35,7 +35,7 @@ struct SignInView: View {
                     .textContentType(.username)
                     .autocorrectionDisabled()
                     .padding()
-                    .background(Color(.secondarySystemBackground))
+                    .background(Color.secondarySystemBackground)
                     .cornerRadius(10)
                     .disabled(isSigningIn)
 

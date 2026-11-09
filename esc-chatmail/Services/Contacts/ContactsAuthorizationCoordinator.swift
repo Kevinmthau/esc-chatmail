@@ -1,6 +1,8 @@
 import Foundation
 import Contacts
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Owns the app's single deliberate Contacts permission request and reacts to
 /// authorization changes from any source (this prompt, the contacts filter

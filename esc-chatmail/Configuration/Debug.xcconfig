@@ -10,3 +10,8 @@ GOOGLE_REDIRECT_URI = com.googleusercontent.apps.999923476073-b4m4r3o96gv30rqmo7
 // Keep build warnings at the same priority as build failures.
 SWIFT_TREAT_WARNINGS_AS_ERRORS = YES
 GCC_TREAT_WARNINGS_AS_ERRORS = YES
+
+// On macOS, GoogleSignIn's umbrella header leaves out its two iOS-only headers, so clang reports
+// the umbrella as incomplete when the app imports the module, and the line above turns that into
+// an error before any Swift compiles. Silence only that warning, only for the Mac.
+OTHER_SWIFT_FLAGS[sdk=macosx*] = $(inherited) -Xcc -Wno-incomplete-umbrella

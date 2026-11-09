@@ -1,7 +1,9 @@
 import SwiftUI
 import CoreData
 import ContactsUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct ChatView: View {
     @ObservedObject var conversation: Conversation

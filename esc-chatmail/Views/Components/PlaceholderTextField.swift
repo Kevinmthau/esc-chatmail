@@ -7,7 +7,7 @@ struct PlaceholderTextField: View {
     let placeholder: String
     var lineLimit: ClosedRange<Int> = 1...5
     var cornerRadius: CGFloat = 18
-    var backgroundColor: Color = Color(.systemGray6)
+    var backgroundColor: Color = Color.systemGray6
     var textFont: Font = .body
     var horizontalPadding: CGFloat = 12
     var verticalPadding: CGFloat = 8
@@ -17,7 +17,7 @@ struct PlaceholderTextField: View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
                 Text(placeholder)
-                    .foregroundColor(Color(.placeholderText))
+                    .foregroundColor(Color.placeholderText)
                     .font(textFont)
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)

@@ -12,10 +12,10 @@ struct CachedAsyncImageSource: Equatable {
 
 @MainActor
 final class CachedAsyncImageLoader: ObservableObject {
-    typealias DataDecoder = @Sendable (Data) async -> UIImage?
-    typealias URLLoader = @Sendable (String) async -> UIImage?
+    typealias DataDecoder = @Sendable (Data) async -> PlatformImage?
+    typealias URLLoader = @Sendable (String) async -> PlatformImage?
 
-    @Published private(set) var image: UIImage?
+    @Published private(set) var image: PlatformImage?
     @Published private(set) var loadedSource: CachedAsyncImageSource?
     @Published private(set) var loadingSource: CachedAsyncImageSource?
 
@@ -108,7 +108,7 @@ struct CachedAsyncImage: View {
     var body: some View {
         Group {
             if loader.loadedSource == source, let image = loader.image {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .scaledToFill()
                     .frame(width: size, height: size)

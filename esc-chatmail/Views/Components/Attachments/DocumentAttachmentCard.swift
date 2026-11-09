@@ -6,7 +6,7 @@ struct DocumentAttachmentCard: View {
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
 
-    @State private var thumbnailImage: UIImage?
+    @State private var thumbnailImage: PlatformImage?
     @State private var thumbnailRequest: QLThumbnailGenerator.Request?
 
     /// Derived, not stored: a stored loading flag must stay in lockstep with
@@ -46,7 +46,7 @@ struct DocumentAttachmentCard: View {
                 downloadIndicator
             }
             .padding(12)
-            .background(Color(UIColor.secondarySystemBackground))
+            .background(Color.secondarySystemBackground)
             .cornerRadius(12)
         }
         .buttonStyle(PlainButtonStyle())
@@ -66,13 +66,13 @@ struct DocumentAttachmentCard: View {
     @ViewBuilder
     private var documentThumbnail: some View {
         if let image = thumbnailImage {
-            Image(uiImage: image)
+            Image(platformImage: image)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
         } else if isLoadingThumbnail {
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color(UIColor.tertiarySystemFill))
+                    .fill(Color.tertiarySystemFill)
                 ProgressView()
                     .scaleEffect(0.6)
             }
@@ -80,7 +80,7 @@ struct DocumentAttachmentCard: View {
             // Fallback: generic document icon
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
-                    .fill(Color(UIColor.tertiarySystemFill))
+                    .fill(Color.tertiarySystemFill)
                 Image(systemName: "doc.fill")
                     .font(.system(size: 24))
                     .foregroundColor(.gray)
@@ -143,7 +143,7 @@ struct DocumentAttachmentCard: View {
         let request = QLThumbnailGenerator.Request(
             fileAt: fileURL,
             size: CGSize(width: 48, height: 60),
-            scale: UIScreen.main.scale,
+            scale: PlatformScreen.scale,
             representationTypes: .icon
         )
         thumbnailRequest = request
@@ -158,7 +158,7 @@ struct DocumentAttachmentCard: View {
                 thumbnailRequest = nil
                 guard attachment.readableLocalURLValue == localPath else { return }
                 if let thumbnail = thumbnail {
-                    thumbnailImage = thumbnail.uiImage
+                    thumbnailImage = thumbnail.platformImage
                 }
             }
         }

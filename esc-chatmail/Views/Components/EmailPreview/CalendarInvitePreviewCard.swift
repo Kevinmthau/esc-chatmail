@@ -77,7 +77,7 @@ struct CalendarInvitePreviewCard: View {
                     .padding(.vertical, 5)
                     .background(
                         Capsule(style: .continuous)
-                            .fill(Color(uiColor: .tertiarySystemFill))
+                            .fill(Color.tertiarySystemFill)
                     )
                     .lineLimit(1)
             }

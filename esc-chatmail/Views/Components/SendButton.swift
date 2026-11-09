@@ -15,7 +15,7 @@ struct SendButton: View {
         Button(action: action) {
             ZStack {
                 Circle()
-                    .fill(isEnabled ? Color.accentColor : Color(.systemGray3))
+                    .fill(isEnabled ? Color.accentColor : Color.systemGray3)
                     .frame(width: 32, height: 32)
 
                 if isSending && showsProgress {

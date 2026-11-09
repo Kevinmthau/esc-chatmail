@@ -22,7 +22,7 @@ struct MessageContextMenuPreview: View {
                 .foregroundColor(.secondary)
         }
         .padding(12)
-        .background(message.isFromMe ? Color.blue : Color(.systemGray5))
+        .background(message.isFromMe ? Color.blue : Color.systemGray5)
         .foregroundColor(message.isFromMe ? .white : .primary)
         .cornerRadius(16)
         .frame(maxWidth: 280)

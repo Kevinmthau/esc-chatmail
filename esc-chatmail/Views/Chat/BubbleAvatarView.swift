@@ -9,13 +9,13 @@ struct BubbleAvatarView: View {
     let avatarURL: String?
     let imageData: Data?
 
-    @State private var loadedImage: UIImage?
+    @State private var loadedImage: PlatformImage?
     /// Tracks the URL we're currently loading to prevent stale updates during cell reuse
     @State private var loadingAvatarURL: String?
 
-    private var displayImage: UIImage? {
+    private var displayImage: PlatformImage? {
         // Priority: contact image data > loaded URL image
-        if let data = imageData, let image = UIImage(data: data) {
+        if let data = imageData, let image = PlatformImage(data: data) {
             return image
         }
         return loadedImage
@@ -24,7 +24,7 @@ struct BubbleAvatarView: View {
     var body: some View {
         Group {
             if let image = displayImage {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .scaledToFill()
                     .frame(width: 24, height: 24)

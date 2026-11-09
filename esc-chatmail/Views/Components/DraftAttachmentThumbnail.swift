@@ -27,7 +27,7 @@ struct DraftAttachmentThumbnail: View {
     var body: some View {
         ZStack(alignment: .topTrailing) {
             if activeLoadKey == loadKey, let image = thumbnailLoader.image {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 60, height: 60)

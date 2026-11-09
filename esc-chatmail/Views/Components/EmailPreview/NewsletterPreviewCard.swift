@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct NewsletterPreviewCard: View {
     let model: NewsletterPreviewModel
@@ -78,7 +80,7 @@ private struct NewsletterPreviewHeroImage: View {
     let imageURL: String
     let displayMode: NewsletterPreviewHeroImageDisplayMode
 
-    @State private var loadedImage: UIImage?
+    @State private var loadedImage: PlatformImage?
     @State private var isLoading = false
     @State private var activeImageURL: String?
 
@@ -112,18 +114,18 @@ private struct NewsletterPreviewHeroImage: View {
     }
 
     @ViewBuilder
-    private func heroImageView(for image: UIImage) -> some View {
+    private func heroImageView(for image: PlatformImage) -> some View {
         switch NewsletterPreviewHeroImageDisplayMode.resolved(
             preferred: displayMode,
             imageSize: image.size
         ) {
         case .fill:
-            Image(uiImage: image)
+            Image(platformImage: image)
                 .resizable()
                 .scaledToFill()
         case .fit:
             VStack(spacing: 0) {
-                Image(uiImage: image)
+                Image(platformImage: image)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity)

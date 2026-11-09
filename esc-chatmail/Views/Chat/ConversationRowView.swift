@@ -183,7 +183,7 @@ struct ConversationRowView: View {
 
                         Image(systemName: "chevron.right")
                             .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(Color(.tertiaryLabel))
+                            .foregroundColor(Color.tertiaryLabel)
                     }
                 }
 

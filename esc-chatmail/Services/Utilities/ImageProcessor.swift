@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 import CoreGraphics
 import PDFKit
 
@@ -15,13 +17,13 @@ struct ImageProcessor {
         }
 
         // Try to create image from data
-        guard let image = UIImage(data: data) else {
+        guard let image = PlatformImage(data: data) else {
             Log.debug("ImageProcessor: Failed to create UIImage from data of size \(data.count)", category: .attachment)
             return (nil, nil)
         }
 
         // Validate image dimensions
-        let size = image.size
+        let size = image.pixelSize
         guard size.width > 0 && size.height > 0 else {
             Log.debug("ImageProcessor: Invalid image dimensions \(size)", category: .attachment)
             return (nil, nil)
@@ -40,31 +42,14 @@ struct ImageProcessor {
             return (nil, nil)
         }
 
-        // Use newer rendering API if available
-        if #available(iOS 10.0, *) {
-            // These limits are pixels, not display points. The default renderer
-            // scale would multiply both dimensions on Retina devices.
-            let format = UIGraphicsImageRendererFormat()
-            format.scale = 1
-            let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
-            let jpegData = renderer.jpegData(withCompressionQuality: jpegCompressionQuality) { context in
-                image.draw(in: CGRect(origin: .zero, size: newSize))
-            }
-            return (jpegData, newSize)
-        } else {
-            // Fallback for older iOS versions
-            UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
-            defer { UIGraphicsEndImageContext() }
-
-            image.draw(in: CGRect(origin: .zero, size: newSize))
-
-            guard let resizedImage = UIGraphicsGetImageFromCurrentImageContext(),
-                  let jpegData = resizedImage.jpegData(compressionQuality: jpegCompressionQuality) else {
-                return (nil, nil)
-            }
-
-            return (jpegData, newSize)
+        guard let jpegData = PlatformImageRenderer.jpegData(
+            drawing: image,
+            pixelSize: newSize,
+            compressionQuality: jpegCompressionQuality
+        ) else {
+            return (nil, nil)
         }
+        return (jpegData, newSize)
     }
     
     static func generateThumbnail(from data: Data, mimeType: String) -> Data? {
@@ -118,25 +103,18 @@ struct ImageProcessor {
             return nil
         }
         
-        UIGraphicsBeginImageContextWithOptions(thumbnailSize, true, 1.0)
-        defer { UIGraphicsEndImageContext() }
-        
-        guard let context = UIGraphicsGetCurrentContext() else { return nil }
-        
-        context.setFillColor(UIColor.white.cgColor)
-        context.fill(CGRect(origin: .zero, size: thumbnailSize))
-        
-        context.translateBy(x: 0, y: thumbnailSize.height)
-        context.scaleBy(x: scale, y: -scale)
-        
-        firstPage.draw(with: .mediaBox, to: context)
-        
-        guard let thumbnailImage = UIGraphicsGetImageFromCurrentImageContext(),
-              let jpegData = thumbnailImage.jpegData(compressionQuality: jpegCompressionQuality) else {
-            return nil
+        return PlatformImageRenderer.opaqueJPEGData(
+            pixelSize: thumbnailSize,
+            compressionQuality: jpegCompressionQuality
+        ) { context in
+            context.setFillColor(PlatformColor.white.cgColor)
+            context.fill(CGRect(origin: .zero, size: thumbnailSize))
+
+            context.translateBy(x: 0, y: thumbnailSize.height)
+            context.scaleBy(x: scale, y: -scale)
+
+            firstPage.draw(with: .mediaBox, to: context)
         }
-        
-        return jpegData
     }
     
     static func getPDFPageCount(from data: Data) -> Int? {
@@ -145,7 +123,7 @@ struct ImageProcessor {
     }
     
     static func getImageDimensions(from data: Data) -> CGSize? {
-        guard let image = UIImage(data: data) else { return nil }
-        return image.size
+        guard let image = PlatformImage(data: data) else { return nil }
+        return image.pixelSize
     }
 }

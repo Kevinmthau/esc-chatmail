@@ -1,5 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct GoogleDriveSharedFileCardView: View {
     let link: SharedDocumentLink
@@ -139,17 +141,17 @@ struct GoogleDriveSharedFileCardContent: View {
     }
 
     private var cardBackground: Color {
-        Color(uiColor: .systemGray6)
+        Color.systemGray6
     }
 
     private var cardBorder: Color {
-        Color(uiColor: .separator).opacity(0.18)
+        Color.separator.opacity(0.18)
     }
 
     @ViewBuilder
     private func skeletonLine(width: CGFloat, height: CGFloat) -> some View {
         RoundedRectangle(cornerRadius: 6, style: .continuous)
-            .fill(Color(uiColor: .tertiarySystemFill))
+            .fill(Color.tertiarySystemFill)
             .frame(width: width, height: height)
     }
 }
@@ -159,7 +161,7 @@ private struct GoogleDriveSharedFilePreview: View {
     let thumbnailURL: String?
     let isLoadingMetadata: Bool
 
-    @State private var loadedImage: UIImage?
+    @State private var loadedImage: PlatformImage?
     @State private var isLoadingImage = false
     @State private var activeThumbnailURL: String?
 
@@ -168,14 +170,14 @@ private struct GoogleDriveSharedFilePreview: View {
             LinearGradient(
                 colors: [
                     accentColor.opacity(0.22),
-                    Color(uiColor: .tertiarySystemFill)
+                    Color.tertiarySystemFill
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
 
             if let loadedImage {
-                Image(uiImage: loadedImage)
+                Image(platformImage: loadedImage)
                     .resizable()
                     .scaledToFill()
                     .transition(.opacity)

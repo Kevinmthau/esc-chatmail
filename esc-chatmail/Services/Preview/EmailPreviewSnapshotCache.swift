@@ -1,6 +1,8 @@
 import CryptoKit
 import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 struct EmailPreviewSnapshotCacheEntry: Equatable, Sendable {
     let imageData: Data
@@ -131,7 +133,7 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
 
     @discardableResult
     func store(
-        image: UIImage,
+        image: PlatformImage,
         displayHeight: CGFloat,
         pixelScale: CGFloat,
         for cacheKey: String,

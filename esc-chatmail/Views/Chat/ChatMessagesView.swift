@@ -1,6 +1,8 @@
 import SwiftUI
 import CoreData
+#if canImport(UIKit)
 import UIKit
+#endif
 import Contacts
 import Combine
 
@@ -149,7 +151,7 @@ struct ChatMessagesView: View {
                     // (`allowsHitTesting` on the lazy stack).
                     .overlay {
                         if shouldHideMessages {
-                            Color(UIColor.systemBackground)
+                            Color.systemBackground
                                 .ignoresSafeArea()
                                 .allowsHitTesting(false)
                         }
@@ -1079,7 +1081,7 @@ private struct ChatReplyComposerOverlay: View {
                 recoveredReplyEnvelope: composerState.recoveredReplyEnvelope
             )
         }
-        .background(Color(UIColor.systemBackground))
+        .background(Color.systemBackground)
         .background(
             GeometryReader { geometry in
                 Color.clear

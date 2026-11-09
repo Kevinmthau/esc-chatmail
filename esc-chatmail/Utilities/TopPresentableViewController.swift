@@ -1,4 +1,6 @@
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Finds the view controller that can present UIKit content right now — the
 /// visible content of the foreground key window, walked up through every

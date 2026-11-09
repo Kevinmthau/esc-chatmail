@@ -1,10 +1,14 @@
+import Combine
+import Foundation
+#if canImport(UIKit)
 import UIKit
+#endif
 
 /// Reusable thumbnail loader for attachment views
 /// Eliminates duplicate loading logic across ImageAttachmentBubble, AttachmentGridItem, PDFAttachmentCard, etc.
 @MainActor
 final class AttachmentThumbnailLoader: ObservableObject {
-    @Published var image: UIImage?
+    @Published var image: PlatformImage?
     /// What `image` needs behind it. Published in the same turn as the image, so a transparent
     /// image never draws for a frame without its card.
     @Published private(set) var imageBackdrop: ImageBackdropPolicy = .none
@@ -21,9 +25,9 @@ final class AttachmentThumbnailLoader: ObservableObject {
         _ messageId: String?,
         _ localPath: String?,
         _ targetSize: CGSize
-    ) async -> UIImage?
+    ) async -> PlatformImage?
     /// Seam for tests: holds the suspension between a decoded image and its publication open.
-    private let resolveBackdropOperation: @Sendable (UIImage?) async -> ImageBackdropPolicy
+    private let resolveBackdropOperation: @Sendable (PlatformImage?) async -> ImageBackdropPolicy
 
     private enum LoadRequest: Equatable {
         case thumbnail(
@@ -50,8 +54,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
     init(
         loadVideoThumbnailOperation: (@Sendable (
             String, String?, String?, CGSize
-        ) async -> UIImage?)? = nil,
-        resolveBackdropOperation: @escaping @Sendable (UIImage?) async -> ImageBackdropPolicy = { image in
+        ) async -> PlatformImage?)? = nil,
+        resolveBackdropOperation: @escaping @Sendable (PlatformImage?) async -> ImageBackdropPolicy = { image in
             await ImageBackdropPolicy.resolve(for: image)
         }
     ) {
@@ -154,7 +158,7 @@ final class AttachmentThumbnailLoader: ObservableObject {
 
         isLoading = true
         loadTask = Task {
-            var loadedImage: UIImage?
+            var loadedImage: PlatformImage?
 
             // Try downsampled first for images with local path
             if let readableLocalPath, isImage {
@@ -244,7 +248,7 @@ final class AttachmentThumbnailLoader: ObservableObject {
 
     /// Resolving the backdrop suspends, so the caller's cancellation check has to run again
     /// after it: `cancel()` or a newer request may have landed in between.
-    private func publish(_ loadedImage: UIImage?) async {
+    private func publish(_ loadedImage: PlatformImage?) async {
         let backdrop = await resolveBackdropOperation(loadedImage)
         guard !Task.isCancelled else { return }
         image = loadedImage

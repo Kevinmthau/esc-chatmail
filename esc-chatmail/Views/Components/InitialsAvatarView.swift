@@ -21,7 +21,7 @@ struct InitialsAvatarStyle {
     static let compact = InitialsAvatarStyle(
         size: 20,
         fontSize: 8,
-        borderColor: Color(UIColor.systemBackground),
+        borderColor: Color.systemBackground,
         borderWidth: 1.5,
         singleNamePrefixLength: 1
     )
