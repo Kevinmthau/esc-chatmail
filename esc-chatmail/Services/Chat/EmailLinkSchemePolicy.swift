@@ -1,27 +1,39 @@
 import Foundation
 
-/// Which URL schemes a link from email content may reach, as one definition shared by the two
-/// places that decide it, so their lists cannot drift apart unnoticed:
+/// Which URL schemes a link from email content may reach, as one definition shared by the places
+/// that decide it, so their lists cannot drift apart unnoticed:
 ///
-/// - `macOpenableSchemes`: what `ExternalURLOpener` hands to `NSWorkspace.open` on the Mac when a
-///   link in an email is clicked.
+/// - `schemesOpenedOnEveryPlatform`: what `ExternalURLOpener` hands to the system on both
+///   platforms when a link in an email is clicked: web, mail, phone, Messages and FaceTime.
 /// - `amazonSESDestinationSchemes`: what an Amazon SES tracking link may unwrap to
 ///   (`FullInteractiveEmailWebView.navigationDecision`), on both platforms.
 ///
-/// On iOS, `ExternalURLOpener` opens a link only when `UIApplication.canOpenURL` says it can. That
-/// admits the system's own schemes (web, mail, phone, Messages, FaceTime) plus the two that
-/// Info.plist lists under `LSApplicationQueriesSchemes`: `google` and the app's own Google OAuth
-/// redirect scheme (`GOOGLE_REDIRECT_URI`). Any other app's custom scheme is refused.
-/// `NSWorkspace.open` has no such check and launches whichever app registered a scheme (`ssh:`,
-/// `smb:`, `vnc:`, an installed app's private scheme), so on the Mac a link from untrusted email
-/// content would reach any of them. The Mac checks `macOpenableSchemes` instead. That is iOS's
-/// system set without the two queried schemes: the Mac has no Google app, and an email link must
-/// never feed the app's own sign-in redirect. Widen it deliberately, one scheme at a time.
+/// The Mac opens nothing outside `schemesOpenedOnEveryPlatform`. `NSWorkspace.open` launches
+/// whichever app registered a scheme (`ssh:`, `smb:`, `vnc:`, an installed app's private scheme),
+/// so a link from untrusted email content would otherwise reach any of them. Widen the list
+/// deliberately, one scheme at a time.
+///
+/// iOS opens that list without asking `UIApplication.canOpenURL`, and any other scheme only when
+/// `canOpenURL` accepts it. The query is not asked for the list because it is the wrong gate for
+/// it. Measured on the iOS 27.0 simulator, which ships no Mail, Phone or FaceTime, with this app's
+/// Info.plist: `canOpenURL` refused `mailto:`, `tel:`, `facetime:` and `facetime-audio:` as schemes
+/// the app is not allowed to query. An undeclared scheme passed only while an Apple app on the
+/// device claimed it, so gating on the query would refuse an email address in a message on a
+/// device without Apple Mail, although `UIApplication.open` reaches the user's default mail app.
+///
+/// For every other scheme iOS's `canOpenURL` is wider than the Mac's list, not equal to it. On the
+/// same simulator it accepted, undeclared, `sms:`, `maps:`, `shortcuts:`, `smb:`,
+/// `x-apple-reminderkit:` and `app-settings:`, and it also admits the two schemes Info.plist does
+/// list under `LSApplicationQueriesSchemes`: `google` and the app's own Google OAuth redirect
+/// scheme (`GOOGLE_REDIRECT_URI`). A third-party app's undeclared scheme (`zoommtg:`) is refused.
+/// The Mac refuses all of those, including the two queried schemes: it has no Google app, and an
+/// email link must never feed the app's own sign-in redirect.
 ///
 /// The policy has no platform code, so the iOS-hosted unit tests pin it.
 enum EmailLinkSchemePolicy {
-    /// The lowercased schemes a clicked email link may open on the Mac.
-    static let macOpenableSchemes: Set<String> = [
+    /// The lowercased schemes a clicked email link opens on both platforms. On the Mac they are the
+    /// only ones.
+    static let schemesOpenedOnEveryPlatform: Set<String> = [
         "http",
         "https",
         "mailto",
@@ -32,9 +44,10 @@ enum EmailLinkSchemePolicy {
     ]
 
     /// The lowercased schemes an Amazon SES tracking link may unwrap to: web, mail and phone only,
-    /// narrower than `macOpenableSchemes` (an SES-wrapped `facetime:` link is cancelled, pinned by
-    /// `testAmazonSESTrackingLinkToDisallowedSchemeIsCancelled`). It must stay a subset of
-    /// `macOpenableSchemes`, or the Mac would refuse a destination the unwrap had just allowed.
+    /// narrower than `schemesOpenedOnEveryPlatform` (an SES-wrapped `facetime:` link is cancelled,
+    /// pinned by `testAmazonSESTrackingLinkToDisallowedSchemeIsCancelled`). It must stay a subset
+    /// of `schemesOpenedOnEveryPlatform`, or the Mac would refuse a destination the unwrap had just
+    /// allowed.
     static let amazonSESDestinationSchemes: Set<String> = [
         "http",
         "https",
@@ -42,10 +55,10 @@ enum EmailLinkSchemePolicy {
         "tel"
     ]
 
-    /// Whether `url`'s scheme, compared case-insensitively, is in `macOpenableSchemes`. A URL with
-    /// no scheme is refused.
-    static func allowsOpeningOnMac(_ url: URL) -> Bool {
-        schemeIsAllowed(url, in: macOpenableSchemes)
+    /// Whether `url`'s scheme, compared case-insensitively, is in `schemesOpenedOnEveryPlatform`.
+    /// A URL with no scheme is refused.
+    static func opensOnEveryPlatform(_ url: URL) -> Bool {
+        schemeIsAllowed(url, in: schemesOpenedOnEveryPlatform)
     }
 
     /// Whether `url`'s scheme, compared case-insensitively, is in `amazonSESDestinationSchemes`. A

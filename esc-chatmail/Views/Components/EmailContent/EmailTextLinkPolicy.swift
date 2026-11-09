@@ -11,8 +11,9 @@ import WebKit
 /// WebView lets a navigation proceed in place (an iOS `x-apple-data-detectors` link). Text has no
 /// in-place navigation, so it is discarded.
 ///
-/// `.openExternally` still goes through `ExternalURLOpener`, which applies the platform's own gate
-/// (`canOpenURL` on iOS, `EmailLinkSchemePolicy.macOpenableSchemes` on the Mac).
+/// `.openExternally` still goes through `ExternalURLOpener`, which applies the platform's own gate:
+/// `EmailLinkSchemePolicy.schemesOpenedOnEveryPlatform` on both, plus whatever else `canOpenURL`
+/// accepts on iOS.
 enum EmailTextLinkPolicy {
     enum Action: Equatable {
         /// Hand the link, possibly an unwrapped tracking destination, to `ExternalURLOpener`.

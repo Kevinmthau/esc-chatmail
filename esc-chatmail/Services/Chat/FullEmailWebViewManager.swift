@@ -172,17 +172,29 @@ enum FullInteractiveEmailWebView {
     }
 
     private static func amazonSESTrackingDestination(from url: URL) -> AmazonSESTrackingDestination {
-        guard isAmazonSESTrackingHost(url.host),
-              let trackingMarkerIndex = url.pathComponents.firstIndex(of: "L0") else {
+        guard isAmazonSESTrackingHost(url.host) else {
             return .notTrackingURL
         }
 
-        let destinationIndex = url.pathComponents.index(after: trackingMarkerIndex)
-        guard destinationIndex < url.pathComponents.endIndex else {
-            return .blockedDestination
+        // Split the percent-encoded path and decode each segment, rather than reading
+        // `url.pathComponents`. The destination is one segment with its slashes encoded
+        // (`https:%2F%2Fhost%2Fpath`), and `pathComponents` keeps it whole only for a URL Swift
+        // parsed itself. For a URL bridged from `NSURL`, which is what
+        // `WKNavigationAction.request.url` and the plain-text reader's `NSDataDetector` hand over,
+        // it decodes the path before splitting it (measured on the iOS 27.0 simulator). The segment
+        // after `L0` then read `https:`, so every real tracking link was blocked as a host-less
+        // private link while the tests, which built their URLs with `URL(string:)`, passed.
+        let segments = url.path(percentEncoded: true)
+            .split(separator: "/")
+            .map { $0.removingPercentEncoding }
+        guard let trackingMarkerIndex = segments.firstIndex(of: "L0") else {
+            return .notTrackingURL
         }
 
-        guard let destination = URL(string: url.pathComponents[destinationIndex]) else {
+        let destinationIndex = segments.index(after: trackingMarkerIndex)
+        guard destinationIndex < segments.endIndex,
+              let destinationString = segments[destinationIndex],
+              let destination = URL(string: destinationString) else {
             return .blockedDestination
         }
 
