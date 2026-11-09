@@ -297,9 +297,10 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 - **Mac tests.** Add macOS to the test target in Xcode.
   - 32 of the 317 test files use UIKit or BGTask types and need `#if os(iOS)`.
   - A small `Mac.xctestplan` runs PR C's tests, the lifecycle policy, the shims, and the boundary and cursor suites (`AuthSessionTests`, `HTMLContentAccountBoundaryTests`, `IncrementalSyncCursorTests`). It shows that `Services/` behaves the same on macOS. The full suite stays on iOS.
-- **Two constraints on Mac tests:**
+- **Three constraints on Mac tests:**
   - **Contacts.** Nothing can grant Contacts access to a Mac test host ahead of time, the way `prepare-simulator.sh` does on iOS. The Mac plan must keep away from the real Contacts store by injecting `accessRequester`, as CLAUDE.md already asks.
   - **Signing.** On macOS, the `keychain-access-groups` entitlement must be backed by a provisioning profile, so running Mac tests in CI means setting up signing there. Until then, run the Mac test plan locally.
+  - **An unlocked screen.** With the Mac's screen locked, the data-protection keychain refuses a `whenUnlocked` item with `errSecInteractionNotAllowed` (-25308), and `KeychainServiceTests.testSave_updatesAccessibilityForDuplicateItem` fails. Seen on 2026-11-09: the same build passed with the screen unlocked.
 - **Done 2026-11-09:**
   - **Test target.** It gained macOS, with Kevin's permission to edit `project.pbxproj`. The same `-showBuildSettings` diff as Phase 0 showed the app target unchanged. On the test target, only `SUPPORTED_PLATFORMS`, `MACOSX_DEPLOYMENT_TARGET` and `SUPPORTS_MACCATALYST` changed; the last went from YES to NO, as on the app target.
   - **Test files.** 31 of the 336 test files are wrapped whole in `#if os(iOS)`. 12 more got narrow guards or a macOS branch: `AuthSessionTests` now uses `PresentationAnchor`, and the `Platform/` shim tests and the hosted-view helper have Mac versions.
@@ -309,7 +310,13 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - The run confirmed that `APP_SANDBOX_CONTAINER_ID` is set in a sandboxed launch of this app (PR C's tripwire signal), and that the data-protection keychain works with the access group.
   - **Test-host entitlements.** A build for testing also carries Xcode's testing exceptions: read-only access to `/`, which lets the source-reading tests work, and mach lookups for `testmanagerd`. Writes stay confined to the container.
   - **Test-host store.** The container is the Mac app's real one, and the host loads `CoreDataStack.shared` at launch. At the default URL that opened the app's mailbox with the checkout's model: a newer model would migrate it, after which the installed app's recovery ladder would delete it, and an older model would make the host's own ladder delete it. In a Mac test host the shared stack now loads a throwaway store under the temporary directory (`MacUnitTestHostStoreTests`). The container's files, `UserDefaults.standard` and keychain are still the real ones.
-  - **Not covered.** CI builds the Mac app but not the Mac tests.
+  - **Follow-up, same day (the open findings of PR F's review).**
+    - **Host guard.** A Mac unit-test host now checks itself, first thing in `esc_chatmailApp.init` (`MacUnitTestHostGuard`, deciding with `MacUnitTestHostPolicy`). It exits unless it is sandboxed and was started by `Mac.xctestplan`, which marks its host with `ESC_CHATMAIL_MAC_TEST_PLAN`. Before, Cmd-U in Xcode on My Mac, or a plain `xcodebuild test`, ran the full iOS plan in a Mac host, and those suites are not written to stay out of the app's real container. Checked live: with the marker taken out of the plan, the sandboxed host logged the refusal and exited with no test started.
+    - **`run-tests.sh`.** `DESTINATION` must name its platform, `-destination` and `-testPlan` arguments are refused, and the host lookup now gets `-configuration`, `-xcconfig` and the other options that decide where products go. Without them it could check one host and launch another.
+    - **Sync defaults.** The incremental sync path keeps its `UserDefaults` state in an injected store (`.standard` in production). `IncrementalSyncCursorTests` passes its own suite, so it no longer sets `installTimestamp`, `lastSuccessfulSyncTime` and `lastReconciliationTime` in the standard defaults, which in a Mac test host are the real app's.
+    - **CI.** The Mac job compiles the test target as well as the app (`codex-build.sh --for-testing`), unsigned, and runs nothing.
+    - **Mac test plan.** `Mac.xctestplan` is now 17 suites and 220 tests.
+  - **Not covered.** CI runs no Mac tests.
 
 **Phase 1 is done when** all of the following work on the Mac: sign in, initial sync, open a chat, send a reply, archive, sign out and sign back in. The iOS suite stays green, and the Mac CI build is green.
 
