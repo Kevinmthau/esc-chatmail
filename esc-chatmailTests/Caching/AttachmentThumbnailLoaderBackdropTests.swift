@@ -1,3 +1,4 @@
+#if os(iOS)
 import UIKit
 import XCTest
 @testable import esc_chatmail
@@ -330,3 +331,4 @@ final class AttachmentThumbnailLoaderBackdropTests: XCTestCase {
         }
     }
 }
+#endif

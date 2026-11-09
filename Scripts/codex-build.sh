@@ -10,8 +10,9 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   cat <<'USAGE'
 Usage: ./Scripts/codex-build.sh [xcodebuild args...]
 
-Example:
+Examples:
   ./Scripts/codex-build.sh
+  DESTINATION='platform=macOS' ./Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO   # compile check; never launch it
 USAGE
   exit 0
 fi

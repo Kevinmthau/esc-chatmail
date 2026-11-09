@@ -1,14 +1,19 @@
+#if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 import WebKit
 import XCTest
 @testable import esc_chatmail
 
 /// The Mac port moved every iOS-only `WKWebView` setting behind a shim in `esc-chatmail/Platform/`
 /// (`WKWebView+Platform.swift`, `WKWebViewConfiguration+Platform.swift`). On iOS each shim must do
-/// exactly what the shared code did inline before, so these tests pin the iOS values. The Mac
-/// branches cannot run until the test target gains macOS (Mac plan, PR F).
+/// exactly what the shared code did inline before, so the iOS tests pin the iOS values. The Mac
+/// tests pin the substitutes in the "Mac equivalents" table of `docs/mac-app-plan.md` (PR E).
 @MainActor
 final class WKWebViewPlatformTests: XCTestCase {
+    #if os(iOS)
     /// Revert-check: emptying the UIKit branch of `WKWebView.applyInterfaceStyle(_:)` fails this.
     func testApplyInterfaceStyle_onIOS_overridesTheTraitStyle() {
         let webView = WKWebView()
@@ -103,11 +108,119 @@ final class WKWebViewPlatformTests: XCTestCase {
         assertSameRGBA(webView.scrollView.backgroundColor, expectedColor)
     }
 
-    /// WebKit hands `underPageBackgroundColor` back as a CGColor-backed `UIColor`, which `==`
-    /// never equates with the color that was set, so compare resolved sRGB components instead.
+    #elseif os(macOS)
+    /// Revert-check: emptying the AppKit branch of `WKWebView.applyInterfaceStyle(_:)` fails this.
+    func testApplyInterfaceStyle_onMac_setsTheMatchingAppearance() {
+        let webView = WKWebView()
+
+        webView.applyInterfaceStyle(.dark)
+        XCTAssertEqual(webView.appearance?.name, .darkAqua)
+
+        webView.applyInterfaceStyle(.light)
+        XCTAssertEqual(webView.appearance?.name, .aqua)
+
+        webView.applyInterfaceStyle(.unspecified)
+        XCTAssertNil(webView.appearance, "Unspecified must inherit the window's appearance")
+    }
+
+    /// On the Mac only the overscroll area is painted; the page itself stays opaque, because only
+    /// private API makes a Mac web view see-through. The color starts elsewhere so a missing
+    /// assignment cannot pass on WebKit's default.
+    ///
+    /// Revert-check: removing the assignment in the AppKit branch of
+    /// `WKWebView.applyNativeBackgroundColor(_:)` fails this.
+    func testApplyNativeBackgroundColor_onMac_paintsTheUnderPageBackground() {
+        let webView = WKWebView()
+        let color = NSColor(srgbRed: 0.2, green: 0.4, blue: 0.6, alpha: 1)
+        webView.underPageBackgroundColor = NSColor(srgbRed: 0.9, green: 0.1, blue: 0.1, alpha: 1)
+
+        webView.applyNativeBackgroundColor(color)
+
+        assertSameRGBA(webView.underPageBackgroundColor, color)
+    }
+
+    /// The full reader has no `scrollView` on the Mac, so its pool checkin scrolls with a script.
+    ///
+    /// Revert-check: emptying the AppKit branch of `WKWebView.resetScrollPosition()` fails this.
+    func testResetScrollPosition_onMac_returnsThePageToTheTop() async throws {
+        let window = try makeTestHostWindow()
+        defer { window.close() }
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        window.contentView?.addSubview(webView)
+        let navigation = NavigationFinishRecorder()
+        webView.navigationDelegate = navigation
+        webView.loadHTMLString(
+            "<html><body style=\"margin:0\"><div style=\"height:4000px\">Tall</div></body></html>",
+            baseURL: nil
+        )
+        await waitUntil { navigation.didFinish }
+        // The script ends on a value: the async `evaluateJavaScript` cannot return `undefined`.
+        let scrolledY = try await scrollY(of: webView, after: "window.scrollTo(0, 600);")
+        XCTAssertEqual(scrolledY, 600, "Precondition: the page is scrolled")
+
+        webView.resetScrollPosition()
+
+        var resetY = scrolledY
+        let deadline = Date().addingTimeInterval(5)
+        while resetY != 0, Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+            resetY = try await scrollY(of: webView)
+        }
+        XCTAssertEqual(resetY, 0)
+    }
+
+    /// The full reader and the warm pool both go through `FullInteractiveEmailWebView`, so on the
+    /// Mac they must force light (Aqua) and paint the original theme behind the page.
+    ///
+    /// Revert-check: dropping the `applyNativeBackgroundColor(_:)` call from
+    /// `applyBackgroundAppearance(to:)` fails this.
+    ///
+    /// HONEST SCOPE: both functions force light, so dropping one `applyInterfaceStyle(.light)` call
+    /// alone does not fail this; only dropping both does.
+    func testFullInteractiveSettings_onMac_forceLightAndPaintTheOriginalTheme() throws {
+        let webView = WKWebView(
+            frame: .zero,
+            configuration: FullInteractiveEmailWebView.makeConfiguration(cidHandler: CIDSchemeHandler(message: nil))
+        )
+        let theme = HTMLDisplayWrapper.theme(isDarkMode: false, displayPurpose: .original)
+        let expectedColor = try XCTUnwrap(PlatformColor(hex: theme.backgroundColorHex))
+        webView.underPageBackgroundColor = NSColor(srgbRed: 0.9, green: 0.1, blue: 0.1, alpha: 1)
+
+        FullInteractiveEmailWebView.applySettings(to: webView)
+        FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
+
+        XCTAssertEqual(webView.appearance?.name, .aqua)
+        assertSameRGBA(webView.underPageBackgroundColor, expectedColor)
+    }
+
+    private func scrollY(of webView: WKWebView, after script: String = "") async throws -> Double {
+        let value = try await webView.evaluateJavaScript(script + "window.scrollY")
+        return try XCTUnwrap((value as? NSNumber)?.doubleValue, "window.scrollY returned \(String(describing: value))")
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 5.0,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+    }
+    #endif
+
+    /// WebKit hands `underPageBackgroundColor` back as a CGColor-backed color, which `==` never
+    /// equates with the color that was set, so compare resolved sRGB components instead.
     private func assertSameRGBA(
-        _ actual: UIColor?,
-        _ expected: UIColor,
+        _ actual: PlatformColor?,
+        _ expected: PlatformColor,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
@@ -119,12 +232,30 @@ final class WKWebViewPlatformTests: XCTestCase {
     }
 
     /// Components rounded to 1/255, as strings so a failure prints both colors.
-    private func rgba(_ color: UIColor) -> String {
-        let resolved = color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
+    private func rgba(_ color: PlatformColor) -> String {
         var red: CGFloat = 0, green: CGFloat = 0, blue: CGFloat = 0, alpha: CGFloat = 0
+        #if os(iOS)
+        let resolved = color.resolvedColor(with: UITraitCollection(userInterfaceStyle: .light))
         resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        #elseif os(macOS)
+        guard let resolved = color.usingColorSpace(.sRGB) else {
+            return "not convertible to sRGB: \(color)"
+        }
+        resolved.getRed(&red, green: &green, blue: &blue, alpha: &alpha)
+        #endif
         return [red, green, blue, alpha]
             .map { String(Int(($0 * 255).rounded())) }
             .joined(separator: ",")
     }
 }
+
+#if os(macOS)
+/// Records when a navigation finishes, for a test that has to wait for a page before scrolling it.
+private final class NavigationFinishRecorder: NSObject, WKNavigationDelegate {
+    private(set) var didFinish = false
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        didFinish = true
+    }
+}
+#endif

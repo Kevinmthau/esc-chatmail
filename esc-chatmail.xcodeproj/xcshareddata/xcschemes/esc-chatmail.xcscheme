@@ -49,6 +49,9 @@
          <TestPlanReference
             reference = "container:Performance.xctestplan">
          </TestPlanReference>
+         <TestPlanReference
+            reference = "container:Mac.xctestplan">
+         </TestPlanReference>
       </TestPlans>
    </TestAction>
    <LaunchAction

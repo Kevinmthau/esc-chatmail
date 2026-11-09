@@ -1,3 +1,4 @@
+#if os(iOS)
 import CoreData
 import SwiftUI
 import UIKit
@@ -118,3 +119,4 @@ final class ConversationRowLayoutTests: XCTestCase {
         ).height
     }
 }
+#endif

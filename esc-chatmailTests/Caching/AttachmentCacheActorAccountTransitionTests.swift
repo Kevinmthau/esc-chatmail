@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -425,3 +426,4 @@ private actor SuspendedAttachmentCacheLoader {
         self.result = result
     }
 }
+#endif

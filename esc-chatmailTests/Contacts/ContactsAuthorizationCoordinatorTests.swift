@@ -1,6 +1,10 @@
 import XCTest
 import Contacts
+#if os(iOS)
 import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 @testable import esc_chatmail
 
 @MainActor
@@ -43,7 +47,11 @@ final class ContactsAuthorizationCoordinatorTests: XCTestCase {
         // Grant happens outside the app (Settings), observed on next foreground.
         status.set(.authorized)
 
+        #if os(iOS)
         center.post(name: UIApplication.didBecomeActiveNotification, object: nil)
+        #elseif os(macOS)
+        center.post(name: NSApplication.didBecomeActiveNotification, object: nil)
+        #endif
 
         await waitUntil { broadcasts.count == 1 }
         _ = coordinator

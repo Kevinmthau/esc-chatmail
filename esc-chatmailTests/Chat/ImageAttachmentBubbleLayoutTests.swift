@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftUI
 import UIKit
 import XCTest
@@ -359,3 +360,4 @@ final class ImageAttachmentBubbleLayoutTests: XCTestCase {
         }
     }
 }
+#endif

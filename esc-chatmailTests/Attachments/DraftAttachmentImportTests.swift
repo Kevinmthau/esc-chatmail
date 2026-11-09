@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 import ImageIO
@@ -120,3 +121,4 @@ final class DraftAttachmentImportTests: XCTestCase {
         return try XCTUnwrap(CGImageSourceGetType(source)) as String
     }
 }
+#endif

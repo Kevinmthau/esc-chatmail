@@ -1,5 +1,7 @@
 import XCTest
+#if os(iOS)
 import UIKit
+#endif
 @testable import esc_chatmail
 
 final class OriginalEmailSourceLoaderTests: XCTestCase {

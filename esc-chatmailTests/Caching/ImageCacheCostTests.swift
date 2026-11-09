@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -136,3 +137,4 @@ final class ImageCacheCostTests: XCTestCase {
         XCTAssertFalse(spy.recorder.recordedCosts.contains(-1), "cost-less setObject reintroduced")
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 import Contacts
@@ -58,3 +59,4 @@ final class IOSPlatformShimTests: XCTestCase {
         XCTAssertTrue(ContactsSheet.supportsContactPicker)
     }
 }
+#endif

@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import BackgroundTasks
 @testable import esc_chatmail
@@ -343,3 +344,4 @@ private final class NSLockedCounter: @unchecked Sendable {
         lock.unlock()
     }
 }
+#endif

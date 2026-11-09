@@ -1,3 +1,4 @@
+#if os(iOS)
 import SwiftUI
 import UIKit
 import XCTest
@@ -112,3 +113,4 @@ final class GoogleDriveSharedFileCardContentTests: XCTestCase {
         ).height
     }
 }
+#endif

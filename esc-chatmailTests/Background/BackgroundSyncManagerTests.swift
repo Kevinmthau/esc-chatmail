@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import BackgroundTasks
 import Security
@@ -2028,3 +2029,4 @@ private final class BackgroundPendingCheckCounter: @unchecked Sendable {
         lock.unlock()
     }
 }
+#endif

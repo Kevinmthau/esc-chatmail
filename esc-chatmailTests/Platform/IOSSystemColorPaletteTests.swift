@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import UIKit
 @testable import esc_chatmail
@@ -41,3 +42,4 @@ final class IOSSystemColorPaletteTests: XCTestCase {
         return hex(channels[0] << 16 | channels[1] << 8 | channels[2])
     }
 }
+#endif

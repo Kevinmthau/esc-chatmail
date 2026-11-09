@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 @testable import esc_chatmail
 
@@ -164,3 +165,4 @@ final class AttachmentThumbnailLoaderVideoTests: XCTestCase {
         await waitUntil { loader.image != nil }
     }
 }
+#endif

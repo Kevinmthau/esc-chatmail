@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 @testable import esc_chatmail
 
@@ -52,3 +53,4 @@ final class QuickLookPresentationPolicyTests: XCTestCase {
         XCTAssertTrue(QuickLookPresentationPolicy.shouldClearOnDismiss(of: attempted, current: attempted))
     }
 }
+#endif

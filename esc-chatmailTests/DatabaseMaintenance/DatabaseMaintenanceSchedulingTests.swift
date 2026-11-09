@@ -1,3 +1,4 @@
+#if os(iOS)
 import XCTest
 import BackgroundTasks
 @testable import esc_chatmail
@@ -80,3 +81,4 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
         )
     }
 }
+#endif
