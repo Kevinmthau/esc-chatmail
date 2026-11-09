@@ -32,6 +32,14 @@ struct esc_chatmailApp: App {
     }
 
     init() {
+        // First, before anything below touches the disk: a Mac unit-test host
+        // that is unsandboxed, or was not started by Mac.xctestplan, exits
+        // here (`MacUnitTestHostPolicy`). `MacUnitTestHostPolicyTests` pins
+        // this position from the source text.
+        #if os(macOS)
+        MacUnitTestHostGuard.exitUnlessPermitted()
+        #endif
+
         logStartupTiming("App init started")
 
         // When hosting unit tests, load the shared Core Data stack now —

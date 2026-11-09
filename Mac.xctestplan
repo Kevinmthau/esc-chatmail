@@ -10,6 +10,12 @@
   ],
   "defaultOptions" : {
     "defaultTestExecutionTimeAllowance" : 120,
+    "environmentVariableEntries" : [
+      {
+        "key" : "ESC_CHATMAIL_MAC_TEST_PLAN",
+        "value" : "1"
+      }
+    ],
     "maximumTestExecutionTimeAllowance" : 300,
     "targetForVariableExpansion" : {
       "containerPath" : "container:esc-chatmail.xcodeproj",
@@ -31,6 +37,7 @@
         "IncrementalSyncCursorTests",
         "KeychainServiceTests",
         "LayoutAwareWKWebViewTests",
+        "MacUnitTestHostPolicyTests",
         "MacUnitTestHostStoreTests",
         "OutboundSendTerminationWaitTests",
         "SandboxTripwirePolicyTests",
