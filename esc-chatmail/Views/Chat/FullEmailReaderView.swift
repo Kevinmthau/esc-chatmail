@@ -317,6 +317,9 @@ private struct OriginalEmailReadableView: View {
         }
         .background(Color.systemBackground)
         .tint(.blue)
+        // The detector below links any scheme in the text (`smb:`, `ssh:`, another app's private
+        // scheme), so on the Mac a click goes through the same allowlist as the WebView reader.
+        .opensEmailLinksThroughExternalURLOpener()
     }
 
     private static func linkifiedAttributedString(from text: String) -> AttributedString {

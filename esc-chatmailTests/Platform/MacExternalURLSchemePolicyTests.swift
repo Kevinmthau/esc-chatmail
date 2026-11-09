@@ -5,8 +5,9 @@ import XCTest
 /// `NSWorkspace.open`. It has no platform code, so it is pinned here on iOS.
 ///
 /// HONEST SCOPE: the test target is iOS-only, so nothing here proves the Mac branch of
-/// `ExternalURLOpener.open(_:)` consults the policy; removing that guard fails no test. These pin
-/// the policy itself.
+/// `ExternalURLOpener.open(_:)` consults the policy, or that the plain-text reader's links reach
+/// that opener on the Mac (`View.opensEmailLinksThroughExternalURLOpener()`); removing either fails
+/// no test. These pin the policy itself.
 final class MacExternalURLSchemePolicyTests: XCTestCase {
     func testAllowsOpening_systemSchemes_isTrue() throws {
         let urls = [
