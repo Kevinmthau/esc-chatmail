@@ -23,16 +23,20 @@ struct ReconciliationPhase: SyncPhase {
     private let reconciliation: SyncReconciliation
     private let messageFetcher: MessageFetcher
     private let messagePersister: MessagePersister
+    /// Where `installTimestamp` is read from: the orchestrator's store.
+    private let defaults: UserDefaults
     private let log = LogCategory.sync.logger
 
     init(
         reconciliation: SyncReconciliation,
         messageFetcher: MessageFetcher,
-        messagePersister: MessagePersister
+        messagePersister: MessagePersister,
+        defaults: UserDefaults = .standard
     ) {
         self.reconciliation = reconciliation
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
+        self.defaults = defaults
     }
 
     func execute(
@@ -45,7 +49,7 @@ struct ReconciliationPhase: SyncPhase {
 
         context.reportProgress(0, status: "Checking for missed messages...", phase: self)
 
-        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+        let installTimestamp = defaults.double(forKey: "installTimestamp")
 
         // Check for missed messages
         let missedResult = await reconciliation.checkForMissedMessagesWithDiagnostics(

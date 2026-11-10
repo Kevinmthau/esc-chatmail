@@ -21,14 +21,12 @@ final class IncrementalSyncCursorTests: XCTestCase {
     private static let myEmail = "me@example.com"
     private static let startingHistoryId = "1000"
 
-    /// The reconciliation phase stamps `lastReconciliationTime` into
-    /// `UserDefaults.standard` (IncrementalSyncOrchestrator) — snapshot and
-    /// restore it so runs here don't leak state into other suites.
-    private var savedReconciliationTime: Any?
-
     override func setUp() async throws {
         try await super.setUp()
-        savedReconciliationTime = UserDefaults.standard.object(forKey: SyncConfig.lastReconciliationTimeKey)
+        // Every defaults-backed dependency of the orchestrator gets this suite
+        // (`makeOrchestrator`), so a run here never reads or writes
+        // `UserDefaults.standard`: in a Mac test host that is the preferences
+        // of the Mac app the user runs. Each test starts with it empty.
         suiteName = "IncrementalSyncCursorTests-\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: suiteName)!
         // SQLite store: the post-sync cleanup issues NSBatchDeleteRequests,
@@ -43,12 +41,6 @@ final class IncrementalSyncCursorTests: XCTestCase {
 
     override func tearDown() async throws {
         await ModificationTracker.shared.reset()
-        if let savedReconciliationTime {
-            UserDefaults.standard.set(savedReconciliationTime, forKey: SyncConfig.lastReconciliationTimeKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
-        }
-        savedReconciliationTime = nil
         defaults?.removePersistentDomain(forName: suiteName)
         defaults = nil
         suiteName = nil
@@ -96,6 +88,103 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(historyId, "2000")
         let lastSuccess = await failureTracker.lastSuccessfulSyncTime
         XCTAssertNotNil(lastSuccess)
+    }
+
+    /// A run keeps its defaults-backed state in the store it was given: the reconciliation
+    /// time, the last-success time, the alias-refresh time and the cleanup schedule.
+    /// `UserDefaults.standard` is only read here, never written: in a Mac test host it is the
+    /// preferences of the Mac app the user runs, and this suite is in `Mac.xctestplan`.
+    ///
+    /// Revert-check: writing `UserDefaults.standard` from
+    /// `IncrementalSyncOrchestrator.recordReconciliationTime` fails this twice over: the
+    /// suite's `lastReconciliationTime` stays unset and the standard one changes.
+    ///
+    /// HONEST SCOPE: this pins the writes. The reads are pinned by the recovery tests below,
+    /// which set `lastSuccessfulSyncTime` and `installTimestamp` only in the suite, and only
+    /// where the standard defaults do not hold those keys already.
+    @MainActor
+    func testCleanRunKeepsItsDefaultsStateInTheInjectedStore() async throws {
+        let standardKeys = [
+            SyncConfig.lastReconciliationTimeKey,
+            SyncConfig.lastSuccessfulSyncTimeKey,
+            SyncConfig.missedMessageReconciliationCursorKey,
+            DataCleanupService.IncrementalCleanupSchedule.lastRunTimeKey,
+            "installTimestamp",
+            "sendAsAliasesLastRefresh.\(Self.myEmail)"
+        ]
+        func standardSnapshot() -> [String] {
+            standardKeys.map { "\($0)=\(String(describing: UserDefaults.standard.object(forKey: $0)))" }
+        }
+        let standardBefore = standardSnapshot()
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-new"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0)
+        XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey), 0)
+        XCTAssertGreaterThan(defaults.double(forKey: "sendAsAliasesLastRefresh.\(Self.myEmail)"), 0)
+        XCTAssertGreaterThan(
+            defaults.double(forKey: DataCleanupService.IncrementalCleanupSchedule.lastRunTimeKey),
+            0
+        )
+        XCTAssertEqual(standardSnapshot(), standardBefore, "The run must not write the standard defaults")
+    }
+
+    /// The test above cannot see a read of the standard defaults, or a `removeObject` of a key
+    /// they do not hold, so the four files on the incremental path are also pinned from their
+    /// source: none may name `UserDefaults.standard` in code. A default argument spelled
+    /// `.standard` is how production gets it and is not matched.
+    ///
+    /// Revert-check: reading `UserDefaults.standard` in
+    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryQuery`, or writing it in
+    /// `recordReconciliationTime`, fails this.
+    ///
+    /// HONEST SCOPE: this reads source text. It does not catch a call that leaves out its
+    /// `defaults:` argument and so gets the `.standard` default; the recovery tests below pin
+    /// that for `SyncTimeCalculator.calculateStartTime` only.
+    func testIncrementalPathSources_neverNameTheStandardDefaults() throws {
+        // This file is esc-chatmailTests/Sync/, so the repo root is three directories up.
+        let syncRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("esc-chatmail/Services/Sync", isDirectory: true)
+        let files = [
+            "IncrementalSyncOrchestrator.swift",
+            "SyncReconciliation.swift",
+            "SyncTimeCalculator.swift",
+            "Phases/ReconciliationPhase.swift"
+        ]
+
+        for file in files {
+            let source = try String(contentsOf: syncRoot.appendingPathComponent(file), encoding: .utf8)
+            let offendingLines = source.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.hasPrefix("//") && $0.contains("UserDefaults.standard") }
+            XCTAssertEqual(offendingLines, [], "\(file) must use its injected defaults store")
+        }
     }
 
     @MainActor
@@ -1607,24 +1696,9 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// there and the first run lists from the 400-day-old install time.
     @MainActor
     func testRecoveryWithoutLastSuccessfulSyncStartsAtNewestReceivedRowAndFreezesIt() async throws {
-        let standard = UserDefaults.standard
-        let savedInstall = standard.object(forKey: "installTimestamp")
-        let savedLastSuccess = standard.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-        defer {
-            if let savedInstall {
-                standard.set(savedInstall, forKey: "installTimestamp")
-            } else {
-                standard.removeObject(forKey: "installTimestamp")
-            }
-            if let savedLastSuccess {
-                standard.set(savedLastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-            } else {
-                standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-            }
-        }
         let now = Date().timeIntervalSince1970
-        standard.set(now - 400 * 86_400, forKey: "installTimestamp")
-        standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defaults.set(now - 400 * 86_400, forKey: "installTimestamp")
+        defaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
 
         let newestReceived = Date(timeIntervalSince1970: TimeInterval(Int(now - 2 * 86_400)))
         try await seedStoredMessage(id: "stored-received", internalDate: newestReceived, isFromMe: false)
@@ -1884,7 +1958,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         let now = Date().timeIntervalSince1970
         let lastSuccess = TimeInterval(Int(now - 10 * 86_400))
         try await withRecoveryInstallBranch(newestReceivedAgo: 3600) {
-            UserDefaults.standard.set(lastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            defaults.set(lastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
             configureCleanRecoveryListing()
             apiClient.getMessageErrors["m-rec"] = APIError.timeout
 
@@ -1895,7 +1969,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
             let expected = "after:\(Int(lastSuccess - SyncConfig.recoveryBufferSeconds)) "
             XCTAssertEqual(apiClient.listMessagesQueries.first??.hasPrefix(expected), true)
 
-            UserDefaults.standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            defaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
             apiClient.listHistoryError = APIError.historyIdExpired
             apiClient.listMessagesQueries = []
             await ModificationTracker.shared.reset()
@@ -1912,30 +1986,15 @@ final class IncrementalSyncCursorTests: XCTestCase {
 
     /// Runs `body` with a 400-day-old install time, no
     /// `lastSuccessfulSyncTime`, and one stored received row
-    /// `newestReceivedAgo` seconds old, restoring the standard defaults after.
+    /// `newestReceivedAgo` seconds old, in the suite's own defaults.
     @MainActor
     private func withRecoveryInstallBranch(
         newestReceivedAgo: TimeInterval,
         _ body: () async throws -> Void
     ) async throws {
-        let standard = UserDefaults.standard
-        let savedInstall = standard.object(forKey: "installTimestamp")
-        let savedLastSuccess = standard.object(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-        defer {
-            if let savedInstall {
-                standard.set(savedInstall, forKey: "installTimestamp")
-            } else {
-                standard.removeObject(forKey: "installTimestamp")
-            }
-            if let savedLastSuccess {
-                standard.set(savedLastSuccess, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-            } else {
-                standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
-            }
-        }
         let now = Date().timeIntervalSince1970
-        standard.set(now - 400 * 86_400, forKey: "installTimestamp")
-        standard.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defaults.set(now - 400 * 86_400, forKey: "installTimestamp")
+        defaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         try await seedStoredMessage(
             id: "stored-received",
             internalDate: Date(timeIntervalSince1970: now - newestReceivedAgo),
@@ -2097,14 +2156,18 @@ final class IncrementalSyncCursorTests: XCTestCase {
                 coreDataStack: coreDataStack,
                 conversationManager: conversationManager,
                 migrationFlags: InMemoryMigrationFlagStore(),
-                identityAliasProvider: { _ in [normalizedEmail(Self.myEmail)] }
+                identityAliasProvider: { _ in [normalizedEmail(Self.myEmail)] },
+                maintenanceScheduleDefaults: defaults
             ),
             reconciliation: SyncReconciliation(
                 messageFetcher: messageFetcher,
-                failureTracker: failureTracker
+                failureTracker: failureTracker,
+                defaults: defaults
             ),
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
+            aliasRefreshPolicy: SendAsAliasRefreshPolicy(userDefaults: defaults),
+            defaults: defaults,
             historyPageLimit: historyPageLimit,
             authenticatedAccountEmail: authenticatedAccountEmail,
             makeSyncContext: makeSyncContext
