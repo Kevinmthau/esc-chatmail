@@ -64,6 +64,19 @@ final class SettingsAppSignOutController: ObservableObject {
         }
     }
 
+    /// The Mac's Sign Out… menu command (`SignOutCommands`). The Mac has no
+    /// Settings app page to hold the switch, so the command turns the same
+    /// request on and looks at it at once. Everything after that is
+    /// `evaluate`'s: the confirmation, the discard while durably signed out,
+    /// and the single `signOut()`. A menu command is a foreground action, so
+    /// this look does not wait for the scene to become active; a request the
+    /// policy cannot act on yet stays on for `ContentView`'s next look, as a
+    /// Settings-app request does.
+    func requestSignOut(account: SettingsAppSignOutAccount) {
+        preferences.requestSignOut()
+        evaluate(account: account, isSceneActive: true)
+    }
+
     /// The sign-out the Settings-app confirmation approved: the same
     /// `AuthSession.signOut()` the old in-app Settings screen called. It starts
     /// from UI, never from inside another auth transition (the auth gate is

@@ -142,7 +142,9 @@ struct ComposeView: View {
                             .font(.headline)
                     }
 
-                    ToolbarItem(placement: .leadingBarEdge) {
+                    // Sheet placements, not the bar edges: a Mac sheet draws no toolbar item
+                    // placed at those, which left Forward with neither Cancel nor Send.
+                    ToolbarItem(placement: .sheetLeadingBarEdge) {
                         Button("Cancel") {
                             viewModel.discard()
                             dismiss()
@@ -150,7 +152,7 @@ struct ComposeView: View {
                         .disabled(viewModel.isSending)
                     }
 
-                    ToolbarItem(placement: .trailingBarEdge) {
+                    ToolbarItem(placement: .sheetTrailingBarEdge) {
                         Button("Send") {
                             Task {
                                 if await viewModel.send() {
@@ -160,6 +162,8 @@ struct ComposeView: View {
                         }
                         .fontWeight(.semibold)
                         .disabled(!viewModel.canSend)
+                        // Without it the Mac presses Send on a bare Return.
+                        .macSendKeyboardShortcut()
                     }
                 }
             }

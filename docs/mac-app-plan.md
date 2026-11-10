@@ -211,6 +211,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 - **iPhone keyboard and screen code.** `KeyboardResponder` (8 errors) and the `UIScreen` sizing (7) are compiled out or replaced with geometry.
 - **iOS-only SwiftUI modifiers (about 8).**
   - Toolbar placements: `topBarLeading`, `topBarTrailing` and `navigationBarTrailing` become `.navigation` or `.primaryAction`.
+    - **Found 2026-11-10: that is wrong inside a sheet.** A Mac sheet has no toolbar and draws no item placed at `.navigation` or `.primaryAction`, so Participants, Forward and New Message had no Done, Cancel or Send. A sheet also needs a size: the app's sheets ask for none and came up as an empty strip 80 points tall that still blocked the window and Quit. Sheets now use `sheetLeadingBarEdge` and `sheetTrailingBarEdge` (`.cancellationAction` and `.confirmationAction` on the Mac) and `macSheetSize(_:)`; the reader gets a Done bar. Measured with a throwaway Mac program on macOS 27.2, not yet seen in the app.
   - `navigationBarTitleDisplayMode` and `textInputAutocapitalization` stay iOS-only.
 
 **PR E: WebKit (about 90 errors).** Build it on `WKWebView` wrapped in `NSViewRepresentable`, as the WebKit spike found (results below).
@@ -376,6 +377,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Keep the iPhone's `NavigationStack` as it is. The transcript's anchoring and reveal logic was tuned inside it.
 - **Settings.** A `Settings` scene replaces `Settings.bundle`, which has three rows: account email, a Sign Out toggle, and the version.
   - Sign Out calls the existing `AuthSession.signOut`. Don't add a seventh AuthSession path.
+  - **Added 2026-11-10, ahead of this phase:** a Sign Out… command in the app menu (`SignOutCommands`). Phase 1's check asks for a sign-out, and nothing on the Mac could raise one. The command raises the same request as the iOS Settings switch, so it adds no AuthSession path. The Settings scene can keep it or replace it.
 - **Menus and shortcuts:**
   - Cmd-N new message, Cmd-R sync now, Cmd-F search.
   - Delete archives; Cmd-Shift-U toggles unread.

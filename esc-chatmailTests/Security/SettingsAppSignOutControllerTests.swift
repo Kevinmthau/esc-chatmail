@@ -181,6 +181,62 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertFalse(preferences.isSignOutRequested, "the user turns the switch on again to retry")
     }
 
+    // MARK: - Menu command
+
+    // HONEST SCOPE: these drive `requestSignOut(account:)`, what the Mac's
+    // Sign Out… menu command calls. The command itself is not exercised:
+    // `SignOutCommands`, the focused value `ContentView` publishes for it and
+    // the scene's `.commands` need a mounted window and a menu bar, which the
+    // unit-test host never has.
+
+    /// The Mac has no Settings app page to turn the switch on, so the command
+    /// must raise the request itself and look at it at once.
+    ///
+    /// Revert-check: removing `preferences.requestSignOut()` from
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail, and so
+    /// does removing its `evaluate` call.
+    func testRequestSignOut_whileSignedIn_raisesRequestAndPresentsConfirmation() {
+        controller.requestSignOut(account: account)
+
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertEqual(prompter.lastAccountEmail, "user@example.com")
+        XCTAssertTrue(preferences.isSignOutRequested, "the request stays pending until the user answers")
+    }
+
+    /// A request left on with no session to end would prompt right after the
+    /// next sign-in, so the command's look must discard it there, as a
+    /// Settings-app request is discarded.
+    ///
+    /// Revert-check: removing the `evaluate` call from
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail.
+    func testRequestSignOut_whileDurablySignedOut_leavesNoRequestAndDoesNotPrompt() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        account.durablySignedOut = true
+
+        controller.requestSignOut(account: account)
+
+        XCTAssertFalse(preferences.isSignOutRequested)
+        XCTAssertEqual(prompter.confirmationCount, 0)
+    }
+
+    /// The whole path the menu command starts: request, confirm, one
+    /// `signOut()`, and no request left behind.
+    ///
+    /// Revert-check: removing `preferences.requestSignOut()` from
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail (no
+    /// confirmation is raised to answer).
+    func testRequestSignOut_confirmed_signsOutOnceAndClearsRequest() async throws {
+        controller.requestSignOut(account: account)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        await waitUntil { self.account.signOutCallCount == 1 && !self.controller.isSigningOut }
+
+        XCTAssertEqual(account.signOutCallCount, 1)
+        XCTAssertFalse(preferences.isSignOutRequested)
+        XCTAssertEqual(prompter.failureCount, 0)
+    }
+
     // MARK: - Platform prompter
 
     /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
