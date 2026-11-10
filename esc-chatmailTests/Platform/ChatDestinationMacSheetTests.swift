@@ -15,7 +15,11 @@ import CoreData
 ///   toolbar item placed at `.navigation` or `.primaryAction` (PR 378's measurement);
 /// - the chrome leaves a sheet that takes no Done bar, and one that sizes itself, pixel for
 ///   pixel as a bare `sheet` draws it;
-/// - Return and Escape each close both the Participants sheet and the reader's Done bar.
+/// - Return and Escape each close both the Participants sheet and the reader's Done bar;
+/// - a sheet whose frame gave its width as a minimum and an ideal opened 470 points wide, or at
+///   the minimum where that is more (the reader 560 by 720). With one width allowed it opens at
+///   that width (the reader 760 by 720), is laid out once, and cannot be resized, alone or when
+///   it follows another sheet on the same presenter (`AppSheetSourceTests` pins the frame).
 /// Nobody has seen any of it in the app.
 final class ChatDestinationMacSheetTests: XCTestCase {
     /// The Participants sheet is a `List` in a `NavigationStack`, which asks a Mac sheet for no
@@ -101,7 +105,6 @@ final class ChatDestinationMacSheetTests: XCTestCase {
         for size in [MacSheetSize.list, .compose, .reader] {
             XCTAssertGreaterThan(size.minHeight, 80)
             XCTAssertGreaterThanOrEqual(size.idealHeight, size.minHeight)
-            XCTAssertGreaterThanOrEqual(size.idealWidth, size.minWidth)
         }
     }
 
