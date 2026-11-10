@@ -1,6 +1,6 @@
 # Plan: replace the web app with a Mac app
 
-Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status: Phase 0 is applied.** It changed project settings and added two resource files; no Swift code has changed yet. The build numbers come from test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
+Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status (2026-11-10): Phase 0 is applied, and every Phase 1 PR is merged.** The Mac app was first launched on 2026-11-10, signed and sandboxed. Sign-in, initial sync and opening a chat worked; the rest of Phase 1's check is still to walk (see "First launch"). Phases 2 to 4 have not started. The error counts in this plan were measured before Phase 1, by test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
 
 ## Summary
 
@@ -96,12 +96,20 @@ A session applied this phase with explicit permission to edit `project.pbxproj`;
 - **Mac build.** The Mac build compiles every package for macOS without errors: AppAuth, AppCheckCore, Promises, GTMAppAuth, GTMSessionFetcher, GoogleSignIn, GoogleUtilities and SwiftSoup. It also compiles the app's asset catalog. It then stops at the first `import UIKit` with `Unable to resolve module dependency: 'UIKit'`, which is where Phase 1 starts.
 - **Mac plist variables.** All 12 variables in `Info-macOS.plist` resolve in the macOS build settings.
 
-**Not checked yet:**
+**Not checked in Phase 0, checked 2026-11-10** on a signed Debug build (`DESTINATION='platform=macOS' ./Scripts/codex-build.sh`, Xcode 27.2):
 
-- **A signed Mac build and its real entitlements.** The first time, Xcode's automatic signing may need to register this Mac with the team and create a Mac development profile. Check the entitlements then with `codesign -d --entitlements - <app>`.
-- **The processed Mac `Info.plist`.** The failed build stops before that step.
+- **The signature and its real entitlements.** `codesign --verify --deep --strict` passes, and so does `Scripts/verify-mac-test-host.sh`.
+  - The signature has the hardened runtime and these entitlements: `com.apple.security.app-sandbox`, `com.apple.security.network.client`, `com.apple.security.personal-information.addressbook`, `com.apple.security.files.user-selected.read-write`, and `keychain-access-groups` with the team-prefixed `com.esc.inboxchat`.
+  - As a Debug build it also has `com.apple.security.get-task-allow`. It has none of the testing exceptions that a test host carries (PR F).
+  - The embedded profile is "Mac Team Provisioning Profile: com.esc.inboxchat".
+  - The Mac it was built on had no signing certificate and no Mac profile. With Kevin's permission, the first build passed `-allowProvisioningUpdates`, and Xcode created both in the developer account. That build also wrote `esc-chatmail.xcodeproj/xcshareddata/xcodecloud/manifest.json`, which is untracked.
+- **The processed Mac `Info.plist`.**
+  - No build variable is left unresolved, and none of the iOS-only keys is present.
+  - The one registered URL scheme is the reversed `GOOGLE_CLIENT_ID`, and it is the scheme of `GOOGLE_REDIRECT_URI`.
+  - `LSMinimumSystemVersion` is 26.0, and `CFBundleDisplayName` is MushMail.
+  - There is no icon key (see "Name and icon" in Phase 2).
 
-The Mac build stays red until Phase 1 lands, and nobody launches it before PR C.
+At the end of Phase 0 the Mac build was red. It stayed red until Phase 1 landed, and nobody launched it before PR C.
 
 ## Phase 1: compile and run on macOS
 
@@ -123,6 +131,22 @@ The Mac build stays red until Phase 1 lands, and nobody launches it before PR C.
 4. C shares `AuthSession.swift` with D. It is small, so land it first, or do C and D in one session.
 5. PR C must land before any Mac build is launched.
 6. F goes last.
+
+**Merged 2026-11-09:**
+
+| Piece | PR |
+|---|---|
+| PR A | 365 |
+| PR C | 366 |
+| WebKit spike | 367 |
+| PR B | 368 |
+| PR E | 369 |
+| PR D | 370 |
+| Follow-ups to B, D and E | 371 |
+| PR F | 374 |
+| Follow-ups to F | 376 |
+
+After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-checked and unit-tested only: none of their Mac behavior had run in a launched app when they merged.
 
 **WebKit spike (1–2 days, throwaway branch).**
 
@@ -319,6 +343,29 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - **Not covered.** CI runs no Mac tests.
 
 **Phase 1 is done when** all of the following work on the Mac: sign in, initial sync, open a chat, send a reply, archive, sign out and sign back in. The iOS suite stays green, and the Mac CI build is green.
+
+**First launch (2026-11-10).** This was the first time the Mac app ran as an app instead of as a test host. It was the signed Debug build described under Phase 0, checked with `Scripts/verify-mac-test-host.sh` right before it was opened. Kevin used the app. These results come from the process and the system log; nobody recorded what the screen showed.
+
+- **Sandbox.**
+  - The launch created `~/Library/Containers/com.esc.inboxchat`, and the Core Data store opened inside it.
+  - The fresh-install cleanup ran there and finished, with no tripwire refusal.
+  - That Mac has a real `~/Documents/Messages` folder that has nothing to do with the app. The launch left it alone. It is the folder an unsandboxed cleanup would have deleted.
+- **Sign in.** It worked: 30 s after launch the app created the account and fetched its 4 aliases and 15 labels.
+- **Initial sync.** 5 messages in 4 conversations, with 0 failures, in 0.9 s.
+  - Initial sync starts at the install time, as on iOS. A new Mac install therefore begins with only the mail from about five minutes before first launch.
+  - Open question: should a desktop app that replaces the web app load older mail?
+- **Open a chat.** The log shows a mark-read queued for one message, which is what opening a chat does. The incremental sync after it ran clean, and reconciliation found no drift.
+- **Errors.** The app's own log had none, and there was no crash report.
+- **Seen in the system log and not traced:**
+  - Contacts logged the fault "Attempt to read notes by an unentitled app" once, at sign-in. Some fetch asks for a contact key the app has no entitlement for.
+  - The sandbox repeatedly denied `system-info net.link.addr`, a read of a network interface's address.
+  - WebKit's helper processes logged their startup errors.
+- **Not walked yet, from the Phase 1 check:** send a reply, archive, sign out and sign back in.
+- **Not checked yet, from the PRs:**
+  - PR C: quit and relaunch, to confirm the session survives.
+  - PR B: sync across sleep and wake, the maintenance jobs, and quitting during a send.
+  - PR D: Quick Look, the file importer, the Contacts hand-off and the sign-out alert.
+  - PR E: the reader's first frame after adoption, scrolling over preview cards with a trackpad and a mouse wheel, window resizing, and the reader's width as a sheet.
 
 ## Phase 2: make it a Mac app
 
