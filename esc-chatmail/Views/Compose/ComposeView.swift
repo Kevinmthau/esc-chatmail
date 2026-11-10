@@ -14,6 +14,7 @@ struct ComposeView: View {
 
     @State private var recipientRowHeight: CGFloat = 44
     @State private var showingContactPicker = false
+    @State private var showingDiscardConfirmation = false
     @State private var iMessageHeaderHeight: CGFloat = 0
 
     private let presentationStyle: PresentationStyle
@@ -135,6 +136,9 @@ struct ComposeView: View {
             .accessibilityIdentifier("ComposeViewRoot")
             .disabled(viewModel.isSending)
             .inlineNavigationTitle()
+            // A Mac sheet draws no `.principal` item, which left Forward untitled there. The
+            // iMessage presentation draws its own title in the content and must get none.
+            .macSheetNavigationTitle(usesIMessagePresentation ? nil : viewModel.navigationTitle)
             .toolbar {
                 if !usesIMessagePresentation {
                     ToolbarItem(placement: .principal) {
@@ -146,8 +150,7 @@ struct ComposeView: View {
                     // placed at those, which left Forward with neither Cancel nor Send.
                     ToolbarItem(placement: .sheetLeadingBarEdge) {
                         Button("Cancel") {
-                            viewModel.discard()
-                            dismiss()
+                            cancel()
                         }
                         .disabled(viewModel.isSending)
                     }
@@ -168,7 +171,14 @@ struct ComposeView: View {
                 }
             }
         }
-        .interactiveDismissDisabled(viewModel.isSending)
+        // On the Mac always: Escape would otherwise close the sheet by itself and discard the
+        // draft unasked (`ComposeCancelPolicy`).
+        .interactiveDismissDisabled(
+            ComposeCancelPolicy.disablesInteractiveDismiss(platform: .current, isSending: viewModel.isSending)
+        )
+        .macDiscardDraftConfirmation(isPresented: $showingDiscardConfirmation) {
+            discardAndDismiss()
+        }
         .onDisappear { viewModel.presentationDidDisappear(isPresented: isPresented) }
         .onChange(of: isPresented) { _, presented in
             if !presented { viewModel.discard() }
@@ -180,7 +190,7 @@ struct ComposeView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
-        .sheet(isPresented: $showingContactPicker) {
+        .appSheet(isPresented: $showingContactPicker, mac: .sizesItself) {
             ContactsSheet(kind: .contactPicker(
                 onContactSelected: { contact in
                     handleContactPickerSelection(contact)
@@ -217,8 +227,7 @@ struct ComposeView: View {
             HStack {
                 Spacer()
                 Button {
-                    viewModel.discard()
-                    dismiss()
+                    cancel()
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 16, weight: .regular))
@@ -230,6 +239,9 @@ struct ComposeView: View {
                         )
                 }
                 .buttonStyle(.plain)
+                // This presentation has no Cancel at the sheet's leading edge for Escape to
+                // press, and on the Mac the sheet no longer closes by itself.
+                .macCancelKeyboardShortcut()
                 .accessibilityLabel("Close")
                 .accessibilityIdentifier("ComposeCloseButton")
             }
@@ -248,6 +260,22 @@ struct ComposeView: View {
                     }
             }
         )
+    }
+
+    /// Cancel, the close button and, on the Mac, Escape. iOS discards at once; the Mac asks
+    /// first when the user's edits would be lost (`ComposeCancelPolicy`).
+    private func cancel() {
+        switch ComposeCancelPolicy.action(platform: .current, hasUserEdits: viewModel.hasUserEdits) {
+        case .discard:
+            discardAndDismiss()
+        case .confirmDiscard:
+            showingDiscardConfirmation = true
+        }
+    }
+
+    private func discardAndDismiss() {
+        viewModel.discard()
+        dismiss()
     }
 
     private func handleContactPickerSelection(_ contact: CNContact) {

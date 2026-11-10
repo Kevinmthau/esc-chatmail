@@ -143,7 +143,7 @@ struct ConversationListView: View {
         }
         .toolbar { toolbarContent }
         .refreshable { await viewModel.performSync() }
-        .sheet(isPresented: $showingComposer, onDismiss: handleComposerDismiss) {
+        .appSheet(isPresented: $showingComposer, mac: .sized(.compose), onDismiss: handleComposerDismiss) {
             ComposeView(
                 mode: .newMessage,
                 presentationStyle: .iMessage,
@@ -152,7 +152,6 @@ struct ConversationListView: View {
                     openConversationIfAvailable(conversationReference: conversationReference)
                 }
             )
-            .macSheetSize(.compose)
         }
         .onAppear {
             // API and Contacts only; safe to call repeatedly (each runs once per

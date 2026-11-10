@@ -537,6 +537,116 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertEqual(coordinator.sendCount, 1)
     }
 
+    // MARK: - User edits
+
+    // `hasUserEdits` is what the Mac asks about before Cancel or Escape discards a draft
+    // (`ComposeCancelPolicy`).
+
+    func testHasUserEdits_untouchedNewMessage_isFalse() {
+        let viewModel = makeNewMessageViewModel()
+        viewModel.setupForMode()
+
+        XCTAssertFalse(viewModel.hasUserEdits)
+    }
+
+    /// Revert-check: dropping `body` from `ComposeViewModel.DraftContent` makes this fail.
+    func testHasUserEdits_typedBody_isTrue() {
+        let viewModel = makeNewMessageViewModel()
+        viewModel.setupForMode()
+
+        viewModel.body = "Hello"
+
+        XCTAssertTrue(viewModel.hasUserEdits)
+    }
+
+    /// Revert-check: dropping `recipientEmails` from `ComposeViewModel.DraftContent` makes this
+    /// fail.
+    func testHasUserEdits_addedRecipient_isTrue() {
+        let viewModel = makeNewMessageViewModel()
+        viewModel.setupForMode()
+
+        viewModel.addRecipient(email: "friend@example.com")
+
+        XCTAssertTrue(viewModel.hasUserEdits)
+    }
+
+    /// A half-typed address is not a recipient yet, and is what an autocomplete list hangs
+    /// from, which is where a stray Escape is most likely.
+    ///
+    /// Revert-check: removing the `recipientInput` check from `ComposeViewModel.hasUserEdits`
+    /// makes this fail.
+    func testHasUserEdits_halfTypedRecipient_isTrue() {
+        let viewModel = makeNewMessageViewModel()
+        viewModel.setupForMode()
+
+        viewModel.recipientInput = "fri"
+
+        XCTAssertTrue(viewModel.hasUserEdits)
+        viewModel.recipientInput = "   "
+        XCTAssertFalse(viewModel.hasUserEdits, "whitespace is nothing to lose")
+    }
+
+    /// Revert-check: dropping `attachmentIDs` from `ComposeViewModel.DraftContent` makes this
+    /// fail.
+    func testHasUserEdits_addedAttachment_isTrue() {
+        let deps = makeDependencies(authSession: makeTestAuthSession())
+        let viewModel = ComposeViewModel(mode: .newMessage, dependencies: deps.makeComposeDependencies())
+        viewModel.setupForMode()
+        let attachment = deps.viewContext.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "photo.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.stateRaw = Attachment.State.queued.rawValue
+        defer { viewModel.attachmentManager.clear() }
+
+        viewModel.addAttachment(attachment)
+
+        XCTAssertTrue(viewModel.hasUserEdits)
+    }
+
+    /// A forward opens with a subject, and a recovered one with recipients and a note. None of
+    /// that is the user's typing in this sheet, so Cancel there must not ask.
+    ///
+    /// Revert-check: removing `defer { contentAtSetup = currentDraftContent }` from
+    /// `ComposeViewModel.setupForMode` makes this fail.
+    func testHasUserEdits_forwardAsOpened_isFalse() {
+        let viewModel = makePrefilledForwardViewModel()
+        viewModel.setupForMode()
+
+        XCTAssertEqual(viewModel.subject, "Fwd: Subject")
+        XCTAssertEqual(viewModel.recipients.map(\.email), ["friend@example.com"])
+        XCTAssertFalse(viewModel.hasUserEdits)
+    }
+
+    /// Revert-check: dropping `subject` from `ComposeViewModel.DraftContent` makes the first
+    /// assertion fail, and dropping `recipientEmails` the second.
+    func testHasUserEdits_forwardChangedSubjectOrRemovedRecipient_isTrue() throws {
+        let subjectEdited = makePrefilledForwardViewModel()
+        subjectEdited.setupForMode()
+        subjectEdited.subject = "Fwd: Subject, see below"
+        XCTAssertTrue(subjectEdited.hasUserEdits)
+
+        let recipientRemoved = makePrefilledForwardViewModel()
+        recipientRemoved.setupForMode()
+        recipientRemoved.removeRecipient(try XCTUnwrap(recipientRemoved.recipients.first))
+        XCTAssertTrue(recipientRemoved.hasUserEdits)
+    }
+
+    private func makeNewMessageViewModel() -> ComposeViewModel {
+        let deps = makeDependencies(authSession: makeTestAuthSession())
+        return ComposeViewModel(mode: .newMessage, dependencies: deps.makeComposeDependencies())
+    }
+
+    private func makePrefilledForwardViewModel() -> ComposeViewModel {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        return ComposeViewModel(mode: .forward(.init(
+            id: "prefilled-forward", initialSubject: "Fwd: Subject",
+            forwardedPlainTextBody: "Original body", forwardedHTMLBody: nil,
+            forwardedInlineAttachmentInfos: [], forwardedRegularAttachments: [],
+            initialRecipientEmails: ["friend@example.com"], initialBody: "A note"
+        )), dependencies: deps.makeComposeDependencies())
+    }
+
     /// Polls `condition` until it holds or `timeout` elapses. The condition is
     /// checked before the deadline on every pass, so a main-thread stall longer
     /// than the timeout cannot fail a condition that came true during the stall.
