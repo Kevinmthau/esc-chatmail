@@ -1,6 +1,6 @@
 # Plan: make the Mac app look and work like Messages on the Mac
 
-Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike is done (same day); no PR has started.** Its results are under "Spike results", and the PR sections below are already changed to match them. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
+Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day); PRs 2 to 6 have not started.** The spike's results are under "Spike results". PR 1 is compiled and unit-tested on both platforms but has not been seen in the app; "PR 1 as built" lists what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
 
 This plan is the detailed version of the Windows, Layout, Toolbar and Selection items of Phase 2 in `docs/mac-app-plan.md`, plus a restyle that Phase 2 did not ask for. The Settings scene, file drag and drop, Save Attachment, the name and the icon stay in that document.
 
@@ -128,6 +128,51 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
   - Keys: Cmd-N new message, Cmd-F search, Cmd-R sync (`.refreshable` has no gesture on the Mac), Delete archives, arrows move the selection.
   - Right-click on a row: Archive, Mark as Read or Unread, Report Spam.
 - **Tests.** `MacSidebarSelectionPolicy`, the exit routing and the mark-read gate are pure functions with suites in `Mac.xctestplan`.
+
+### PR 1 as built (2026-11-10)
+
+**What is there.**
+
+- `MailboxRootView` picks the shape: iOS is unchanged; the Mac shows `MacMailboxView`, a `NavigationSplitView` of `MacConversationSidebar` and `MacMailboxDetail`. The Mac app is one `Window` scene.
+- The sidebar is an `.inset` list with `List(selection:)`, search at `.sidebar`, the filter menu at the sidebar's trailing edge, swipe actions, a right-click menu and Delete. The rows are still the iPhone's (chevron, iPhone metrics) until PR 2.
+- Menu commands (`MailboxCommands`): New Message (Cmd-N, in place of New Window), Get New Mail (Cmd-R), Search (Cmd-F).
+- Shared by both lists, so they cannot drift: the view model, the row, the banners, `ConversationFilterMenu`, `conversationListLifecycle` and `ConversationReference.openableConversation`.
+
+**Where it differs from the plan above, or settles what the plan left open.**
+
+- **What is selected after a conversation leaves.**
+  - Your own Archive or Report Spam on the list (Delete, the menu, a swipe) moves the selection to the next row, so Delete, Delete, Delete works from the keyboard.
+  - Everything else selects nothing: the chat's own ⋯ menu, a conversation that drains, one archived from another device. Selecting a row marks it read, and in those cases you did not pick one.
+- **Closing the window quits the app.** SwiftUI does that for an app whose only scene is a `Window`. Before, with a window group, the app kept running. A quit still waits for a send in flight. Whether to keep the app running with its window closed is still the open decision in `mac-app-plan.md`.
+- **The sidebar's selection is its own,** not the select-mode set in `ConversationSelectionService`. That set is pruned to the visible rows on every list publish; bound to it, typing in the search field would close the open chat. Batch actions take the row IDs instead (`archiveConversations(withIDs:)`).
+- **`dismiss()` in the chat column closes the window,** which is worse than the "nothing to dismiss" this plan assumed, since closing the window quits. `ChatView` now closes itself only through `exitChat()`, and a test reads the source to keep it that way.
+- **The chat column is `Equatable` on the selection.** The mailbox view re-evaluates on every list publish, including each search keystroke; without the check each one would re-evaluate the open transcript.
+
+**Checked.**
+
+- The Mac app and its test target compile, unsigned, with no new warnings. The unsigned app was deleted and never launched.
+- The full iOS suite passes: 4,847 tests.
+- `Mac.xctestplan` passes in the signed, sandboxed test host: 237 tests in 19 suites, the two new ones (`MacSidebarSelectionPolicyTests`, `ChatViewExitTests`) among them. That host is the app itself, so the new `Window` scene and its commands at least start. It stays on the loading view (`initializeApp()` does nothing under tests), so it never builds the mailbox.
+- Each new regression test was run against the change it guards, with that change undone: 11 of 12 failed as they should. The twelfth cannot fail that way and says so (`HONEST SCOPE`: the per-call task key in `ConversationSelectionService`).
+- In an off-screen stand-in for the chat column (the spike's harness, not the app's views):
+  - A chat swapped out by a selection change gets its `onDisappear`, which is what saves its draft and withdraws its composer. The new chat's `onAppear` runs first, then the old one's `onDisappear`.
+  - 20 unrelated changes in the parent re-evaluated the column 20 times without the `Equatable` conformance, and not once with it.
+
+**Found by reading, not fixed here.**
+
+- **A draft can lose its last words on a very fast A, B, A.** Leaving chat A schedules its draft save, which waits its turn behind other conversation mutations. If A is selected again before that save runs, the new composer loads the older stored draft and the pending save is dropped as stale (`ChatReplyComposerDirectory`). iOS has the same order of events but a pop and a push take half a second; arrow keys take none. The loss is the text typed since the last autosave (350 ms after a keystroke, longer if a sync holds the queue). It belongs with PR 5.
+- **Mail that arrives while the app is in the background stays unread after you come back** to the chat it is in, until you select another row and return. The gate only stops the marking; nothing marks on return. iOS behaves the same when you return to an open chat. Decide in PR 5 whether returning should mark it.
+- **Arrow keys open, and mark read, every conversation they pass,** because that is what selecting does. If that is wrong for mail, the fix is a short pause before a newly selected chat opens.
+
+**Not seen: check in the signed, sandboxed app.**
+
+- The whole window: column widths, the toolbar, the empty and multiple-selection states.
+- Selecting, Shift- and Cmd-click, arrows, Delete, the right-click menu, swipes.
+- That closing a chat by its ⋯ menu's Archive clears the column and does not close the window.
+- That mail arriving with the app in the background stays unread.
+- The three menu commands, and whether `.searchable` adds a Find command of its own beside Search.
+- Typing in the search field with a long chat open: the transcript should not stutter.
+- Whether the sidebar's width holds (the spike's hand-made window ignored it).
 
 ## PR 2: the sidebar's look
 
