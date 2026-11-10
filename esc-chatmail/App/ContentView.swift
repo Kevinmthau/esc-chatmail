@@ -16,9 +16,8 @@ struct ContentView: View {
     var body: some View {
         Group {
             if authSession.canAccessMailbox {
-                NavigationStack {
-                    ConversationListView(deps: dependencies)
-                }
+                // A pushed list on iOS, a sidebar and chat column on the Mac.
+                MailboxRootView(dependencies: dependencies)
             } else {
                 SignInView()
             }
