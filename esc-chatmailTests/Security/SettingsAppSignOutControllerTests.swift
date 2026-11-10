@@ -183,51 +183,118 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
 
     // MARK: - Menu command
 
-    // HONEST SCOPE: these drive `requestSignOut(account:)`, what the Mac's
-    // Sign Out… menu command calls. The command itself is not exercised:
-    // `SignOutCommands`, the focused value `ContentView` publishes for it and
-    // the scene's `.commands` need a mounted window and a menu bar, which the
-    // unit-test host never has.
+    // HONEST SCOPE: these drive `requestSignOut(account:focusedWindowHasSheet:)` and
+    // `refreshHeldAccount(account:)`, what the Mac's Sign Out… menu command calls. The
+    // command itself is not exercised: `SignOutCommands`, the focused value `ContentView`
+    // publishes for it (`SignOutMenuActionPublisher`), the AppKit read behind
+    // `focusedWindowHasSheet` (`FocusedWindowSheet`), the beep on a refusal and the scene's
+    // `.commands` need a mounted window and a menu bar, which the unit-test host never has.
+    // Nobody has seen the command on screen either.
 
-    /// The Mac has no Settings app page to turn the switch on, so the command
-    /// must raise the request itself and look at it at once.
+    /// The Mac has no Settings app page, so the command must ask at once. It must not store
+    /// the request: a stored one outlives a force quit made before the alert is answered and
+    /// asks again at the next launch, with no switch on screen to explain it.
     ///
-    /// Revert-check: removing `preferences.requestSignOut()` from
-    /// `SettingsAppSignOutController.requestSignOut` makes this fail, and so
-    /// does removing its `evaluate` call.
-    func testRequestSignOut_whileSignedIn_raisesRequestAndPresentsConfirmation() {
-        controller.requestSignOut(account: account)
+    /// Revert-check: writing `signOutRequestedKey` in
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail, and so does removing
+    /// its `presentConfirmation` call.
+    func testRequestSignOut_whileSignedIn_presentsConfirmationWithoutStoringRequest() {
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: false)
 
+        XCTAssertEqual(choice, .confirm)
         XCTAssertEqual(prompter.confirmationCount, 1)
         XCTAssertEqual(prompter.lastAccountEmail, "user@example.com")
-        XCTAssertTrue(preferences.isSignOutRequested, "the request stays pending until the user answers")
+        XCTAssertNil(defaults.object(forKey: SettingsAppPreferences.signOutRequestedKey))
     }
 
-    /// A request left on with no session to end would prompt right after the
-    /// next sign-in, so the command's look must discard it there, as a
-    /// Settings-app request is discarded.
+    /// Each window has its own controller and prompter over the same defaults. A request the
+    /// command stored would be confirmed again by a second window as soon as it looked.
     ///
-    /// Revert-check: removing the `evaluate` call from
+    /// Revert-check: writing `signOutRequestedKey` in
     /// `SettingsAppSignOutController.requestSignOut` makes this fail.
-    func testRequestSignOut_whileDurablySignedOut_leavesNoRequestAndDoesNotPrompt() {
+    func testRequestSignOut_unanswered_secondWindowsControllerDoesNotPrompt() {
+        let secondPrompter = FakePrompter()
+        let secondController = SettingsAppSignOutController(preferences: preferences, prompter: secondPrompter)
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        secondController.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertEqual(secondPrompter.confirmationCount, 0)
+    }
+
+    /// Under New Message or the reader the alert would stay queued and unseen, so the command
+    /// asks nothing there and reports the refusal for its beep.
+    ///
+    /// Revert-check: passing `focusedWindowHasSheet: false` to `SignOutMenuPolicy.choice` in
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail.
+    func testRequestSignOut_focusedWindowHasSheet_refusesWithoutPrompt() {
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: true)
+
+        XCTAssertEqual(choice, .refuse)
+        XCTAssertEqual(prompter.confirmationCount, 0)
+        XCTAssertNil(defaults.object(forKey: SettingsAppPreferences.signOutRequestedKey))
+    }
+
+    /// The command is enabled from a cached answer, so it can be chosen with no session left
+    /// to end. It must ask nothing, leave nothing stored, and correct the cache so the command
+    /// disables itself.
+    ///
+    /// Revert-check: passing `isDurablySignedOut: false` to `SettingsAppSignOutPolicy.decision`
+    /// in `SettingsAppSignOutController.requestSignOut` makes this fail, and so does removing
+    /// its `setHoldsAccountWhileSignedOut` call.
+    func testRequestSignOut_whileDurablySignedOut_refusesAndCorrectsHeldAccount() {
         account.isAuthenticated = false
         account.userEmail = nil
+        controller.refreshHeldAccount(account: account)
+        XCTAssertTrue(controller.holdsAccountWhileSignedOut)
         account.durablySignedOut = true
 
-        controller.requestSignOut(account: account)
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: false)
 
+        XCTAssertEqual(choice, .refuse)
+        XCTAssertEqual(prompter.confirmationCount, 0)
         XCTAssertFalse(preferences.isSignOutRequested)
+        XCTAssertFalse(controller.holdsAccountWhileSignedOut)
+    }
+
+    /// A retryably failed launch restore leaves the account on the Mac behind `SignInView`;
+    /// the command is the Mac's only way to remove it.
+    ///
+    /// Revert-check: judging the request on `!account.isAuthenticated` instead of
+    /// `account.isDurablySignedOut()` in `SettingsAppSignOutController.requestSignOut` makes
+    /// this fail.
+    func testRequestSignOut_accountHeldBehindSignIn_presentsConfirmation() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        account.durablySignedOut = false
+
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        XCTAssertEqual(choice, .confirm)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertNil(prompter.lastAccountEmail)
+    }
+
+    /// Revert-check: dropping `prompter.isConfirmationActive` from `isRequestBeingHandled` in
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail.
+    func testRequestSignOut_whileConfirmationActive_refusesWithoutStackingPrompt() {
+        prompter.isConfirmationActive = true
+
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        XCTAssertEqual(choice, .refuse)
         XCTAssertEqual(prompter.confirmationCount, 0)
     }
 
-    /// The whole path the menu command starts: request, confirm, one
-    /// `signOut()`, and no request left behind.
+    /// The whole path the menu command starts: ask, confirm, one `signOut()`, and nothing
+    /// stored at any point.
     ///
-    /// Revert-check: removing `preferences.requestSignOut()` from
-    /// `SettingsAppSignOutController.requestSignOut` makes this fail (no
-    /// confirmation is raised to answer).
-    func testRequestSignOut_confirmed_signsOutOnceAndClearsRequest() async throws {
-        controller.requestSignOut(account: account)
+    /// Revert-check: removing the `presentConfirmation` call from
+    /// `SettingsAppSignOutController.requestSignOut` makes this fail (no confirmation is
+    /// raised to answer).
+    func testRequestSignOut_confirmed_signsOutOnceAndStoresNoRequest() async throws {
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
 
         try XCTUnwrap(prompter.onSignOut)()
         await waitUntil { self.account.signOutCallCount == 1 && !self.controller.isSigningOut }
@@ -235,6 +302,59 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertEqual(account.signOutCallCount, 1)
         XCTAssertFalse(preferences.isSignOutRequested)
         XCTAssertEqual(prompter.failureCount, 0)
+    }
+
+    // MARK: - Held account
+
+    /// While signed in the answer is false without the durable check, which is the read this
+    /// cache exists to keep out of a view body.
+    ///
+    /// Revert-check: dropping `!account.isAuthenticated &&` from
+    /// `SettingsAppSignOutController.refreshHeldAccount` makes this fail.
+    func testRefreshHeldAccount_signedIn_isFalseWithoutReadingDurableState() {
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertFalse(controller.holdsAccountWhileSignedOut)
+        XCTAssertEqual(account.isDurablySignedOutCallCount, 0)
+    }
+
+    /// Revert-check: removing the `setHoldsAccountWhileSignedOut` call from
+    /// `SettingsAppSignOutController.refreshHeldAccount` makes this fail.
+    func testRefreshHeldAccount_signedOutButAccountOnDevice_isTrue() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        account.durablySignedOut = false
+
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertTrue(controller.holdsAccountWhileSignedOut)
+    }
+
+    /// Revert-check: dropping `&& !account.isDurablySignedOut()` from
+    /// `SettingsAppSignOutController.refreshHeldAccount` makes this fail.
+    func testRefreshHeldAccount_durablySignedOut_isFalse() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        account.durablySignedOut = true
+
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertFalse(controller.holdsAccountWhileSignedOut)
+    }
+
+    /// The answer follows the account: held behind `SignInView`, then signed in again.
+    ///
+    /// Revert-check: making `SettingsAppSignOutController.setHoldsAccountWhileSignedOut` ignore
+    /// a change to false makes this fail.
+    func testRefreshHeldAccount_afterSigningInAgain_turnsFalse() {
+        account.isAuthenticated = false
+        controller.refreshHeldAccount(account: account)
+        XCTAssertTrue(controller.holdsAccountWhileSignedOut)
+
+        account.isAuthenticated = true
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertFalse(controller.holdsAccountWhileSignedOut)
     }
 
     // MARK: - Platform prompter

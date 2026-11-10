@@ -3,8 +3,9 @@ import Foundation
 /// The app's side of `Resources/Settings.bundle` (Settings → MushMail): the
 /// values the Settings app displays, and the Sign Out switch it writes back.
 /// The account and Sign Out live there because the app has no in-app settings
-/// screen. On the Mac, which has no such page, the app menu's Sign Out… command
-/// writes the switch instead (`requestSignOut()`).
+/// screen. The Mac has no such page, and nothing there writes the switch: its
+/// app menu's Sign Out… command asks at once and stores no request
+/// (`SettingsAppSignOutController.requestSignOut`).
 ///
 /// Both sides share the app's own defaults domain (`UserDefaults.standard`),
 /// so these keys must match the bundle's `Root.plist` exactly — pinned by
@@ -30,15 +31,6 @@ struct SettingsAppPreferences {
     /// register a bundle's defaults with the app).
     var isSignOutRequested: Bool {
         defaults.bool(forKey: Self.signOutRequestedKey)
-    }
-
-    /// Turns the Sign Out switch on from inside the app. The Mac has no
-    /// Settings app page to hold the switch (`Settings.bundle` is iOS-only),
-    /// so its Sign Out… menu command (`SignOutCommands`) raises the request
-    /// through the same key; the iOS switch is only ever written by the
-    /// Settings app.
-    func requestSignOut() {
-        defaults.set(true, forKey: Self.signOutRequestedKey)
     }
 
     /// Turns the Settings app's Sign Out switch back off.

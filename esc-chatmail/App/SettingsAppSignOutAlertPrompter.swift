@@ -6,12 +6,14 @@ import Foundation
 ///
 /// iOS keeps `SettingsAppSignOutPrompter`, a UIKit alert from the topmost view controller: a
 /// SwiftUI alert on the root view never appears there while a Compose or chat sheet is up. On the
-/// Mac a window shows one sheet at a time, so an alert raised under a sheet waits for it to close,
-/// and the request stays held (`isConfirmationActive`) until the user answers it.
+/// Mac a window shows one sheet at a time, so an alert raised under a sheet waits, unseen, for it
+/// to close (measured on macOS 27.2, 2026-11-10). The Mac's command therefore asks nothing while
+/// the window has a sheet attached (`SignOutMenuPolicy.choice`).
 ///
 /// The Mac has no Settings app page (`Settings.bundle` is iOS-only), so until the Mac gets its own
-/// Settings scene, the app menu's Sign Out… command (`SignOutCommands`) is what raises a sign-out
-/// request there.
+/// Settings scene, the app menu's Sign Out… command (`SignOutCommands`) is the only thing that
+/// asks for a sign-out there. That is why the failure alert names the command, where the iOS
+/// prompt names the Settings switch.
 ///
 /// The alert is published as a value. `answer(_:signOut:)` runs exactly one of its handlers; when
 /// the alert leaves the screen any other way, `alertDidDismiss(_:)` clears it and runs neither,
@@ -45,7 +47,9 @@ final class SettingsAppSignOutAlertPrompter: ObservableObject, SettingsAppSignOu
             case .confirmation(let accountEmail):
                 return "\(accountEmail ?? "This account") will be signed out and its mail removed from this device."
             case .failure:
-                return "MushMail is still signed in. Turn on Sign Out in Settings to try again."
+                // Names the command and not the menu it is in: the Mac app menu is still
+                // titled from the target name (`docs/mac-app-plan.md`, "Name and icon").
+                return "MushMail is still signed in. To try again, choose Sign Out… from the app menu."
             }
         }
     }
