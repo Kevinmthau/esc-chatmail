@@ -153,21 +153,17 @@ struct ConversationListView: View {
                 }
             )
         }
-        .onAppear {
-            // API and Contacts only; safe to call repeatedly (each runs once per
-            // launch). WebKit is deliberately warmed solely by the post-init task
-            // in esc_chatmailApp.initializeApp(), off the first list layout passes.
-            AppPrewarmer.prewarmAll()
-            viewModel.onAppear(in: viewContext)
-            abandonedActions.refresh()
-            // Lookups never prompt on their own, so this is the one deliberate
-            // Contacts permission request (no-op after first launch/answer).
-            ContactsAuthorizationCoordinator.shared.requestAccessOnFirstAuthenticatedLaunchIfNeeded()
-        }
+        // The list's own part of leaving the screen; the view model's teardown
+        // is in the shared lifecycle below. Neither depends on the other.
         .onDisappear {
             isSearchFieldFocused = false
-            viewModel.onDisappear(preservePreviewRepair: authSession.canAccessMailbox)
         }
+        .conversationListLifecycle(
+            viewModel: viewModel,
+            abandonedActions: abandonedActions,
+            viewContext: viewContext,
+            authSession: authSession
+        )
     }
 
     private func conversationRow(for item: ConversationListItem) -> some View {
@@ -235,24 +231,15 @@ struct ConversationListView: View {
     }
 
     private var filterMenu: some View {
-        Menu {
-            ForEach(ConversationFilter.allCases, id: \.self) { filter in
-                Button {
-                    // Each choice resigns search focus itself: the menu now
-                    // sits in the navigation bar, where SwiftUI hosts it as a
-                    // native bar-button menu and a gesture on its label (the
-                    // old `simultaneousGesture` resign) is not reliably
-                    // delivered, and Menu has no pre-presentation hook.
-                    isSearchFieldFocused = false
-                    viewModel.currentFilter = filter
-                } label: {
-                    SwiftUI.Label(filter.rawValue, systemImage: filter.icon)
-                }
-            }
-        } label: {
-            SwiftUI.Label("Filter", systemImage: viewModel.currentFilter.icon)
+        ConversationFilterMenu(currentFilter: viewModel.currentFilter) { filter in
+            // Each choice resigns search focus itself: the menu now
+            // sits in the navigation bar, where SwiftUI hosts it as a
+            // native bar-button menu and a gesture on its label (the
+            // old `simultaneousGesture` resign) is not reliably
+            // delivered, and Menu has no pre-presentation hook.
+            isSearchFieldFocused = false
+            viewModel.currentFilter = filter
         }
-        .accessibilityLabel("Filter conversations")
     }
 
     // MARK: - Bottom Bar
@@ -376,19 +363,13 @@ struct ConversationListView: View {
     @MainActor
     private func openConversationIfAvailable(conversationReference: ConversationReference) {
         isSearchFieldFocused = false
-        guard let objectID = conversationReference.resolveObjectID(in: viewContext) else {
+        guard let conversation = conversationReference.openableConversation(in: viewContext) else {
             pendingConversationReference = conversationReference
             return
         }
 
-        if let conversation = try? viewContext.existingObject(with: objectID) as? Conversation,
-           conversation.archivedAt == nil {
-            selectedConversation = conversation
-            pendingConversationReference = nil
-            return
-        }
-
-        pendingConversationReference = conversationReference
+        selectedConversation = conversation
+        pendingConversationReference = nil
     }
 
     private func resolveConversation(with objectID: NSManagedObjectID) -> Conversation? {

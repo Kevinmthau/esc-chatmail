@@ -275,6 +275,79 @@ final class ConversationSelectionServiceTests: XCTestCase {
     // Revert-check: the `guard !conversations.isEmpty` in
     // ConversationSelectionService.performBatchAction — it must bail before
     // the clear, so an empty batch leaves selection mode untouched.
+    // MARK: - Batch Actions on Named Conversations (the Mac sidebar)
+
+    /// Revert-check: making `ConversationSelectionService.archiveConversations(withIDs:)` pass
+    /// `.selection` to `performBatchAction` makes this fail three ways: it archives the
+    /// select-mode selection (Bob) instead of the named row, and clears that selection and
+    /// leaves select mode.
+    func testArchiveConversationsWithIDs_archivesTheNamedRowsAndLeavesTheSelectionAlone() async throws {
+        _ = LabelBuilder().inbox().build(in: viewContext)
+        let alice = makeConversation(name: "Alice")
+        let bob = makeConversation(name: "Bob")
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        _ = MessageBuilder().withId("bob-1").inConversation(bob).build(in: viewContext)
+        try saveViewContext()
+        service.toggleSelectionMode()
+        service.toggleSelection(for: bob.objectID)
+
+        service.archiveConversations(withIDs: [alice.objectID])
+
+        XCTAssertEqual(service.selectedConversationIDs, [bob.objectID])
+        XCTAssertTrue(service.isSelecting)
+        await waitUntil { [pendingActionsManager] in
+            await pendingActionsManager?.queuedConversationActions.isEmpty == false
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertEqual(queued.first?.type, .archiveConversation)
+        XCTAssertEqual(queued.first?.messageIds ?? [], ["alice-1"])
+    }
+
+    /// Delete pressed on one row and then the next starts two batches back to back. Each gets a
+    /// task key of its own, so the second `ViewModelTaskManager.run` does not cancel the first.
+    ///
+    /// HONEST SCOPE: this does not pin the per-call key. With `taskKey` used unchanged for
+    /// `.conversations` in `ConversationSelectionService.performBatchAction`, the first batch's
+    /// task is cancelled and this test still passes (checked 2026-11-10): the batch queued its
+    /// action anyway. It pins the outcome that must hold, both archives queued, against a
+    /// change that makes that cancellation bite.
+    func testArchiveConversationsWithIDs_twoCallsBackToBack_bothBatchesAreQueued() async throws {
+        _ = LabelBuilder().inbox().build(in: viewContext)
+        let alice = makeConversation(name: "Alice")
+        let bob = makeConversation(name: "Bob")
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        _ = MessageBuilder().withId("bob-1").inConversation(bob).build(in: viewContext)
+        try saveViewContext()
+
+        service.archiveConversations(withIDs: [alice.objectID])
+        service.archiveConversations(withIDs: [bob.objectID])
+
+        await waitUntil { [pendingActionsManager] in
+            await pendingActionsManager?.queuedConversationActions.count == 2
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(Set(queued.flatMap(\.messageIds)), ["alice-1", "bob-1"])
+        XCTAssertTrue(queued.allSatisfy { $0.type == .archiveConversation })
+    }
+
+    func testReportSpamConversationsWithIDs_queuesReportSpamForTheNamedRows() async throws {
+        _ = LabelBuilder().inbox().build(in: viewContext)
+        let alice = makeConversation(name: "Alice")
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        try saveViewContext()
+
+        service.reportSpamConversations(withIDs: [alice.objectID])
+
+        XCTAssertFalse(service.isSelecting)
+        await waitUntil { [pendingActionsManager] in
+            await pendingActionsManager?.queuedConversationActions.isEmpty == false
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.first?.type, .reportSpam)
+        XCTAssertEqual(queued.first?.messageIds ?? [], ["alice-1"])
+    }
+
     func testArchiveSelectedConversations_emptySelection_keepsSelectionModeActive() {
         service.toggleSelectionMode()
         XCTAssertTrue(service.isSelecting)
