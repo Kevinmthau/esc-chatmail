@@ -104,6 +104,10 @@ struct ChatView: View {
             dismissActiveDestination(presentationDidEnd: true)
         }) { destination in
             destinationSheet(destination)
+                // On the Mac a sheet is as large as its content asks to be, and
+                // these ask for nothing (`MacSheetSize`).
+                .macSheetDoneBar(destination.needsMacSheetDoneBar)
+                .macSheetSize(destination.macSheetSize)
                 .onAppear {
                     presentedSheetDestination = destination
                 }

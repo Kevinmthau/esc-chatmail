@@ -152,6 +152,7 @@ struct ConversationListView: View {
                     openConversationIfAvailable(conversationReference: conversationReference)
                 }
             )
+            .macSheetSize(.compose)
         }
         .onAppear {
             // API and Contacts only; safe to call repeatedly (each runs once per

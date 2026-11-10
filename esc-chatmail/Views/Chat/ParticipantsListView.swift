@@ -58,7 +58,9 @@ struct ParticipantsListView: View {
             .navigationTitle("Participants")
             .inlineNavigationTitle()
             .toolbar {
-                ToolbarItem(placement: .trailingBarEdge) {
+                // A sheet's placement, not `.trailingBarEdge`: a Mac sheet draws no toolbar
+                // item placed there, which left this sheet with no way to close it.
+                ToolbarItem(placement: .sheetTrailingBarEdge) {
                     Button("Done") {
                         dismiss()
                     }
