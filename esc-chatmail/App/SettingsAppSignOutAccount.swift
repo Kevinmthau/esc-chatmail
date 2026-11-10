@@ -8,8 +8,11 @@ import Foundation
 protocol SettingsAppSignOutAccount: AnyObject {
     var isAuthenticated: Bool { get }
     var userEmail: String? { get }
-    /// See `AuthSession.isDurablySignedOut()`. Called only while a request is
-    /// pending: while signed out it reads the keychain.
+    /// See `AuthSession.isDurablySignedOut()`. While signed out it reads the
+    /// keychain, so it is called only to judge a request (a pending Settings-app
+    /// one, or the Mac's menu command being chosen) and, on the Mac, to renew
+    /// whether that command has an account to sign out
+    /// (`SettingsAppSignOutController.refreshHeldAccount`).
     func isDurablySignedOut() -> Bool
     /// See `AuthSession.signOut()`: false only when cleanup never began.
     func signOut() async -> Bool

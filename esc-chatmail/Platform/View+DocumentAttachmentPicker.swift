@@ -15,6 +15,8 @@ extension View {
         onImportFailures: @escaping @MainActor ([String]) -> Void
     ) -> some View {
         #if os(iOS)
+        // SwiftUI's own `sheet`, not `appSheet`: this branch is iOS-only, and the Mac's
+        // counterpart below is a system file panel, which needs no Mac sheet chrome.
         sheet(isPresented: isPresented) {
             DocumentPicker(
                 attachments: attachments,

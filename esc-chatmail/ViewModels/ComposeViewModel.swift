@@ -39,6 +39,9 @@ final class ComposeViewModel: ObservableObject {
     private var discardAfterSend = false
     private var hasDiscarded = false
     private var forwardedPreviewIsDarkMode: Bool?
+    /// What the draft held when `setupForMode()` finished, so `hasUserEdits` can tell the
+    /// user's changes from what the sheet opened with. Nil before setup: an empty draft.
+    private var contentAtSetup: DraftContent?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -108,6 +111,39 @@ final class ComposeViewModel: ObservableObject {
         }
     }
 
+    /// Whether the draft holds anything of the user's that Cancel would lose: a recipient added
+    /// or removed, a half-typed recipient, a changed subject or note, or an attachment added or
+    /// removed. What the sheet opened with is not the user's: a forward's subject, a recovered
+    /// forward's recipients and note, and the attachments copied from the forwarded message.
+    /// The Mac asks before discarding when this is true (`ComposeCancelPolicy`).
+    var hasUserEdits: Bool {
+        if !recipientInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return true
+        }
+        return currentDraftContent != (contentAtSetup ?? .empty)
+    }
+
+    private var currentDraftContent: DraftContent {
+        DraftContent(
+            subject: subject,
+            body: body,
+            recipientEmails: recipients.map(\.email),
+            // The attachment's own `local_…` ID, not its `objectID`: a new attachment's object
+            // ID is temporary and changes at its first save, which would read as an edit.
+            attachmentIDs: attachments.map { $0.id ?? "" }
+        )
+    }
+
+    /// The parts of a draft `hasUserEdits` compares.
+    private struct DraftContent: Equatable {
+        let subject: String
+        let body: String
+        let recipientEmails: [String]
+        let attachmentIDs: [String]
+
+        static let empty = DraftContent(subject: "", body: "", recipientEmails: [], attachmentIDs: [])
+    }
+
     var showSubjectField: Bool {
         switch mode {
         case .newEmail, .forward: return true
@@ -145,6 +181,8 @@ final class ComposeViewModel: ObservableObject {
     func setupForMode() {
         guard !hasSetupMode else { return }
         hasSetupMode = true
+        // On every way out, the failed-setup return included.
+        defer { contentAtSetup = currentDraftContent }
 
         switch mode {
         case .forward(let context):

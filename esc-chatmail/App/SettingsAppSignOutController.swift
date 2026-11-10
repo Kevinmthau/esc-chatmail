@@ -6,6 +6,10 @@ import Foundation
 /// What a look does — which signal judges the request, when it is cleared,
 /// and the confirmed sign-out — lives here so tests can drive it with a fake
 /// account and prompter (`SettingsAppSignOutControllerTests`).
+///
+/// The Mac has no Settings app page. Its Sign Out… menu command asks through
+/// `requestSignOut(account:focusedWindowHasSheet:)` instead, and reaches the
+/// same confirmation and the same single `signOut()`.
 @MainActor
 final class SettingsAppSignOutController: ObservableObject {
     /// True from a confirmed Settings-app sign-out until `signOut()` returns.
@@ -13,6 +17,15 @@ final class SettingsAppSignOutController: ObservableObject {
     /// screen until teardown reaches `isAuthenticated = false`; the cleanup
     /// that follows runs behind the same overlay.
     @Published private(set) var isSigningOut = false
+
+    /// Whether an account is still held on this device while nobody is signed in: a launch
+    /// restore that failed retryably shows `SignInView` over credentials, a store and body
+    /// files that are all still there. The Mac's Sign Out… command is enabled from it
+    /// (`SignOutMenuPolicy.isEnabled`). It is a cached answer, because the live one
+    /// (`isDurablySignedOut()`) reads the keychain while signed out and the command's state is
+    /// computed in a view body; `refreshHeldAccount` renews it. Stays false on iOS, which has
+    /// no command and never refreshes it.
+    @Published private(set) var holdsAccountWhileSignedOut = false
 
     private let preferences: SettingsAppPreferences
     private let prompter: SettingsAppSignOutPrompting
@@ -53,28 +66,72 @@ final class SettingsAppSignOutController: ObservableObject {
         case .discardRequest:
             preferences.clearSignOutRequest()
         case .confirm:
-            prompter.presentConfirmation(
-                accountEmail: SettingsAppPreferences.displayedAccountEmail(
-                    isAuthenticated: account.isAuthenticated,
-                    userEmail: account.userEmail
-                ),
-                onSignOut: { [weak self] in self?.signOutConfirmed(account: account) },
-                onCancel: { [weak self] in self?.preferences.clearSignOutRequest() }
-            )
+            presentConfirmation(account: account)
         }
     }
 
-    /// The Mac's Sign Out… menu command (`SignOutCommands`). The Mac has no
-    /// Settings app page to hold the switch, so the command turns the same
-    /// request on and looks at it at once. Everything after that is
-    /// `evaluate`'s: the confirmation, the discard while durably signed out,
-    /// and the single `signOut()`. A menu command is a foreground action, so
-    /// this look does not wait for the scene to become active; a request the
-    /// policy cannot act on yet stays on for `ContentView`'s next look, as a
-    /// Settings-app request does.
-    func requestSignOut(account: SettingsAppSignOutAccount) {
-        preferences.requestSignOut()
-        evaluate(account: account, isSceneActive: true)
+    /// The Mac's Sign Out… menu command (`SignOutCommands`): asks at once, through the
+    /// policy the Settings-app switch is judged by, and returns what it did so the command
+    /// can beep when it asked nothing.
+    ///
+    /// It stores no request. The iOS switch is a stored value because the Settings app is
+    /// another process, and the user can see it there. The command runs in this process: a
+    /// stored request would outlive a force quit made before the alert was answered and ask
+    /// "Sign Out of MushMail?" at the next launch with no switch on screen to explain it, and
+    /// a second window, which has its own controller, would ask about the first window's
+    /// request as soon as it became key.
+    ///
+    /// A menu command is a foreground action, so this does not wait for the scene to become
+    /// active. `focusedWindowHasSheet` is `SignOutMenuPolicy.choice`'s.
+    @discardableResult
+    func requestSignOut(
+        account: SettingsAppSignOutAccount,
+        focusedWindowHasSheet: Bool
+    ) -> SignOutMenuPolicy.Choice {
+        let isDurablySignedOut = account.isDurablySignedOut()
+        // The command was enabled from the cached answer; this one is fresh.
+        setHoldsAccountWhileSignedOut(!account.isAuthenticated && !isDurablySignedOut)
+        let choice = SignOutMenuPolicy.choice(
+            focusedWindowHasSheet: focusedWindowHasSheet,
+            decision: SettingsAppSignOutPolicy.decision(
+                isSignOutRequested: true,
+                isDurablySignedOut: isDurablySignedOut,
+                isRequestBeingHandled: isSigningOut || prompter.isConfirmationActive,
+                isSceneActive: true
+            )
+        )
+        if choice == .confirm {
+            presentConfirmation(account: account)
+        }
+        return choice
+    }
+
+    /// Renews `holdsAccountWhileSignedOut`. The Mac calls it where `ContentView` already looks
+    /// at the account: when the window appears and when authentication changes
+    /// (`SignOutMenuActionPublisher`). iOS never does, so it gains no keychain read. While
+    /// signed in the answer is false without asking `isDurablySignedOut()`.
+    func refreshHeldAccount(account: SettingsAppSignOutAccount) {
+        setHoldsAccountWhileSignedOut(!account.isAuthenticated && !account.isDurablySignedOut())
+    }
+
+    /// Publishes only a change: both callers run on events that usually leave it as it was.
+    private func setHoldsAccountWhileSignedOut(_ holds: Bool) {
+        guard holdsAccountWhileSignedOut != holds else { return }
+        holdsAccountWhileSignedOut = holds
+    }
+
+    /// Asks the user to confirm signing out `account`. Both answers clear the Settings-app
+    /// request; after the Mac's menu command there is none stored, and clearing an absent key
+    /// changes nothing.
+    private func presentConfirmation(account: SettingsAppSignOutAccount) {
+        prompter.presentConfirmation(
+            accountEmail: SettingsAppPreferences.displayedAccountEmail(
+                isAuthenticated: account.isAuthenticated,
+                userEmail: account.userEmail
+            ),
+            onSignOut: { [weak self] in self?.signOutConfirmed(account: account) },
+            onCancel: { [weak self] in self?.preferences.clearSignOutRequest() }
+        )
     }
 
     /// The sign-out the Settings-app confirmation approved: the same

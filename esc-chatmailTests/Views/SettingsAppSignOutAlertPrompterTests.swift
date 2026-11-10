@@ -138,6 +138,27 @@ final class SettingsAppSignOutAlertPrompterTests: XCTestCase {
         XCTAssertFalse(prompter.isConfirmationActive)
     }
 
+    /// This prompter is the Mac's only one, and the Mac has no Settings page: the retry is the
+    /// Sign Out… command, so the failure alert must name it and not a switch the Mac lacks. It
+    /// names no menu either, because the Mac app menu is still titled from the target name.
+    ///
+    /// Revert-check: restoring "Turn on Sign Out in Settings to try again." as the `.failure`
+    /// message in `SettingsAppSignOutAlertPrompter.Alert.message` makes this fail.
+    func testFailureMessage_namesTheMenuCommandAndNoSettingsSwitch() throws {
+        let prompter = SettingsAppSignOutAlertPrompter()
+
+        prompter.presentFailure()
+        let alert = try XCTUnwrap(prompter.alert)
+
+        XCTAssertEqual(alert.title, "Couldn’t Sign Out")
+        XCTAssertEqual(
+            alert.message,
+            "MushMail is still signed in. To try again, choose Sign Out… from the app menu."
+        )
+        XCTAssertFalse(alert.message.contains("Settings"))
+        XCTAssertFalse(alert.message.contains("MushMail menu"))
+    }
+
     /// The confirmation names the account it signs out, as the UIKit prompt does.
     func testConfirmationMessage_namesAccountOrFallsBack() {
         let prompter = SettingsAppSignOutAlertPrompter()

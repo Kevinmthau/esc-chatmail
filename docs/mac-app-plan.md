@@ -56,13 +56,13 @@ Everything else in `web/src/features` already exists on iOS: search, filters, ro
 
 ## Decisions
 
-Already decided: SwiftUI on AppKit (2026-11-09). Still open:
+Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and applied (Phase 0, 2026-11-09). Items 3 to 5 are still open.
 
-1. **Minimum macOS version: 26 (recommended).**
+1. **Minimum macOS version: 26. Decided and applied.** Phase 0 set `MACOSX_DEPLOYMENT_TARGET = 26.0`, and the processed Mac `Info.plist` has `LSMinimumSystemVersion` 26.0. The reasons:
    - At a macOS 15 minimum, the only availability errors are three Liquid Glass calls (`safeAreaBar`, `glassEffect`, `GlassEffectContainer`) in `View+ConversationListChrome.swift`. iOS already gates them behind iOS 26.
    - At 26 those calls compile unchanged, and SwiftUI's own `WebView`/`WebPage` (macOS 26 and later) becomes an option for the WebKit work.
    - This Mac runs macOS 27.
-2. **Keep the bundle ID `com.esc.inboxchat` (recommended).** A target that builds for several platforms shares one bundle ID by default. Google's docs say macOS apps use an iOS-type OAuth client keyed by bundle ID, so the existing client and its URL scheme should work unchanged.
+2. **The bundle ID stays `com.esc.inboxchat`. Decided and applied.** The Mac build is signed under it, with its own Mac profile (see "Not checked in Phase 0, checked 2026-11-10"). A target that builds for several platforms shares one bundle ID by default. Google's docs say macOS apps use an iOS-type OAuth client keyed by bundle ID; the Mac plist takes the same `GOOGLE_*` build settings as the iOS one, and sign-in worked at the first launch.
 3. **Distribution.**
    - TestFlight for Mac: the app updates itself. The app already sets `ITSAppUsesNonExemptEncryption`, which suggests it is uploaded to App Store Connect.
    - Or a Developer ID-signed, notarized `.app` that you update by hand.
@@ -212,6 +212,12 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 - **iOS-only SwiftUI modifiers (about 8).**
   - Toolbar placements: `topBarLeading`, `topBarTrailing` and `navigationBarTrailing` become `.navigation` or `.primaryAction`.
     - **Found 2026-11-10: that is wrong inside a sheet.** A Mac sheet has no toolbar and draws no item placed at `.navigation` or `.primaryAction`, so Participants, Forward and New Message had no Done, Cancel or Send. A sheet also needs a size: the app's sheets ask for none and came up as an empty strip 80 points tall that still blocked the window and Quit. Sheets now use `sheetLeadingBarEdge` and `sheetTrailingBarEdge` (`.cancellationAction` and `.confirmationAction` on the Mac) and `macSheetSize(_:)`; the reader gets a Done bar. Measured with a throwaway Mac program on macOS 27.2, not yet seen in the app.
+    - **Changed 2026-11-10, in the follow-up to PR 378.** Measured the same way, and not yet seen in the app either:
+      - **One presenter.** Every sheet is presented with `appSheet(…mac:…)`, which takes its Mac size and Done-bar choice (`MacSheetChrome`) as a required argument; `macSheetSize(_:)` and `macSheetDoneBar(_:)` are gone, and `AppSheetSourceTests` fails on a raw `.sheet(` in code the Mac compiles.
+      - **Titles.** A Mac sheet draws a `navigationTitle` (Participants had its title all along) and no `.principal` item, so Forward had none. Forward now gets one on the Mac (`macSheetNavigationTitle(_:)`). An empty navigation title draws an empty strip, so New Message, which draws its own title, gets none.
+      - **Done.** Return and Escape now both close the Participants sheet and the reader. With no button and no focused text field, Escape does not close a Mac sheet at all.
+      - **Escape in compose.** With a text field focused, Escape closed New Message and Forward by itself, pressing no button, and the draft was discarded. Both now disable interactive dismissal on the Mac, so Escape presses Cancel (or New Message's close button), which asks before discarding the user's edits (`ComposeCancelPolicy`). iOS is unchanged.
+      - **Not fixed: width.** In the same program a sheet opened at its `MacSheetSize` minimum width and its ideal height (the reader 560 by 720, not 760 wide). `MacSheetSize`'s comment says a sheet opens at its ideal size. This is the reader's width that "First launch" lists as not checked.
   - `navigationBarTitleDisplayMode` and `textInputAutocapitalization` stay iOS-only.
 
 **PR E: WebKit (about 90 errors).** Build it on `WKWebView` wrapped in `NSViewRepresentable`, as the WebKit spike found (results below).
@@ -357,11 +363,12 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Open question: should a desktop app that replaces the web app load older mail?
 - **Open a chat.** The log shows a mark-read queued for one message, which is what opening a chat does. The incremental sync after it ran clean, and reconciliation found no drift.
 - **Errors.** The app's own log had none, and there was no crash report.
+- **Sheets: see the note under PR D.** "Found 2026-11-10: that is wrong inside a sheet" records a failure this section does not: a chat's Participants sheet came up as a strip 80 points tall with no Done button, and blocked the window and Quit until the app was force-quit. PR 378 read that from the system log, not from the screen, and the app's own log would not show it. It is not established that it happened at this launch.
 - **Seen in the system log and not traced:**
   - Contacts logged the fault "Attempt to read notes by an unentitled app" once, at sign-in. Some fetch asks for a contact key the app has no entitlement for.
   - The sandbox repeatedly denied `system-info net.link.addr`, a read of a network interface's address.
   - WebKit's helper processes logged their startup errors.
-- **Not walked yet, from the Phase 1 check:** send a reply, archive, sign out and sign back in.
+- **Not walked yet, from the Phase 1 check:** send a reply, archive, sign out and sign back in. The Mac had no way to sign out until PR 378 added the Sign Out… command (see "Settings" in Phase 2).
 - **Not checked yet, from the PRs:**
   - PR C: quit and relaunch, to confirm the session survives.
   - PR B: sync across sleep and wake, the maintenance jobs, and quitting during a send.
@@ -377,7 +384,13 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Keep the iPhone's `NavigationStack` as it is. The transcript's anchoring and reveal logic was tuned inside it.
 - **Settings.** A `Settings` scene replaces `Settings.bundle`, which has three rows: account email, a Sign Out toggle, and the version.
   - Sign Out calls the existing `AuthSession.signOut`. Don't add a seventh AuthSession path.
-  - **Added 2026-11-10, ahead of this phase:** a Sign Out… command in the app menu (`SignOutCommands`). Phase 1's check asks for a sign-out, and nothing on the Mac could raise one. The command raises the same request as the iOS Settings switch, so it adds no AuthSession path. The Settings scene can keep it or replace it.
+  - **Added 2026-11-10, ahead of this phase:** a Sign Out… command in the app menu (`SignOutCommands`). Phase 1's check asks for a sign-out, and nothing on the Mac could raise one. The command asks through the controller that judges the iOS Settings switch, and ends in the same confirmation and the same `AuthSession.signOut`, so it adds no AuthSession path. The Settings scene can keep it or replace it.
+    - **Changed 2026-11-10, in the follow-up to PR 378:**
+      - The command no longer stores a request. As first written it turned on the iOS switch's key, so a force quit before the alert was answered asked again at the next launch, and a second window asked about the first window's request.
+      - It asks nothing, and beeps, while the window has a sheet attached. The confirmation is an alert on that window and would wait unseen behind the sheet.
+      - It is enabled for an account still held behind `SignInView` after a launch restore that failed retryably, which iOS could already sign out.
+      - Its failure alert names the command. It named a Settings switch the Mac does not have.
+    - Not yet seen on screen: the command, its alerts, or its state under a sheet.
 - **Menus and shortcuts:**
   - Cmd-N new message, Cmd-R sync now, Cmd-F search.
   - Delete archives; Cmd-Shift-U toggles unread.

@@ -100,14 +100,12 @@ struct ChatView: View {
                 .disabled(!allowsNavigationExit)
             }
         }
-        .sheet(item: activeDestinationBinding, onDismiss: {
+        // On the Mac a sheet is as large as its content asks to be, and these
+        // ask for nothing, so each destination names its size (`MacSheetSize`).
+        .appSheet(item: activeDestinationBinding, mac: \.macSheetChrome, onDismiss: {
             dismissActiveDestination(presentationDidEnd: true)
         }) { destination in
             destinationSheet(destination)
-                // On the Mac a sheet is as large as its content asks to be, and
-                // these ask for nothing (`MacSheetSize`).
-                .macSheetDoneBar(destination.needsMacSheetDoneBar)
-                .macSheetSize(destination.macSheetSize)
                 .onAppear {
                     presentedSheetDestination = destination
                 }

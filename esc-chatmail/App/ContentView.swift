@@ -60,16 +60,9 @@ struct ContentView: View {
         }
         .settingsAppSignOutAlerts(for: settingsAppSignOut)
         // The Mac has no Settings app page, so its app menu carries Sign Out…
-        // (`SignOutCommands`); the command raises its request through the same
-        // controller, which is why it is published from here.
-        .signOutMenuAction(
-            isEnabled: SignOutMenuPolicy.isEnabled(
-                isAuthenticated: authSession.isAuthenticated,
-                isSigningOut: settingsAppSignOut.isSigningOut
-            )
-        ) {
-            settingsAppSignOut.requestSignOut(account: authSession)
-        }
+        // (`SignOutCommands`); the command asks through the same controller,
+        // which is why it is published from here.
+        .signOutMenuAction(controller: settingsAppSignOut, account: authSession)
     }
 
     /// Stands in for the old in-app Settings screen's "Signing Out..." state

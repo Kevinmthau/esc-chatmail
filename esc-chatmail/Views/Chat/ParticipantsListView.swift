@@ -66,6 +66,9 @@ struct ParticipantsListView: View {
                     }
                 }
             }
+            // On the Mac that Done is the sheet's default button, which Return presses;
+            // this makes Escape close the sheet too, as it does the reader's.
+            .macSheetClosesOnEscape()
             .task(id: contactRefreshGeneration) {
                 if contactRefreshGeneration > 0 {
                     await invalidateContactsCache()
