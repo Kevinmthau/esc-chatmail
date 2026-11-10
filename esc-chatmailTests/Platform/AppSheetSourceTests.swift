@@ -7,6 +7,10 @@ import XCTest
 /// (`MacSheetSize`). A `sheet` inside an `#if os(iOS)` branch is left alone: the Mac never
 /// compiles it (the iOS document picker, whose Mac counterpart is a file importer).
 ///
+/// The chrome sizes a sheet with its frame alone, so the same reading pins the two things that
+/// frame depends on: it allows a sized sheet one width, and nothing replaces the Mac's own sheet
+/// sizing (`MacSheetChromeModifier`).
+///
 /// HONEST SCOPE: this reads source text, as `LogRedactionTests` and `SandboxTripwireTests` do.
 /// It does not see a sheet presented some other way (AppKit, a `fullScreenCover`, which the Mac
 /// does not have), and it cannot tell whether the chrome a call site names is the right one.
@@ -37,6 +41,52 @@ final class AppSheetSourceTests: XCTestCase {
             Self.sheetCallsCompiledForMac(in: presenter.lines).count,
             2,
             "one for isPresented:, one for item:"
+        )
+    }
+
+    /// A sheet opens at its `MacSheetSize.width` only because the chrome's frame allows no other
+    /// width. The Mac offers a sheet 470 points: with no maximum a narrower sheet opened 470
+    /// wide (Participants), and with no minimum a wider one did (the reader).
+    ///
+    /// HONEST SCOPE: this reads the Mac-only modifier's source, because no test presents a
+    /// sheet. It pins that the frame names the width as all three bounds, not what the system
+    /// does with that frame, which was measured (`MacSheetChromeModifier`). It matches the
+    /// spelling, so renaming `chrome` or `width` fails it too.
+    ///
+    /// Revert-check: deleting the `minWidth:` line or the `maxWidth:` line from the frame in
+    /// `MacSheetChromeModifier.body` makes this fail.
+    func testMacSheetChromeModifier_frame_allowsOnlyTheSheetWidth() throws {
+        let modifier = try XCTUnwrap(appSources().first { $0.fileName == "MacSheetChromeModifier.swift" })
+        let code = modifier.lines
+            .filter { !$0.hasPrefix("//") }
+            .joined()
+            .filter { !$0.isWhitespace }
+
+        XCTAssertTrue(
+            code.contains("minWidth:chrome.size?.width,idealWidth:chrome.size?.width,maxWidth:chrome.size?.width,"),
+            "MacSheetChromeModifier's frame must allow a sized sheet one width, or it opens 470 points wide"
+        )
+    }
+
+    /// A sheet's Mac size comes from its frame alone. A sizing fitted to the content
+    /// (`presentationSizing`) gave the width too, but the reader was then laid out at two widths
+    /// as it opened and could adopt no pre-rendered WebView, its window could be resized, and a
+    /// sheet that followed another on one presenter kept the first one's size or stayed
+    /// resizable (`MacSheetChromeModifier`).
+    ///
+    /// Revert-check: adding
+    /// `.presentationSizing(.automatic.fitted(horizontal: true, vertical: false))` after the
+    /// frame in `MacSheetChromeModifier.body` makes this fail.
+    func testAppSources_presentationSizingModifier_isNotCalled() throws {
+        let offenders = try appSources().flatMap { source in
+            Self.callsCompiledForMac(of: "presentationSizing", in: source.lines)
+                .map { "\(source.fileName): \($0)" }
+        }
+
+        XCTAssertEqual(
+            offenders,
+            [],
+            "Size a Mac sheet with its MacSheetSize (MacSheetChromeModifier's frame), not a presentation sizing"
         )
     }
 
@@ -80,9 +130,13 @@ final class AppSheetSourceTests: XCTestCase {
 
     private static let presenterFileName = "View+AppSheet.swift"
 
-    /// The trimmed lines among `lines` that call `sheet` in code the Mac compiles: all of it
-    /// except what sits inside an `#if os(iOS)` branch.
     private static func sheetCallsCompiledForMac(in lines: [String]) -> [String] {
+        callsCompiledForMac(of: "sheet", in: lines)
+    }
+
+    /// The trimmed lines among `lines` that call `name` in code the Mac compiles: all of it
+    /// except what sits inside an `#if os(iOS)` branch.
+    private static func callsCompiledForMac(of name: String, in lines: [String]) -> [String] {
         // One entry per open `#if`: whether the branch being read is iOS-only.
         var branches: [Bool] = []
         var calls: [String] = []
@@ -96,18 +150,22 @@ final class AppSheetSourceTests: XCTestCase {
                 }
             } else if line.hasPrefix("#endif") {
                 _ = branches.popLast()
-            } else if !branches.contains(true), callsSheetModifier(line) {
+            } else if !branches.contains(true), containsCall(to: name, in: line) {
                 calls.append(line)
             }
         }
         return calls
     }
 
-    /// Whether a trimmed source line calls a function or modifier named exactly `sheet`.
     private static func callsSheetModifier(_ line: String) -> Bool {
+        containsCall(to: "sheet", in: line)
+    }
+
+    /// Whether a trimmed source line calls a function or modifier named exactly `name`.
+    private static func containsCall(to name: String, in line: String) -> Bool {
         guard !line.hasPrefix("//") else { return false }
         var searchRange = line.startIndex..<line.endIndex
-        while let match = line.range(of: "sheet(", range: searchRange) {
+        while let match = line.range(of: "\(name)(", range: searchRange) {
             let isWholeName: Bool
             if match.lowerBound == line.startIndex {
                 isWholeName = true
