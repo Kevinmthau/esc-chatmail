@@ -10,6 +10,16 @@ struct MacSheetChrome: Equatable {
     /// Whether the sheet gets the Mac's Done bar (`MacSheetDoneBar`).
     let showsDoneBar: Bool
 
+    /// Whether the sheet's width is fitted to its content, which is what makes a sized sheet
+    /// open at its ideal width, and makes its window resizable (`MacSheetChromeModifier`).
+    ///
+    /// False for a sheet that sizes itself, and it must stay false: fitted, the Contacts sheet
+    /// opened 387 points wide instead of 470 and could be resized (measured on macOS 27.2,
+    /// 2026-11-10).
+    var fitsIdealWidth: Bool {
+        size != nil
+    }
+
     private init(size: MacSheetSize?, showsDoneBar: Bool) {
         self.size = size
         self.showsDoneBar = showsDoneBar
