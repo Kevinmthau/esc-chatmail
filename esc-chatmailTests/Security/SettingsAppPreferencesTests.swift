@@ -35,6 +35,18 @@ final class SettingsAppPreferencesTests: XCTestCase {
         XCTAssertTrue(preferences.isSignOutRequested)
     }
 
+    /// The Mac's Sign Out… menu command writes the switch the Settings app
+    /// writes on iOS, so it must land under the same key and read back as on.
+    ///
+    /// Revert-check: writing anything but `true` under `signOutRequestedKey`
+    /// in `SettingsAppPreferences.requestSignOut` makes this fail.
+    func testRequestSignOut_untouchedDefaults_turnsSwitchOn() {
+        preferences.requestSignOut()
+
+        XCTAssertTrue(preferences.isSignOutRequested)
+        XCTAssertEqual(defaults.object(forKey: SettingsAppPreferences.signOutRequestedKey) as? Bool, true)
+    }
+
     func testClearSignOutRequest_afterRequest_removesStoredValue() {
         defaults.set(true, forKey: SettingsAppPreferences.signOutRequestedKey)
 

@@ -10,7 +10,8 @@ import Foundation
 /// and the request stays held (`isConfirmationActive`) until the user answers it.
 ///
 /// The Mac has no Settings app page (`Settings.bundle` is iOS-only), so until the Mac gets its own
-/// Settings scene, nothing raises a sign-out request there.
+/// Settings scene, the app menu's Sign Out… command (`SignOutCommands`) is what raises a sign-out
+/// request there.
 ///
 /// The alert is published as a value. `answer(_:signOut:)` runs exactly one of its handlers; when
 /// the alert leaves the screen any other way, `alertDidDismiss(_:)` clears it and runs neither,

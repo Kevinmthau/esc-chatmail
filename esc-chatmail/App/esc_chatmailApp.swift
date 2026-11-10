@@ -110,6 +110,12 @@ struct esc_chatmailApp: App {
                 handleScenePhaseChange(newPhase)
             }
         }
+        #if os(macOS)
+        // The Mac's only way to sign out until it has a Settings scene.
+        .commands {
+            SignOutCommands()
+        }
+        #endif
     }
 
     private func initializeApp() async {
