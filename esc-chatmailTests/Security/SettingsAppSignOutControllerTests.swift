@@ -111,7 +111,8 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
     // MARK: - Answers
 
     /// Revert-check: removing `clearSignOutRequest()` from the `onCancel`
-    /// handler in `SettingsAppSignOutController.evaluate` makes this fail.
+    /// handler in `SettingsAppSignOutController.presentConfirmation` makes this
+    /// fail.
     func testCancel_clearsRequestWithoutSigningOut() throws {
         requestSignOut()
         controller.evaluate(account: account, isSceneActive: true)
