@@ -17,11 +17,15 @@ struct ChatView: View {
     @State private var replySendIsInFlight = false
     private let chatDependencies: ChatDependencies
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
+    /// How this chat leaves the screen when it closes itself; nil pops it with `dismiss`
+    /// (`exitChat()`).
+    private let onExit: (@MainActor () -> Void)?
 
     @FocusState private var isTextFieldFocused: Bool
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
+    private var windowAppearsActive = WindowAppearsActive()
 
     @MainActor
     init(
@@ -29,11 +33,13 @@ struct ChatView: View {
         chatDependencies: ChatDependencies,
         makeForwardComposeView: @escaping @MainActor (ComposeForwardModeContext) -> ComposeView = { context in
             ComposeView(mode: .forward(context))
-        }
+        },
+        onExit: (@MainActor () -> Void)? = nil
     ) {
         self.conversation = conversation
         self.chatDependencies = chatDependencies
         self.makeForwardComposeView = makeForwardComposeView
+        self.onExit = onExit
         self._viewModel = StateObject(
             wrappedValue: ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
         )
@@ -167,7 +173,7 @@ struct ChatView: View {
         .onChange(of: shouldDismissDrainedConversation, initial: true) { _, shouldDismiss in
             guard shouldDismiss else { return }
             isTextFieldFocused = false
-            dismiss()
+            exitChat()
         }
         .onAppear {
             viewModel.composerDidAppear()
@@ -208,6 +214,7 @@ struct ChatView: View {
     private var isChatActiveAndUncovered: Bool {
         Self.isChatActiveAndUncovered(
             sceneIsActive: scenePhase == .active,
+            windowAppearsActive: windowAppearsActive.value,
             hasDesiredDestination: activeDestination != nil,
             hasPresentedSheet: presentedSheetDestination != nil,
             hasContactAccessPicker: viewModel.contactManager.showingContactAccessPicker,
@@ -216,8 +223,16 @@ struct ChatView: View {
         )
     }
 
+    /// Whether someone can be looking at this chat: it gates marking newly arrived mail read
+    /// (`ChatMessagesCoordinator`) and the transcript's inset shifts.
+    ///
+    /// `windowAppearsActive` is the Mac's half of "active" (`WindowAppearsActive`; always true on
+    /// iOS). On iOS a chat is on screen only while the user is in it. On the Mac it stays in the
+    /// chat column for as long as its row is selected, all day, behind whatever else is open;
+    /// without this term, mail arriving then would be marked read with nobody looking.
     static func isChatActiveAndUncovered(
         sceneIsActive: Bool,
+        windowAppearsActive: Bool,
         hasDesiredDestination: Bool,
         hasPresentedSheet: Bool,
         hasContactAccessPicker: Bool,
@@ -225,6 +240,7 @@ struct ChatView: View {
         hasSendErrorAlert: Bool
     ) -> Bool {
         sceneIsActive &&
+            windowAppearsActive &&
             !hasDesiredDestination &&
             !hasPresentedSheet &&
             !hasContactAccessPicker &&
@@ -298,11 +314,27 @@ struct ChatView: View {
     /// Mid-send the view model holds the tap until the reply is durable
     /// instead of dropping it; the chat then closes as usual.
     private func archiveConversationAndDismiss() {
-        viewModel.performConversationExitAction(.archive) { dismiss() }
+        viewModel.performConversationExitAction(.archive) { exitChat() }
     }
 
     private func reportSpamAndDismiss() {
-        viewModel.performConversationExitAction(.reportSpam) { dismiss() }
+        viewModel.performConversationExitAction(.reportSpam) { exitChat() }
+    }
+
+    /// The one way this chat closes itself (drained, Archive, Report Spam): through `onExit` when
+    /// the presenter gave one, else by popping.
+    ///
+    /// On iOS the chat is pushed on a `NavigationStack` and `dismiss` pops it. In the Mac's chat
+    /// column nothing was pushed: there `dismiss` closes the *window*, and closing the Mac's one
+    /// window quits the app. `MacMailboxView` passes `onExit` and deselects the row instead. Keep
+    /// every self-exit on this function; `ChatViewExitTests` pins that `dismiss()` is called
+    /// nowhere else in this file.
+    private func exitChat() {
+        if let onExit {
+            onExit()
+        } else {
+            dismiss()
+        }
     }
 
     private var activeDestination: ChatDestination? {
