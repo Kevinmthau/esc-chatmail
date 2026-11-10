@@ -604,6 +604,31 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertTrue(viewModel.hasUserEdits)
     }
 
+    /// A new attachment's Core Data object ID is temporary until its first save and then
+    /// changes. That must not read as the user's edit, or an untouched forward that carries
+    /// attachments would be asked about as soon as anything saved the context.
+    ///
+    /// Revert-check: comparing `attachments.map(\.objectID)` in
+    /// `ComposeViewModel.currentDraftContent` makes this fail.
+    func testHasUserEdits_attachmentObjectIDBecomesPermanent_isFalse() throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession())
+        let viewModel = ComposeViewModel(mode: .newMessage, dependencies: deps.makeComposeDependencies())
+        let attachment = deps.viewContext.insertTestObject(Attachment.self)
+        attachment.id = "local_\(UUID().uuidString)"
+        attachment.filename = "photo.jpg"
+        attachment.mimeType = "image/jpeg"
+        attachment.stateRaw = Attachment.State.queued.rawValue
+        viewModel.addAttachment(attachment)
+        defer { viewModel.attachmentManager.clear() }
+        viewModel.setupForMode()
+        XCTAssertTrue(attachment.objectID.isTemporaryID)
+
+        try deps.viewContext.obtainPermanentIDs(for: [attachment])
+
+        XCTAssertFalse(attachment.objectID.isTemporaryID)
+        XCTAssertFalse(viewModel.hasUserEdits)
+    }
+
     /// A forward opens with a subject, and a recovered one with recipients and a note. None of
     /// that is the user's typing in this sheet, so Cancel there must not ask.
     ///

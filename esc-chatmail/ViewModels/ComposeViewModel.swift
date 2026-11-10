@@ -128,7 +128,9 @@ final class ComposeViewModel: ObservableObject {
             subject: subject,
             body: body,
             recipientEmails: recipients.map(\.email),
-            attachmentIDs: attachments.map(\.objectID)
+            // The attachment's own `local_…` ID, not its `objectID`: a new attachment's object
+            // ID is temporary and changes at its first save, which would read as an edit.
+            attachmentIDs: attachments.map { $0.id ?? "" }
         )
     }
 
@@ -137,7 +139,7 @@ final class ComposeViewModel: ObservableObject {
         let subject: String
         let body: String
         let recipientEmails: [String]
-        let attachmentIDs: [NSManagedObjectID]
+        let attachmentIDs: [String]
 
         static let empty = DraftContent(subject: "", body: "", recipientEmails: [], attachmentIDs: [])
     }
