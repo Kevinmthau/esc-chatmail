@@ -233,7 +233,7 @@ Messages shows a "New Message" row in the sidebar and writes the message where t
 
 ## How each PR is checked
 
-- **Compile, both platforms.** The iOS build, and `DESTINATION='platform=macOS' ./Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO`. Delete the unsigned `esc-chatmail.app` afterwards; it is unsandboxed and must never be launched.
+- **Compile, both platforms.** The iOS build, and `DESTINATION='platform=macOS' ./Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO`. Delete the unsigned `MushMail.app` afterwards; it is unsandboxed and must never be launched.
 - **Tests.** The narrowest iOS suites while working and the full iOS suite before merge. New policy suites go into `Mac.xctestplan`, with `Revert-check:` comments.
 - **Look.** Compile the real view files into the off-screen probe where they have no app dependencies (row, bubble shape, composer bar, header), render to PNG, and compare with the screenshot in light and dark.
 - **Not checkable without the app:** the split view with real data, focus, menus, the mark-read gate, trackpad scrolling under the header, and window resizing over a long chat. Kevin checks those in the signed, sandboxed build, and each PR lists what was not seen.

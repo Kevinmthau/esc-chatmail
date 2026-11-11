@@ -270,7 +270,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.esc.inboxchat;
+				"PRODUCT_MODULE_NAME[sdk=macosx*]" = esc_chatmail;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				"PRODUCT_NAME[sdk=macosx*]" = MushMail;
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
@@ -317,7 +319,9 @@
 				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.esc.inboxchat;
+				"PRODUCT_MODULE_NAME[sdk=macosx*]" = esc_chatmail;
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				"PRODUCT_NAME[sdk=macosx*]" = MushMail;
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx";
 				SUPPORTS_MACCATALYST = NO;
@@ -478,6 +482,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/esc-chatmail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/esc-chatmail";
+				"TEST_HOST[sdk=macosx*]" = "$(BUILT_PRODUCTS_DIR)/MushMail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MushMail";
 			};
 			name = Debug;
 		};
@@ -504,6 +509,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/esc-chatmail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/esc-chatmail";
+				"TEST_HOST[sdk=macosx*]" = "$(BUILT_PRODUCTS_DIR)/MushMail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MushMail";
 			};
 			name = Release;
 		};
