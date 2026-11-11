@@ -56,16 +56,33 @@ Everything else in `web/src/features` already exists on iOS: search, filters, ro
 
 ## Decisions
 
-Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and applied (Phase 0, 2026-11-09). Items 3 to 5 are still open.
+Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and applied (Phase 0, 2026-11-09). Kevin decided item 3 on 2026-11-11. Items 4 and 5 are still open.
 
 1. **Minimum macOS version: 26. Decided and applied.** Phase 0 set `MACOSX_DEPLOYMENT_TARGET = 26.0`, and the processed Mac `Info.plist` has `LSMinimumSystemVersion` 26.0. The reasons:
    - At a macOS 15 minimum, the only availability errors are three Liquid Glass calls (`safeAreaBar`, `glassEffect`, `GlassEffectContainer`) in `View+ConversationListChrome.swift`. iOS already gates them behind iOS 26.
    - At 26 those calls compile unchanged, and SwiftUI's own `WebView`/`WebPage` (macOS 26 and later) becomes an option for the WebKit work.
    - This Mac runs macOS 27.
 2. **The bundle ID stays `com.esc.inboxchat`. Decided and applied.** The Mac build is signed under it, with its own Mac profile (see "Not checked in Phase 0, checked 2026-11-10"). A target that builds for several platforms shares one bundle ID by default. Google's docs say macOS apps use an iOS-type OAuth client keyed by bundle ID; the Mac plist takes the same `GOOGLE_*` build settings as the iOS one, and sign-in worked at the first launch.
-3. **Distribution.**
-   - TestFlight for Mac: the app updates itself. The app already sets `ITSAppUsesNonExemptEncryption`, which suggests it is uploaded to App Store Connect.
-   - Or a Developer ID-signed, notarized `.app` that you update by hand.
+3. **Distribution: TestFlight for Mac. Decided 2026-11-11.** The app updates itself, and the Mac build goes on the App Store Connect record the iOS app already has, because the two share a bundle ID. The alternative was a Developer ID-signed, notarized `.app` updated by hand. Nothing has been uploaded yet.
+   - **In place:**
+     - The App Sandbox and the hardened runtime on the target.
+     - In `Info-macOS.plist`: the category (`public.app-category.productivity`), `ITSAppUsesNonExemptEncryption` and the MushMail display name.
+     - A macOS icon, since 2026-11-11. See "Name and icon" in Phase 2.
+   - **A Release archive builds from the command line.** Checked 2026-11-11 with Xcode 27.2, without `-allowProvisioningUpdates`: `xcodebuild archive -project esc-chatmail.xcodeproj -scheme esc-chatmail -configuration Release -destination 'generic/platform=macOS' -archivePath <path>` ended in `ARCHIVE SUCCEEDED`. Read from the archive, which was then deleted and never launched:
+     - The app is universal (`x86_64` and `arm64`), both built for macOS 26.0.
+     - It is signed "Apple Development" with the Mac team profile, and `codesign --verify --deep --strict` passes. The signature has the hardened runtime and the five entitlements of the Debug build listed under Phase 0, the App Sandbox among them, and no `get-task-allow`.
+     - It has the icon (`AppIcon.icns`, `Assets.car`, and both icon keys in `Info.plist`), `PrivacyInfo.xcprivacy`, and a dSYM.
+     - Its version is 1.0 (1), from the project.
+   - **Missing for an upload, on this Mac:** an Apple Distribution certificate, a Mac installer certificate and a Mac App Store profile for `com.esc.inboxchat`. The keychain has one signing identity, Apple Development, and the only Mac profile for the app is the development one. Nobody exported or uploaded the archive, so whether App Store Connect accepts the build has not been tried.
+   - **How iOS builds are numbered and uploaded: asked Kevin, not answered yet.** What the repository and GitHub show:
+     - The project says `CURRENT_PROJECT_VERSION = 1`, the installed iOS TestFlight build is 1.0 (513), and the repo has no upload tooling.
+     - An Xcode Cloud workflow named Default runs an "Archive - iOS" action on pushes to `main`: its check run is on four of the six merge commits on `main` from PR 376 to PR 381 (2026-11-09 to 2026-11-11), and not on PR 381 itself. This Mac has no Xcode archive of any app.
+     - So the likely answer is that Xcode Cloud archives each merge, numbers it and sends it to TestFlight. If so, the Mac build can go up the same way, from a macOS archive action in that workflow, with Xcode Cloud doing the signing.
+   - **Kevin's steps:**
+     - Add the macOS platform to the app's record in App Store Connect.
+     - Upload the first Mac build. Either add a macOS archive action with TestFlight delivery to the Xcode Cloud workflow, or archive in Xcode for Any Mac and use Distribute App, which lets Xcode create the profile and the two certificates above.
+     - Install it from TestFlight on the Mac, and say what should happen to the copy described next.
+   - **To settle:** what happens to `/Applications/MushMail.app` on this Mac. It is the iOS TestFlight build, running as an iPhone app, under the same bundle ID and in the same container. Whether TestFlight replaces it with the native build has not been seen.
 4. **When to delete `web/`.** Recommended: after Phase 3. Stop adding web features now, and fix the web app only if it breaks.
 5. **The From: alias picker on the Mac.** If you use it on the web, it belongs in Phase 3. iOS gets it too, because the platforms share views.
 
@@ -107,7 +124,7 @@ A session applied this phase with explicit permission to edit `project.pbxproj`;
   - No build variable is left unresolved, and none of the iOS-only keys is present.
   - The one registered URL scheme is the reversed `GOOGLE_CLIENT_ID`, and it is the scheme of `GOOGLE_REDIRECT_URI`.
   - `LSMinimumSystemVersion` is 26.0, and `CFBundleDisplayName` is MushMail.
-  - There is no icon key (see "Name and icon" in Phase 2).
+  - There was no icon key on that day. The icon came on 2026-11-11 (see "Name and icon" in Phase 2).
 
 At the end of Phase 0 the Mac build was red. It stayed red until Phase 1 landed, and nobody launched it before PR C.
 
@@ -417,7 +434,26 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Open attachments in their default app (`NSWorkspace`).
 - **Closing the window.** Decide whether the app keeps running and syncing like Mail, where clicking the Dock icon reopens the window, or quits. Either way, sync follows the app's lifetime, not the window's.
   - **Changed 2026-11-10, as a side effect of the single `Window` scene:** the app now quits when its window closes. SwiftUI does that for an app whose only scene is a `Window`; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. The decision is still open: keeping the app running needs an app delegate that reopens the window, or a second scene.
-- **Name and icon.** The Mac bundle and its menu name still come from the target name (`esc-chatmail`). `AppIcon` has only the iOS 1024-pixel image, so the Mac app shows a generic icon. Give the Mac build the MushMail name and a macOS icon.
+- **Name and icon.** The icon is in place. The name is not.
+  - **Icon (2026-11-11).** `AppIcon` has the ten macOS slots (16, 32, 128, 256 and 512 points, at 1x and 2x) beside the iOS image, whose entries are unchanged.
+    - **The files.** Seven `mac-icon-<pixels>.png` files fill the ten slots. `Scripts/make-mac-app-icon.swift` makes them from the iOS image: run it again when that image changes, and do not edit them by hand.
+    - **The shape.** An iOS icon is a full square that the system masks. The Mac files draw the same image in the macOS template's shape: a rounded square 824 pixels wide on a 1024-pixel canvas, with the template's drop shadow. The script's header has the numbers.
+    - **What macOS draws.** macOS 26 and later redraw every app icon in the system's own shape, with the system's shadow. Measured on macOS 27.2 with `NSWorkspace.icon(forFile:)`, which launches nothing: at 16, 32, 64, 128, 256, 512 and 1024 pixels the Mac build's icon has the outline every other app's has, with the whole image inside it. At 1024 pixels it is the installed iOS build's icon to within 23 of 255 in any channel; the smaller sizes differ more, in sharpness.
+    - **Keep the scaling exact.** The system first checks each size against the template, and draws a size that does not match small, on a gray plate. A 16-pixel image scaled down with Core Graphics' high-quality interpolation got the plate. The same image scaled by block means, which is what the script does, did not. Slack's icon gets the plate at 16 and 32 pixels.
+    - **Checked.**
+      - iOS: the asset catalog compiles to the same bytes with and without the Mac entries (`Assets.car` and the two loose `AppIcon` files, for the simulator and for a device), and a simulator build's `Info.plist` is unchanged.
+      - Mac: the unsigned compile check's product has `AppIcon.icns`, the ten sizes in `Assets.car`, and `CFBundleIconFile` and `CFBundleIconName` set to `AppIcon`. Without the Mac entries, `actool` wrote no file at all from this catalog for macOS.
+    - **Not done:** small sizes drawn by hand, and a Liquid Glass icon (an Icon Composer `.icon` file). At 16 pixels "Esc" is a smudge. Both need a designer's choices, not a script.
+  - **Name: not changed, waiting for Kevin's OK** (it edits `project.pbxproj`). The Mac bundle is still `esc-chatmail.app` and its menu name is still `esc-chatmail`, because `PRODUCT_NAME` is the target name. Finder shows `esc-chatmail` too: `CFBundleDisplayName` is MushMail, but `FileManager.displayName(atPath:)` returned the file's name for the archived app.
+    - **The change:** three settings, each scoped to `[sdk=macosx*]`, in Debug and Release.
+      - App target: `PRODUCT_NAME[sdk=macosx*] = MushMail`.
+      - App target: `PRODUCT_MODULE_NAME[sdk=macosx*] = esc_chatmail`. The module name follows the product name unless it is set, and 333 test files import `esc_chatmail`.
+      - Test target: `TEST_HOST[sdk=macosx*] = $(BUILT_PRODUCTS_DIR)/MushMail.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MushMail`. The existing `TEST_HOST` line spells out `esc-chatmail.app` and its executable, so the Mac needs its own. The iOS line stays as it is.
+    - **Measured 2026-11-11 in a copy of the project outside the repo:**
+      - `xcodebuild -showBuildSettings` for both targets, Debug and Release: no iOS setting differs, for the simulator or a device. On macOS only names and paths differ (`MushMail.app`, the executable `MushMail`, the dSYM, the test host). The module name, the bundle ID and every signing setting stay.
+      - Without the `PRODUCT_MODULE_NAME` line the Mac module becomes `MushMail`.
+      - An unsigned Mac `build-for-testing` of the copy succeeded. Its product was `MushMail.app` with `CFBundleName` MushMail, Finder's name for it was MushMail, and the tests compiled against `esc_chatmail`.
+    - **What follows the name:** `Scripts/run-tests.sh` reads the host from `TEST_HOST`, so it needs no change. CLAUDE.md's "delete its `Build/Products/Debug/esc-chatmail.app`" does.
 - **Optional:**
   - An unread count on the Dock icon or in a `MenuBarExtra`.
   - New-mail notifications. Neither iOS nor the web app has them today.
