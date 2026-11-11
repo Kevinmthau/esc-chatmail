@@ -473,7 +473,10 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - iOS: `xcodebuild test -showBuildSettings -json`, for the simulator and for a device, in Debug and Release, prints the same bytes before and after. That covers every setting of both targets.
       - Mac: the same comparison shows only names and paths changing (`MushMail.app`, the executable, the dSYM, the test host). The module name, the bundle ID and every signing setting stay.
       - The unsigned Mac compile check (`codex-build.sh --for-testing`) succeeds. Its product is `MushMail.app` with the tests inside it, Finder's name for it is MushMail, and both modules compile as `esc_chatmail` and `esc_chatmailTests`.
-    - **Not run: the Mac test plan.** It launches the app as its test host, and nothing launched a Mac build that day. `Scripts/run-tests.sh` reads the host's path from `TEST_HOST`, so it follows the new name without a change.
+    - **The Mac test plan: run at the review, before the merge (2026-11-11).** It was not run when the name changed, because it launches the app as its test host and nothing launched a Mac build then. `Scripts/run-tests.sh` reads the host's path from `TEST_HOST`, so it followed the new name without a change.
+      - `DESTINATION='platform=macOS' ./Scripts/codex-test.sh` on this branch with `main` merged in (PRs 384 and 385): 247 tests in 22 suites, 0 failures.
+      - The host was the signed `MushMail.app`, which passed the script's sandbox check, and its process was `MushMail`.
+      - Only the test host was launched. The app itself has still not been launched under the new name.
 - **Optional:**
   - An unread count on the Dock icon or in a `MenuBarExtra`.
   - New-mail notifications. Neither iOS nor the web app has them today.
