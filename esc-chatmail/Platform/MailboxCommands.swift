@@ -7,13 +7,17 @@ import SwiftUI
 /// New Message takes Command-N in place of File > New Window. The app has one window on
 /// purpose: `ChatReplyComposerDirectory` lets only the newest composer write a conversation's
 /// draft, so two windows on one chat would fight over it.
+///
+/// Chosen while the focused window has a sheet attached, New Message beeps and opens nothing
+/// (`MailboxMenuPolicy.newMessageChoice`). Search and Get New Mail are not checked: neither
+/// presents anything.
 struct MailboxCommands: Commands {
     @FocusedValue(\.mailboxMenuActions) private var actions
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Message") {
-                actions?.newMessage()
+                actions?.chooseNewMessage()
             }
             .keyboardShortcut("n", modifiers: .command)
             .disabled(actions == nil)
