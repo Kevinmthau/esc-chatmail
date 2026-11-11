@@ -19,7 +19,8 @@ import WebKit
 /// `acceptsFirstMouse(for:)` is deliberately not overridden: in an inactive Mac window the first
 /// click on the full reader only activates the window, as in most Mac apps, so a click meant to
 /// bring the window forward cannot open a link. Returning true would let that click reach the
-/// page as `.linkActivated` (spike, 2026-11-09). This is an open product question in PR E.
+/// page as `.linkActivated` (spike, 2026-11-09). Decided 2026-11-11: it stays this way
+/// (`docs/mac-app-plan.md`, decision 8).
 final class LayoutAwareWKWebView: WKWebView {
     var onLayoutChange: ((WKWebView) -> Void)?
 
