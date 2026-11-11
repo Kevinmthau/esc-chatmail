@@ -168,6 +168,13 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
 - **Mail that arrives while the app is in the background stays unread after you come back** to the chat it is in, until you select another row and return. The gate only stops the marking; nothing marks on return. iOS behaves the same when you return to an open chat. Decide in PR 5 whether returning should mark it.
 - **Arrow keys open, and mark read, every conversation they pass,** because that is what selecting does. If that is wrong for mail, the fix is a short pause before a newly selected chat opens.
 
+**Fixed after the review of PR 381 (2026-11-11).** Two findings from that review. Neither fix has been seen in the app.
+
+- **The sidebar could be dragged closed, with no control to reopen it.** Removing the toggle button does not stop a drag of the divider from closing the sidebar. `MacMailboxView` now owns the split view's column visibility and puts both columns back when the split view reports the sidebar closed (`MacSidebarVisibilityPolicy`).
+  - Measured in a throwaway off-screen program on macOS 27.2, with a mouse drag of the divider sent to the split view. With no binding, and with `.constant(.all)`, the sidebar closed and stayed closed. With the reset it closed and reopened four times while the drag was held past the edge, and it was open when the drag ended.
+  - That program's window ignored the column's minimum width, as the spike's did, so where the divider comes to rest in the app is not known.
+- **New Message from the menu while a sheet is up.** Command-N under the reader, Participants or the Sign Out… confirmation asked for a second sheet on the same window. A Mac window shows one sheet at a time, so it would wait behind the first and appear when that one closed. The command now beeps and opens nothing while the focused window has a sheet attached (`MailboxMenuPolicy`), the rule the Sign Out… command already follows. Search and Get New Mail are unchanged.
+
 **Not seen: check in the signed, sandboxed app.**
 
 - The whole window: column widths, the toolbar, the empty and multiple-selection states.
@@ -177,6 +184,8 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
 - The three menu commands, and whether `.searchable` adds a Find command of its own beside Search.
 - Typing in the search field with a long chat open: the transcript should not stutter.
 - Whether the sidebar's width holds (the spike's hand-made window ignored it).
+- Dragging the sidebar's divider to the window's left edge: the sidebar should be open when you let go. It may close and reopen while you hold the drag there.
+- Command-N with the reader or Participants open: a beep, and no New Message sheet when that sheet closes.
 
 ## PR 2: the sidebar's look
 
