@@ -82,9 +82,13 @@ struct esc_chatmailApp: App {
         // one chat would fight over it; a `Window` scene cannot be opened twice.
         //
         // It is also the app's only scene, and SwiftUI quits an app whose one
-        // `Window` closes. Quitting goes through `MacAppDelegate`, which holds
-        // it for a send in flight. Whether the app should instead keep running
-        // and syncing with its window closed, as Mail does, is still open
+        // `Window` closes. That is the decided behavior (2026-11-11), not a
+        // side effect to fix: the app does not keep running and syncing with
+        // its window closed, as Mail does. Quitting goes through
+        // `MacAppDelegate`, which holds it for a send in flight. A
+        // `WindowGroup` here would leave the app running with no window,
+        // unless the delegate also returned true from
+        // `applicationShouldTerminateAfterLastWindowClosed(_:)`
         // (`docs/mac-app-plan.md`, "Closing the window").
         Window("MushMail", id: Self.mainWindowID) {
             rootContent
