@@ -45,7 +45,7 @@ Keep these, even though a search for "web" or "netlify" finds them:
 
 The parity bar is what the web app does that iOS doesn't, beyond running on a desktop:
 
-- **A From: alias picker in compose** (`web/src/features/compose/AliasPicker.tsx`). It appears when the account has more than one alias it can send from. iOS compose has no equivalent.
+- **A From: alias picker in compose** (`web/src/features/compose/AliasPicker.tsx`). It appears when the account has more than one alias it can send from. iOS compose has no equivalent, and the Mac will not get one (decision 5).
 - **Desktop input:**
   - Enter sends, and Shift-Enter adds a new line.
   - In selection mode, arrow keys move through the list and Escape leaves it.
@@ -56,7 +56,7 @@ Everything else in `web/src/features` already exists on iOS: search, filters, ro
 
 ## Decisions
 
-Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and applied (Phase 0, 2026-11-09). Kevin decided item 3 on 2026-11-11. Items 4 and 5 are still open.
+Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and applied (Phase 0, 2026-11-09). Kevin decided items 3 and 5 to 8 on 2026-11-11. Item 4 is still open.
 
 1. **Minimum macOS version: 26. Decided and applied.** Phase 0 set `MACOSX_DEPLOYMENT_TARGET = 26.0`, and the processed Mac `Info.plist` has `LSMinimumSystemVersion` 26.0. The reasons:
    - At a macOS 15 minimum, the only availability errors are three Liquid Glass calls (`safeAreaBar`, `glassEffect`, `GlassEffectContainer`) in `View+ConversationListChrome.swift`. iOS already gates them behind iOS 26.
@@ -90,7 +90,12 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
      - Install it from TestFlight on the Mac, and say what should happen to the copy described next.
    - **To settle:** what happens to `/Applications/MushMail.app` on this Mac. It is the iOS TestFlight build, running as an iPhone app, under the same bundle ID and in the same container. Since the rename the native build has the same file name too. Whether TestFlight replaces it with the native build has not been seen.
 4. **When to delete `web/`.** Recommended: after Phase 3. Stop adding web features now, and fix the web app only if it breaks.
-5. **The From: alias picker on the Mac.** If you use it on the web, it belongs in Phase 3. iOS gets it too, because the platforms share views.
+5. **The From: alias picker: not built. Decided 2026-11-11.** Kevin asked for whichever option was simpler, and that is no picker on either platform.
+   - The Mac sends as iOS does today. A new message goes out from the signed-in Gmail address. A reply goes out from the send-as alias the mail was addressed to (`ReplyFromAddressResolver`).
+   - The picker is the one web feature that goes away with `web/`. Revisit it only if the two weeks of daily use in Phase 3 show it is missed.
+6. **Older mail: none. Decided 2026-11-11.** A new Mac install starts at the install time, as iOS does, with about five minutes of mail. Nothing loads older mail.
+7. **Closing the window quits the app. Decided 2026-11-11.** The alternative was to keep running and syncing like Mail. See "Closing the window" in Phase 2.
+8. **The first click in an inactive window only activates it. Decided 2026-11-11.** A click that brings the window forward does not follow a link in the reader. See the gotchas under PR E.
 
 Before Phase 0 there was a stopgap: Xcode listed *My Mac (Designed for iPad)*, which ran the unmodified iOS app in a window. Xcode drops that destination once a target supports macOS natively, so the stopgap went away with Phase 0.
 
@@ -341,7 +346,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - **The offscreen pool window counts as hidden.** To macOS, a window that is off every screen isn't visible, so WebKit reports the warm page as `hidden`. On iOS, `OffscreenWebViewHost` relies on its offscreen window to keep the page painting.
     - `finalizeWarm`'s snapshot still returns, and the page turns `visible` once adopted.
     - The spike couldn't see whether the first frame after adoption flashes. If it does, `FullEmailWebViewAdoptionPolicy` can turn adoption off on the Mac.
-  - **In an inactive window, the first click only activates the window.** A click on a link reached the page as `.linkActivated` only after the web view returned true from `acceptsFirstMouse(for:)`. Decide which the Mac reader should do.
+  - **In an inactive window, the first click only activates the window.** A click on a link reached the page as `.linkActivated` only after the web view returned true from `acceptsFirstMouse(for:)`. **Decided 2026-11-11 (decision 8):** the reader keeps the default, and `LayoutAwareWKWebView` does not override `acceptsFirstMouse(for:)`.
   - **`WebPage` blockers:**
     - A `WebPage` with no `WebView` lays out 1024 px wide and ignores dark mode, and nothing can resize it. So snapshots and warm pages have to be hosted in a sized `WebView` anyway. Its `exported(as: .image(...))` returns PNG data whose `NSImage` reports pixels as points.
     - On macOS, `ScrollInputKind` has no members, so `webViewScrollInputBehavior` can't turn off wheel scrolling. `.scrollDisabled(true)` doesn't either. Only `.allowsHitTesting(false)` works.
@@ -391,7 +396,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 - **Sign in.** It worked: 30 s after launch the app created the account and fetched its 4 aliases and 15 labels.
 - **Initial sync.** 5 messages in 4 conversations, with 0 failures, in 0.9 s.
   - Initial sync starts at the install time, as on iOS. A new Mac install therefore begins with only the mail from about five minutes before first launch.
-  - Open question: should a desktop app that replaces the web app load older mail?
+  - **Decided 2026-11-11 (decision 6):** it stays that way. The open question was whether a desktop app that replaces the web app should load older mail.
 - **Open a chat.** The log shows a mark-read queued for one message, which is what opening a chat does. The incremental sync after it ran clean, and reconciliation found no drift.
 - **Errors.** The app's own log had none, and there was no crash report.
 - **Sheets: see the note under PR D.** "Found 2026-11-10: that is wrong inside a sheet" records a failure this section does not: a chat's Participants sheet came up as a strip 80 points tall with no Done button, and blocked the window and Quit until the app was force-quit. PR 378 read that from the system log, not from the screen, and the app's own log would not show it. It is not established that it happened at this launch.
@@ -438,8 +443,15 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Drag attachments out of a message.
   - Add Save Attachment… (`fileExporter`).
   - Open attachments in their default app (`NSWorkspace`).
-- **Closing the window.** Decide whether the app keeps running and syncing like Mail, where clicking the Dock icon reopens the window, or quits. Either way, sync follows the app's lifetime, not the window's.
-  - **Changed 2026-11-10, as a side effect of the single `Window` scene:** the app now quits when its window closes. SwiftUI does that for an app whose only scene is a `Window`; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. The decision is still open: keeping the app running needs an app delegate that reopens the window, or a second scene.
+- **Closing the window quits the app. Decided 2026-11-11 (decision 7).** The alternative was to keep running and syncing like Mail, where clicking the Dock icon reopens the window. Sync follows the app's lifetime, so it stops when the window closes.
+  - **How.** The app's only scene is a `Window` (built 2026-11-10), and SwiftUI quits such an app when its window closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. Nothing else was added for it.
+  - **Measured 2026-11-11 in a stand-in program** on macOS 27.2, not in the app:
+    - Closing the window of a one-`Window` app called `applicationShouldTerminate` on the delegate installed with `@NSApplicationDelegateAdaptor`, and the process exited.
+    - It still quit with a borderless window that is never ordered in, the shape of `OffscreenWebViewHost`'s window.
+    - It still quit with a `Settings` scene declared and not open.
+    - A `WindowGroup` app was still running three seconds after its window closed. It quit once its delegate returned true from `applicationShouldTerminateAfterLastWindowClosed(_:)`.
+    - Not measured: closing the main window while a Settings window is open.
+  - Keep the primary scene a single `Window`. If it ever becomes a `WindowGroup`, add that delegate method, or the app is left running with no window.
 - **Name and icon.** Both are in place.
   - **Icon (2026-11-11).** `AppIcon` has the ten macOS slots (16, 32, 128, 256 and 512 points, at 1x and 2x) beside the iOS image, whose entries are unchanged.
     - **The files.** Seven `mac-icon-<pixels>.png` files fill the ten slots. `Scripts/make-mac-app-icon.swift` makes them from the iOS image: run it again when that image changes, and do not edit them by hand.
@@ -469,7 +481,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 
 ## Phase 3: parity, then daily use
 
-- **Close the parity gaps:** the From: alias picker if decision 5 says yes, and the desktop input behaviors.
+- **Close the parity gaps:** the desktop input behaviors. The From: alias picker is not built (decision 5).
 - **Re-rank the iOS items in `docs/scalability-review.md`.** They now apply to the Mac too, and a desktop app that stays open all day runs the 60 s sync loop for hours.
 - **Use the Mac app as your only desktop mail client for about two weeks.** Leave the web app online but unused.
 
