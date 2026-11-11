@@ -197,6 +197,18 @@ final class ConversationListViewModel: ObservableObject {
         selectionService.reportSpamSelectedConversations()
     }
 
+    /// Archives the named rows without touching select mode: the Mac sidebar's Delete key,
+    /// context menu and swipe (`ConversationSelectionService.archiveConversations(withIDs:)`).
+    func archiveConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
+        selectionService.archiveConversations(withIDs: conversationIDs)
+    }
+
+    /// Reports the named rows as spam without touching select mode. See
+    /// `archiveConversations(withIDs:)`.
+    func reportSpamConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
+        selectionService.reportSpamConversations(withIDs: conversationIDs)
+    }
+
     // MARK: - List Store Updates
 
     func applyConversationChanges(

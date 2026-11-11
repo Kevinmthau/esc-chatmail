@@ -82,6 +82,7 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         XCTAssertFalse(
             ChatView.isChatActiveAndUncovered(
                 sceneIsActive: true,
+                windowAppearsActive: true,
                 hasDesiredDestination: false,
                 hasPresentedSheet: true,
                 hasContactAccessPicker: false,
@@ -92,6 +93,26 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         XCTAssertTrue(
             ChatView.isChatActiveAndUncovered(
                 sceneIsActive: true,
+                windowAppearsActive: true,
+                hasDesiredDestination: false,
+                hasPresentedSheet: false,
+                hasContactAccessPicker: false,
+                hasContactActionAlert: false,
+                hasSendErrorAlert: false
+            )
+        )
+    }
+
+    /// A Mac chat stays in the window's chat column behind other apps. Mail arriving then must
+    /// not be marked read, so an inactive window counts as a covered chat.
+    ///
+    /// Revert-check: removing `windowAppearsActive &&` from
+    /// `ChatView.isChatActiveAndUncovered` makes this fail.
+    func testChatVisibility_windowNotActive_isNotActiveAndUncovered() {
+        XCTAssertFalse(
+            ChatView.isChatActiveAndUncovered(
+                sceneIsActive: true,
+                windowAppearsActive: false,
                 hasDesiredDestination: false,
                 hasPresentedSheet: false,
                 hasContactAccessPicker: false,

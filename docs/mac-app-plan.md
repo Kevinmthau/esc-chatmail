@@ -386,9 +386,11 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 ## Phase 2: make it a Mac app
 
 - **Windows.** Show the main UI in a single window. Use either a `Window` scene, or a `WindowGroup` where `CommandGroup(replacing: .newItem)` turns File → New Window into New Message (Cmd-N).
+  - **Built 2026-11-10** as a `Window` scene, with Cmd-N as New Message (`docs/mac-imessage-ui-plan.md`, PR 1). Compiled and unit-tested; not yet seen in the app.
   - Why one window: `ChatReplyComposerDirectory` lets only the most recently shown composer write a conversation's draft, so two windows on the same chat would fight over its draft.
   - Revisit multiple windows after reviewing that rule.
 - **Layout.** On the Mac, use a `NavigationSplitView`: the conversation list (search and filters) in the sidebar, the chat in the detail column. Branch at the root view.
+  - **Built 2026-11-10** (`MailboxRootView`, `MacMailboxView`). The detailed plan, and the restyle to match Messages that follows it, are in `docs/mac-imessage-ui-plan.md`.
   - Keep the iPhone's `NavigationStack` as it is. The transcript's anchoring and reveal logic was tuned inside it.
 - **Settings.** A `Settings` scene replaces `Settings.bundle`, which has three rows: account email, a Sign Out toggle, and the version.
   - Sign Out calls the existing `AuthSession.signOut`. Don't add a seventh AuthSession path.
@@ -414,6 +416,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Add Save Attachment… (`fileExporter`).
   - Open attachments in their default app (`NSWorkspace`).
 - **Closing the window.** Decide whether the app keeps running and syncing like Mail, where clicking the Dock icon reopens the window, or quits. Either way, sync follows the app's lifetime, not the window's.
+  - **Changed 2026-11-10, as a side effect of the single `Window` scene:** the app now quits when its window closes. SwiftUI does that for an app whose only scene is a `Window`; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. The decision is still open: keeping the app running needs an app delegate that reopens the window, or a second scene.
 - **Name and icon.** The Mac bundle and its menu name still come from the target name (`esc-chatmail`). `AppIcon` has only the iOS 1024-pixel image, so the Mac app shows a generic icon. Give the Mac build the MushMail name and a macOS icon.
 - **Optional:**
   - An unread count on the Dock icon or in a `MenuBarExtra`.

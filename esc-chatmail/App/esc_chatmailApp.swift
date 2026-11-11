@@ -76,46 +76,73 @@ struct esc_chatmailApp: App {
     }
     
     var body: some Scene {
-        WindowGroup {
-            Group {
-                if isInitialized {
-                    ContentView()
-                        .environment(\.managedObjectContext, dependencies.viewContext)
-                        .environmentObject(dependencies)
-                        .environmentObject(dependencies.authSession) // backward compatibility
-                        .onOpenURL { url in
-                            GIDSignIn.sharedInstance.handle(url)
-                        }
-                        .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
-                            handleAuthStateChange(isAuthenticated)
-                        }
-                        .onChange(of: dependencies.authSession.requiresReauthentication) { _, isRequired in
-                            handleReauthenticationRequirementChange(isRequired)
-                        }
-                } else {
-                    AppLoadingView()
-                        .task {
-                            logStartupTiming("AppLoadingView.task started")
-                            await initializeApp()
-                        }
-                }
-            }
-            // Attached to the container, not ContentView: a scene-phase change
-            // during cold-start initialization (AppLoadingView showing) must
-            // still reach the handler. Attached inside `isInitialized`, a
-            // backgrounding during init was dropped entirely — no background
-            // task was armed for that session, and `onChange` never delivers
-            // the current phase retroactively when ContentView later appears.
-            .onChange(of: scenePhase) { oldPhase, newPhase in
-                handleScenePhaseChange(newPhase)
-            }
-        }
         #if os(macOS)
-        // The Mac's only way to sign out until it has a Settings scene.
+        // One window, not a window group. `ChatReplyComposerDirectory` lets only
+        // the newest composer write a conversation's draft, so two windows on
+        // one chat would fight over it; a `Window` scene cannot be opened twice.
+        //
+        // It is also the app's only scene, and SwiftUI quits an app whose one
+        // `Window` closes. Quitting goes through `MacAppDelegate`, which holds
+        // it for a send in flight. Whether the app should instead keep running
+        // and syncing with its window closed, as Mail does, is still open
+        // (`docs/mac-app-plan.md`, "Closing the window").
+        Window("MushMail", id: Self.mainWindowID) {
+            rootContent
+                // Room for the sidebar's narrowest width beside a readable chat.
+                .frame(minWidth: 700, minHeight: 480)
+        }
+        .defaultSize(width: 900, height: 860)
         .commands {
+            // The Mac's only way to sign out until it has a Settings scene.
             SignOutCommands()
+            MailboxCommands()
+        }
+        #else
+        WindowGroup {
+            rootContent
         }
         #endif
+    }
+
+    #if os(macOS)
+    private static let mainWindowID = "main"
+    #endif
+
+    /// The window's content on both platforms: the loading view until
+    /// `initializeApp()` finishes, then `ContentView`.
+    private var rootContent: some View {
+        Group {
+            if isInitialized {
+                ContentView()
+                    .environment(\.managedObjectContext, dependencies.viewContext)
+                    .environmentObject(dependencies)
+                    .environmentObject(dependencies.authSession) // backward compatibility
+                    .onOpenURL { url in
+                        GIDSignIn.sharedInstance.handle(url)
+                    }
+                    .onChange(of: dependencies.authSession.isAuthenticated) { _, isAuthenticated in
+                        handleAuthStateChange(isAuthenticated)
+                    }
+                    .onChange(of: dependencies.authSession.requiresReauthentication) { _, isRequired in
+                        handleReauthenticationRequirementChange(isRequired)
+                    }
+            } else {
+                AppLoadingView()
+                    .task {
+                        logStartupTiming("AppLoadingView.task started")
+                        await initializeApp()
+                    }
+            }
+        }
+        // Attached to the container, not ContentView: a scene-phase change
+        // during cold-start initialization (AppLoadingView showing) must
+        // still reach the handler. Attached inside `isInitialized`, a
+        // backgrounding during init was dropped entirely — no background
+        // task was armed for that session, and `onChange` never delivers
+        // the current phase retroactively when ContentView later appears.
+        .onChange(of: scenePhase) { oldPhase, newPhase in
+            handleScenePhaseChange(newPhase)
+        }
     }
 
     private func initializeApp() async {
