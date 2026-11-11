@@ -95,7 +95,7 @@ struct MacMailboxView: View {
         .onChange(of: visibleConversationIDs) { _, visibleIDs in
             dropUnopenableSelection(visibleIDs: Set(visibleIDs))
         }
-        .sheet(isPresented: $showingComposer, onDismiss: handleComposerDismiss) {
+        .appSheet(isPresented: $showingComposer, mac: .sized(.compose), onDismiss: handleComposerDismiss) {
             ComposeView(
                 mode: .newMessage,
                 presentationStyle: .iMessage,
@@ -104,7 +104,6 @@ struct MacMailboxView: View {
                     openConversationIfAvailable(conversationReference)
                 }
             )
-            .macSheetSize(.compose)
         }
         .conversationListLifecycle(
             viewModel: viewModel,
