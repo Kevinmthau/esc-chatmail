@@ -27,7 +27,8 @@ struct MacMailboxView: View {
     @State private var showingComposer = false
     @State private var pendingConversationReference: ConversationReference?
     /// Which columns the split view shows. Both, except for the one update in which the split
-    /// view reports its sidebar closed (`MacSidebarVisibilityPolicy`).
+    /// view reports its sidebar closed (`MacSidebarVisibilityPolicy`), which the user can no
+    /// longer make it do (`MacSidebarCollapseGuardView`).
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     @MainActor
@@ -63,11 +64,18 @@ struct MacMailboxView: View {
                 onReportSpam: { reportSpam($0) },
                 onNewMessage: { showingComposer = true }
             )
-            .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 480)
             // Messages has no Hide Sidebar button, and with one column hidden there would be
-            // no list to pick a chat from. Removing the button does not keep the sidebar open:
-            // the `columnVisibility` reset below does.
+            // no list to pick a chat from. Removing the button does not keep the sidebar open.
+            // This does: the divider stops at the column's minimum width, where without it a
+            // drag on toward the window's edge closed the sidebar
+            // (`MacSidebarCollapseGuardView`).
+            .macSplitViewColumnCannotCollapse()
             .toolbar(removing: .sidebarToggle)
+            // The column's last modifier, on purpose. Applied before `toolbar(removing:)`, the
+            // width was ignored: the sidebar came up 144 points wide with a 140-point minimum
+            // (measured 2026-11-11 in a throwaway program on macOS 27.2, with these modifiers in
+            // both orders). `MacMailboxViewSourceTests` pins the order.
+            .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 480)
         } detail: {
             MacMailboxDetail(
                 selection: selection,
@@ -99,8 +107,9 @@ struct MacMailboxView: View {
         .onChange(of: visibleConversationIDs) { _, visibleIDs in
             dropUnopenableSelection(visibleIDs: Set(visibleIDs))
         }
-        // A drag of the divider to the window's edge closes the sidebar, button or no button.
-        // Put it back. Not `.constant(.all)`: that binding was measured not to hold it open.
+        // The fallback behind `macSplitViewColumnCannotCollapse()`: if the sidebar is closed all
+        // the same, put it back. Not `.constant(.all)`: that binding was measured not to hold it
+        // open.
         .onChange(of: columnVisibility) { _, reported in
             if let correction = MacSidebarVisibilityPolicy.correction(for: reported) {
                 columnVisibility = correction
