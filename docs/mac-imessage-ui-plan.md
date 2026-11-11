@@ -157,6 +157,10 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
 - In an off-screen stand-in for the chat column (the spike's harness, not the app's views):
   - A chat swapped out by a selection change gets its `onDisappear`, which is what saves its draft and withdraws its composer. The new chat's `onAppear` runs first, then the old one's `onDisappear`.
   - 20 unrelated changes in the parent re-evaluated the column 20 times without the `Equatable` conformance, and not once with it.
+- **Rebased 2026-11-11** onto `main` at `01fa227a`, which had gained the sheet presenter (PRs 379 and 380).
+  - One change was needed: the New Message sheet in `MacMailboxView` is now presented with `appSheet(isPresented:mac:)`, as `main` requires of every sheet the Mac compiles. Before that the Mac build did not compile, because `macSheetSize(_:)` is gone.
+  - Run again on the rebased tree: the full iOS suite, 4,880 tests, and `Mac.xctestplan` in the signed, sandboxed test host, 237 tests in 19 suites. All passed.
+  - The revert-checks above were not repeated, and the app has still not been launched with this.
 
 **Found by reading, not fixed here.**
 
