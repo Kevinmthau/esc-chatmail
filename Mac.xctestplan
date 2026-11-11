@@ -38,6 +38,7 @@
         "IncrementalSyncCursorTests",
         "KeychainServiceTests",
         "LayoutAwareWKWebViewTests",
+        "MacSidebarCollapseGuardViewTests",
         "MacSidebarSelectionPolicyTests",
         "MacSidebarVisibilityPolicyTests",
         "MacUnitTestHostPolicyTests",

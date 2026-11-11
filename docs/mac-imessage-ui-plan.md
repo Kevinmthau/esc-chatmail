@@ -102,7 +102,7 @@ Each has a recommendation; none blocks the spike or PR 1.
 - **Glass and blur.** The captures draw none. Not seen: the glass behind the avatar's toolbar item and whether `sharedBackgroundVisibility(.hidden)` removes it, the capsule's glass, the scroll edge effect under the header, the sidebar's material behind an `.inset` list (it may need `scrollContentBackground(.hidden)`).
 - **A real key window.** "Focused" was simulated by setting the row's `isEmphasized`, the way AppKit does. Menus and `Commands` were not run.
 - **A real input method.** With text marked by hand and no input method running, one Return both committed the text and ran `onSubmit`. A real input method should take that first Return for itself. Check with Japanese input in the app before PR 5 ships.
-- **Sidebar width.** In the probe's hand-made window, `navigationSplitViewColumnWidth(min: 240, ideal: 310, max: 420)` was ignored and the sidebar came up 144 points wide; it was set to 310 by hand. Check it in the app's `Window` scene.
+- **Sidebar width.** In the probe's hand-made window, `navigationSplitViewColumnWidth(min: 240, ideal: 310, max: 420)` was ignored and the sidebar came up 144 points wide; it was set to 310 by hand. Check it in the app's `Window` scene. Answered 2026-11-11: the hand-made window was not the cause. The probe applied `toolbar(removing: .sidebarToggle)` after the width, as PR 1 then did, and that order is what makes the split view ignore the width (see "Fixed after the review of PR 382").
 - **Rows inside the split view.** They did not draw in any capture, so the list was measured in a window of its own. Its frames inside the split view matched.
 
 ## PR 1: window and split view (structure only)
@@ -175,6 +175,19 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
   - That program's window ignored the column's minimum width, as the spike's did, so where the divider comes to rest in the app is not known.
 - **New Message from the menu while a sheet is up.** Command-N under the reader, Participants or the Sign Out… confirmation asked for a second sheet on the same window. A Mac window shows one sheet at a time, so it would wait behind the first and appear when that one closed. The command now beeps and opens nothing while the focused window has a sheet attached (`MailboxMenuPolicy`), the rule the Sign Out… command already follows. Search and Get New Mail are unchanged.
 
+**Fixed after the review of PR 382 (2026-11-11).** That review's two findings about the sidebar fix above, and one thing the measuring turned up. None of it has been seen in the app.
+
+Measured on macOS 27.2 in a second throwaway program, this one a SwiftUI app with a `Window` scene, an invisible window and a sidebar carrying `MacConversationSidebar`'s modifiers. The divider was dragged from 320 points to 40 points past the window's leading edge with mouse events 16 ms apart, twice (70 events, then 30).
+
+- **The reset alone is not a fix.** With only the visibility reset, the sidebar closed and reopened 69 times in those two drags: once a drag had gone far enough to close it, nearly every further event closed it again. The window ended 320 points wider: AppKit widens the window when it reopens a sidebar. The earlier measurement counted four in its one drag; how many events that drag had was not recorded.
+- **The sidebar can no longer be dragged closed.** `macSplitViewColumnCannotCollapse()` puts an empty AppKit view in the sidebar column. It finds the `NSSplitViewItem` it is inside and turns `canCollapse` off (`MacSidebarCollapseGuardView`). With it the sidebar never closed, the visibility binding was never written, the divider stopped at the 260-point minimum and the window kept its width.
+  - SwiftUI turns `canCollapse` back on: at each of six state changes of the split view's content, and after each write of the visibility binding. One assignment did not last, so the view holds it off with a key-value observation, which turned it off again every time.
+  - The reset stays as the fallback (`MacSidebarVisibilityPolicy`). A sidebar closed in code (`NSSplitViewItem.isCollapsed`) was still reported as `.detailOnly` and reopened. `toggleSidebar(_:)` did nothing while `canCollapse` was off.
+  - The guard depends on how SwiftUI builds a split view on macOS 27.2: an `NSSplitView` whose delegate is an `NSSplitViewController`, with the column's content inside one item's view. If a later system builds it another way, the guard finds nothing and the reset is all there is.
+- **The sidebar's width was being ignored.** With `navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 480)` applied before `toolbar(removing: .sidebarToggle)`, the order PR 1 shipped, the sidebar came up 144 points wide with a 140-point minimum and no maximum. With the width applied last it came up 320 wide with a 260 minimum and a 480 maximum. `MacMailboxView` now applies it last, and `MacMailboxViewSourceTests` pins the order.
+- **The review's second finding needed no change.** It asked whether a sidebar could end up closed without the reset hearing of it. A launch whose saved split view frames had the sidebar closed opened it with nothing reported: the state starts at `.all` and SwiftUI applies it. And on macOS 27.2 `.automatic` compares equal to `.doubleColumn`, so `.detailOnly` is the only one of the four values that does not show the sidebar, and a rule correcting "everything not known to be open" would be the same rule.
+- Narrowing the window in code to 300 points, below its 700-point minimum, closed nothing whether `canCollapse` was on or off, and SwiftUI put the window back at 700.
+
 **Not seen: check in the signed, sandboxed app.**
 
 - The whole window: column widths, the toolbar, the empty and multiple-selection states.
@@ -183,8 +196,8 @@ The largest PR, and the only one that changes behavior. Nothing is restyled.
 - That mail arriving with the app in the background stays unread.
 - The three menu commands, and whether `.searchable` adds a Find command of its own beside Search.
 - Typing in the search field with a long chat open: the transcript should not stutter.
-- Whether the sidebar's width holds (the spike's hand-made window ignored it).
-- Dragging the sidebar's divider to the window's left edge: the sidebar should be open when you let go. It may close and reopen while you hold the drag there.
+- Whether the sidebar's width holds: it should open 320 points wide and resize between 260 and 480.
+- Dragging the sidebar's divider to the window's left edge: the divider should stop at 260 points and the sidebar should never close. If it closes and reopens, the guard did not find its split view item.
 - Command-N with the reader or Participants open: a beep, and no New Message sheet when that sheet closes.
 
 ## PR 2: the sidebar's look
