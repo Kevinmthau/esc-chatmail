@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: Scripts/verify-mac-test-host.sh <path/to/esc-chatmail.app>
+# Usage: Scripts/verify-mac-test-host.sh <path/to/MushMail.app>
 #
 # Exits 0 only if the app has a valid code signature that carries the App
 # Sandbox entitlement. run-tests.sh calls it before a Mac test run, because a
