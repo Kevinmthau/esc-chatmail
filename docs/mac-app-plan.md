@@ -81,13 +81,14 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
      - An Xcode Cloud workflow named Default runs an "Archive - iOS" action on pushes to `main`: its check run is on four of the six merge commits on `main` from PR 376's to PR 381's (2026-11-09 to 2026-11-11), PR 381's merge among them. The checks PR 381 had before it merged include no Xcode Cloud run, which suggests the workflow does not run on pull requests. This Mac has no Xcode archive of any app.
      - Merging a pull request to `main` is therefore what starts an iOS build.
      - The keychain on this Mac has no iOS distribution certificate either, so that route signs somewhere else.
-     - For the Mac: an archive made on this Mac, in Xcode or with `xcodebuild`, is 1.0 (1). Whether a macOS action in the Default workflow gets the number the iOS action gets has not been seen.
-   - **Kevin's steps:**
-     - Add the macOS platform to the app's record in App Store Connect.
-     - Upload the first Mac build. Which way is not chosen yet.
-       - The way iOS ships: add a macOS archive action with TestFlight delivery to the Xcode Cloud workflow. The workflow lives in App Store Connect, not in the repo.
-       - Or archive in Xcode for Any Mac and use Distribute App. That archive is build 1 unless Xcode renumbers it at upload, and Distribute App lets Xcode create the profile and the two certificates above.
-     - Install it from TestFlight on the Mac, and say what should happen to the copy described next.
+     - For the Mac: an archive made on this Mac, in Xcode or with `xcodebuild`, is 1.0 (1).
+   - **Xcode Cloud builds the Mac app too, since 2026-11-11.** Kevin added the macOS platform to the app's record in App Store Connect and asked for the Mac build to go up the way iOS does. The Default workflow was edited in App Store Connect that day; it lives there, not in the repo. It now has:
+     - **"Archive - macOS":** platform macOS, scheme `esc-chatmail`, built for Any Mac, distribution preparation "TestFlight (Internal Testing Only)". Apart from the platform these are the settings of "Archive - iOS", which is unchanged.
+     - **"TestFlight Internal Testing - macOS":** it delivers the macOS archive to the Team group, the one group the iOS post-action delivers to.
+     - **Unchanged:** the start condition (any file change on `main`, with a newer push cancelling a running build) and the environment (the latest release of Xcode and of macOS, which was Xcode 27.2 on macOS 27.2 that day).
+     - **Not seen yet: a Mac build.** The first one starts with the next push to `main`. Still to be seen: that Xcode Cloud's signing covers the Mac entitlements, `keychain-access-groups` among them; that App Store Connect accepts the build; and what build number it gets.
+     - The other way, not taken: archive in Xcode for Any Mac and use Distribute App, which would have Xcode create the profile and the two certificates above.
+   - **Kevin's steps left:** install the Mac build from TestFlight once one is there, and say what should happen to the copy described next.
    - **To settle:** what happens to `/Applications/MushMail.app` on this Mac. It is the iOS TestFlight build, running as an iPhone app, under the same bundle ID and in the same container. Since the rename the native build has the same file name too. Whether TestFlight replaces it with the native build has not been seen.
 4. **When to delete `web/`.** Recommended: after Phase 3. Stop adding web features now, and fix the web app only if it breaks.
 5. **The From: alias picker: not built. Decided 2026-11-11.** Kevin asked for whichever option was simpler, and that is no picker on either platform.
