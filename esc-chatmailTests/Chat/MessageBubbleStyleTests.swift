@@ -92,4 +92,39 @@ final class MessageBubbleStyleTests: XCTestCase {
         XCTAssertEqual(style.textBubbleMaxWidth(transcriptWidth: 0), 280)
         XCTAssertEqual(style.textBubbleMaxWidth(transcriptWidth: .infinity), 280)
     }
+
+    /// The Mac's chat column can be narrower than the style's image width: the window's
+    /// minimum is 700 points and the sidebar takes up to 480 of them. A row holding a
+    /// 400-point image was then wider than the transcript and was cut off at both edges.
+    ///
+    /// Revert-check: returning `imageMaxWidth` from
+    /// `MessageBubbleStyle.imageMaxWidth(transcriptWidth:)` at every width makes the narrow
+    /// assertions fail; dropping its `max(Self.minimumImageMaxWidth, …)` makes the 150-point
+    /// one fail.
+    ///
+    /// HONEST SCOPE: this pins the number the row is given. That the row then fits its column
+    /// rests on `imageRowChromeWidth`, which was added up from the views' numbers and has not
+    /// been measured or seen in the app.
+    func testMac_imageWidth_isTheStylesCapWhereItFitsAndWhatTheColumnHasLeftWhereItDoesNot() {
+        let style = MessageBubbleStyle.mac
+
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 900), 400)
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 496), 400)
+        // The window at its minimum with the sidebar at its ideal width.
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 380), 284)
+        // The sidebar at its widest.
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 220), 124)
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 150), 120)
+        // Before the transcript has a width.
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: 0), 400)
+        XCTAssertEqual(style.imageMaxWidth(transcriptWidth: .infinity), 400)
+    }
+
+    /// Revert-check: giving `.standard` an `imageMaxWidth` makes this fail: the iPhone's
+    /// images would leave `ImageAttachmentBubble`'s own cap.
+    func testStandard_imageWidth_isTheImageBubblesOwnCapAtEveryTranscriptWidth() {
+        for width: CGFloat in [0, 320, 393, 1024] {
+            XCTAssertNil(MessageBubbleStyle.standard.imageMaxWidth(transcriptWidth: width))
+        }
+    }
 }

@@ -141,14 +141,39 @@ enum MessageBubbleStyle {
         return max(maxBubbleWidth, (transcriptWidth * share).rounded(.down))
     }
 
-    /// The widest an image attachment draws, or nil for `ImageAttachmentBubble`'s own cap.
-    /// Fixed, not a share of the window: the image reserves its frame when it mounts, and a
-    /// frame that followed the window would change the height of every image row on a resize.
+    /// The widest an image attachment draws where the transcript has room for it, or nil for
+    /// `ImageAttachmentBubble`'s own cap. Fixed, not a share of the window: a frame that
+    /// followed the window would change the height of every image row on a resize. What a
+    /// row actually gets is `imageMaxWidth(transcriptWidth:)`.
     var imageMaxWidth: CGFloat? {
         switch self {
         case .standard, .compact: return nil
         case .mac: return 400
         }
+    }
+
+    /// What a row with an image keeps beside it, of the transcript's width: the stack's
+    /// padding on both sides (32), the avatar and its gap in a group (32), the tail's room
+    /// (4), and the gap and the spacer that push the row to its side (16), rounded up. Added
+    /// from the views' own numbers, not measured.
+    static let imageRowChromeWidth: CGFloat = 96
+
+    /// An image is never asked to be narrower than this, however narrow the transcript.
+    static let minimumImageMaxWidth: CGFloat = 120
+
+    /// The widest an image attachment draws in a transcript of the given width, or nil for
+    /// `ImageAttachmentBubble`'s own cap. It is `imageMaxWidth` wherever that fits, which is
+    /// every chat column from 496 points up. Below that it is what the column has left: the
+    /// window's minimum is 700 points and the sidebar takes 260 to 480 of them, so the chat
+    /// column can be 220 points wide, and a row holding a 400-point image was wider than the
+    /// transcript and was cut off at both edges. In so narrow a column an image row's height
+    /// does follow the window, as a text row's does everywhere.
+    func imageMaxWidth(transcriptWidth: CGFloat) -> CGFloat? {
+        guard let cap = imageMaxWidth else { return nil }
+        // Before the transcript has a width.
+        guard transcriptWidth.isFinite, transcriptWidth > 0 else { return cap }
+        let room = (transcriptWidth - Self.imageRowChromeWidth).rounded(.down)
+        return min(cap, max(Self.minimumImageMaxWidth, room))
     }
 
     /// How far a bubble's tail reaches past the bubble's edge, or 0 for a style whose bubbles

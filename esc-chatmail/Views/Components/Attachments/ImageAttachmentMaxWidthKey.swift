@@ -6,7 +6,7 @@ private struct ImageAttachmentMaxWidthKey: EnvironmentKey {
 
 extension EnvironmentValues {
     /// The widest an image attachment draws, or nil for `ImageAttachmentBubble`'s own cap. The
-    /// bubble's style sets it (`MessageBubbleStyle.imageMaxWidth`); it is in the environment
+    /// bubble's style sets it (`MessageBubbleStyle.imageMaxWidth(transcriptWidth:)`); it is in the environment
     /// because the image is several views below the bubble that knows the style.
     var imageAttachmentMaxWidth: CGFloat? {
         get { self[ImageAttachmentMaxWidthKey.self] }

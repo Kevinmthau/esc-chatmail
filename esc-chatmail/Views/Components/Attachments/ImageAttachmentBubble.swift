@@ -9,9 +9,10 @@ struct ImageAttachmentBubble: View {
     @State private var reservedPixelSize: CGSize
     @State private var reservedPresentation: InlineImagePresentationPolicy
 
-    /// Set by a bubble style with its own image width (`MessageBubbleStyle.imageMaxWidth`). A
-    /// fixed number for the chat's life, like the cap below, so the frame this image reserved
-    /// at mount holds.
+    /// Set by a bubble style with its own image width
+    /// (`MessageBubbleStyle.imageMaxWidth(transcriptWidth:)`). One number for the chat's life
+    /// wherever the transcript has room for it, like the cap below, so the frame this image
+    /// reserved at mount holds; less only in a chat column too narrow for that number.
     @Environment(\.imageAttachmentMaxWidth) private var styleMaxWidth
 
     private var maxWidth: CGFloat {

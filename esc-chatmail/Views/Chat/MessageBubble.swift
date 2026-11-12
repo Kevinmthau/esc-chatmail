@@ -215,12 +215,12 @@ struct MessageBubble: View {
             ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
             : nil
         // The column holds text at the style's text width and everything else at its own cap
-        // (cards at `maxBubbleWidth`, images at `imageMaxWidth`), so it is as wide as the
+        // (cards at `maxBubbleWidth`, images at `imageMaxWidth(transcriptWidth:)`), so it is as wide as the
         // widest of them. For a style whose widths are all `maxBubbleWidth` that is the 280
         // points it always was.
         let columnMaxWidth = max(
             style.textBubbleMaxWidth(transcriptWidth: transcriptWidth),
-            style.imageMaxWidth ?? 0
+            style.imageMaxWidth(transcriptWidth: transcriptWidth) ?? 0
         )
 
         // With a recovery badge, center it on the content bubble rather than on the row's
@@ -579,8 +579,15 @@ struct MessageBubble: View {
                         ))
                     })
                 )
-                    .frame(maxWidth: max(style.maxBubbleWidth, style.imageMaxWidth ?? 0))
-                    .environment(\.imageAttachmentMaxWidth, style.imageMaxWidth)
+                    .frame(maxWidth: max(
+                        style.maxBubbleWidth,
+                        style.imageMaxWidth(transcriptWidth: transcriptWidth) ?? 0
+                    ))
+                    // The style's image width, less in a transcript too narrow for it.
+                    .environment(
+                        \.imageAttachmentMaxWidth,
+                        style.imageMaxWidth(transcriptWidth: transcriptWidth)
+                    )
             } else {
                 AttachmentIndicator(count: displayable.count)
             }
