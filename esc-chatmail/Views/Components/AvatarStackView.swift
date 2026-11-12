@@ -79,6 +79,22 @@ struct AvatarStackView: View {
 }
 
 extension AvatarStackView {
+    /// Whether an avatar of these participants can draw from its fallback text at all. False
+    /// means the text is never drawn, so a caller for whom the text is costly need not build
+    /// it (`ChatHeaderPolicy.avatar`).
+    ///
+    /// The answer of the one view the body draws for these arguments (`resolvedLayout`),
+    /// never restated: a view that comes to read the fallback in another case changes its
+    /// answer, and every caller follows.
+    static func readsFallbackDisplayText(participants: [String], showsGroupAvatar: Bool) -> Bool {
+        switch resolvedLayout(participantCount: participants.count, showsGroupAvatar: showsGroupAvatar) {
+        case .group:
+            return GroupAvatarView.readsFallbackDisplayText(participants: participants)
+        case .single:
+            return SingleAvatarView.readsFallbackDisplayText(participant: participants.first)
+        }
+    }
+
     enum Layout: Equatable {
         case single
         case group
@@ -179,6 +195,12 @@ extension SingleAvatarView {
         }
 
         return .genericIcon
+    }
+
+    /// Whether the single avatar's initials can come from the fallback text: only where the
+    /// participant's own name gives none (`initialsSource` takes the first usable of the two).
+    static func readsFallbackDisplayText(participant: String?) -> Bool {
+        usableIdentityText(from: participant) == nil
     }
 
     static func initialsSource(
@@ -283,7 +305,7 @@ struct GroupAvatarView: View {
 
             // No resolved participants (load pending or failed): monogram the
             // fallback title like SingleAvatarView does, never a blank circle.
-            if participants.isEmpty,
+            if Self.readsFallbackDisplayText(participants: participants),
                case .initials(let initialsSource) = Self.resolvedEmptyContent(
                     fallbackDisplayText: fallbackDisplayText
                ) {
@@ -386,6 +408,12 @@ extension GroupAvatarView {
     enum EmptyGroupContent: Equatable {
         case initials(String)
         case placeholderCircle
+    }
+
+    /// Whether the group circle draws from the fallback text: only with no participants,
+    /// where it monograms the text (`resolvedEmptyContent`). The body asks this.
+    static func readsFallbackDisplayText(participants: [String]) -> Bool {
+        participants.isEmpty
     }
 
     /// Monogram source for a group circle with no resolved participants —

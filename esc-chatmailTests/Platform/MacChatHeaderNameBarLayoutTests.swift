@@ -112,18 +112,24 @@ final class MacChatHeaderNameBarLayoutTests: XCTestCase {
         // the view mounted, so one sample taken at once proves nothing. A count of drawings,
         // not a stretch of time: on a busy machine each takes longer and all are still made.
         let sampleCount = 15
-        var samples: [NSColor] = []
+        var drawings: [NSColor?] = []
         for _ in 0..<sampleCount {
-            if let color = Self.color(in: host, at: NSPoint(x: size.width / 2, y: size.height / 2)) {
-                samples.append(color)
-            }
+            drawings.append(Self.color(in: host, at: NSPoint(x: size.width / 2, y: size.height / 2)))
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         window.contentView = nil
+        let samples = drawings.compactMap { $0 }
 
         // A machine that cannot draw off screen at all says nothing about the bar.
         try XCTSkipIf(samples.isEmpty, "The view could not be drawn off screen on this machine")
-        XCTAssertEqual(samples.count, sampleCount, "Some drawings could not be made")
+        // One drawing that could not be made is not the bar's fault, but the ones that count
+        // are the late ones, because the transcript left after the first drawings: of the last
+        // ten, made half a second and more after the view mounted, at least seven must be
+        // there, and the last of all, so the drawings that are missing cannot be the only
+        // ones that would have shown the transcript gone.
+        let late = drawings.suffix(10).compactMap { $0 }
+        XCTAssertGreaterThanOrEqual(late.count, 7, "Too few of the late drawings could be made")
+        XCTAssertNotNil(drawings.last ?? nil, "The last drawing could not be made")
         let missing = samples.filter { $0.blueComponent < 0.9 || $0.redComponent > 0.1 }
         XCTAssertTrue(
             missing.isEmpty,

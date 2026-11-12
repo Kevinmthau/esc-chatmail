@@ -20,8 +20,7 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
         let chats = try chatViewCalls(in: "esc-chatmail/Views/Main/ConversationListView.swift")
 
         for chat in chats {
-            XCTAssertTrue(chat.contains("headerStyle: .navigationTitle"), chat)
-            XCTAssertFalse(chat.contains(".avatarOverNameCapsule"), chat)
+            XCTAssertEqual(Self.headerStyleArgument(of: chat), ".navigationTitle", chat)
         }
     }
 
@@ -32,8 +31,7 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
         let chats = try chatViewCalls(in: "esc-chatmail/Platform/MacMailboxDetail.swift")
 
         for chat in chats {
-            XCTAssertTrue(chat.contains("headerStyle: .avatarOverNameCapsule(.mac)"), chat)
-            XCTAssertFalse(chat.contains(".navigationTitle"), chat)
+            XCTAssertEqual(Self.headerStyleArgument(of: chat), ".avatarOverNameCapsule(.mac)", chat)
         }
     }
 
@@ -71,10 +69,10 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
     /// parenthesis to the one that closes it, however the call is laid out. At least one, or
     /// the test fails: a file that builds no chat has nothing to pin.
     ///
-    /// Parentheses are counted as written, comments and strings included, so an unpaired one
-    /// among the arguments would be miscounted; neither call has one.
+    /// Line comments and the text of string literals are taken out first (`codeOnly`), so a
+    /// parenthesis in either is not counted.
     private func chatViewCalls(in relativePath: String) throws -> [String] {
-        let source = try String(contentsOf: repoFile(relativePath), encoding: .utf8)
+        let source = Self.codeOnly(try String(contentsOf: repoFile(relativePath), encoding: .utf8))
         var calls: [String] = []
         var searchStart = source.startIndex
 
@@ -99,6 +97,82 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
 
         XCTAssertFalse(calls.isEmpty, "\(relativePath) no longer builds a ChatView")
         return calls
+    }
+
+    /// Source with its line comments and the text of its string literals taken out; a
+    /// literal keeps its two quotes. A `//` inside a literal (a URL) is text, not a comment.
+    ///
+    /// Read a line at a time, so a literal ends with its line at the latest. Multi-line and
+    /// raw literals, block comments and interpolations that hold a literal of their own are
+    /// not understood; neither file pinned here has one among a `ChatView` call's arguments.
+    static func codeOnly(_ source: String) -> String {
+        source.components(separatedBy: "\n").map { line in
+            var code = ""
+            var inString = false
+            var escaped = false
+            var previousWasSlash = false
+            for character in line {
+                if inString {
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == "\"" {
+                        inString = false
+                        code.append(character)
+                    }
+                    continue
+                }
+                if character == "/", previousWasSlash {
+                    code.removeLast()
+                    break
+                }
+                previousWasSlash = character == "/"
+                if character == "\"" { inString = true }
+                code.append(character)
+            }
+            return code
+        }
+        .joined(separator: "\n")
+    }
+
+    /// Revert-check: cutting each line at its first `//` in `codeOnly`, wherever it is, makes
+    /// the second assertion fail: the URL's `//` ends the line and the call is never closed.
+    func testCodeOnly_dropsCommentsAndStringText_keepsCodeAfterAURL() {
+        XCTAssertEqual(Self.codeOnly("a(b) // c) \"d\""), "a(b) ")
+        XCTAssertEqual(Self.codeOnly(#"a(url: "https://x.test/)", b) // c"#), #"a(url: "", b) "#)
+        XCTAssertEqual(Self.codeOnly(#"a("say \"hi\" (", b / c)"#), #"a("", b / c)"#)
+        XCTAssertEqual(Self.codeOnly("a(\n// b)\nc)"), "a(\n\nc)")
+    }
+
+    /// The whole value a call passes as `headerStyle:`, from the label to the comma that ends
+    /// the argument (one inside the value's own parentheses, brackets or braces does not) or
+    /// to the end of the call. Nil where the call has no such argument. The whole value, so a
+    /// style whose name only begins with the expected one is not taken for it.
+    static func headerStyleArgument(of call: String) -> String? {
+        guard let label = call.range(of: "headerStyle:") else { return nil }
+        var depth = 0
+        var value = ""
+        for character in call[label.upperBound...] {
+            if "([{".contains(character) { depth += 1 }
+            if ")]}".contains(character) { depth -= 1 }
+            if character == ",", depth == 0 { break }
+            value.append(character)
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Revert-check: counting only parentheses in `headerStyleArgument` makes the brace and
+    /// bracket assertions fail: the value ends at its inner comma.
+    func testHeaderStyleArgument_isTheWholeValue_howeverItIsNested() {
+        XCTAssertEqual(Self.headerStyleArgument(of: "a: 1, headerStyle: .navigationTitle"), ".navigationTitle")
+        XCTAssertEqual(
+            Self.headerStyleArgument(of: "headerStyle: .avatarOverNameCapsule(.init(a: 1, b: 2)),\n b: 3"),
+            ".avatarOverNameCapsule(.init(a: 1, b: 2))"
+        )
+        XCTAssertEqual(Self.headerStyleArgument(of: "headerStyle: .custom { a, b in a }, c: 3"), ".custom { a, b in a }")
+        XCTAssertEqual(Self.headerStyleArgument(of: "headerStyle: styles[a, b], c: 3"), "styles[a, b]")
+        XCTAssertNil(Self.headerStyleArgument(of: "conversation: conversation"))
     }
 
     private func repoFile(_ relativePath: String) -> URL {
