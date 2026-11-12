@@ -1,6 +1,6 @@
 # Plan: make the Mac app look and work like Messages on the Mac
 
-Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), and PR 2 is built (2026-11-11); PRs 3 to 6 have not started.** The spike's results are under "Spike results". PRs 1 and 2 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built" and "PR 2 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
+Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), PR 2 is merged (PR 387, 2026-11-12) and PR 3 is built (2026-11-12); PRs 4 to 6 have not started.** The spike's results are under "Spike results". PRs 1 to 3 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built", "PR 2 as built" and "PR 3 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
 
 This plan is the detailed version of the Windows, Layout, Toolbar and Selection items of Phase 2 in `docs/mac-app-plan.md`, plus a restyle that Phase 2 did not ask for. The Settings scene, file drag and drop, Save Attachment, the name and the icon stay in that document.
 
@@ -58,7 +58,7 @@ Each has a recommendation; none blocks the spike or PR 1.
 - A 40-point avatar alone fits as the `.principal` item (6 to 46 points from the top) and takes clicks.
 - The capsule in `safeAreaBar(edge: .top)` sits right under the toolbar, 30 points tall with its padding, and takes clicks. The transcript's first row starts under it, 82 points from the window's top; Messages' header is about 79.
 - A view the chat column draws up into the toolbar's 52 points gets no clicks there: they go to the toolbar. So the avatar has to be a toolbar item, not an overlay.
-- The `.principal` item is centered 2.5 points to the right of the chat column's center, at both window widths tried and whatever the trailing item's width. Offset the capsule by the same 2.5 points.
+- The `.principal` item is centered 2.5 points to the right of the chat column's center, at both window widths tried and whatever the trailing item's width. Offset the capsule by the same 2.5 points. That is for an item on the toolbar's glass. PR 3 takes the avatar off it, and the item is then centered 0.5 points to the right ("PR 3 as built").
 
 **Sidebar: `.listStyle(.inset)` draws Messages' list; `.sidebar` does not.**
 
@@ -260,6 +260,69 @@ Measured on macOS 27.2 in a second throwaway program, this one a SwiftUI app wit
 - **Photos.** `ChatViewModel` already loads `ParticipantInfo` for the title (`ChatViewModel.swift:1400`) and keeps only the name and the count. Publish the photos and names it already has, with the same `maxParticipants: 4`, or the row and the chat fork the rollup cache (`ConversationRowView.swift:6`).
 - **Click on the capsule** opens Participants, as the title does today, and not for a list conversation (`allowsParticipantListPresentation`). It stays a sheet; a popover is later polish.
 - **Trailing edge:** the ⋯ menu.
+
+### PR 3 as built (2026-11-12)
+
+**What is there.**
+
+- **A chat takes its header from whoever shows it.** `ChatView` has a required `headerStyle` (`ChatHeaderStyle`): `.navigationTitle` in `ConversationListView`, `.avatarOverNameCapsule(.mac)` in `MacMailboxDetail`. `ChatHeaderPolicy` says what a style means, so `ChatView`'s body holds no platform check:
+  - What the toolbar's principal item is: the name, as before, or the avatar at 40 points (`ChatHeaderAvatarButton`).
+  - Whether there is a name bar, and its sizes (`ChatHeaderMetrics.mac`).
+  - Whether the principal item keeps the toolbar's glass (below).
+  - Whether a click opens Participants: not for a mailing list, the rule the iOS title's tap already had.
+- **The name is in a capsule in a bar on the transcript** (`MacChatHeaderNameBar`, put there by `View.macChatHeaderNameBar` with `safeAreaBar(edge: .top)`): the name and a chevron, on glass. The bar is 30 points tall whatever the name is, and whether a chat has one is fixed by its style, so the transcript's top inset is one number from the moment the chat mounts. `ChatMessagesView` did not change.
+- **The avatar and the capsule both open Participants,** the same sheet through the same `appSheet`. For a mailing list neither is a button, and the capsule has no chevron.
+- **The avatar is the row's.** `ChatHeaderPolicy.avatar` builds it from `ConversationRowPolicy`'s rules, so the header and the row cannot show different faces for one conversation.
+  - `ChatViewModel` keeps the `ParticipantInfo` its title load already fetched (`participantInfo`), and asks for the row's four participants by one constant (`rollupMaxParticipants`).
+  - Until that load lands the avatar is drawn from the row's entry in the rollup cache (`cachedParticipantInfo()`), so a chat opened from its row has its photo at once.
+- **The trailing edge** is the chat's own ⋯ menu, as it was.
+
+**Where it differs from the plan above, or settles what the plan left open.**
+
+- **The avatar is taken off the toolbar's glass, and the capsule is offset 0.5 points, not 2.5.** Measured with the header's own views under a real window toolbar: a `NavigationSplitView` in a window the test host made and never showed, 900 and 1200 points wide, with a New Message button and a ⋯ menu beside the avatar.
+  - Left as the toolbar draws it, the avatar's item sits inside an `NSToolbarPlatterView` holding an `NSGlassEffectView`, 40 by 40, and the drawing shows a crescent of it under the avatar. Its center is 2.5 points right of the chat column's center, the spike's number.
+  - With `sharedBackgroundVisibility(.hidden)` (`ToolbarContent.macSharedBackgroundHidden`) there is no platter and no glass view, the drawing shows the avatar alone, and its center is 0.5 points right of the column's center.
+  - So the two are one choice: `ChatHeaderPolicy.hidesPrincipalItemGlass` and `ChatHeaderMetrics.principalItemCenterOffset`. With both, the capsule's name and chevron drew centered 0.25 points left of the avatar's center.
+- **The capsule stops 48 points short of the chat column's edges.** A name long enough would otherwise carry it to 16 points from them, and at that distance an off-screen drawing lost the transcript.
+  - A glass capsule within 20 points of both edges of the scroll view under it took that scroll view's content out of the drawing. The first drawing after the view mounted had it; 14 of the 15 that followed, over a second and a half, did not. At 22 points and more it stayed.
+  - The same at 520, 800 and 1100 points wide. It did not matter whether the name was truncated, whether the glass was interactive, or whether the capsule was a button. The rows' frames were the same either way, and the same bar without glass lost nothing.
+  - Whether the app loses its transcript that way is not known: it has been seen neither way. `MacChatHeaderNameBarLayoutTests` pins that a name too long for the column leaves the transcript in the drawing.
+- **The photo does not wait for the load.** The plan had the view model publish what its load fetched. The avatar also reads the row's cached entry until then; without it every chat opened with initials and changed to its photo a moment later.
+- **The first bubble starts 90 points from the window's top:** 52 of toolbar, 30 of bar, and the transcript's own 8 points of padding. The spike's 82 is where the transcript starts.
+- **`safeAreaBar` adds no spacing of its own** on macOS 27.2: the inset measured 30 points with `spacing: 0` and with no spacing given. The modifier still says 0.
+
+**Checked.**
+
+- **iOS draws the same pixels.** A throwaway hosted test mounted the real `ChatView` in a `NavigationStack` on the simulator (iOS 27.0) over test fixtures, and drew the whole window: the navigation bar, a four-message transcript and the reply bar. On `main` at `1160dd23` and on this branch.
+  - A one-to-one chat and a mailing list, light and dark, each drawn twice: all eight PNG files are byte for byte the same as `main`'s.
+  - A group, light and dark, drawn nine times each. Its title lists the participants in a different order from one mount to the next (below), so the pictures were matched by content: every order both trees drew, four light and three dark, is byte for byte the same. The pictures left over on either side were opened and are orders the other tree did not happen to draw.
+- **The Mac header was drawn off screen** by a second throwaway test, in the signed, sandboxed test host on macOS 27.2: 19 pictures, light and dark.
+  - The header's two views over a stand-in transcript: a person with initials, with a photo, and before any participant info; a group with and without photos; a mailing list; a name too long for the column.
+  - The same views under the real window toolbar described above, with and without the toolbar's glass behind the avatar, and with a long name in a dark window.
+  - The pictures were opened. They show the avatar, the name and the chevron where the measurements put them, the name truncating short of the column's edges, and no chevron for a mailing list. They draw no glass, and they cannot be trusted for the colors of anything on glass ("Not seen").
+- **Tests.** The full iOS suite passes: 4,939 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 293 tests in 28 suites, two of them new (`ChatHeaderPolicyTests`, `MacChatHeaderNameBarLayoutTests`). Two more new suites run on iOS only: `ChatViewModelHeaderParticipantsTests` and `ChatHeaderStyleSourceTests`.
+- **Revert-checks.** Each of the 30 changes named in the new tests' `Revert-check:` comments was made alone, 32 runs in all because one comment names three numbers, and each time the test that names it failed. Two tests did not fail at first, and were wrong, not the code:
+  - The inset test claimed that deleting `spacing: 0` would fail it. It does not, as above; the test now names a change that does and says so.
+  - The long-name drawing test looked at one drawing, taken at once, which still has the transcript. It now watches for a second and a half.
+- **Compiled on the Mac.** The app compiled unsigned once, and that product was deleted unlaunched. The signed test host is the only Mac build that ran: sandboxed, and it never builds the mailbox.
+- **The memberwise initializer CI's compiler makes private** (`CLAUDE.md`, Traps): the new views were read for a plain `private var x = value` and hold none. Only CI's own build can confirm it.
+
+**Found, not changed here.**
+
+- **A group's title lists its participants in whatever order a `Set` gives them** (`ConversationParticipantExtractor.extractNonMeParticipants`). The iOS drawings showed "Grace, Ada, Alan" and "Alan, Ada, Grace" for one conversation, on `main` as well. The rollup cache holds one order for five minutes; after that it can change.
+- **The chat's ⋯ menu draws with a disclosure chevron beside it** on the Mac. The spike's 36-point circle was a menu with `menuIndicator(.hidden)`, which `ChatView`'s menu does not have.
+
+**Not seen: check in the signed, sandboxed app.**
+
+- The header beside Messages. The capsule's height (22 points), its text size (11 points, medium) and the 10 points between the avatar and the capsule are a first reading of a screenshot.
+- The capsule's glass, and whether the name can be read on it in a dark window. An off-screen drawing draws no glass, and in these the name came out black in a dark window as well as a light one, while the chevron did not show in a light one. Glass picks a light or a dark look for what is on it from what is behind it, and off screen nothing is. The name and the chevron use the styles meant for glass (the default and `.secondary`), not colors by name.
+- The avatar alone in the toolbar, with no glass behind it, centered over the capsule.
+- The blur where the transcript scrolls under the header. With the transcript at rest the drawing shows a hairline across the column under the bar, 82 points down.
+- A click on the avatar and one on the capsule: each opens Participants. In a mailing list neither does anything, and the capsule has no chevron.
+- A short chat (fewer rows than fill the window) and a long one: each opens at its newest message, and nothing moves when the avatar's photo arrives.
+- A conversation with a very long name: the name truncates, and the transcript is there.
+- A person's photo at 40 points, and a group's. The pictures used stand-in photos; a Mac test host cannot be given Contacts access.
+- VoiceOver on the header. The capsule is the control that is read; the avatar is hidden from it as a second copy of the same button.
 
 ## PR 4: bubbles and the transcript
 
