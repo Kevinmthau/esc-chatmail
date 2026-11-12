@@ -92,32 +92,40 @@ enum ChatHeaderPolicy {
             conversationType: conversationType,
             participantInfo: participantInfo
         )
+        let showsGroupAvatar = ConversationRowPolicy.resolvedShowsGroupAvatar(
+            snapshotShowsGroupAvatar: ConversationSnapshot.showsGroupAvatar(
+                conversationType: conversationType
+            ),
+            conversationType: conversationType,
+            participantInfo: participantInfo
+        )
         return ChatHeaderAvatar(
             photos: ConversationRowPolicy.resolvedAvatarPhotos(
                 conversationType: conversationType,
                 participantInfo: participantInfo
             ),
             participantNames: participantNames,
-            showsGroupAvatar: ConversationRowPolicy.resolvedShowsGroupAvatar(
-                snapshotShowsGroupAvatar: ConversationSnapshot.showsGroupAvatar(
-                    conversationType: conversationType
-                ),
-                conversationType: conversationType,
-                participantInfo: participantInfo
-            ),
-            fallbackDisplayText: readsFallbackDisplayText(participantNames: participantNames)
+            showsGroupAvatar: showsGroupAvatar,
+            fallbackDisplayText: readsFallbackDisplayText(
+                participantNames: participantNames,
+                showsGroupAvatar: showsGroupAvatar
+            )
                 ? fallbackDisplayText()
                 : nil
         )
     }
 
-    /// Whether the avatar can draw from its fallback text at all, given the names it has:
-    /// `AvatarStackView`'s own answer, which is yes only for a first name with no usable
-    /// identity text, an empty list included. Where it is no the text is never drawn, and
-    /// `avatar` does not ask for it: the chat builds it by walking the conversation's
-    /// participants in Core Data, and the header is re-evaluated with every update of the chat.
-    static func readsFallbackDisplayText(participantNames: [String]) -> Bool {
-        AvatarStackView.readsFallbackDisplayText(participants: participantNames)
+    /// Whether the avatar can draw from its fallback text at all, given the names it has and
+    /// the layout they are drawn in: `AvatarStackView`'s own answer. A single avatar reads the
+    /// text only for a name with no usable identity text, no name included; a group circle
+    /// only with no names at all. Where it is no the text is never drawn, and `avatar` does
+    /// not ask for it: the chat builds it by walking the conversation's participants in Core
+    /// Data, and the header is re-evaluated with every update of the chat.
+    static func readsFallbackDisplayText(participantNames: [String], showsGroupAvatar: Bool) -> Bool {
+        AvatarStackView.readsFallbackDisplayText(
+            participants: participantNames,
+            showsGroupAvatar: showsGroupAvatar
+        )
     }
 
     /// The name capsule's offset, moved to the nearest whole pixel of the display it is on.

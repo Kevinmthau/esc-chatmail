@@ -283,18 +283,16 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(avatar.fallbackDisplayText, "Ada Lovelace")
     }
 
-    /// The header leaves the fallback text out exactly where the avatar's views cannot draw
-    /// it, whichever layout draws them: what each view draws with the text and without it is
-    /// compared over names of every kind.
+    /// The header leaves the fallback text out exactly where the avatar view that is drawn
+    /// cannot draw it: for names of every kind, in each layout, the answer is compared with
+    /// what that layout's view draws with the text and without it.
     ///
-    /// Revert-check: returning `false` from `SingleAvatarView.readsFallbackDisplayText` makes
-    /// this fail.
-    ///
-    /// HONEST SCOPE: returning `false` from `GroupAvatarView.readsFallbackDisplayText` does not.
-    /// The group reads the text only with no participants, and there the single avatar's
-    /// answer is already yes, so the header's answer does not change; the group circle itself
-    /// would lose its monogram, which no test here draws.
-    func testReadsFallbackDisplayText_isNoOnlyWhereNeitherAvatarViewDrawsTheText() {
+    /// Revert-check: returning `false` from `SingleAvatarView.readsFallbackDisplayText`, or
+    /// from `GroupAvatarView.readsFallbackDisplayText`, makes this fail. So does answering for
+    /// both layouts at once in `AvatarStackView.readsFallbackDisplayText` (the single view's
+    /// answer or the group's): a group whose first name is blank then reads a text that the
+    /// group circle never draws.
+    func testReadsFallbackDisplayText_isYesOnlyWhereTheAvatarViewThatIsDrawnDrawsTheText() {
         let fallback = "Zed Fallback"
         let lists: [[String]] = [
             [], ["Ada Lovelace"], ["   "], ["ada@example.com"], ["3 Unknown Contacts"],
@@ -302,20 +300,35 @@ final class ChatHeaderPolicyTests: XCTestCase {
         ]
 
         for names in lists {
-            let singleDrawsIt = SingleAvatarView.resolvedContent(
-                avatarPhoto: nil, participant: names.first, fallbackDisplayText: fallback
-            ) != SingleAvatarView.resolvedContent(
-                avatarPhoto: nil, participant: names.first, fallbackDisplayText: nil
-            )
-            // The group circle monograms the text only with no participants to draw.
-            let groupDrawsIt = names.isEmpty
-                && GroupAvatarView.resolvedEmptyContent(fallbackDisplayText: fallback) == .initials(fallback)
+            for showsGroupAvatar in [false, true] {
+                let layout = AvatarStackView.resolvedLayout(
+                    participantCount: names.count,
+                    showsGroupAvatar: showsGroupAvatar
+                )
+                let drawsIt: Bool
+                switch layout {
+                case .single:
+                    drawsIt = SingleAvatarView.resolvedContent(
+                        avatarPhoto: nil, participant: names.first, fallbackDisplayText: fallback
+                    ) != SingleAvatarView.resolvedContent(
+                        avatarPhoto: nil, participant: names.first, fallbackDisplayText: nil
+                    )
+                case .group:
+                    // The group circle monograms the text only with no participants to draw.
+                    drawsIt = names.isEmpty
+                        && GroupAvatarView.resolvedEmptyContent(fallbackDisplayText: fallback)
+                            == .initials(fallback)
+                }
 
-            XCTAssertEqual(
-                ChatHeaderPolicy.readsFallbackDisplayText(participantNames: names),
-                singleDrawsIt || groupDrawsIt,
-                "\(names)"
-            )
+                XCTAssertEqual(
+                    ChatHeaderPolicy.readsFallbackDisplayText(
+                        participantNames: names,
+                        showsGroupAvatar: showsGroupAvatar
+                    ),
+                    drawsIt,
+                    "\(names), showsGroupAvatar: \(showsGroupAvatar)"
+                )
+            }
         }
     }
 

@@ -79,15 +79,20 @@ struct AvatarStackView: View {
 }
 
 extension AvatarStackView {
-    /// Whether an avatar of these participants can draw from its fallback text at all, in
-    /// either layout. False means the text is never drawn, so a caller for whom the text is
-    /// costly need not build it (`ChatHeaderPolicy.avatar`).
+    /// Whether an avatar of these participants can draw from its fallback text at all. False
+    /// means the text is never drawn, so a caller for whom the text is costly need not build
+    /// it (`ChatHeaderPolicy.avatar`).
     ///
-    /// Made of the two views' own answers, never restated: a view that comes to read the
-    /// fallback in another case changes its answer, and every caller follows.
-    static func readsFallbackDisplayText(participants: [String]) -> Bool {
-        SingleAvatarView.readsFallbackDisplayText(participant: participants.first)
-            || GroupAvatarView.readsFallbackDisplayText(participants: participants)
+    /// The answer of the one view the body draws for these arguments (`resolvedLayout`),
+    /// never restated: a view that comes to read the fallback in another case changes its
+    /// answer, and every caller follows.
+    static func readsFallbackDisplayText(participants: [String], showsGroupAvatar: Bool) -> Bool {
+        switch resolvedLayout(participantCount: participants.count, showsGroupAvatar: showsGroupAvatar) {
+        case .group:
+            return GroupAvatarView.readsFallbackDisplayText(participants: participants)
+        case .single:
+            return SingleAvatarView.readsFallbackDisplayText(participant: participants.first)
+        }
     }
 
     enum Layout: Equatable {
