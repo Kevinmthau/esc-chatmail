@@ -93,6 +93,33 @@ final class MessageBubbleStyleTests: XCTestCase {
         XCTAssertEqual(style.textBubbleMaxWidth(transcriptWidth: .infinity), 280)
     }
 
+    /// The row's column is as wide as the widest thing it holds, which on the Mac is an image
+    /// wherever 65% of the transcript is under 400 points. Without a cap of its own, text in a
+    /// 520-point chat column wrapped at 400 points, not at its 338.
+    ///
+    /// Revert-check: returning nil for every style from
+    /// `MessageBubbleStyle.textContentMaxWidth` makes this fail.
+    ///
+    /// HONEST SCOPE: this pins the number. That the text takes it is
+    /// `ChatBubbleStyleSourceTests`' to pin, from source, and it has not been seen in the app.
+    func testMac_textContent_hasItsOwnCapTheTextsShareOfTheTranscript() {
+        let style = MessageBubbleStyle.mac
+
+        XCTAssertEqual(style.textContentMaxWidth(transcriptWidth: 520), 338)
+        XCTAssertEqual(style.textContentMaxWidth(transcriptWidth: 1000), 650)
+        XCTAssertEqual(style.textContentMaxWidth(transcriptWidth: 300), 280)
+        XCTAssertEqual(style.textContentMaxWidth(transcriptWidth: 0), 280)
+    }
+
+    /// Revert-check: returning `textBubbleMaxWidth` for every style from
+    /// `MessageBubbleStyle.textContentMaxWidth` makes this fail: the iPhone's text would be
+    /// wrapped in a frame its row never had.
+    func testStandard_textContent_hasNoCapOfItsOwn() {
+        for width: CGFloat in [0, 320, 393, 1024] {
+            XCTAssertNil(MessageBubbleStyle.standard.textContentMaxWidth(transcriptWidth: width))
+        }
+    }
+
     /// The Mac's chat column can be narrower than the style's image width: the window's
     /// minimum is 700 points and the sidebar takes up to 480 of them. A row holding a
     /// 400-point image was then wider than the transcript and was cut off at both edges.

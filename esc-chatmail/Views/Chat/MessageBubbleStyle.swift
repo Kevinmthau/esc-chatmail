@@ -141,6 +141,17 @@ enum MessageBubbleStyle {
         return max(maxBubbleWidth, (transcriptWidth * share).rounded(.down))
     }
 
+    /// The cap the text itself takes inside the row's column, or nil where the column's cap is
+    /// the text's. The column is as wide as the widest thing it can hold, and on the Mac that
+    /// is an image (`imageMaxWidth`) wherever the text's share of the transcript is less: with
+    /// no cap of its own, text in a chat column under about 615 points wrapped at the image's
+    /// 400 points, not at its share.
+    @MainActor
+    func textContentMaxWidth(transcriptWidth: CGFloat) -> CGFloat? {
+        guard textBubbleWidthShare != nil else { return nil }
+        return textBubbleMaxWidth(transcriptWidth: transcriptWidth)
+    }
+
     /// The widest an image attachment draws where the transcript has room for it, or nil for
     /// `ImageAttachmentBubble`'s own cap. Fixed, not a share of the window: a frame that
     /// followed the window would change the height of every image row on a resize. What a

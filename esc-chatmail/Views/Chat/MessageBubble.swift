@@ -214,7 +214,8 @@ struct MessageBubble: View {
         let recoveryPrompt = message.isFromMe
             ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
             : nil
-        // The column holds text at the style's text width and everything else at its own cap
+        // The column holds text at the style's text width (the text's own cap where an image
+        // can be wider: `MessageTextWidthCap`) and everything else at its own cap
         // (cards at `maxBubbleWidth`, images at `imageMaxWidth(transcriptWidth:)`), so it is as wide as the
         // widest of them. For a style whose widths are all `maxBubbleWidth` that is the 280
         // points it always was.
@@ -263,7 +264,8 @@ struct MessageBubble: View {
                         isFromMe: message.isFromMe,
                         endsRun: runPlacement.endsRun,
                         layoutDirection: layoutDirection
-                    )
+                    ),
+                    textMaxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth)
                 )
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 

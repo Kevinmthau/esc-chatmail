@@ -87,6 +87,29 @@ final class ChatBubbleStyleSourceTests: XCTestCase {
         XCTAssertFalse(transcript.contains("ChatTimestampSeparator("))
     }
 
+    /// The text's own cap reaches the text: the bubble hands it to its content, and the
+    /// content applies it to the text branch only, so cards and images keep their own widths.
+    ///
+    /// Revert-check: deleting `textMaxWidth:` from the `MessageContentView(` call in
+    /// `MessageBubble` makes the first assertion fail; deleting the `MessageTextWidthCap`
+    /// modifier from `MessageContentView.body` makes the second fail.
+    func testTextContent_isGivenAndTakesItsOwnWidthCap() throws {
+        let content = try call("MessageContentView(", in: "esc-chatmail/Views/Chat/MessageBubble.swift")
+        let contentView = try String(
+            contentsOf: repoFile("esc-chatmail/Views/Chat/MessageContentView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(
+            content.contains("textMaxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth)"),
+            content
+        )
+        XCTAssertTrue(contentView.contains(
+            "            textContent\n"
+                + "                .modifier(MessageTextWidthCap(maxWidth: textMaxWidth, isFromMe: message.isFromMe))\n"
+        ))
+    }
+
     /// The arguments of the one call that opens with `opening` on a line of its own in a
     /// source file: from that line to the line that closes it at the call's own indentation.
     private func call(_ opening: String, in relativePath: String) throws -> String {
