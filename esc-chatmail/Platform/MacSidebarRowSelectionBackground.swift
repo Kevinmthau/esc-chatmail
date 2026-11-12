@@ -7,11 +7,13 @@ import AppKit
 /// list's edges, with a corner radius of 8, the row's full height (measured off screen on
 /// macOS 27.2; `docs/mac-imessage-ui-plan.md`, "Spike results").
 ///
-/// The fill is the only selection on screen: it carries a `MacSidebarListSelectionGuard`, which
-/// stops the list drawing its own. So the shape is how the selection looks, not something that
-/// has to match a shape underneath. Where the guard cannot find the list (a system that builds
-/// lists another way), the list's own selection is still drawn under the fill, and the fill
-/// covers it on a system whose list draws the shape above.
+/// The fill is the only selection on screen: the list's own is turned off by a
+/// `MacSidebarListSelectionGuard`. The sidebar has one behind its list, which does it as the
+/// sidebar opens, and the fill carries one too, for a list that has none behind it or whose
+/// guard found nothing. So the shape is how the selection looks, not something that has to
+/// match a shape underneath. Where neither guard can find the list (a system that builds lists
+/// another way), the list's own selection is still drawn under the fill, and the fill covers it
+/// on a system whose list draws the shape above.
 ///
 /// Selected rows that touch are one shape to the list, rounded only at its ends, so the fill is
 /// square at an edge it shares with another selected row (`joins`).
@@ -59,9 +61,11 @@ struct MacSidebarRowSelectionBackground: View {
         )
         .fill(color)
         .padding(.horizontal, Self.horizontalInset)
-        // In the fill, not on the list: the guard finds the list from inside one of its rows,
-        // and a selected row is the only place the list's own selection would be drawn.
-        // `MacSidebarRowSelectionBackgroundTests` mounts a real list to pin that it is found.
+        // In the fill as well as behind the sidebar's list: a selected row is the only place
+        // the list's own selection would be drawn, and from inside the row the guard finds the
+        // list wherever this fill is used. It has nothing to do when the one behind the list
+        // has done it. `MacSidebarRowSelectionBackgroundTests` mounts a real list with the fill
+        // alone to pin that this one finds it.
         .background {
             MacSidebarListSelectionGuard()
                 .frame(width: 0, height: 0)

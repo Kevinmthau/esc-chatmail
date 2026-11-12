@@ -17,8 +17,9 @@ import XCTest
 /// iOS suite although the view is Mac-only. It pins that the row takes the Mac's metrics, that
 /// the palette and the fill are both built from `selectionFill`, that the fill is decided from
 /// the window's active state and given its joins, that the rows are identified by
-/// `MacSidebarRowID`, and that the filter button is given the words for its badge. It matches the spelling of the source, so renaming a local fails it too. What
-/// the list then draws was measured off screen, not seen in the app.
+/// `MacSidebarRowID`, that the list has its selection guard behind it, and that the filter
+/// button is given the words for its badge. It matches the spelling of the source, so renaming
+/// a local fails it too. What the list then draws was measured off screen, not seen in the app.
 final class MacConversationSidebarSourceTests: XCTestCase {
     /// Revert-check: passing `metrics: .iOS` to the row in `MacConversationSidebar.body` makes
     /// this fail: the sidebar would show the iPhone's row, chevron and all.
@@ -103,6 +104,39 @@ final class MacConversationSidebarSourceTests: XCTestCase {
         XCTAssertFalse(source.contains("ForEach(viewModel.filteredConversationItems) {"))
         XCTAssertFalse(source.contains("List(selection: $selection)"))
         XCTAssertFalse(source.contains("forSelectionType: NSManagedObjectID.self"))
+    }
+
+    /// The list's own selection is turned off from behind the list, as the sidebar opens
+    /// (`MacSidebarListSelectionGuardView`). Left to the first selected row's fill alone, it was
+    /// done at the first click on a row, inside SwiftUI's drawing of that row, which the first
+    /// native build logged as a fault.
+    ///
+    /// This is the test of that which CI runs: `MacConversationSidebarSelectionGuardTests`
+    /// mounts the sidebar, in the Mac plan, and CI runs no Mac tests.
+    ///
+    /// Revert-check: deleting the `.background { MacSidebarListSelectionGuard()… }` from the
+    /// list in `MacConversationSidebar.body` makes this fail.
+    func testList_hasTheSelectionGuardBehindIt() throws {
+        let source = try sidebarSource()
+        let listStyle = try XCTUnwrap(
+            source.range(of: ".listStyle(.inset)"),
+            "MacConversationSidebar no longer styles its list the way this test reads it"
+        )
+        // The list's own modifiers: from its style to the search field, which is the first
+        // thing after them that is not the list's.
+        let end = try XCTUnwrap(source.range(of: ".searchable(", range: listStyle.upperBound..<source.endIndex))
+        let listModifiers = String(source[listStyle.upperBound..<end.lowerBound])
+        let background = try XCTUnwrap(
+            listModifiers.range(of: ".background {"),
+            "The sidebar's list has nothing behind it"
+        )
+        let afterBackground = listModifiers[background.upperBound...]
+        let closing = try XCTUnwrap(afterBackground.range(of: "\n        }"))
+
+        XCTAssertTrue(
+            afterBackground[..<closing.lowerBound].contains("MacSidebarListSelectionGuard()"),
+            listModifiers
+        )
     }
 
     /// The filter button's badge is a bare number, so the button is also given the words for

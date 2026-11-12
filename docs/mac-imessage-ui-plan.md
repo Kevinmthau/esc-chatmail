@@ -433,9 +433,9 @@ Build 528 was the first native build TestFlight installed, and the first time PR
   - The real sidebar with the real view model in the Mac test host, read without touching its rows: SwiftUI's own row objects say which conversation each table row and each cell is bound to (`ListOutlineItem.viewID`, `ListTableCellView.viewListID`), and the table can be drawn with `cacheDisplay`. One conversation moved to the top, and every visible cell was wrong.
   - A program with no app code: 100 `Text` rows identified by `NSManagedObjectID`, row 13 moved to 0. Wrong the same way with object IDs from a SQLite store, an in-memory store and temporary ones, and with `NSUUID` and `NSString` ids. Right with a struct, a `URL`, a Swift class, and an `NSObject` subclass written in Swift.
 - **Why nothing caught it before the app ran.** The sidebar had only been measured in probes, and the one in the repo (`MacSidebarRowSelectionBackgroundTests`) identifies its rows by `Int` and moves none. The probes written on 2026-11-12 to find the fault then missed it for hours, through hundreds of moves, because each wrapped its rows in an `if`/`else`: a `ForEach` whose content is a conditional does not go wrong. A probe of a list gives the `ForEach` the row and nothing around it, identifies the rows as the app does, and moves one.
-- **Seen on the way, and not the cause.** They are left as they are:
-  - AppKit logs "Application performed a reentrant operation in its NSTableView delegate" when the list takes a large change in one update (about 224 rows from empty, or 100 rows reordered). That run's log has it within seconds of each time the sidebar appeared. The list stayed right through it in every probe.
-  - The selection fill's first write of `selectionHighlightStyle` (`MacSidebarListSelectionGuardView`) logs "NSHostingView is being laid out reentrantly", and on a list of a few hundred rows the AppKit warning too. That one is the app's own doing: the write happens inside the table's layout.
+- **Seen on the way, and not the cause.**
+  - AppKit logs "Application performed a reentrant operation in its NSTableView delegate" when the list takes a large change in one update (about 224 rows from empty, or 100 rows reordered). That run's log has it within seconds of each time the sidebar appeared. The list stayed right through it in every probe. It is SwiftUI's own doing, and is left as it is.
+  - The selection fill's first write of `selectionHighlightStyle` (`MacSidebarListSelectionGuardView`) logged "NSHostingView is being laid out reentrantly", and on a list of a few hundred rows the AppKit warning too. That one was the app's own doing: the write was made inside the list's layout. This fix left it as it was. It is fixed since: "The selection guard's write", below.
 - **Tests.** `MacConversationSidebarRowIdentityTests` (Mac plan) draws the real sidebar's table after a conversation moves to the top and compares it with a freshly mounted sidebar's, and keeps a list identified by object IDs as the case that fails. `MacConversationSidebarSourceTests` pins the row id from source, which is the part CI runs.
 - **Seen in the app (2026-11-12).** Kevin ran a Debug build of the fix on the real mailbox for four and a half minutes. It carried a temporary checker that is not in the tree. Once a second, and after every publish of the list, table operation and selection change, the checker read which conversation SwiftUI's row object and the row's cell were bound to, for each visible row, and compared both with the list's data at that row.
   - The list opened with 30 conversations. A sync added 15, one publish each. One more publish then took 19 out, added 1 and moved 2, which the table took as two `moveItem` calls. One move was enough to scramble build 528's list.
@@ -443,6 +443,63 @@ Build 528 was the first native build TestFlight installed, and the first time PR
   - The selection guard found the table: `selectionHighlightStyle` read 0 until the first selection and -1 from then on. That write logged "NSHostingView is being laid out reentrantly" once, as it does in the test host. AppKit's reentrancy warning did not appear; the list never held more than 45 rows.
   - Also in that run's log, from the transcript and not looked into: SwiftUI logged "onChange(of: ChatScrollGeometry) action tried to update multiple times per frame" twice, each as a chat opened.
 - **Still to check in the app:** the same in a TestFlight build, and how the accent fill looks on a row's first click. Kevin reported that the list works, not what the fill looked like.
+
+### The selection guard's write (2026-11-12)
+
+The second message of "Seen on the way" above, fixed on its own. None of the fix has been seen in the app.
+
+**What was wrong.**
+
+- `MacSidebarListSelectionGuardView` was only in a selected row's fill, and set the table's `selectionHighlightStyle` from `layout()`, from joining its superview or its window, and from SwiftUI's update of the view. So the first write came at the first selection, from inside SwiftUI's drawing of the selected row.
+- In the app, SwiftUI logged "NSHostingView is being laid out reentrantly while rendering its SwiftUI content. This is not supported and the current layout pass will be skipped": build 528 once, 75 ms after a click, and the Debug build above at its first click on a row, 34 ms after the guard's write. AppKit's message says its warning "will become an assert in the future", and on a long list this write got that warning too. If it does become one, the first click on a row would end the app.
+
+**Measured** on macOS 27.2: first in a throwaway program with the table's style setter hooked (an `.inset` `List(selection:)` with the sidebar's fill, the `ForEach` given the row and nothing around it), then with the real sidebar in the Mac test host. Every window was off screen or at alpha 0.
+
+- **The setter reloads the table.** `-[NSOutlineView setSelectionHighlightStyle:]` calls `_reloadTableForStyleDataChange`: every row view is thrown away, the selected rows are selected again, and SwiftUI's delegate writes the list's selection binding once more, with the same value. In a split view the rows were built again before the setter returned.
+- **Where the old write was made.** In the guard's `layout()`, in a layout pass SwiftUI runs while it renders the row: adding the guard's platform view calls `layoutSubtreeIfNeeded` from inside the row's own `NSHostingView.layout()`.
+- **The fault needs a split view.** With the list alone in a window nothing was logged, though the write was made in the same place: at 6 to 500 rows, with rows identified by a struct, an `NSUUID` or an `NSString`, selected from the table or from the binding, in a window never ordered in, ordered in off screen, or on screen at alpha 0. As the sidebar of a `NavigationSplitView`, in a window that was ordered in, the fault came at the first selection in every run. Finding that took most of the measuring. A split view in a window that is never ordered in does not lay its list out reliably, and those runs say nothing.
+- **AppKit's warning comes from the reload, not from where the write is made.** On 220 rows and more it was logged inside the setter: with the write in `layout()`, with the write on the next turn of the main queue, and with no row selected. With 200 rows and fewer it never was. SwiftUI's own load of 230 rows into an empty list logs it once with no guard at all, which is the first message of "Seen on the way".
+- **A view behind the list finds the table.** A view in the list's `background` is not inside the table. Both are under one `NSHostingView`, the sidebar column's, which is the view's second superview. The list's views join the window after its background's, and the view's second `layout()` found the table.
+- **The options, in the split view.** What was logged, and when:
+
+  | | 27 rows | 230 rows |
+  |---|---|---|
+  | As it was: the guard in the fill, writing in `layout()` | the fault, at the first selection | the fault and AppKit's warning, at the first selection |
+  | The guard in the fill, writing on the next turn of the main queue | nothing | AppKit's warning, at the first selection |
+  | A guard behind the list, rows loaded after it opens, as in the app | nothing | nothing from the guard |
+  | A guard behind the list, rows there when it opens | nothing | AppKit's warning once, as the list opens |
+
+  With a guard behind the list nothing was written at the first selection in any run: 27, 230 and 500 rows, selected from the table and from the binding.
+- **The real sidebar, before and after.** `MacConversationSidebar` over the real view model, as the sidebar column of a `NavigationSplitView` in the test host, with 27 and 300 conversations, selected from the mailbox and from the table. Before: the fault at four first selections of four, and AppKit's warning at both with 300. After: neither, at the same four. The table's style was written once, as the sidebar opened, from a turn of the main queue, and not at the first or the second selection. The table drew the same picture before and after, with no row selected and with one (compared by a hash of the PNG data), and a row's right-click menu had the same three items.
+
+**What changed.**
+
+- **The sidebar's list has a guard behind it** (the `background` of the `List` in `MacConversationSidebar`). It turns the list's own selection off as the sidebar opens, with no row selected and, in the app, the rows yet to load. Nothing is left to write at the first selection.
+- **The guard never writes from inside a call made into it.** `layout()` and the rest look for the table and leave the write to the next turn of the main queue.
+- **It finds the table from either place:** the one it is inside, or else the one drawn over it. A table elsewhere in the window is left alone.
+- **The fill keeps its guard,** for a list with none behind it.
+
+**What is left.**
+
+- A sidebar that opens with 220 rows or more already loaded gets AppKit's warning once as it opens, from the reload. The app's sidebar opens empty: `MacMailboxView` builds the list's view model with the view.
+- AppKit's warning on SwiftUI's own large updates, the first message of "Seen on the way". Nothing here changes it.
+- A fill in a list with no guard behind it still reloads its table at the first selection, a turn later.
+
+**Tests.**
+
+- `MacSidebarListSelectionGuardViewTests` (Mac plan, twelve tests, six of them new): nothing is written during the layout pass in which a table makes the rows that hold the guards, nor inside any call into the guard; the table behind a list is found, also when it joins after the guard; a table beside the guard is left alone.
+- `MacConversationSidebarSelectionGuardTests` (Mac plan, new): the real sidebar has its list's selection off before any row is selected, and selecting the first row writes nothing to the table's style.
+- `MacConversationSidebarSourceTests` pins from source that the list has the guard behind it, which is the part CI runs.
+- `MacSidebarRowSelectionBackgroundTests` has the tests it had: a list with the fill alone still has its selection turned off.
+- `Mac.xctestplan` passes in the signed, sandboxed test host: 451 tests in 46 suites, one of them new, and the run's log has neither message. The full iOS suite passes: 5,085 tests.
+
+**Revert-checks.** Each of the eleven changes named in these tests' `Revert-check:` comments was undone alone, and each time the test that names it failed. One of them is the write moved back into `layout()`. One test did not fail at first: the guard's turn of the main queue when it finds no table was covered by a later `layout()` from the window, so that test now has its views in no window.
+
+**Check in the signed, sandboxed app.**
+
+- The first click on a row after launch: the row has the accent fill, and the log has no "laid out reentrantly" (`/usr/bin/log show --predicate 'process == "MushMail"'`).
+- With the caret in the reply field, the open conversation's row: no gray around the fill.
+- A right-click on a row that is not selected: the menu, and whether the list still draws its ring around the row. The list's own selection is now off before the first click, where it used to be on until then.
 
 ## PR 5: the composer
 
@@ -517,7 +574,7 @@ Messages shows a "New Message" row in the sidebar and writes the message where t
 - **Compile, both platforms.** The iOS build, and `DESTINATION='platform=macOS' ./Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO`. Delete the unsigned `MushMail.app` afterwards; it is unsandboxed and must never be launched.
 - **Tests.** The narrowest iOS suites while working and the full iOS suite before merge. New policy suites go into `Mac.xctestplan`, with `Revert-check:` comments.
 - **Look.** Compile the real view files into the off-screen probe where they have no app dependencies (row, bubble shape, composer bar, header), render to PNG, and compare with the screenshot in light and dark.
-- **A list.** Give the probe's `ForEach` the row itself, with no `if`/`else` around it, identify the rows the way the app does, and move a row before reading anything ("Found in the app").
+- **A list.** Give the probe's `ForEach` the row itself, with no `if`/`else` around it, identify the rows the way the app does, and move a row before reading anything ("Found in the app"). Put the list where the app has it, in the sidebar of a `NavigationSplitView`: with the list alone in its window SwiftUI never logged the fault the app logged ("The selection guard's write").
 - **Not checkable without the app:** the split view with real data, focus, menus, the mark-read gate, trackpad scrolling under the header, and window resizing over a long chat. Kevin checks those in the signed, sandboxed build, and each PR lists what was not seen.
 
 ## Risks

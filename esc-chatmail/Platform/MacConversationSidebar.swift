@@ -23,8 +23,9 @@ import CoreData
 ///
 /// How a selected row looks is the sidebar's, not the list's: the row sits on a fill the sidebar
 /// draws, in colors to match, so the open conversation stays in the accent color while the caret
-/// is in the reply field (`MacSidebarRowSelectionPolicy`). The fill also stops the list drawing
-/// a selection of its own under it (`MacSidebarListSelectionGuardView`).
+/// is in the reply field (`MacSidebarRowSelectionPolicy`). The list draws no selection of its
+/// own under the fill: a guard behind the list turns that off as the sidebar opens, before any
+/// row is selected (`MacSidebarListSelectionGuardView`).
 struct MacConversationSidebar: View {
     @ObservedObject var viewModel: ConversationListViewModel
     @ObservedObject var abandonedActions: AbandonedPendingActionsModel
@@ -136,6 +137,16 @@ struct MacConversationSidebar: View {
         // separators that start at the text. `.sidebar` draws neither (measured off screen on
         // macOS 27.2; `docs/mac-imessage-ui-plan.md`, "Spike results").
         .listStyle(.inset)
+        // Turns the list's own selection off, so the rows' fills are the only selection drawn.
+        // Behind the list, not only in a selected row's fill: turning it off reloads the
+        // list's table, and here that happens as the sidebar opens, with no row selected and
+        // the rows yet to load. Left to the fill, it happened at the first click on a row,
+        // inside SwiftUI's drawing of that row (`MacSidebarListSelectionGuardView`).
+        .background {
+            MacSidebarListSelectionGuard()
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
         .animation(nil, value: viewModel.filteredConversationItems.count)
         // The menu's rows are the ones right-clicked: the whole selection when the click is
         // inside it, otherwise just the clicked row, which the selection then does not follow.
