@@ -474,6 +474,14 @@ Build 528 was the first native build TestFlight installed, and the first time PR
 - **Selecting a conversation puts the caret in its field, unless a key selected it** (`ChatComposerPolicy.focusesFieldWhenChatAppears`). This is narrower than the plan's "selecting a conversation puts the caret in the field", on purpose: with the focus taken from the sidebar's list on every selection, the arrow keys would stop after one row, and Delete pressed on row after row would archive one conversation and then type into an empty field. A click, a menu command or a swipe focuses the field; an arrow key or Delete leaves the focus with the list. Which it was is read from the event the app is handling when the chat appears (`ChatAppearanceTrigger`).
 - **Undo after a send does not bring the sent text back**: when the composer replaces the field's text, the field's undo history is emptied.
 
+**After review (2026-11-12, a follow-up PR).** Four changes from reviewing PR 397. What each rests on was measured in the test host, with the real text view, before anything was changed.
+
+- **A word still being composed, and the composer replacing its text.** The view tells the composer nothing about a word an input method is composing (measured with marked text set by hand: the composer's copy stayed without it), so the field used to leave its text alone whenever it held marked text. A send made with the arrow in the middle of a word then emptied the composer but not the view, and the view's next change gave the whole text back: the mail just sent was a draft again. Now the field remembers the composer's text as it last knew it (`composerTextKnownToField`). If the composer's text is not that, it was replaced from outside, and it wins: the view takes it and the composition is dropped. If it is that, the view is only ahead by the word being composed and is left alone, as before.
+- **The send arrow commits the word first** (`ReplyFieldFocusBridge.commitPendingInput`). A click on the arrow does not end a composition, and the composer's copy lacked the word, so the reply went without it. Return needs no such step: the field decides that key itself.
+- **The field has its own undo manager.** A text view's default is its window's (measured: the same object), so emptying it after a send also emptied the undo history of the search field and anything else in the window.
+- **The two tests over marked text and undo fail where they used to skip** if the view takes no marked text, or registers no undo, off screen. On macOS 27.2 both run. CI runs no Mac tests, so a skip there would have been seen by nobody.
+- Measured and left alone: a click over the text is the text view's. Hit testing over the text returns the text view, and the capsule's tap gesture adds no gesture recognizer above it. A real click could not be delivered to a window that is not shown, so placing the caret with the mouse is still on the list below.
+
 **Not built here.**
 
 - **The draft lost on a very fast A, B, A** ("PR 1 as built"). It is a change to who owns the stored draft (`ChatReplyComposerDirectory`), with attachments to hand over as well as text. That is its own change with its own tests, not part of the composer's drawing.
@@ -503,6 +511,8 @@ Build 528 was the first native build TestFlight installed, and the first time PR
 - The field growing to five lines and then scrolling, with the transcript's last row staying above it; and scrolling the transcript with the pointer over a one-line field.
 - Every number in `ChatComposerMetrics.mac` is a first reading of a screenshot.
 - Undo and redo while typing, spelling correction, and dictation in the field.
+- With Japanese input, clicking the send arrow in the middle of a word: the word is confirmed and goes with the reply, and the field is empty afterwards. Whether a real input method tells the field of each change to the word it is composing was not measured; the fix does not depend on it.
+- Clicking in the middle of a draft places the caret there.
 
 ## PR 6 (optional): New Message in the chat column
 

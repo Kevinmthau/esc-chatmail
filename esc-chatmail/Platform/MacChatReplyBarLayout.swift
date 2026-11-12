@@ -117,7 +117,12 @@ struct MacChatReplyBarLayout<Indicator: View, Attachments: View, AttachmentMenu:
     }
 
     private var sendArrow: some View {
-        Button(action: onSend) {
+        Button {
+            // A click here does not end an input method's composition, and the composer does
+            // not hold the word being composed until the field commits it.
+            focusBridge.commitPendingInput()
+            onSend()
+        } label: {
             Image(systemName: "arrow.up.circle.fill")
                 .resizable()
                 .symbolRenderingMode(.palette)

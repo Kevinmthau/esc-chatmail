@@ -66,7 +66,8 @@ final class ChatComposerState: ObservableObject {
             .eraseToAnyPublisher()
     }
 
-    static func hasDraftContent(
+    /// Pure, and asked from outside the main actor too (`ChatComposerPolicy.showsSendArrow`).
+    nonisolated static func hasDraftContent(
         replyText: String,
         hasAttachments: Bool
     ) -> Bool {

@@ -122,21 +122,76 @@ final class MacReplyTextFieldTests: XCTestCase {
     /// the reply is sent with the word still being composed.
     func testReturn_overMarkedText_commitsItAndDoesNotSend() async throws {
         let harness = try await Harness(text: "")
-        harness.textView.setMarkedText(
-            "にほん",
-            selectedRange: NSRange(location: 3, length: 0),
-            replacementRange: NSRange(location: NSNotFound, length: 0)
-        )
-        try XCTSkipUnless(
-            harness.textView.hasMarkedText(),
-            "This text view would not take marked text off screen"
-        )
+        try harness.compose("にほん")
 
         harness.textView.doCommand(by: #selector(NSResponder.insertNewline(_:)))
 
         XCTAssertEqual(harness.model.sendCount, 0)
         XCTAssertFalse(harness.textView.hasMarkedText())
         XCTAssertEqual(harness.textView.string, "にほん")
+        harness.close()
+    }
+
+    // MARK: - A word an input method is still composing
+
+    /// The composer replaces its text while a word is being composed: a send made with the
+    /// arrow empties it, a failed reply handed back fills it. The composer's text wins. Left
+    /// in place, the view kept all it showed and gave it back to the composer at the next
+    /// change: the mail just sent was a draft again, one Return from going out twice.
+    ///
+    /// Revert-check: putting `guard !textView.hasMarkedText() else { return }` back in place
+    /// of the marked-text branch of `MacReplyTextFieldCoordinator.applyTextFromComposer`
+    /// makes this fail: the view keeps "Hello にほん".
+    func testComposerReplacingItsText_whileAWordIsBeingComposed_replacesWhatTheFieldShows() async throws {
+        let harness = try await Harness(text: "Hello ")
+        try harness.compose("にほん")
+
+        harness.model.text = ""
+        await harness.waitUntil { harness.textView.string.isEmpty }
+
+        XCTAssertEqual(harness.textView.string, "")
+        XCTAssertFalse(harness.textView.hasMarkedText())
+        // What the view reports next is what was typed next, and nothing of what was sent.
+        harness.textView.insertText("Next", replacementRange: NSRange(location: 0, length: 0))
+        XCTAssertEqual(harness.model.text, "Next")
+        harness.close()
+    }
+
+    /// While a word is being composed the view is ahead of the composer by that word, and an
+    /// update for any other reason must not take the composition away.
+    ///
+    /// Revert-check: deleting `guard composerText != composerTextKnownToField else { return }`
+    /// from `applyTextFromComposer` makes this fail: the update replaces the view's text with
+    /// the composer's "Hello " and the word is gone.
+    func testUpdateForAnotherReason_whileAWordIsBeingComposed_leavesTheComposition() async throws {
+        let harness = try await Harness(text: "Hello ")
+        try harness.compose("にほん")
+
+        let evaluations = harness.model.bodyEvaluations
+        harness.model.unrelated += 1
+        await harness.waitUntil { harness.model.bodyEvaluations > evaluations }
+        await harness.nextMainQueueTurn()
+
+        XCTAssertEqual(harness.textView.string, "Hello にほん")
+        XCTAssertTrue(harness.textView.hasMarkedText())
+        harness.close()
+    }
+
+    /// The send arrow asks this before it sends: a click on it does not end a composition,
+    /// and the composer's copy lacks the word being composed, so the reply went without it.
+    ///
+    /// Revert-check: dropping the `commitPendingInput:` argument from the coordinator's
+    /// `bridge.attach` call makes this fail: the word stays marked and out of the composer.
+    func testCommitPendingInput_commitsTheWordBeingComposed_andGivesItToTheComposer() async throws {
+        let harness = try await Harness(text: "Hello ")
+        try harness.compose("にほん")
+
+        harness.bridge.commitPendingInput()
+
+        XCTAssertFalse(harness.textView.hasMarkedText())
+        XCTAssertEqual(harness.textView.string, "Hello にほん")
+        XCTAssertEqual(harness.model.text, "Hello にほん")
+        XCTAssertEqual(harness.model.sendCount, 0)
         harness.close()
     }
 
@@ -188,15 +243,43 @@ final class MacReplyTextFieldTests: XCTestCase {
     func testComposerEmptyingTheField_leavesNothingToUndo() async throws {
         let harness = try await Harness(text: "")
         harness.textView.insertText("Sent", replacementRange: NSRange(location: 0, length: 0))
-        try XCTSkipUnless(
-            harness.textView.undoManager?.canUndo == true,
-            "This text view registered no undo off screen"
+        // A failure, not a skip: a skipped test would leave the next assertion unchecked
+        // with nothing to show for it.
+        XCTAssertEqual(
+            harness.textView.undoManager?.canUndo,
+            true,
+            "This text view registered no undo off screen, so the rest of this test checks nothing"
         )
 
         harness.model.text = ""
         await harness.waitUntil { harness.textView.string.isEmpty }
 
         XCTAssertEqual(harness.textView.undoManager?.canUndo, false)
+        harness.close()
+    }
+
+    /// The field has an undo history of its own. Left to itself a text view records in its
+    /// window's, which the sidebar's search field shares, so emptying it after a send emptied
+    /// theirs too.
+    ///
+    /// Revert-check: deleting `undoManager(for:)` from `MacReplyTextFieldCoordinator` makes
+    /// the first assertion fail.
+    func testComposerEmptyingTheField_leavesTheWindowsUndoHistoryAlone() async throws {
+        let harness = try await Harness(text: "")
+        let windowUndoManager = try XCTUnwrap(harness.window.undoManager)
+        XCTAssertFalse(harness.textView.undoManager === windowUndoManager)
+
+        let somethingElse = NSObject()
+        windowUndoManager.registerUndo(withTarget: somethingElse) { _ in }
+        defer { windowUndoManager.removeAllActions(withTarget: somethingElse) }
+        XCTAssertTrue(windowUndoManager.canUndo)
+
+        harness.textView.insertText("Sent", replacementRange: NSRange(location: 0, length: 0))
+        harness.model.text = ""
+        await harness.waitUntil { harness.textView.string.isEmpty }
+
+        XCTAssertTrue(windowUndoManager.canUndo)
+        withExtendedLifetime(somethingElse) {}
         harness.close()
     }
 
@@ -326,8 +409,9 @@ final class MacReplyTextFieldTests: XCTestCase {
         XCTAssertTrue(harness.window.makeFirstResponder(other))
 
         harness.bridge.requestFocus(false)
-        // The request is applied on the next turn of the run loop; give it several.
-        for _ in 0..<5 { await Task.yield(); try await Task.sleep(nanoseconds: 20_000_000) }
+        // The request is applied in a block the call put on the main queue, so a block put
+        // there after it runs once the request has been applied.
+        await harness.nextMainQueueTurn()
 
         XCTAssertTrue(harness.window.firstResponder === other)
         harness.close()
@@ -349,6 +433,10 @@ private final class FieldModel: ObservableObject {
     var textAtSend: [String] = []
     /// Each text the field asked `canSend` about.
     var textAskedAbout: [String] = []
+    /// Changed to make SwiftUI update the field for a reason other than its text.
+    @Published var unrelated = 0
+    /// How many times `FieldHost.body` ran.
+    var bodyEvaluations = 0
 
     init(text: String, canSend: Bool) {
         self.text = text
@@ -363,6 +451,7 @@ private struct FieldHost: View {
     let key: MacReplyKeyEvent
 
     var body: some View {
+        let _ = model.bodyEvaluations += 1
         MacReplyTextField(
             text: $model.text,
             fontSize: ChatComposerMetrics.mac.fontSize,
@@ -443,6 +532,31 @@ private final class Harness {
         while !condition() {
             guard Date() < deadline else { return }
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+    }
+
+    /// Puts `word` at the end of the field as text an input method is still composing.
+    ///
+    /// Fails, where it used to skip, if the view takes no marked text off screen: a skipped
+    /// test leaves the guard it names unchecked with nothing to show for it, and CI runs no
+    /// Mac tests to notice.
+    func compose(_ word: String, file: StaticString = #filePath, line: UInt = #line) throws {
+        textView.setSelectedRange(NSRange(location: (textView.string as NSString).length, length: 0))
+        textView.setMarkedText(
+            word,
+            selectedRange: NSRange(location: (word as NSString).length, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        guard textView.hasMarkedText() else {
+            XCTFail("This text view would not take marked text off screen", file: file, line: line)
+            throw CocoaError(.featureUnsupported)
+        }
+    }
+
+    /// Returns once everything already on the main queue has run.
+    func nextMainQueueTurn() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
         }
     }
 

@@ -35,7 +35,8 @@ enum ChatComposerPolicy {
     /// show that a send is waiting on an attachment. Whether the arrow is *enabled* is
     /// `ChatReplyBar.canSend`'s to say, the same check Return asks.
     static func showsSendArrow(replyText: String, hasAttachments: Bool) -> Bool {
-        !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachments
+        // The composer's own rule for "there is a draft", which the draft store shares.
+        ChatComposerState.hasDraftContent(replyText: replyText, hasAttachments: hasAttachments)
     }
 
     /// What made a chat appear: how its row came to be selected.
