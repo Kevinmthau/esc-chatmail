@@ -59,7 +59,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
                 fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
             ),
             headerStyle: .navigationTitle,
-            bubbleStyle: .standard
+            bubbleStyle: .standard,
+            composerStyle: .bar
         )
 
         let names = storedPropertyNames(of: view)

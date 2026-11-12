@@ -19,6 +19,9 @@ enum AttachmentImportFinalizationResult: Equatable {
 struct AttachmentPicker: View {
     @Binding var attachments: [Attachment]
     @Binding var isProcessing: Bool
+    /// How the two pickers are offered: two buttons (the iPhone's reply bar), or one "+" menu
+    /// (the Mac's composer). What a picker returns is handled the same either way.
+    var style: AttachmentPickerStyle = .inlineButtons
     @Environment(\.managedObjectContext) private var viewContext
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
@@ -30,23 +33,7 @@ struct AttachmentPicker: View {
     @State private var importErrorMessage: String?
     
     var body: some View {
-        HStack(spacing: 16) {
-            Button(action: { showPhotoPicker = true }) {
-                Image(systemName: "photo")
-                    .font(.system(size: 20))
-                    .foregroundColor(.blue)
-            }
-            .disabled(isProcessing)
-            .accessibilityLabel("Attach photo")
-
-            Button(action: { showDocumentPicker = true }) {
-                Image(systemName: "paperclip")
-                    .font(.system(size: 20))
-                    .foregroundColor(.blue)
-            }
-            .disabled(isProcessing)
-            .accessibilityLabel("Attach document")
-        }
+        controls
         .photosPicker(
             isPresented: $showPhotoPicker,
             selection: $selectedPhotoItems,
@@ -93,6 +80,46 @@ struct AttachmentPicker: View {
         }
     }
     
+    @ViewBuilder
+    private var controls: some View {
+        switch style {
+        case .inlineButtons:
+            inlineButtons
+        case .plusMenu(let diameter):
+            #if os(macOS)
+            MacAttachmentMenuButton(
+                diameter: diameter,
+                onChoosePhotos: { showPhotoPicker = true },
+                onChooseFiles: { showDocumentPicker = true }
+            )
+            .disabled(isProcessing)
+            #else
+            let _ = diameter
+            inlineButtons
+            #endif
+        }
+    }
+
+    private var inlineButtons: some View {
+        HStack(spacing: 16) {
+            Button(action: { showPhotoPicker = true }) {
+                Image(systemName: "photo")
+                    .font(.system(size: 20))
+                    .foregroundColor(.blue)
+            }
+            .disabled(isProcessing)
+            .accessibilityLabel("Attach photo")
+
+            Button(action: { showDocumentPicker = true }) {
+                Image(systemName: "paperclip")
+                    .font(.system(size: 20))
+                    .foregroundColor(.blue)
+            }
+            .disabled(isProcessing)
+            .accessibilityLabel("Attach document")
+        }
+    }
+
     private nonisolated func processPhotoSelections(
         _ items: [PhotosPickerItem],
         generation: AttachmentAccountWorkGeneration

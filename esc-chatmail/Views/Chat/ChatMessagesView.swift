@@ -51,7 +51,13 @@ struct ChatMessagesView: View {
     let isChatActiveAndUncovered: Bool
     /// How the transcript draws its rows (`ChatView.bubbleStyle`). Fixed for the chat's life.
     let bubbleStyle: MessageBubbleStyle
-    var isTextFieldFocused: FocusState<Bool>.Binding
+    /// How the chat draws its reply composer (`ChatView.composerStyle`). Fixed for the chat's
+    /// life.
+    let composerStyle: ChatComposerStyle
+    /// The reply field's focus. Spelled as the `FocusState` binding it used to be, so every
+    /// read and write below is the same for the iPhone's field and the Mac's
+    /// (`ChatComposerFocus`).
+    let isTextFieldFocused: ChatComposerFocus
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
     @StateObject private var session: ChatMessagesSession
@@ -80,7 +86,8 @@ struct ChatMessagesView: View {
         isEffectivelyOneToOneConversation: Bool,
         isChatActiveAndUncovered: Bool,
         bubbleStyle: MessageBubbleStyle,
-        isTextFieldFocused: FocusState<Bool>.Binding,
+        composerStyle: ChatComposerStyle,
+        isTextFieldFocused: ChatComposerFocus,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
         self.conversation = conversation
@@ -89,6 +96,7 @@ struct ChatMessagesView: View {
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.isChatActiveAndUncovered = isChatActiveAndUncovered
         self.bubbleStyle = bubbleStyle
+        self.composerStyle = composerStyle
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
 
@@ -618,7 +626,8 @@ struct ChatMessagesView: View {
             composerState: viewModel.composerState,
             conversation: conversation,
             measuredHeight: $replyBarHeight,
-            focusBinding: isTextFieldFocused
+            focus: isTextFieldFocused,
+            style: composerStyle
         ) {
             let anchorIntent = coordinator.beginLocalReplySend()
             defer { coordinator.endLocalReplySend(anchorIntent) }
@@ -1089,12 +1098,20 @@ private struct ChatReplyComposerOverlay: View {
     @ObservedObject var composerState: ChatComposerState
     let conversation: Conversation
     @Binding var measuredHeight: CGFloat
-    var focusBinding: FocusState<Bool>.Binding
+    let focus: ChatComposerFocus
+    let style: ChatComposerStyle
     let onSend: () async -> Bool
 
+    /// The composer keeps this structure in every style: an overlay at the transcript's bottom
+    /// whose measured height is the transcript's bottom inset (`ChatBottomInsetPolicy`). A
+    /// style changes only what is drawn behind the controls (`ChatComposerPolicy.backdrop`)
+    /// and the controls themselves (`ChatReplyBar`).
     var body: some View {
+        let backdrop = ChatComposerPolicy.backdrop(for: style)
         VStack(spacing: 0) {
-            Divider()
+            if backdrop == .dividerOverOpaqueBar {
+                Divider()
+            }
             ChatReplyBar(
                 replyText: $composerState.replyText,
                 replyingTo: $composerState.replyingTo,
@@ -1102,13 +1119,29 @@ private struct ChatReplyComposerOverlay: View {
                 conversation: conversation,
                 isSending: composerState.isSending,
                 onSend: onSend,
-                focusBinding: focusBinding,
+                focus: focus,
+                style: style,
                 isProcessingAttachments: $composerState.isProcessingAttachments,
                 unavailableReplyTargetURI: $composerState.unavailableReplyTargetURI,
                 recoveredReplyEnvelope: composerState.recoveredReplyEnvelope
             )
         }
-        .background(Color.systemBackground)
+        .background {
+            switch backdrop {
+            case .dividerOverOpaqueBar:
+                Color.systemBackground
+            case .fade:
+                // The transcript shows under the composer and fades out towards the
+                // window's edge. It takes no clicks: between the controls they reach the
+                // rows underneath.
+                LinearGradient(
+                    colors: [Color.systemBackground.opacity(0), Color.systemBackground.opacity(0.9)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .allowsHitTesting(false)
+            }
+        }
         .background(
             GeometryReader { geometry in
                 Color.clear

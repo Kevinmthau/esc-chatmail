@@ -24,12 +24,20 @@ struct ChatView: View {
     /// in the Mac's chat column (`MessageBubbleStyle`). Required, like the header's style, so
     /// each presenter names its own. Fixed for the chat's life.
     private let bubbleStyle: MessageBubbleStyle
+    /// How this chat draws its reply composer: the iPhone's bar where it is pushed, Messages'
+    /// floating composer in the Mac's chat column (`ChatComposerStyle`). Required, like the
+    /// other two styles. Fixed for the chat's life.
+    private let composerStyle: ChatComposerStyle
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
     /// How this chat leaves the screen when it closes itself; nil pops it with `dismiss`
     /// (`exitChat()`).
     private let onExit: (@MainActor () -> Void)?
 
     @FocusState private var isTextFieldFocused: Bool
+    /// The focus of the Mac's reply field, which `FocusState` does not reach
+    /// (`ReplyFieldFocusBridge`). Observed, so the chat re-evaluates when that field gains or
+    /// loses the focus, as it does for `isTextFieldFocused`. Never changes on iOS.
+    @StateObject private var replyFieldFocus = ReplyFieldFocusBridge()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
@@ -41,6 +49,7 @@ struct ChatView: View {
         chatDependencies: ChatDependencies,
         headerStyle: ChatHeaderStyle,
         bubbleStyle: MessageBubbleStyle,
+        composerStyle: ChatComposerStyle,
         makeForwardComposeView: @escaping @MainActor (ComposeForwardModeContext) -> ComposeView = { context in
             ComposeView(mode: .forward(context))
         },
@@ -50,6 +59,7 @@ struct ChatView: View {
         self.chatDependencies = chatDependencies
         self.headerStyle = headerStyle
         self.bubbleStyle = bubbleStyle
+        self.composerStyle = composerStyle
         self.makeForwardComposeView = makeForwardComposeView
         self.onExit = onExit
         self._viewModel = StateObject(
@@ -72,7 +82,8 @@ struct ChatView: View {
             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
             bubbleStyle: bubbleStyle,
-            isTextFieldFocused: $isTextFieldFocused,
+            composerStyle: composerStyle,
+            isTextFieldFocused: composerFocus,
             onOpenFullMessage: { messageObjectID, source in
                 viewModel.openEmailReader(
                     for: messageObjectID,
@@ -206,11 +217,20 @@ struct ChatView: View {
         }
         .onChange(of: shouldDismissDrainedConversation, initial: true) { _, shouldDismiss in
             guard shouldDismiss else { return }
-            isTextFieldFocused = false
+            composerFocus.wrappedValue = false
             exitChat()
         }
         .onAppear {
             viewModel.composerDidAppear()
+            // Messages puts the caret in the field of the conversation you select. Whether
+            // this chat does is the policy's to say: never on iOS, and on the Mac not when a
+            // key selected the row (`ChatComposerPolicy.focusesFieldWhenChatAppears`).
+            if ChatComposerPolicy.focusesFieldWhenChatAppears(
+                style: composerStyle,
+                trigger: ChatAppearanceTrigger.current()
+            ) {
+                composerFocus.wrappedValue = true
+            }
         }
         .onDisappear {
             viewModel.composerDidDisappear()
@@ -218,6 +238,12 @@ struct ChatView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { viewModel.scheduleReplyDraftSave() }
         }
+    }
+
+    /// The reply field's focus, whichever field this chat's composer draws
+    /// (`ChatComposerFocus`).
+    private var composerFocus: ChatComposerFocus {
+        ChatComposerFocus(fieldBinding: $isTextFieldFocused, bridge: replyFieldFocus)
     }
 
     private var navigationDisplayName: String {
@@ -275,7 +301,7 @@ struct ChatView: View {
     /// Opens Participants, a sheet (`activeDestination`). Every header control that opens it
     /// first asks whether this conversation's does.
     private func presentParticipantsList() {
-        isTextFieldFocused = false
+        composerFocus.wrappedValue = false
         viewModel.contactManager.showingParticipantsList = true
     }
 

@@ -1,6 +1,6 @@
 # Plan: make the Mac app look and work like Messages on the Mac
 
-Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), PR 2 is merged (PR 387, 2026-11-12), PR 3 is merged (PR 389, 2026-11-12) and PR 4 is built (2026-11-12); PRs 5 and 6 have not started.** The spike's results are under "Spike results". PRs 1 to 4 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built" to "PR 4 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
+Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), PR 2 is merged (PR 387, 2026-11-12), PR 3 is merged (PR 389, 2026-11-12), PR 4 is merged (PR 394, 2026-11-12, with PRs 395 and 396 after it) and PR 5 is built (2026-11-12); PR 6 has not started.** The spike's results are under "Spike results". PRs 1 to 5 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built" to "PR 5 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
 
 This plan is the detailed version of the Windows, Layout, Toolbar and Selection items of Phase 2 in `docs/mac-app-plan.md`, plus a restyle that Phase 2 did not ask for. The Settings scene, file drag and drop, Save Attachment, the name and the icon stay in that document.
 
@@ -430,6 +430,56 @@ The transcript's scroll timing is delicate (AGENTS.md), and the reveal pass depe
 - **Check in the app, with Japanese input:** the Return that confirms a word does not send.
 - **Focus.** Selecting a conversation puts the caret in the field. Escape clears a reply target.
 - **Reply indicator and attachment strip** sit above the capsule, restyled to match.
+
+### PR 5 as built (2026-11-12)
+
+**The composer is a value, like the header and the transcript.** `ChatView` takes a required `ChatComposerStyle`: `.bar` where the iOS list pushes a chat, `.floating(.mac)` in the Mac's chat column. `ChatComposerPolicy` says what each draws and does, so no view checks the platform. The structure did not move: the composer is still `ChatReplyComposerOverlay`, whose measured height feeds `ChatBottomInsetPolicy`, and nothing on the send path changed.
+
+- **Layout** (`MacChatReplyBarLayout`). A "+" glass circle that opens a menu of the two pickers (`AttachmentPicker` with `style: .plusMenu`; the pickers and what they return are unchanged), and a field with an emoji button inside it that opens the system character palette. The reply indicator sits above as a small capsule (`MacReplyIndicator`) and offers what the iPhone's row does. The attachment strip sits between them, without its gray band.
+- **The field is not glass.** It is a capsule with the window's background as its fill and a hairline border, so the draft is always read against the same color. Only the "+" button is glass. That also keeps PR 3's finding out of reach: a wide glass shape over a scroll view took the scroll view's content out of an off-screen drawing.
+- **No divider and no opaque bar.** Behind the composer the transcript fades out towards the window's edge (`ChatComposerPolicy.Backdrop.fade`): a gradient to 90% of the window's background, which takes no clicks. The plan asked only for the bar to go; the fade is an addition, so that a bubble passing under the controls does not read as one of them. Deleting the `.fade` case's gradient in `ChatReplyComposerOverlay` removes it.
+- **Send arrow** (decision 2). Inside the field, only while there is something to send (`ChatComposerPolicy.showsSendArrow`), gray while the composer cannot send. The field is no taller for having it.
+- **The field is an `NSTextView`** (`MacReplyTextField`, `MacReplyTextView`, `MacReplyTextFieldCoordinator`), as recommended. Its delegate takes four of the text system's commands and asks `ReplyFieldKeyPolicy` what each does:
+  - Return sends, if the composer can send. If it cannot (nothing to send, a send that owns the draft, an attachment still being read) Return does nothing, and adds no line.
+  - Shift-Return, Option-Return and Control-Return add a line. Control-Return adds a plain newline, not the U+2028 a text view inserts for it.
+  - A held Return does not send again.
+  - A Return or an Escape that arrives over an input method's marked text commits the word, or does nothing. It never sends.
+  - Escape is taken, because left alone it opens a text view's completion list, and offered to the composer.
+- **One send.** The iPhone's button, the Mac's arrow and Return all call `ChatReplyBar.sendIfAllowed`, the only caller of `onSend`, behind `canSend`. Return asks `canSend` about the text in the view at that moment, and hands the composer that text before the send, in case the composer's copy has not caught up with the last key.
+- **Escape drops the quote**, as the indicator's X does, and only where there is an X: not for a recovered reply, not for an unavailable target, and not while a send owns the draft (`ChatComposerPolicy.escapeDropsQuote`). The reply's destination is kept, as with the X.
+- **Focus.** `FocusState` does not reach an `NSTextView`, so the Mac's field reports to, and takes requests from, a `ReplyFieldFocusBridge` the chat owns. `ChatComposerFocus` wraps that and the chat's `FocusState` behind the one `wrappedValue` every existing read and write already used, so the transcript's focus handling is the same code for both fields.
+- **Selecting a conversation puts the caret in its field, unless a key selected it** (`ChatComposerPolicy.focusesFieldWhenChatAppears`). This is narrower than the plan's "selecting a conversation puts the caret in the field", on purpose: with the focus taken from the sidebar's list on every selection, the arrow keys would stop after one row, and Delete pressed on row after row would archive one conversation and then type into an empty field. A click, a menu command or a swipe focuses the field; an arrow key or Delete leaves the focus with the list. Which it was is read from the event the app is handling when the chat appears (`ChatAppearanceTrigger`).
+- **Undo after a send does not bring the sent text back**: when the composer replaces the field's text, the field's undo history is emptied.
+
+**Not built here.**
+
+- **The draft lost on a very fast A, B, A** ("PR 1 as built"). It is a change to who owns the stored draft (`ChatReplyComposerDirectory`), with attachments to hand over as well as text. That is its own change with its own tests, not part of the composer's drawing.
+- **Marking mail read on returning to the window.** Still a decision: nothing marks on return, as on iOS.
+- **Type-to-focus.** With the focus on the sidebar's list, typing a letter does not start a reply; click the field first.
+
+**Checked.**
+
+- **Both platforms compile**, and the iOS chat draws the same pixels: the real `ChatView` in a `NavigationStack`, over fixture messages, drawn in light and in dark from this branch and from a copy of `main`, and the four PNGs compared byte for byte. That picture has no "Replying to" row in it, so the row's drawing was not compared; its code changed only in that its X now calls a function shared with Escape.
+- **Drawn off screen on the Mac**: the real `ChatView` with the floating composer under a transcript, and the composer alone in six states (empty, with a reply row, one line, four lines, an unavailable target, a recovered reply), each in light and dark. The transcript ends above the composer; the field grows upward and its buttons stay on its last line.
+  - A drawing made with `cacheDisplay` shows a short tick at each end of every stroked capsule. `ImageRenderer` draws the same view without them, so they are the drawing's, not the view's.
+  - The "+" button's glass does not draw off screen, and its plus sign drew white in a dark window and not at all in a light one, as PR 3 found for content on glass.
+- **Tests.** The full iOS suite passes: 5,072 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 433 tests in 43 suites. New suites: `ReplyFieldKeyPolicyTests`, `ChatComposerPolicyTests`, `ReplyFieldFocusBridgeTests` (both platforms), `MacReplyTextFieldTests`, `MacChatReplyBarLayoutTests` (Mac plan) and `ChatComposerStyleSourceTests` (iOS, reading source). `MacReplyTextFieldTests` mounts the real field in a window that is never shown and gives its text view the commands directly, with marked text set by hand.
+- **Revert-checks.** Each change named in the new tests' `Revert-check:` comments was made alone: 69 made the test that names it fail. Two do not, and their comments say so (`HONEST SCOPE`): the field's own `invalidateIntrinsicContentSize()` on typing, because SwiftUI asks for the size again anyway, and the field's minimum height, because one line of text and the padding already come to it.
+
+**Not seen: check in the signed, sandboxed app.**
+
+- **With Japanese input, the Return that confirms a word does not send.** The tests set marked text by hand and no input method ran. This is the check the plan names before PR 5 ships.
+- Return sends; Shift-Return, Option-Return and Control-Return add a line; a held Return sends once.
+- Return with an attachment still being read: nothing happens, and the draft is not selected.
+- Clicking a conversation puts the caret in the field. Arrow keys in the sidebar keep the focus in the list, and Delete on row after row archives each one. Whether the event that selected the row is still the current one when the chat appears was not measured (`ChatAppearanceTrigger`): if it is not, an arrow key would take the focus too.
+- Clicking in the transcript takes the caret out of the field (as on iOS, where it lowers the keyboard), and typing then goes nowhere until the field is clicked. That may want changing once seen.
+- Escape drops the quote. Escape with no quote does nothing, and no completion list opens.
+- The emoji button opens the character palette, and a character chosen there lands in the field.
+- The "+" menu: Photos and Files open their pickers, and what is picked appears in the strip above the field.
+- The composer over a transcript: the "+" button's glass, the fade under the controls, and a click between the controls reaching the row underneath.
+- The field growing to five lines and then scrolling, with the transcript's last row staying above it; and scrolling the transcript with the pointer over a one-line field.
+- Every number in `ChatComposerMetrics.mac` is a first reading of a screenshot.
+- Undo and redo while typing, spelling correction, and dictation in the field.
 
 ## PR 6 (optional): New Message in the chat column
 
