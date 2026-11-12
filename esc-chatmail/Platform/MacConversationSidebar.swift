@@ -15,6 +15,10 @@ import CoreData
 /// The selection is the list's own (`List(selection:)`): a click selects, Shift-click and
 /// Command-click extend, and the arrow keys move it. One selected row is the open chat
 /// (`MacSidebarSelectionPolicy`).
+///
+/// How a selected row looks is the sidebar's, not the list's: the row sits on a fill the sidebar
+/// draws, in colors to match, so the open conversation stays in the accent color while the caret
+/// is in the reply field (`MacSidebarRowSelectionPolicy`).
 struct MacConversationSidebar: View {
     @ObservedObject var viewModel: ConversationListViewModel
     @ObservedObject var abandonedActions: AbandonedPendingActionsModel
@@ -31,8 +35,16 @@ struct MacConversationSidebar: View {
     let onNewMessage: @MainActor () -> Void
 
     @FocusState private var isSearchFieldFocused: Bool
+    /// Whether this window is the one the user is working in. A selected row is gray in a
+    /// window that is not.
+    private var windowAppearsActive = WindowAppearsActive()
 
     var body: some View {
+        // Empty unless several rows are selected, and then one pass over the rows.
+        let selectionJoins = MacSidebarRowSelectionPolicy.joins(
+            orderedIDs: viewModel.filteredConversationItems.lazy.map(\.id),
+            selection: selection
+        )
         List(selection: $selection) {
             if syncEngine.isBlockedByInsufficientStorage {
                 InsufficientStorageBanner(onTryAgain: {
@@ -57,12 +69,26 @@ struct MacConversationSidebar: View {
             // The row's identity, and so its selection value, is the conversation's object ID
             // (`ConversationListItem.id`).
             ForEach(viewModel.filteredConversationItems) { item in
+                let selectionFill = MacSidebarRowSelectionPolicy.fill(
+                    isSelected: selection.contains(item.id),
+                    windowAppearsActive: windowAppearsActive.value
+                )
                 ConversationRowView(
                     snapshot: item.snapshot,
                     conversationObjectID: item.id,
                     conversationContext: viewContext,
                     currentUserEmail: currentUserEmail,
-                    participantLoader: participantLoader
+                    participantLoader: participantLoader,
+                    metrics: .mac,
+                    palette: MacSidebarRowSelectionPolicy.palette(on: selectionFill)
+                )
+                // The fill and the palette above come from one decision and go together:
+                // without this the row's white text sits on the list's own gray selection.
+                .listRowBackground(
+                    MacSidebarRowSelectionBackground(
+                        fill: selectionFill,
+                        joins: selectionJoins[item.id] ?? .none
+                    )
                 )
                 .onAppear {
                     viewModel.loadMoreIfNeeded(currentItem: item)
@@ -116,6 +142,8 @@ struct MacConversationSidebar: View {
                 ConversationFilterMenu(currentFilter: viewModel.currentFilter) { filter in
                     viewModel.currentFilter = filter
                 }
+                // A count of zero draws no badge.
+                .badge(MacSidebarFilterBadgePolicy.badgeCount(for: viewModel.currentFilter))
             }
         }
         .focusedSceneValue(

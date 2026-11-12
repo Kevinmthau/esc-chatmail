@@ -19,6 +19,14 @@ struct ConversationRowView: View {
     private let participantLoader: ParticipantLoader
     private let conversationObjectID: NSManagedObjectID
     private let conversationContext: NSManagedObjectContext
+    /// The row's sizes, spacing and fonts: `.iOS` in the iOS list, `.mac` in the Mac sidebar.
+    /// Every list names its own, so neither platform gets the other's by default. The text
+    /// column's padding sets the row height instead of a fixed frame, so rows grow with
+    /// Dynamic Type as Messages' do.
+    private let metrics: ConversationRowMetrics
+    /// The row's colors: `.standard` unless the row sits on a selection fill, which only the
+    /// Mac sidebar draws.
+    private let palette: ConversationRowPalette
 
     /// An uncached participant load result together with the `participantInfoKey` it was
     /// loaded for, stored as one value so the key/info pair cannot drift across write
@@ -42,7 +50,9 @@ struct ConversationRowView: View {
         conversationObjectID: NSManagedObjectID,
         conversationContext: NSManagedObjectContext,
         currentUserEmail: String,
-        participantLoader: ParticipantLoader
+        participantLoader: ParticipantLoader,
+        metrics: ConversationRowMetrics,
+        palette: ConversationRowPalette = .standard
     ) {
         self.snapshot = snapshot
         self.currentUserEmail = currentUserEmail
@@ -50,25 +60,9 @@ struct ConversationRowView: View {
         self.participantLoader = participantLoader
         self.conversationObjectID = conversationObjectID
         self.conversationContext = conversationContext
+        self.metrics = metrics
+        self.palette = palette
     }
-
-    /// Row spacing matched to Messages (iOS 26), measured side by side at the
-    /// same text size. The text column's padding sets the row height instead of
-    /// a fixed frame, so rows grow with Dynamic Type as Messages' do; the old
-    /// fixed 88pt row left its text almost no room at larger text sizes. The
-    /// bottom padding is deeper than the top because the title's line box holds
-    /// more room above its ascenders than the last preview line holds below its
-    /// descenders; 11 over 14.5 spaces the visible text evenly between
-    /// separators, as in Messages. The padding is on the text column, not the
-    /// row, so the avatar and unread dot stay centered on the full row height.
-    private static let textColumnTopPadding: CGFloat = 11
-    private static let textColumnBottomPadding: CGFloat = 14.5
-    private static let titleToPreviewSpacing: CGFloat = 4
-    private static let rowLeadingPadding: CGFloat = 8
-    private static let unreadIndicatorToAvatarSpacing: CGFloat = 9
-    private static let avatarToTextSpacing: CGFloat = 12
-    private static let rowTrailingPadding: CGFloat = 20
-    private static let timestampToChevronSpacing: CGFloat = 12
 
     /// The text column's leading edge, where the row's separator starts, as in
     /// Messages. By default a List separator starts at the row's first `Text`,
@@ -127,50 +121,54 @@ struct ConversationRowView: View {
             cachedFull: cachedFull,
             infoKey: infoKey
         ) ? infoKey : nil
-        let rowContent = HStack(spacing: Self.avatarToTextSpacing) {
-            HStack(spacing: Self.unreadIndicatorToAvatarSpacing) {
+        let rowContent = HStack(spacing: metrics.avatarToTextSpacing) {
+            HStack(spacing: metrics.unreadIndicatorToAvatarSpacing) {
                 // Unread indicator with fixed width container
                 ZStack {
                     if snapshot.inboxUnreadCount > 0 {
                         Circle()
-                            .fill(Color.blue)
-                            .frame(width: 10, height: 10)
+                            .fill(palette.unreadIndicator)
+                            .frame(width: metrics.unreadIndicatorDiameter, height: metrics.unreadIndicatorDiameter)
                     }
                 }
-                .frame(width: 10, height: 10)
+                .frame(width: metrics.unreadIndicatorDiameter, height: metrics.unreadIndicatorDiameter)
 
                 // Avatar stack
                 AvatarStackView(
                     alignedAvatarPhotos: avatarPhotos,
                     participants: participantNames,
                     showsGroupAvatar: showsGroupAvatar,
-                    fallbackDisplayText: fallbackName
+                    fallbackDisplayText: fallbackName,
+                    diameter: metrics.avatarDiameter
                 )
-                    .frame(width: 44, height: 44)
+                    .frame(width: metrics.avatarDiameter, height: metrics.avatarDiameter)
             }
 
-            VStack(alignment: .leading, spacing: Self.titleToPreviewSpacing) {
+            VStack(alignment: .leading, spacing: metrics.titleToPreviewSpacing) {
                 // Top row: Name, date, and chevron
                 HStack {
                     HStack(spacing: 4) {
                         if snapshot.pinned {
                             Image(systemName: "pin.fill")
                                 .font(.footnote)
-                                .foregroundColor(.orange)
+                                .foregroundColor(palette.pin)
                         }
 
                         Text(displayName)
-                            .font(.headline)
+                            .font(metrics.titleFont)
+                            // Nil in the standard palette, which leaves the name's color to
+                            // the row's surroundings, as before the row had a palette.
+                            .foregroundColor(palette.title)
                             .lineLimit(1)
                     }
 
                     Spacer()
 
-                    HStack(spacing: Self.timestampToChevronSpacing) {
+                    HStack(spacing: metrics.timestampToChevronSpacing) {
                         if let date = snapshot.lastMessageDate {
                             Text(formatDate(date))
-                                .font(.subheadline)
-                                .foregroundColor(.secondary)
+                                .font(metrics.secondaryTextFont)
+                                .foregroundColor(palette.secondaryText)
                                 // One line, so the timestamp never makes its row
                                 // alone taller: beside a long title the stack can
                                 // give it less than its width, and at accessibility
@@ -181,25 +179,29 @@ struct ConversationRowView: View {
                                 .lineLimit(1)
                         }
 
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundColor(Color.tertiaryLabel)
+                        if metrics.showsChevron {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(palette.chevron)
+                        }
                     }
                 }
 
                 // Bottom row: snippet only. Both lines are reserved so a
                 // one-line preview keeps the full row height, as in Messages.
                 Text(ConversationRowPolicy.previewText(snippet: snapshot.snippet))
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .font(metrics.secondaryTextFont)
+                    .foregroundColor(palette.secondaryText)
                     .lineLimit(2, reservesSpace: true)
             }
-            .padding(.top, Self.textColumnTopPadding)
-            .padding(.bottom, Self.textColumnBottomPadding)
+            // On the text column, not the row, so the avatar and unread dot stay centered
+            // on the full row height.
+            .padding(.top, metrics.textColumnTopPadding)
+            .padding(.bottom, metrics.textColumnBottomPadding)
             .alignmentGuide(Self.textColumnLeading) { $0[.leading] }
         }
-        .padding(.leading, Self.rowLeadingPadding)
-        .padding(.trailing, Self.rowTrailingPadding)
+        .padding(.leading, metrics.rowLeadingPadding)
+        .padding(.trailing, metrics.rowTrailingPadding)
         .alignmentGuide(.listRowSeparatorLeading) { $0[Self.textColumnLeading] }
 
         rowContent

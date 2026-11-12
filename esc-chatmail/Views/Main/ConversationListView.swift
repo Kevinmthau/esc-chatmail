@@ -172,7 +172,8 @@ struct ConversationListView: View {
             conversationObjectID: item.id,
             conversationContext: viewContext,
             currentUserEmail: authSession.userEmail ?? "",
-            participantLoader: deps.participantLoader
+            participantLoader: deps.participantLoader,
+            metrics: .iOS
         )
         .onAppear {
             viewModel.loadMoreIfNeeded(currentItem: item)
