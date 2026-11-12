@@ -33,6 +33,9 @@ struct MessageContentView: View {
     /// The tail this row's bubble draws, nil for none (`MessageBubbleRowPolicy.tail`): the
     /// last bubble of a run in a style with tails.
     var bubbleTail: BubbleShape.Tail?
+    /// The widest the text content draws, nil for the width of the row's column
+    /// (`MessageBubbleStyle.textContentMaxWidth`). Cards and images keep their own caps.
+    var textMaxWidth: CGFloat?
 
     var body: some View {
         if showHTMLPreview {
@@ -41,6 +44,7 @@ struct MessageContentView: View {
         } else {
             // Personal emails: Show as chat bubbles with text
             textContent
+                .modifier(MessageTextWidthCap(maxWidth: textMaxWidth, isFromMe: message.isFromMe))
         }
     }
 
