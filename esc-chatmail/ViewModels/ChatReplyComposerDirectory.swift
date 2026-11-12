@@ -18,6 +18,15 @@ import CoreData
 /// hands an unsent reply to the presented composer, or merges it into the
 /// stored draft when no composer is on screen.
 ///
+/// Ownership passes with the draft, not only with the right to write it. A
+/// composer that left the screen saves what it holds through the cleanup
+/// gate, behind whatever holds that queue, and a composer created for the
+/// chat before that save ran used to load the older stored draft while the
+/// save was dropped as stale: the words typed since the last autosave were
+/// lost. On the Mac that takes two arrow keys (chat A, B, A). The new
+/// composer now takes the draft from the one that left
+/// (`withdrawnDraftOwner`, `ChatViewModel.handOverOwedReplyDraft`).
+///
 /// It also counts the conversation's reply sends that have not made their
 /// optimistic message durable yet (`UnpersistedSend`). Until then the stored
 /// draft still holds the text being sent (the autosave that ran before the
@@ -49,19 +58,23 @@ final class ChatReplyComposerDirectory {
         }
     }
 
+    private typealias Presentation = (generation: UInt64, composer: () -> ChatViewModel?)
+
     private var nextGeneration: UInt64 = 0
-    private var draftOwnerGenerations: [NSManagedObjectID: UInt64] = [:]
-    private var presentedComposers: [NSManagedObjectID: (generation: UInt64, composer: () -> ChatViewModel?)] = [:]
+    /// Held weakly, like the presented composers: an owner whose screen is
+    /// gone lives only as long as its queued save or its send.
+    private var draftOwners: [NSManagedObjectID: Presentation] = [:]
+    private var presentedComposers: [NSManagedObjectID: Presentation] = [:]
     private var unpersistedSendCounts: [NSManagedObjectID: Int] = [:]
 
     /// Makes `composer` the on-screen composer and the draft owner for the
     /// conversation, superseding any earlier one. Returns its generation.
     func present(_ composer: ChatViewModel, for conversationObjectID: NSManagedObjectID) -> UInt64 {
         nextGeneration &+= 1
-        let generation = nextGeneration
-        draftOwnerGenerations[conversationObjectID] = generation
-        presentedComposers[conversationObjectID] = (generation, { [weak composer] in composer })
-        return generation
+        let presentation: Presentation = (nextGeneration, { [weak composer] in composer })
+        draftOwners[conversationObjectID] = presentation
+        presentedComposers[conversationObjectID] = presentation
+        return presentation.generation
     }
 
     /// The composer left the screen. It stays the draft owner until another
@@ -72,11 +85,23 @@ final class ChatReplyComposerDirectory {
     }
 
     func ownsDraft(generation: UInt64, for conversationObjectID: NSManagedObjectID) -> Bool {
-        draftOwnerGenerations[conversationObjectID] == generation
+        draftOwners[conversationObjectID]?.generation == generation
     }
 
     func presentedComposer(for conversationObjectID: NSManagedObjectID) -> ChatViewModel? {
         presentedComposers[conversationObjectID]?.composer()
+    }
+
+    /// The conversation's draft owner, if it has left the screen and no
+    /// composer has been presented for the conversation since.
+    ///
+    /// Asked by a composer about to be presented, before `present` makes it
+    /// the owner: this one's final save may not have run yet (see the type
+    /// comment). Nil while a composer is on screen. That one is being typed
+    /// into, and nothing takes its content from under it.
+    func withdrawnDraftOwner(for conversationObjectID: NSManagedObjectID) -> ChatViewModel? {
+        guard presentedComposers[conversationObjectID] == nil else { return nil }
+        return draftOwners[conversationObjectID]?.composer()
     }
 
     /// Registers a reply send in its tap turn, before anything awaits.
