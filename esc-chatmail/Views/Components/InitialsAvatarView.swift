@@ -47,6 +47,19 @@ struct InitialsAvatarStyle {
             singleNamePrefixLength: singleNamePrefixLength
         )
     }
+
+    /// This style with its border in another color and everything else kept. A group's small
+    /// avatars take their ring's color from the group (`GroupAvatarColors.ring`); in the
+    /// standard colors that is `compact`'s own border, so the style is unchanged.
+    func bordered(in color: Color) -> InitialsAvatarStyle {
+        InitialsAvatarStyle(
+            size: size,
+            fontSize: fontSize,
+            borderColor: color,
+            borderWidth: borderWidth,
+            singleNamePrefixLength: singleNamePrefixLength
+        )
+    }
 }
 
 /// Unified initials avatar view with configurable styles

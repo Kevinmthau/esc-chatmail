@@ -53,10 +53,20 @@ final class MacSidebarRowSelectionPolicyTests: XCTestCase {
     // MARK: - Joins
 
     /// One selected row is the open chat, and nearly always the whole selection: its fill is
-    /// rounded at all four corners.
-    func testJoins_oneRowSelected_isEmpty() {
-        XCTAssertEqual(Policy.joins(orderedIDs: ["a", "b", "c"], selection: ["b"]), [:])
-        XCTAssertEqual(Policy.joins(orderedIDs: ["a", "b", "c"], selection: Set<String>()), [:])
+    /// rounded at all four corners, and finding that out costs nothing. The sidebar asks at
+    /// every evaluation of its body, with every row it has loaded.
+    ///
+    /// Revert-check: deleting `guard selection.count > 1 else { return [:] }` from
+    /// `MacSidebarRowSelectionPolicy.joins` makes this fail: the answers stay empty, but every
+    /// row is walked to reach them.
+    func testJoins_oneRowSelectedOrNone_isEmptyAndWalksNoRow() {
+        let oneSelected = WalkedRows(["a", "b", "c"])
+        XCTAssertEqual(Policy.joins(orderedIDs: oneSelected, selection: ["b"]), [:])
+        XCTAssertEqual(oneSelected.walked, 0)
+
+        let noneSelected = WalkedRows(["a", "b", "c"])
+        XCTAssertEqual(Policy.joins(orderedIDs: noneSelected, selection: Set<String>()), [:])
+        XCTAssertEqual(noneSelected.walked, 0)
     }
 
     /// The list draws selected rows that touch as one shape, so each fill is square where it
@@ -84,11 +94,67 @@ final class MacSidebarRowSelectionPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.joins(orderedIDs: ["a", "b", "c", "d", "e"], selection: ["a", "c", "e"]), [:])
     }
 
-    /// A selected conversation whose row a search or a filter hides stays selected
-    /// (`MacSidebarSelectionPolicy`), and is no row's neighbor.
-    func testJoins_selectedRowNotInTheList_joinsNothing() {
-        let joins = Policy.joins(orderedIDs: ["a", "b", "c"], selection: ["b", "hidden"])
+    /// The rows a user selects are near the ones on screen, and the list can hold thousands
+    /// below them, so the walk ends at the last selected row.
+    ///
+    /// Revert-check: deleting `if selectedRowsNotYetMet == 0 { break }` from
+    /// `MacSidebarRowSelectionPolicy.joins` makes this fail: all six rows are walked.
+    func testJoins_stopsWalkingAtTheLastSelectedRow() {
+        let rows = WalkedRows(["a", "b", "c", "d", "e", "f"])
 
-        XCTAssertEqual(joins, [:])
+        let joins = Policy.joins(orderedIDs: rows, selection: ["b", "c"])
+
+        XCTAssertEqual(
+            joins,
+            [
+                "b": Policy.Joins(above: false, below: true),
+                "c": Policy.Joins(above: true, below: false)
+            ]
+        )
+        XCTAssertEqual(rows.walked, 3, "a, b and c: nothing below the last selected row")
+    }
+
+    /// A selected conversation whose row a search or a filter hides stays selected
+    /// (`MacSidebarSelectionPolicy`), and is no row's neighbor. The walk never meets it, so it
+    /// cannot stop early, and the rows that are showing still get their joins.
+    ///
+    /// HONEST SCOPE: no line of `joins` is there for this case, so no one change to it fails
+    /// this test alone. It records what the walk does with a selected row it never meets.
+    func testJoins_selectedRowNotInTheList_joinsNothingAndHidesNoJoin() {
+        XCTAssertEqual(Policy.joins(orderedIDs: ["a", "b", "c"], selection: ["b", "hidden"]), [:])
+
+        let rows = WalkedRows(["a", "b", "c", "d"])
+        let joins = Policy.joins(orderedIDs: rows, selection: ["a", "b", "hidden"])
+
+        XCTAssertEqual(
+            joins,
+            [
+                "a": Policy.Joins(above: false, below: true),
+                "b": Policy.Joins(above: true, below: false)
+            ]
+        )
+        XCTAssertEqual(rows.walked, 4, "the hidden row might have been below any of them")
+    }
+}
+
+/// A list's rows that count how many of them a walk has taken.
+private final class WalkedRows: Sequence {
+    private let ids: [String]
+    private(set) var walked = 0
+
+    init(_ ids: [String]) {
+        self.ids = ids
+    }
+
+    func makeIterator() -> AnyIterator<String> {
+        var next = ids.startIndex
+        return AnyIterator {
+            guard next < self.ids.endIndex else { return nil }
+            defer {
+                next += 1
+                self.walked += 1
+            }
+            return self.ids[next]
+        }
     }
 }
