@@ -2680,6 +2680,262 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(Set(saved.1.map(\.objectID)), Set([unfinished.objectID, finalized.objectID]))
     }
 
+    // MARK: - A chat reopened before the composer that left it has saved
+
+    /// One chat and the screens opened for it in turn. Each `openChat()` is
+    /// the view model a new `ChatView` creates, as selecting the chat's row
+    /// again does on the Mac. The screens share a composer directory of
+    /// their own, so no other test's view model can own this chat's draft.
+    private func makeReopenableChatFixture(
+        serializer: ConversationRollupMutationSerializer = .shared
+    ) -> (
+        context: NSManagedObjectContext,
+        conversation: Conversation,
+        replyTarget: Message,
+        draftStore: ChatReplyDraftStore,
+        openChat: () -> ChatViewModel
+    ) {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        let conversation = ConversationBuilder().visible().recentlyActive().build(in: context)
+        let replyTarget = MessageBuilder()
+            .withId("reopen-target-\(UUID().uuidString)")
+            .inConversation(conversation)
+            .build(in: context)
+        let composerDirectory = ChatReplyComposerDirectory()
+        let openChat = {
+            ChatViewModel(
+                conversation: conversation,
+                chatDependencies: deps.makeChatDependencies(),
+                conversationMutationSerializer: serializer,
+                composerDirectory: composerDirectory
+            )
+        }
+        return (context, conversation, replyTarget, ChatReplyDraftStore(context: context), openChat)
+    }
+
+    func testReplyDraft_chatReopenedBeforeLeftComposerSaved_takesOverItsTextTargetAndFinalizedAttachments() async throws {
+        let serializer = ConversationRollupMutationSerializer()
+        let fixture = makeReopenableChatFixture(serializer: serializer)
+        let first = fixture.openChat()
+        first.replyingTo = fixture.replyTarget
+        // The autosave stored the draft as it stood a moment ago.
+        first.replyText = "See you at"
+        await first.saveReplyDraft()
+
+        // Something else now holds the queue every draft save waits in, as a
+        // sync's cleanup pass does.
+        let (queueHeld, queueHeldContinuation) = AsyncStream<Void>.makeStream()
+        let (queueRelease, queueReleaseContinuation) = AsyncStream<Void>.makeStream()
+        defer { queueReleaseContinuation.finish() }
+        let queueHolder = Task {
+            await serializer.performCleanupSensitiveMutation {
+                queueHeldContinuation.finish()
+                for await _ in queueRelease {}
+            }
+        }
+        for await _ in queueHeld {}
+
+        let finalized = makeDraftAttachment(in: fixture.context)
+        let importing = AttachmentBuilder().withId("local_\(UUID().uuidString)")
+            .withFilename("still-importing.pdf").build(in: fixture.context)
+        first.replyText = "See you at noon, I'll bring the keys"
+        first.composerState.attachments = [finalized, importing]
+
+        // Chat B is selected and then this chat again: its composer leaves,
+        // and a new one is created before the first one's save has had its
+        // turn.
+        first.composerDidDisappear()
+        let reopened = fixture.openChat()
+
+        XCTAssertEqual(
+            try fixture.draftStore.load(conversationID: fixture.conversation.id)?.0.text,
+            "See you at",
+            "The save of the composer that left must still be waiting, or this is not the case under test"
+        )
+        // Revert-check: deleting the `withdrawnDraftOwner` branch from
+        // `ChatViewModel.restoreReplyDraft` loads the stored "See you at"
+        // here, with no attachment, and the rest is in a composer whose save
+        // is dropped as stale.
+        XCTAssertEqual(reopened.replyText, "See you at noon, I'll bring the keys")
+        XCTAssertEqual(reopened.composerState.attachments, [finalized])
+        XCTAssertEqual(reopened.replyingTo, fixture.replyTarget)
+        // The composer that left has given the draft away, and keeps only the
+        // file its importer still owns.
+        // Revert-check: no longer emptying the composer in
+        // `ChatViewModel.handOverOwedReplyDraft` leaves the text and the
+        // finalized attachment in both composers.
+        XCTAssertEqual(first.replyText, "")
+        XCTAssertEqual(first.composerState.attachments, [importing])
+
+        queueReleaseContinuation.finish()
+        await queueHolder.value
+        await first.waitForScheduledReplyDraftSave()
+        await reopened.waitForScheduledReplyDraftSave()
+
+        // The new composer made the save the old one owed.
+        let (draft, draftAttachments) = try XCTUnwrap(
+            fixture.draftStore.load(conversationID: fixture.conversation.id)
+        )
+        XCTAssertEqual(draft.text, "See you at noon, I'll bring the keys")
+        XCTAssertEqual(draftAttachments, [finalized])
+        XCTAssertNil(importing.replyDraft, "The importer must retain ownership of its placeholder")
+    }
+
+    func testReplyDraft_chatReopenedBeforeEmptiedComposerSaved_startsFreshAndRemovesTheStoredDraft() async throws {
+        let fixture = makeReopenableChatFixture()
+        let first = fixture.openChat()
+        first.replyingTo = fixture.replyTarget
+        first.replyText = "Old draft"
+        await first.saveReplyDraft()
+
+        // The user deletes the text and dismisses the quote, selects another
+        // chat and then this one again.
+        first.replyText = ""
+        first.replyingTo = nil
+        first.composerDidDisappear()
+        let reopened = fixture.openChat()
+        reopened.initializeReplyingTo(lastMessage: fixture.replyTarget)
+
+        // Revert-check: deleting the `withdrawnDraftOwner` branch from
+        // `ChatViewModel.restoreReplyDraft` brings "Old draft" back.
+        XCTAssertEqual(reopened.replyText, "")
+        // Revert-check: applying the emptied draft in that branch (dropping
+        // its `hasDraftContent` check) carries the dismissed quote over, and
+        // a composer with no draft never gets its automatic target.
+        XCTAssertEqual(reopened.replyingTo, fixture.replyTarget)
+
+        await first.waitForScheduledReplyDraftSave()
+        await reopened.waitForScheduledReplyDraftSave()
+
+        // Revert-check: deleting `if tookOverOwedDraft { scheduleReplyDraftSave() }`
+        // from `ChatViewModel.init` leaves "Old draft" stored: the composer
+        // that owed its removal no longer owns the draft.
+        XCTAssertNil(try fixture.draftStore.load(conversationID: fixture.conversation.id))
+    }
+
+    func testReplyDraft_chatReopenedAfterLeftComposerSaved_loadsTheStoredDraft() async throws {
+        let fixture = makeReopenableChatFixture()
+        // Still referenced when the chat is reopened, as a view model is
+        // while a send's task holds it.
+        let first = fixture.openChat()
+        first.replyText = "Next reply"
+        first.composerDidDisappear()
+        await first.waitForScheduledReplyDraftSave()
+        // With no composer on screen, a reply that was rolled back is merged
+        // into the stored draft, which the composer that left never sees.
+        try fixture.draftStore.saveMergingUnsentReply(
+            StoredChatReplyDraft(text: "Rolled back reply", targetURI: nil, recoveredEnvelope: nil),
+            attachments: [],
+            conversationID: fixture.conversation.id
+        )
+
+        let reopened = fixture.openChat()
+
+        // Revert-check: dropping `replyDraftSaveIsOwed` from the guard in
+        // `ChatViewModel.handOverOwedReplyDraft`, or no longer clearing it in
+        // `saveReplyDraftWithoutCleanupInterleaving`, hands over "Next reply"
+        // in place of the stored draft, and the rolled-back reply is gone.
+        XCTAssertEqual(reopened.replyText, "Rolled back reply\nNext reply")
+        XCTAssertEqual(first.replyText, "Next reply")
+    }
+
+    func testReplyDraft_secondComposerCreatedWhileFirstIsOnScreen_takesNothingFromIt() async throws {
+        let fixture = makeReopenableChatFixture()
+        let first = fixture.openChat()
+        first.replyText = "Being typed"
+        // A save is owed, as after any keystroke, but the composer has not
+        // left the screen.
+        first.scheduleReplyDraftSave()
+
+        let second = fixture.openChat()
+
+        // Revert-check: dropping the `presentedComposers` guard from
+        // `ChatReplyComposerDirectory.withdrawnDraftOwner` empties a composer
+        // that is on screen and being typed into.
+        XCTAssertEqual(first.replyText, "Being typed")
+        XCTAssertEqual(second.replyText, "")
+        await first.waitForScheduledReplyDraftSave()
+    }
+
+    func testReplyDraft_chatReopenedBeforeSendingComposerSaved_leavesTypedTextForTheSendsRelease() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        viewModel.replyText = "Sent reply"
+        defer { coordinator.resumePersistence() }
+        var persistedOptimisticResult: OutboundMessageResult?
+
+        let sendTask = Task {
+            await viewModel.sendReply { result in
+                persistedOptimisticResult = result
+            }
+        }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // Typed after the tap, then the chat is left and reopened at once:
+        // the save the disappearance scheduled has not run.
+        viewModel.replyText = "Typed after the tap"
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+
+        // Revert-check: dropping `!composerState.isSending` from the guard in
+        // `ChatViewModel.handOverOwedReplyDraft` takes the text out of the
+        // sending composer here, before its send has released it.
+        XCTAssertEqual(reopened.replyText, "")
+        XCTAssertEqual(viewModel.replyText, "Typed after the tap")
+
+        coordinator.resumePersistence()
+        await waitUntil { persistedOptimisticResult != nil }
+        _ = await sendTask.value
+
+        // The send's own release hands it on, once.
+        XCTAssertEqual(reopened.replyText, "Typed after the tap")
+        XCTAssertEqual(viewModel.replyText, "")
+        XCTAssertNil(reopened.sendErrorAlert)
+    }
+
+    func testReplyDraft_chatReopenedDuringEarlierScreensUnpersistedSend_takesOverTheLeftComposerNotTheStoredReply() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        coordinator.suspendsBeforePersistence = true
+        // The autosave stored the reply before the tap, so until the send
+        // persists the stored draft is the reply being sent.
+        viewModel.replyText = "Sent while away"
+        await viewModel.saveReplyDraft()
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+
+        // The chat is left and opened again while the send waits. The next
+        // reply is typed there, and that screen is left and opened again
+        // before its composer has saved.
+        viewModel.composerDidDisappear()
+        let second = fixture.reopenChat()
+        XCTAssertEqual(second.replyText, "")
+        second.replyText = "Next reply"
+        second.composerDidDisappear()
+        let third = fixture.reopenChat()
+
+        // Revert-check: moving the `hasUnpersistedSend` guard above the
+        // `withdrawnDraftOwner` branch in `ChatViewModel.restoreReplyDraft`
+        // leaves this composer empty and "Next reply" in one whose save is
+        // stale. The stored copy of the reply being sent is still not
+        // restored: the text is "Next reply" alone.
+        XCTAssertEqual(third.replyText, "Next reply")
+        XCTAssertEqual(second.replyText, "")
+
+        coordinator.resumePersistence()
+        let result = await sendTask.value
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(third.replyText, "Next reply")
+        XCTAssertNil(third.sendErrorAlert)
+    }
+
     // MARK: - Archive / Report Spam during a reply send
 
     /// A chat whose Archive and Report Spam run through a real `MessageActions`

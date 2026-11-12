@@ -184,6 +184,12 @@ final class ChatViewModel: ObservableObject {
     /// This view model's presentation in `composerDirectory`. Only the newest
     /// presentation for the conversation writes its durable draft.
     private var composerPresentationGeneration: UInt64 = 0
+    /// A draft save was requested and has not read this composer yet
+    /// (`startReplyDraftSave`). It waits its turn on the cleanup gate, so
+    /// until it runs this composer can hold text the stored draft lacks. A
+    /// composer created for the chat in that time takes the draft from this
+    /// one (`handOverOwedReplyDraft`).
+    private var replyDraftSaveIsOwed = false
     /// Unsent replies waiting for the cleanup gate to merge them into the
     /// stored draft (`handOffUnsentReply`), with the text this composer
     /// received after the tap and the send registration the merge ends.
@@ -277,7 +283,9 @@ final class ChatViewModel: ObservableObject {
 
         // Forward child observable changes to trigger view updates
         forwardChanges(from: contactManager, storing: &cancellables)
-        restoreReplyDraft()
+        // Before `present` below: the draft may come from the composer that
+        // owns it until then.
+        let tookOverOwedDraft = restoreReplyDraft()
         composerState.objectWillChange
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleReplyDraftSave() }
@@ -286,6 +294,9 @@ final class ChatViewModel: ObservableObject {
         // composer owns the conversation's draft, superseding any view model
         // that a still-running send keeps alive for a screen that is gone.
         composerPresentationGeneration = self.composerDirectory.present(self, for: conversationObjectID)
+        // The save the last composer owed the store is this one's to make
+        // now: that composer's own request is stale from `present` on.
+        if tookOverOwedDraft { scheduleReplyDraftSave() }
     }
 
     // MARK: - Message Actions
@@ -855,9 +866,7 @@ final class ChatViewModel: ObservableObject {
         } else if composerDirectory.ownsDraft(generation: composerPresentationGeneration, for: conversationObjectID) {
             // Off screen `scheduleReplyDraftSave` is a no-op; this is the
             // save the disappearance could not make.
-            taskManager.run("saveReplyDraft") { [self] in
-                await saveReplyDraft()
-            }
+            startReplyDraftSave()
         } else if composerState.hasDraftContent {
             // The chat was opened again since; that composer owns the draft
             // and never saw this text.
@@ -1097,6 +1106,13 @@ final class ChatViewModel: ObservableObject {
     /// had saved since.
     func scheduleReplyDraftSave() {
         guard isComposerPresented else { return }
+        startReplyDraftSave()
+    }
+
+    /// Every scheduled draft save starts here, so `replyDraftSaveIsOwed`
+    /// covers the whole wait for the cleanup gate.
+    private func startReplyDraftSave() {
+        replyDraftSaveIsOwed = true
         taskManager.run("saveReplyDraft") { [self] in
             await saveReplyDraft()
         }
@@ -1116,9 +1132,10 @@ final class ChatViewModel: ObservableObject {
 
     /// `ChatView.onDisappear`: saves what the user left, then stops treating
     /// this composer as the visible one. It keeps owning the stored draft
-    /// until the chat is opened again, so that save still lands; a reply that
-    /// fails later is handed off instead of restored here
-    /// (`returnUnsentReply`).
+    /// until the chat is opened again, so that save still lands. A chat
+    /// opened before the save has run takes the draft from this composer
+    /// (`handOverOwedReplyDraft`). A reply that fails later is handed off
+    /// instead of restored here (`returnUnsentReply`).
     func composerDidDisappear() {
         // The save below skips while this composer is sending.
         if composerState.isSending { savesComposerWhenSendReleases = true }
@@ -1142,6 +1159,10 @@ final class ChatViewModel: ObservableObject {
     }
 
     private func saveReplyDraftWithoutCleanupInterleaving() throws {
+        // The request reads the composer now. What it does not write (a send
+        // holds the composer, the draft is another composer's) is not this
+        // request's to hand on either.
+        replyDraftSaveIsOwed = false
         // Read live state only after acquiring cleanup's gate: a queued save
         // must not resurrect content that was sent or explicitly discarded.
         // `sendReply` clears the composer at tap, so a save scheduled by a
@@ -1149,8 +1170,10 @@ final class ChatViewModel: ObservableObject {
         guard !composerState.isSending, !draftRestoreFailed,
               authSession.userEmail == draftAccountEmail else { return }
         // A composer opened for this chat since (see
-        // `ChatReplyComposerDirectory`) loaded the stored draft and owns it
-        // now; this one's content is stale.
+        // `ChatReplyComposerDirectory`) owns the draft now. It loaded the
+        // stored one, or took this composer's while this request was still
+        // waiting (`handOverOwedReplyDraft`); either way this one's content
+        // is stale.
         guard composerDirectory.ownsDraft(
             generation: composerPresentationGeneration,
             for: conversationObjectID
@@ -1170,6 +1193,15 @@ final class ChatViewModel: ObservableObject {
                 return
             }
         }
+        let composer = try composerAsStoredDraft()
+        try draftStore.save(composer.draft, attachments: composer.attachments, conversationID: conversation.id)
+    }
+
+    /// The composer as its stored draft: what `saveReplyDraft` writes, and
+    /// what a composer taking the draft over receives in its place
+    /// (`handOverOwedReplyDraft`). One definition, so that hand-over gives
+    /// the new composer what the save and a load would have.
+    private func composerAsStoredDraft() throws -> (draft: StoredChatReplyDraft, attachments: [Attachment]) {
         if let target = composerState.replyAnchor, target.objectID.isTemporaryID {
             try viewContext.obtainPermanentIDs(for: [target])
         }
@@ -1180,13 +1212,64 @@ final class ChatViewModel: ObservableObject {
             guard let localURL = attachment.localURL else { return false }
             return !localURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
-        try draftStore.save(
+        return (
             StoredChatReplyDraft(text: replyText, targetURI: composerState.unavailableReplyTargetURI ?? composerState.replyAnchor?.objectID.uriRepresentation(),
                                  recoveredEnvelope: composerState.recoveredReplyEnvelope,
                                  includesQuotedMessage: replyingTo != nil),
-            attachments: finalizedAttachments,
-            conversationID: conversation.id
+            finalizedAttachments
         )
+    }
+
+    /// Gives the draft this composer still owes the store to the composer
+    /// being created for the chat, and stops holding it. Nil when nothing is
+    /// owed, and the new composer then loads the stored draft as before.
+    ///
+    /// This composer left the screen and its save is still waiting for the
+    /// cleanup gate. Once the new composer is presented that save is stale
+    /// (`saveReplyDraftWithoutCleanupInterleaving`), so without this the new
+    /// composer loaded the older stored draft and whatever was typed since
+    /// the last autosave was lost. The Mac switches chats on an arrow key,
+    /// so A, B, A arrives well inside that wait.
+    ///
+    /// The draft is taken in place of the stored one, never merged with it:
+    /// that is what this composer's save followed by a load would have left.
+    /// A composer that owes nothing gives nothing, because the store can
+    /// then hold more than it does (an unsent reply merged in while it was
+    /// off screen).
+    ///
+    /// Left alone on purpose:
+    /// - A composer that is sending. What was typed after its tap is handed
+    ///   on when the send releases it (`saveComposerLeftWhileSending`,
+    ///   `handOffUnsentReply`), and the send path is unchanged.
+    /// - A composer whose stored draft could not be read. It never writes.
+    /// - Attachments still importing. Their importer finds them through
+    ///   this composer and may yet remove them; only finalized files go, as
+    ///   in a save. HONEST SCOPE: an import that finishes after its chat was
+    ///   left stays here and reaches no draft. That was so before this too.
+    private func handOverOwedReplyDraft() -> (draft: StoredChatReplyDraft, attachments: [Attachment])? {
+        guard replyDraftSaveIsOwed, !composerState.isSending, !draftRestoreFailed,
+              authSession.userEmail == draftAccountEmail else { return nil }
+        let composer: (draft: StoredChatReplyDraft, attachments: [Attachment])
+        do {
+            composer = try composerAsStoredDraft()
+        } catch {
+            Log.error("Failed to hand a reply draft to the reopened chat", category: .message, error: error)
+            return nil
+        }
+        // As the store would hold them: no row a discard deleted, none a
+        // message has adopted.
+        let attachments = ChatReplyRestorePolicy.restoredAttachments(
+            unsent: composer.attachments,
+            addedSinceSend: []
+        )
+        // The draft has left: this composer must not write it again, hand it
+        // on a second time, or discard files the new composer now shows.
+        replyDraftSaveIsOwed = false
+        replyText = ""
+        composerState.attachments.removeAll { attachment in
+            attachments.contains { $0 === attachment }
+        }
+        return (composer.draft, attachments)
     }
 
     private enum ReplyDraftPersistenceError: LocalizedError {
@@ -1197,37 +1280,66 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    private func restoreReplyDraft() {
+    /// Gives a new composer the conversation's draft. Returns whether it came
+    /// from the chat's last composer instead of the store, in which case the
+    /// store does not hold it yet.
+    private func restoreReplyDraft() -> Bool {
+        // First, and whatever the store holds: the composer that just left
+        // this chat may not have saved yet (`handOverOwedReplyDraft`). This
+        // sits above the unpersisted-send check below because that check is
+        // about the stored copy. A composer's own content is never the reply
+        // being sent, which left it at the tap.
+        if let lastComposer = composerDirectory.withdrawnDraftOwner(for: conversationObjectID),
+           lastComposer.viewContext === viewContext,
+           let owed = lastComposer.handOverOwedReplyDraft() {
+            // An emptied composer owed the store a removal. This one starts
+            // as it would with no stored draft, and with no target taken
+            // from a draft that no longer exists.
+            if ChatComposerState.hasDraftContent(
+                replyText: owed.draft.text,
+                hasAttachments: !owed.attachments.isEmpty
+            ) {
+                applyStoredReplyDraft(owed.draft, attachments: owed.attachments)
+            }
+            return true
+        }
         // A reply sent from an earlier screen of this chat has not become
         // durable yet, so the stored draft is that reply (saved before its
         // tap). Loaded here, it reappeared ready to be sent again, and a
         // failure that handed the reply over doubled it. The send's
         // transaction removes the stored copy; a failure hands it to this
         // composer, or merges it back into the store.
-        guard !composerDirectory.hasUnpersistedSend(for: conversationObjectID) else { return }
+        guard !composerDirectory.hasUnpersistedSend(for: conversationObjectID) else { return false }
         do {
-            guard let (snapshot, attachments) = try draftStore.load(conversationID: conversation.id) else { return }
-            replyText = snapshot.text
-            composerState.attachments = attachments
-            composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope
-            if let uri = snapshot.targetURI,
-               let objectID = viewContext.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: uri) {
-                // A target that still exists but moved to another chat (List-Id
-                // repair, a merge) looked restored, yet every send failed with
-                // "reopen", and reopening restored it again. Route it to the
-                // unavailable state, which shows "Clear target" and blocks send.
-                composerState.replaceReplyTarget(
-                    resolveMessage(with: objectID).flatMap { isValidReplyTarget($0) ? $0 : nil }
-                )
-                if composerState.replyAnchor == nil { composerState.unavailableReplyTargetURI = uri }
-                if snapshot.includesQuotedMessage == false { replyingTo = nil }
-            } else if let uri = snapshot.targetURI {
-                composerState.unavailableReplyTargetURI = uri
-            }
+            guard let (snapshot, attachments) = try draftStore.load(conversationID: conversation.id) else { return false }
+            applyStoredReplyDraft(snapshot, attachments: attachments)
         } catch {
             draftRestoreFailed = true
             Log.error("Failed to restore reply draft", category: .message, error: error)
             sendErrorAlert = ChatSendErrorAlert(title: "Couldn’t Restore Draft", message: error.localizedDescription)
+        }
+        return false
+    }
+
+    /// Puts a stored draft, or one taken over in its stored form, into this
+    /// new composer.
+    private func applyStoredReplyDraft(_ snapshot: StoredChatReplyDraft, attachments: [Attachment]) {
+        replyText = snapshot.text
+        composerState.attachments = attachments
+        composerState.recoveredReplyEnvelope = snapshot.recoveredEnvelope
+        if let uri = snapshot.targetURI,
+           let objectID = viewContext.persistentStoreCoordinator?.managedObjectID(forURIRepresentation: uri) {
+            // A target that still exists but moved to another chat (List-Id
+            // repair, a merge) looked restored, yet every send failed with
+            // "reopen", and reopening restored it again. Route it to the
+            // unavailable state, which shows "Clear target" and blocks send.
+            composerState.replaceReplyTarget(
+                resolveMessage(with: objectID).flatMap { isValidReplyTarget($0) ? $0 : nil }
+            )
+            if composerState.replyAnchor == nil { composerState.unavailableReplyTargetURI = uri }
+            if snapshot.includesQuotedMessage == false { replyingTo = nil }
+        } else if let uri = snapshot.targetURI {
+            composerState.unavailableReplyTargetURI = uri
         }
     }
 
