@@ -49,6 +49,8 @@ struct ChatMessagesView: View {
     let chatDependencies: ChatDependencies
     let isEffectivelyOneToOneConversation: Bool
     let isChatActiveAndUncovered: Bool
+    /// How the transcript draws its rows (`ChatView.bubbleStyle`). Fixed for the chat's life.
+    let bubbleStyle: MessageBubbleStyle
     var isTextFieldFocused: FocusState<Bool>.Binding
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
@@ -77,6 +79,7 @@ struct ChatMessagesView: View {
         chatDependencies: ChatDependencies,
         isEffectivelyOneToOneConversation: Bool,
         isChatActiveAndUncovered: Bool,
+        bubbleStyle: MessageBubbleStyle,
         isTextFieldFocused: FocusState<Bool>.Binding,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
     ) {
@@ -85,6 +88,7 @@ struct ChatMessagesView: View {
         self.chatDependencies = chatDependencies
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.isChatActiveAndUncovered = isChatActiveAndUncovered
+        self.bubbleStyle = bubbleStyle
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
 
@@ -302,6 +306,7 @@ struct ChatMessagesView: View {
                 displayedMessages: displayedMessages,
                 bottomContentInset: bottomContentInset,
                 viewportHeight: viewport.size.height,
+                viewportWidth: viewport.size.width,
                 scrollProxy: scrollProxy
             )
         }
@@ -311,6 +316,7 @@ struct ChatMessagesView: View {
         displayedMessages: [ChatMessageRowModel],
         bottomContentInset: CGFloat,
         viewportHeight: CGFloat,
+        viewportWidth: CGFloat,
         scrollProxy: ScrollViewProxy
     ) -> some View {
         let newestRowIndex = MessageSendStatusLinePolicy.newestRowIndex(
@@ -319,7 +325,9 @@ struct ChatMessagesView: View {
         )
         let localSendAppendedMessageIDs = scrollState.localSendAppendedMessageIDs
         return ScrollView {
-            LazyVStack(spacing: 8) {
+            // One constant for the whole stack. What sets one run of bubbles apart from the next
+            // is padding inside the row (`ChatTranscriptRunPlacement.topPadding`).
+            LazyVStack(spacing: bubbleStyle.rowSpacing) {
                 // Keyed by display identity, not object ID, so Gmail's echo replacing a just-sent
                 // reply updates the bubble in place instead of remounting it
                 // (`ChatMessageDisplayIdentity`; uniqueness: `ChatTranscriptIdentityPolicy`).
@@ -333,6 +341,26 @@ struct ChatMessagesView: View {
                         next: nextMessage,
                         senderRunKey: senderRunKey(for:)
                     )
+                    // The row before, for a style with time lines and runs that start. Read
+                    // past the window's edge like the row after, so the window's first row
+                    // does not change when older rows load above it. Never read by a style
+                    // without them.
+                    let previousMessage = bubbleStyle.showsTimestampSeparators
+                        ? messageRow(atAbsoluteIndex: absoluteIndex - 1)
+                        : nil
+                    let runPlacement = ChatTranscriptRunPolicy.placement(
+                        style: bubbleStyle,
+                        isFirstFromSender: ChatMessageRowGrouping.isFirstFromSender(
+                            current: message,
+                            previous: previousMessage,
+                            senderRunKey: senderRunKey(for:)
+                        ),
+                        isLastFromSender: isLastFromSender,
+                        date: message.internalDate,
+                        previousDate: previousMessage?.internalDate,
+                        nextDate: nextMessage?.internalDate,
+                        calendar: .current
+                    )
 
                     MessageBubble(
                         message: message,
@@ -342,8 +370,10 @@ struct ChatMessagesView: View {
                         originalEmailSourceWarmer: chatDependencies.content.originalEmailSourceWarmer,
                         isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation,
                         contactRefreshToken: coordinator.contactRefreshToken,
-                        isLastFromSender: isLastFromSender,
+                        runPlacement: runPlacement,
+                        transcriptWidth: viewportWidth,
                         isNewestInTranscript: index == newestRowIndex,
+                        style: bubbleStyle,
                         onOpenFullMessage: onOpenFullMessage,
                         onSendRecoveryAction: { action in
                             performSendRecovery(action, messageObjectID: message.messageObjectID)

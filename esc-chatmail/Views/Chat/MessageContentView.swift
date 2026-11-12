@@ -30,6 +30,9 @@ struct MessageContentView: View {
     /// dialog instead of the email reader, and the prompt supplies the bubble's VoiceOver hint.
     let sendRecoveryPrompt: FailedSendRecoveryPolicy.Prompt?
     let onSendRecoveryTap: () -> Void
+    /// The tail this row's bubble draws, nil for none (`MessageBubbleRowPolicy.tail`): the
+    /// last bubble of a run in a style with tails.
+    var bubbleTail: BubbleShape.Tail?
 
     var body: some View {
         if showHTMLPreview {
@@ -130,9 +133,7 @@ struct MessageContentView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            .padding(style.bubblePadding)
-            .background(style.bubbleBackground(isFromMe: message.isFromMe))
-            .cornerRadius(style.bubbleCornerRadius)
+            .messageBubbleChrome(style: style, isFromMe: message.isFromMe, tail: bubbleTail)
         }
         .buttonStyle(.plain)
         .accessibilityHint("Opens the full original email")
@@ -175,12 +176,18 @@ struct MessageContentView: View {
         }
     }
 
+    @ViewBuilder
     private func textBubbleBody(_ displayText: String) -> some View {
-        Text(displayText)
-            .padding(style.bubblePadding)
-            .background(style.bubbleBackground(isFromMe: message.isFromMe))
-            .foregroundColor(style.textColor(isFromMe: message.isFromMe))
-            .cornerRadius(style.bubbleCornerRadius)
+        if style.drawsLargeEmoji, ChatLargeEmojiPolicy.drawsLargeEmoji(displayText) {
+            // A few emoji and nothing else: large, with no bubble, as in Messages. Decided from
+            // the text itself, which for a row with a stored preview is there at mount.
+            Text(displayText)
+                .font(style.largeEmojiFont)
+        } else {
+            Text(displayText)
+                .messageBubbleChrome(style: style, isFromMe: message.isFromMe, tail: bubbleTail)
+                .foregroundColor(style.textColor(isFromMe: message.isFromMe))
+        }
     }
 
     /// The whole bubble (lead-in note and forwarded card) opens the original, like a text bubble —
@@ -207,9 +214,7 @@ struct MessageContentView: View {
                     isFromMe: message.isFromMe
                 )
             }
-            .padding(style.bubblePadding)
-            .background(style.bubbleBackground(isFromMe: message.isFromMe))
-            .cornerRadius(style.bubbleCornerRadius)
+            .messageBubbleChrome(style: style, isFromMe: message.isFromMe, tail: bubbleTail)
         }
         .buttonStyle(.plain)
         .accessibilityHint(sendRecoveryPrompt?.accessibilityHint ?? "Opens the full original email")
@@ -247,9 +252,15 @@ struct MessageContentView: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .italic()
-                .padding(10)
-                .background(Color.gray.opacity(0.1))
-                .cornerRadius(12)
+                // Its own padding, fill and radius where the style has no tail; a style with
+                // one draws it in the bubble's shape, with the bubble's radius.
+                .modifier(MessageBubbleChrome(
+                    style: style,
+                    padding: EdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10),
+                    fill: Color.gray.opacity(0.1),
+                    cornerRadius: 12,
+                    tail: bubbleTail
+                ))
         }
         .buttonStyle(.plain)
         .accessibilityHint("Opens the full original email")

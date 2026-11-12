@@ -38,6 +38,9 @@ struct MacMailboxDetail: View, Equatable {
                     // Messages' header: the avatar in the toolbar, the name in a capsule
                     // under it (`ChatHeaderPolicy`).
                     headerStyle: .avatarOverNameCapsule(.mac),
+                    // Messages' transcript: tailed bubbles, time lines between groups of
+                    // messages (`MessageBubbleStyle.mac`).
+                    bubbleStyle: .mac,
                     makeForwardComposeView: makeForwardComposeView,
                     // Never nil here: without it the chat would close itself with `dismiss`,
                     // which in this column closes the window (`ChatView.exitChat`).

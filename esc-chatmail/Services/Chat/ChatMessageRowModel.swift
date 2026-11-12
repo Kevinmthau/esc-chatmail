@@ -714,4 +714,16 @@ enum ChatMessageRowGrouping {
             senderRunKey(next) != senderRunKey(current) ||
             next?.isFromMe != current.isFromMe
     }
+
+    /// The mirror of `isLastFromSender`, over the row before: whether `current` is the first
+    /// message from its sender after a different sender, or the conversation's first.
+    static func isFirstFromSender(
+        current: ChatMessageRowModel,
+        previous: ChatMessageRowModel?,
+        senderRunKey: (ChatMessageRowModel?) -> String?
+    ) -> Bool {
+        previous == nil ||
+            senderRunKey(previous) != senderRunKey(current) ||
+            previous?.isFromMe != current.isFromMe
+    }
 }

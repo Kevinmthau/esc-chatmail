@@ -20,6 +20,10 @@ struct ChatView: View {
     /// (iOS), or Messages' avatar and name capsule in the Mac's chat column
     /// (`ChatHeaderPolicy`). Fixed for the chat's life.
     private let headerStyle: ChatHeaderStyle
+    /// How this chat draws its transcript: the iPhone's bubbles where it is pushed, Messages'
+    /// in the Mac's chat column (`MessageBubbleStyle`). Required, like the header's style, so
+    /// each presenter names its own. Fixed for the chat's life.
+    private let bubbleStyle: MessageBubbleStyle
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
     /// How this chat leaves the screen when it closes itself; nil pops it with `dismiss`
     /// (`exitChat()`).
@@ -36,6 +40,7 @@ struct ChatView: View {
         conversation: Conversation,
         chatDependencies: ChatDependencies,
         headerStyle: ChatHeaderStyle,
+        bubbleStyle: MessageBubbleStyle,
         makeForwardComposeView: @escaping @MainActor (ComposeForwardModeContext) -> ComposeView = { context in
             ComposeView(mode: .forward(context))
         },
@@ -44,6 +49,7 @@ struct ChatView: View {
         self.conversation = conversation
         self.chatDependencies = chatDependencies
         self.headerStyle = headerStyle
+        self.bubbleStyle = bubbleStyle
         self.makeForwardComposeView = makeForwardComposeView
         self.onExit = onExit
         self._viewModel = StateObject(
@@ -65,6 +71,7 @@ struct ChatView: View {
             chatDependencies: chatDependencies,
             isEffectivelyOneToOneConversation: viewModel.isEffectivelyOneToOneConversation,
             isChatActiveAndUncovered: isChatActiveAndUncovered,
+            bubbleStyle: bubbleStyle,
             isTextFieldFocused: $isTextFieldFocused,
             onOpenFullMessage: { messageObjectID, source in
                 viewModel.openEmailReader(

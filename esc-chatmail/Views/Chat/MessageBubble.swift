@@ -49,8 +49,13 @@ struct MessageBubble: View {
     var isEffectivelyOneToOneConversation: Bool
     /// Bumps when local contact data changes so sender labels/avatars reload in-place.
     var contactRefreshToken: Int = 0
-    /// Whether this is the last message from this sender before a different sender (for avatar grouping)
-    var isLastFromSender: Bool = true
+    /// Where this row sits in its run of bubbles and what it draws above itself
+    /// (`ChatTranscriptRunPolicy.placement`): the avatar's and the tail's row, the sender
+    /// name's row, the time line.
+    var runPlacement: ChatTranscriptRunPlacement = .alone
+    /// The transcript's width, for a style whose text bubbles take a share of it
+    /// (`MessageBubbleStyle.textBubbleMaxWidth`). 0 until the transcript has been laid out.
+    var transcriptWidth: CGFloat = 0
     /// Whether this row is the conversation's newest message
     /// (`MessageSendStatusLinePolicy.newestRowIndex`); only that row carries the "Sent" receipt.
     var isNewestInTranscript: Bool = false
@@ -62,6 +67,7 @@ struct MessageBubble: View {
 
     @StateObject private var viewModel: MessageBubbleViewModel
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.layoutDirection) private var layoutDirection
     /// Whether a pending send has outlasted `MessageSendStatusLinePolicy.sendingRevealDelay`.
     /// Driven by this view's own `.task`, so the timer dies with the row or the pending state.
     @State private var isSendingRevealDue = false
@@ -158,7 +164,8 @@ struct MessageBubble: View {
         prefetchedSenderName: String? = nil,
         isEffectivelyOneToOneConversation: Bool,
         contactRefreshToken: Int = 0,
-        isLastFromSender: Bool = true,
+        runPlacement: ChatTranscriptRunPlacement = .alone,
+        transcriptWidth: CGFloat = 0,
         isNewestInTranscript: Bool = false,
         style: MessageBubbleStyle = .standard,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
@@ -171,7 +178,8 @@ struct MessageBubble: View {
         self.prefetchedSenderName = prefetchedSenderName
         self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
         self.contactRefreshToken = contactRefreshToken
-        self.isLastFromSender = isLastFromSender
+        self.runPlacement = runPlacement
+        self.transcriptWidth = transcriptWidth
         self.isNewestInTranscript = isNewestInTranscript
         self.style = style
         self.onOpenFullMessage = onOpenFullMessage
@@ -206,6 +214,14 @@ struct MessageBubble: View {
         let recoveryPrompt = message.isFromMe
             ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
             : nil
+        // The column holds text at the style's text width and everything else at its own cap
+        // (cards at `maxBubbleWidth`, images at `imageMaxWidth(transcriptWidth:)`), so it is as wide as the
+        // widest of them. For a style whose widths are all `maxBubbleWidth` that is the 280
+        // points it always was.
+        let columnMaxWidth = max(
+            style.textBubbleMaxWidth(transcriptWidth: transcriptWidth),
+            style.imageMaxWidth(transcriptWidth: transcriptWidth) ?? 0
+        )
 
         // With a recovery badge, center it on the content bubble rather than on the row's
         // bottom (the timestamp line). Only then: the custom guide would also move an incoming
@@ -241,13 +257,26 @@ struct MessageBubble: View {
                     htmlSourceSignaturer: htmlContentHandler,
                     onOpenFullMessage: openFullMessage(source:),
                     sendRecoveryPrompt: recoveryPrompt,
-                    onSendRecoveryTap: { isShowingSendRecovery = true }
+                    onSendRecoveryTap: { isShowingSendRecovery = true },
+                    bubbleTail: MessageBubbleRowPolicy.tail(
+                        style: style,
+                        isFromMe: message.isFromMe,
+                        endsRun: runPlacement.endsRun,
+                        layoutDirection: layoutDirection
+                    )
                 )
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
-                metadataLine(statusLine: statusLine)
+                metadataLine(statusLine: statusLine, sendStatus: sendStatus)
             }
-            .frame(maxWidth: style.maxBubbleWidth, alignment: message.isFromMe ? .trailing : .leading)
+            .frame(maxWidth: columnMaxWidth, alignment: message.isFromMe ? .trailing : .leading)
+            // Room for the bubble's tail on the row's own side, in every row of a style with
+            // tails, so a bubble with one and a bubble without line up. Nothing where the
+            // style has none.
+            .padding(message.isFromMe ? .trailing : .leading, style.bubbleTailWidth)
+            .modifier(MessageTimeTooltip(
+                date: style.showsTimestampUnderBubble ? nil : message.internalDate
+            ))
 
             if let recoveryPrompt {
                 // Trailing, as in iMessage; the room comes out of the leading spacer of the
@@ -264,8 +293,15 @@ struct MessageBubble: View {
         // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
         // receipt moving to a newer row) and the badge's arrival. None of them changes the row's
         // height: the caption shares the timestamp's line (below accessibility text sizes; see
-        // `MessageSendStatusLinePolicy.Arrangement`).
-        .animation(.easeInOut(duration: 0.2), value: statusLine)
+        // `MessageSendStatusLinePolicy.Arrangement`). Not where the caption has a line of its
+        // own (`captionOnly`): there a status change can take that line off the row, and an
+        // animated height animates the transcript's content size, which clamps a scroll issued
+        // meanwhile (`ChatRowEntranceEffect`). That arrangement crossfades the caption inside
+        // its line instead (`metadataLine`).
+        .animation(
+            style.showsTimestampUnderBubble ? .easeInOut(duration: 0.2) : nil,
+            value: statusLine
+        )
         .background {
             InlineAttachmentDownloadTrigger(
                 attachments: InlineAttachmentDownloadPolicy.pendingImages(in: message.attachments, isFromMe: message.isFromMe)
@@ -299,28 +335,40 @@ struct MessageBubble: View {
         .onChange(of: isShowingSendRecovery) { _, _ in
             runPendingSendRecoveryIfDialogDismissed()
         }
+        // The time line, or the space that starts a run, above everything the row draws.
+        .modifier(ChatTranscriptRowLeadIn(style: style, placement: runPlacement))
     }
 
     // MARK: - Subviews
 
     @ViewBuilder
     private var leadingContent: some View {
-        if style.showAvatar {
-            if isLastFromSender {
-                BubbleAvatarView(
-                    name: viewModel.senderName ?? "?",
-                    avatarURL: viewModel.senderAvatarURL,
-                    imageData: viewModel.senderImageData
-                )
-            } else {
-                Color.clear.frame(width: 24, height: 24)
-            }
+        switch MessageBubbleRowPolicy.leadingSlot(
+            style: style,
+            isOneToOneConversation: isEffectivelyOneToOneConversation,
+            endsRun: runPlacement.endsRun
+        ) {
+        case .none:
+            EmptyView()
+        case .avatar:
+            BubbleAvatarView(
+                name: viewModel.senderName ?? "?",
+                avatarURL: viewModel.senderAvatarURL,
+                imageData: viewModel.senderImageData
+            )
+        case .avatarPlaceholder:
+            Color.clear.frame(width: 24, height: 24)
         }
     }
 
     @ViewBuilder
     private var senderNameView: some View {
-        if !message.isFromMe && style.showSenderName && isGroupConversation, let name = viewModel.senderName {
+        if MessageBubbleRowPolicy.showsSenderName(
+            style: style,
+            isFromMe: message.isFromMe,
+            isGroupConversation: isGroupConversation,
+            startsRun: runPlacement.startsRun
+        ), let name = viewModel.senderName {
             Text(name)
                 .font(.caption2)
                 .fontWeight(.medium)
@@ -352,18 +400,41 @@ struct MessageBubble: View {
     /// The send status, when there is one, and the timestamp ("Sent · 2:41 PM"), arranged per
     /// `MessageSendStatusLinePolicy.Arrangement`.
     @ViewBuilder
-    private func metadataLine(statusLine: MessageSendStatusLinePolicy.Line?) -> some View {
+    private func metadataLine(
+        statusLine: MessageSendStatusLinePolicy.Line?,
+        sendStatus: MessageSendStatusPresentation
+    ) -> some View {
         let timestamp = MessageMetadata(
             date: message.internalDate,
             isUnread: message.isUnread,
             showUnreadIndicator: style.showUnreadIndicator
         )
         switch MessageSendStatusLinePolicy.arrangement(
+            showsTimestamp: style.showsTimestampUnderBubble,
             isAccessibilityTextSize: dynamicTypeSize.isAccessibilitySize
         ) {
+        case .captionOnly:
+            if MessageSendStatusLinePolicy.reservesCaptionLine(
+                presentation: sendStatus,
+                isFromMe: message.isFromMe,
+                isNewestInTranscript: isNewestInTranscript
+            ) {
+                ZStack(alignment: message.isFromMe ? .trailing : .leading) {
+                    // Holds the line's height while there is no caption, so one arriving
+                    // ("Sending…" after the grace period, then "Sent") does not grow the row.
+                    Text(MessageSendStatusLinePolicy.Line.sent.label)
+                        .font(.caption2)
+                        .hidden()
+                    statusCaption(statusLine, form: .alone)
+                }
+                .lineLimit(1)
+                // The crossfade the row's own animation gives the other arrangements, kept
+                // inside the line so the line itself comes and goes unanimated.
+                .animation(.easeInOut(duration: 0.2), value: statusLine)
+            }
         case .inline:
             HStack(spacing: 0) {
-                statusCaption(statusLine, isInline: true)
+                statusCaption(statusLine, form: .inline)
                     .lineLimit(1)
                     // If the column ever runs short, the timestamp gives way, not the status.
                     .layoutPriority(1)
@@ -373,10 +444,20 @@ struct MessageBubble: View {
             }
         case .stacked:
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 0) {
-                statusCaption(statusLine, isInline: false)
+                statusCaption(statusLine, form: .stacked)
                 timestamp
             }
         }
+    }
+
+    /// How the caption is drawn in each `MessageSendStatusLinePolicy.Arrangement`.
+    private enum StatusCaptionForm {
+        /// Before the timestamp, on its line: "Sent · ".
+        case inline
+        /// On its own line above the timestamp.
+        case stacked
+        /// On a line the row reserves for it, with no timestamp.
+        case alone
     }
 
     /// A ZStack so two captions crossfade in one place ("Sending…" fading out where "Sent" fades
@@ -384,21 +465,24 @@ struct MessageBubble: View {
     /// share one edge. Empty, it takes no space.
     private func statusCaption(
         _ statusLine: MessageSendStatusLinePolicy.Line?,
-        isInline: Bool
+        form: StatusCaptionForm
     ) -> some View {
         ZStack(alignment: message.isFromMe ? .trailing : .leading) {
             if let statusLine {
                 Group {
-                    if isInline {
+                    switch form {
+                    case .inline:
                         // Interpolated rather than joined with `+`, which macOS 26 deprecates (and
                         // the Mac build's warnings-as-errors rejects); each part keeps its color.
                         let label = Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
                         let separator = Text(verbatim: " · ").foregroundColor(.secondary)
                         Text("\(label)\(separator)")
-                    } else {
+                    case .stacked:
                         // Own line: spacing lives inside the caption so an empty ZStack adds none.
                         Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
                             .padding(.bottom, 2)
+                    case .alone:
+                        Text(statusLine.label).foregroundColor(Self.statusColor(statusLine))
                     }
                 }
                 .font(.caption2)
@@ -495,7 +579,15 @@ struct MessageBubble: View {
                         ))
                     })
                 )
-                    .frame(maxWidth: style.maxBubbleWidth)
+                    .frame(maxWidth: max(
+                        style.maxBubbleWidth,
+                        style.imageMaxWidth(transcriptWidth: transcriptWidth) ?? 0
+                    ))
+                    // The style's image width, less in a transcript too narrow for it.
+                    .environment(
+                        \.imageAttachmentMaxWidth,
+                        style.imageMaxWidth(transcriptWidth: transcriptWidth)
+                    )
             } else {
                 AttachmentIndicator(count: displayable.count)
             }

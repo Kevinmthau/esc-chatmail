@@ -1,6 +1,6 @@
 # Plan: make the Mac app look and work like Messages on the Mac
 
-Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), PR 2 is merged (PR 387, 2026-11-12) and PR 3 is built (2026-11-12); PRs 4 to 6 have not started.** The spike's results are under "Spike results". PRs 1 to 3 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built", "PR 2 as built" and "PR 3 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
+Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), PR 2 is merged (PR 387, 2026-11-12), PR 3 is merged (PR 389, 2026-11-12) and PR 4 is built (2026-11-12); PRs 5 and 6 have not started.** The spike's results are under "Spike results". PRs 1 to 4 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built" to "PR 4 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
 
 This plan is the detailed version of the Windows, Layout, Toolbar and Selection items of Phase 2 in `docs/mac-app-plan.md`, plus a restyle that Phase 2 did not ask for. The Settings scene, file drag and drop, Save Attachment, the name and the icon stay in that document.
 
@@ -364,6 +364,58 @@ The transcript's scroll timing is delicate (AGENTS.md), and the reveal pass depe
   - Risk: the first row of a loaded window. If its separator appears or disappears when older rows load above it, the content above the viewport changes height. Test paging up through a long chat.
 - **Status line.** A Mac arrangement in `MessageSendStatusLinePolicy`: "Sent" alone under the newest sent bubble. "Sending…", "Not sent", "Delivery unknown" and the failed-send badge keep their meaning and colors. Not "Delivered": Gmail does not report delivery.
 - **Large emoji.** A message of one to three emoji draws without a bubble. A pure policy over the stored preview text, so the row's height is known at mount.
+
+### PR 4 as built (2026-11-12)
+
+**What is there.**
+
+- **A chat takes its bubble style from whoever shows it.** `ChatView` has a required `bubbleStyle` (`MessageBubbleStyle`): `.standard` in `ConversationListView`, the new `.mac` in `MacMailboxDetail`. It goes through `ChatMessagesView` to every `MessageBubble`. What the style means is in the style's own values and in four pure policies, so no view checks the platform.
+- **Bubbles.** Radius 17, capped at half the height, so a one-line bubble is a capsule. Padding 6 and 12 points. Text at the body size, 13 points on the Mac. Incoming is an opaque gray (`systemGray5`), outgoing the system blue.
+- **Tail.** `BubbleShape` draws it on the last bubble of a run, at the bottom corner on the row's own side: on the text bubble, the forwarded bubble, the loading pill and the no-preview placeholder (`MessageBubbleChrome`). The tail is drawn outside the bubble's frame, and every row keeps 4 points free on that side, so a bubble with a tail and one without line up, and so do images and cards.
+- **Runs.** The stack's spacing is one constant, 2 points on the Mac and the old 8 on iOS. A row that starts a run has 8 more points above it, inside the row (`ChatTranscriptRunPolicy`). A time line breaks a run even between two messages from one sender.
+- **Width.** A text bubble takes up to 65% of the transcript's width, from the `GeometryReader` the transcript already had, and never less than 280 points. Cards keep 280. An image is up to 400 points wide, a fixed number (`imageAttachmentMaxWidth` in the environment), and less only in a chat column under 496 points, where 400 would not fit beside the row's padding (`MessageBubbleStyle.imageMaxWidth(transcriptWidth:)`): the window's minimum leaves the column as little as 220.
+- **Avatars.** None in a one-to-one chat. In a group, on the last row of an incoming run, with the sender's name above the first (`MessageBubbleRowPolicy`).
+- **Time lines.** A centered line above a row whose day differs from the row before it, or that follows it by an hour or more, and above the conversation's first message (`ChatTimestampSeparatorPolicy`). The day is bold: "**Today** 2:14 PM", "**Yesterday**", the weekday for the five days before that, then the date. It is drawn inside the row (`ChatTranscriptRowLeadIn`), so the transcript's `ForEach` still holds one view per message. The row before is read with `rowForGrouping`, past the window's edge.
+- **No timestamp under the bubble,** and no per-message unread dot. The exact time is the bubble's tooltip.
+- **Status line.** "Sent" alone, on a line of its own under the newest sent bubble (`MessageSendStatusLinePolicy.Arrangement.captionOnly`). "Sending…", "Not sent", "Delivery unknown", "Send failed" and the badge keep their meaning and colors.
+- **Large emoji.** A message of one to three emoji and nothing else is drawn at 40 points with no bubble (`ChatLargeEmojiPolicy`).
+
+**Where it differs from the plan above, or settles what the plan left open.**
+
+- **The row's line for "Sent" is reserved, not added.** The plan asked for no height changes after a row mounts. A caption on its own line is one, unless the line is already there. So the user's newest row has the line from its first frame, empty through the grace period, and a row with any durable status has it wherever it is (`reservesCaptionLine`). Two changes of height remain, both unanimated:
+  - A newer message takes the receipt, as in Messages. The old row gives up its line, about 13 points, in the update that appends the new row.
+  - A reply sent before an earlier one was accepted: the earlier row gives up its line when Gmail answers.
+- **Status changes are not animated across the row on the Mac.** On iOS the row animates them, which is safe because the row's height does not change. On the Mac that animation would animate the line leaving, and with it the transcript's content size (`ChatRowEntranceEffect` says why that is a fault). The caption crossfades inside its line instead. The failed-send badge appears without a fade.
+- **The tail is outside the bubble's frame,** where the spike's shape kept 4 points free inside it. The row keeps the 4 points instead, so attachments and cards line up with the bubbles too.
+- **The tail's fill is a union of two paths.** As two subpaths the first drawing showed a sliver of tail beside a notched corner: the rounded rectangle and the tail wind in opposite directions, and their overlap filled as a hole.
+- **The emoji rule reads the text the bubble shows,** not only the stored preview. For a row with a stored preview they are the same text from the first frame. A row without one (it shows the loading pill first) learns its form when its load lands, as it learns its text.
+- **A time line also ends the run before it.** The bubble above a time line gets its tail, and in a group the row below it names its sender again.
+- **The time line's label is computed when the row is drawn.** "Today" becomes "Yesterday" at the next redraw after midnight, not at midnight.
+
+**Checked.**
+
+- **iOS draws the same pixels.** A throwaway hosted test mounted the real `ChatView` in a `NavigationStack` on the simulator (iOS 27.0) over test fixtures and drew the whole window, on `main` at `c5457dc1` and on this branch: a one-to-one chat of ten messages (long and short text, a subject, emoji-only messages, the "Sent" receipt) and a group of seven, each in light and dark. All four pairs of PNG files are byte for byte the same.
+  - Not in those pictures: the loading pill, a forwarded bubble, the no-preview placeholder, attachments, a failed send, and accessibility text sizes. Their code on iOS is the same calls in the same order, moved into `MessageBubbleChrome`.
+- **The Mac transcript was drawn off screen** by the same test in the signed, sandboxed test host on macOS 27.2: the same two chats in the `.mac` style, light and dark, 520 and 900 points wide. Eight pictures, opened.
+  - They show tails on the last bubble of each run and none inside a run, the time lines with the day in bold, large emoji with no bubble, "Sent" under the newest bubble, no avatar in the one-to-one chat, and in the group the avatar on a run's last row and the name above its first.
+  - Text follows the width: the long incoming message is two lines at 900 points and three at 520.
+- **Tests.** The full iOS suite passes: 5,007 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 369 tests in 37 suites, seven of them new to the plan (`MessageBubbleStyleTests`, `BubbleShapeTests`, `ChatTimestampSeparatorPolicyTests`, `ChatLargeEmojiPolicyTests`, `ChatTranscriptRunPolicyTests`, `MessageBubbleRowPolicyTests`, and `MessageSendStatusLinePolicyTests`, which is not new but was iOS-only). Two more new suites run on iOS only: `ChatMessageRowGroupingTests` and `ChatBubbleStyleSourceTests`.
+- **Revert-checks.** Each of the 65 changes named in the new tests' `Revert-check:` comments was made alone. 63 made the test that names it fail. One does not compile, which the comment now says. One test cannot fail that way and says so (`HONEST SCOPE`: a tail of no width).
+- **The memberwise initializer CI's compiler makes private** (`CLAUDE.md`, Traps): the new views hold no plain `private var x = value`. Only CI's own build can confirm it.
+
+**Not seen: check in the signed, sandboxed app.**
+
+- The transcript beside Messages. Every number in `.mac` is a first reading of a screenshot: the radius, the padding, the 2 and 8 points between rows, the 65%, the 400-point image, the 40-point emoji, the time line's 11-point text, the one-hour gap.
+- The tail's shape, at the Mac's real scale. It was judged from drawings enlarged four times.
+- The incoming gray in a dark window. It drew only a little lighter than the pane behind it; Messages' is lighter.
+- Sending a reply: the row arrives with its empty line, then "Sent". Then a second reply: the first row loses its line as the second arrives. The transcript should end at its bottom both times.
+- Mail arriving under your own newest message, with the transcript at its bottom and scrolled up.
+- Paging up through a long chat: the first row of each loaded window keeps or lacks its time line as older rows load.
+- Resizing the window over a long chat: text reflows, and the transcript keeps its place.
+- A chat with images and one with a newsletter card: the image up to 400 points wide, the card at 280, both lined up with the bubbles.
+- The tooltip with the exact time, on hover.
+- A group: names and avatars with real contacts. The pictures used people Contacts does not know.
+- A right-to-left layout was not drawn. The tail's side follows the layout direction by a tested rule.
 
 ## PR 5: the composer
 
