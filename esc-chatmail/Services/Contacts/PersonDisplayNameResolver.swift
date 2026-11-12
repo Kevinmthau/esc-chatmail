@@ -47,18 +47,25 @@ enum PersonDisplayNameResolver {
         unknownContactName
     }
 
+    /// The addresses joined, in participant display order: ascending by
+    /// normalized address, compared with `String`'s own `<`
+    /// (`ConversationParticipantExtractor.participantsInDisplayOrder`). A
+    /// locale-aware compare of the addresses as written gave another order
+    /// than the avatar stack beside the title: `a.z@gmail.com` (normalized
+    /// `az@gmail.com`) came before `ab@gmail.com` here and after it there.
     static func fallbackConversationName(participantEmails: [String]) -> String {
         var seenKeys = Set<String>()
-        var unique: [String] = []
+        var keyed: [(key: String, email: String)] = []
         for email in participantEmails {
             let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !trimmed.isEmpty else { continue }
             let key = EmailNormalizer.normalize(trimmed)
             guard !key.isEmpty, seenKeys.insert(key).inserted else { continue }
-            unique.append(trimmed)
+            keyed.append((key: key, email: trimmed))
         }
-        guard !unique.isEmpty else { return unknownContactName }
-        unique.sort { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        guard !keyed.isEmpty else { return unknownContactName }
+        // Keys are unique, so the order has no ties.
+        let unique = keyed.sorted { $0.key < $1.key }.map(\.email)
         let maxVisible = 3
         guard unique.count > maxVisible else {
             return unique.joined(separator: ", ")

@@ -46,6 +46,17 @@ enum ConversationParticipantExtractor {
     static func participantsInDisplayOrder(
         _ participants: some Sequence<ConversationParticipant>
     ) -> [ConversationParticipant] {
+        displayOrderedParticipants(participants).map(\.participant)
+    }
+
+    /// `participantsInDisplayOrder`, each row with the normalized address it
+    /// was ordered by ("" for a row with no person). The walks that go on to
+    /// compare that address (self-exclusion, deduplication) read it from here,
+    /// so an address is normalized once per walk, not once for the order and
+    /// again in the loop.
+    static func displayOrderedParticipants(
+        _ participants: some Sequence<ConversationParticipant>
+    ) -> [(participant: ConversationParticipant, normalizedEmail: String)] {
         participants
             .map { participant in
                 let person = participant.person
@@ -59,7 +70,7 @@ enum ConversationParticipantExtractor {
                 )
             }
             .sorted { $0.key < $1.key }
-            .map(\.participant)
+            .map { (participant: $0.participant, normalizedEmail: $0.key.normalizedEmail) }
     }
 
     private struct ParticipantDisplayOrderKey: Comparable {
@@ -92,14 +103,13 @@ enum ConversationParticipantExtractor {
         var seenEmails = Set<String>()
         var result: [String] = []
 
-        for participant in participantsInDisplayOrder(participants) {
+        for (participant, normalized) in displayOrderedParticipants(participants) {
             guard let person = participant.person else { continue }
             if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
                 continue
             }
 
             let email = person.email
-            let normalized = EmailNormalizer.normalize(email)
 
             guard !normalized.isEmpty,
                   !normalizedSelfAliases.contains(normalized),

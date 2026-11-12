@@ -23,13 +23,63 @@ struct ConversationRollupUpdater: Sendable {
     ///   - conversation: The conversation to update
     ///   - myEmail: The current user's email (must be captured before entering context.perform block)
     func updateRollups(for conversation: Conversation, myEmail: String) {
+        guard let context = conversation.managedObjectContext else { return }
+        updateRollups(
+            for: conversation,
+            myEmail: myEmail,
+            normalizedSelfAddresses: Self.storedSelfAddresses(in: context, myEmail: myEmail)
+        )
+    }
+
+    /// `updateRollups(for:myEmail:)` for a batch, which reads the account's
+    /// addresses once (`storedSelfAddresses`) and not once per conversation.
+    private func updateRollups(
+        for conversation: Conversation,
+        myEmail: String,
+        normalizedSelfAddresses: Set<String>
+    ) {
         guard conversation.managedObjectContext != nil else { return }
         let messages = conversation.messages ?? []
         let snapshot = ConversationRollupSnapshot.make(from: messages)
         logRollupSnapshot(snapshot, for: conversation, totalCount: messages.count)
         snapshot.apply(to: conversation)
 
-        updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+        updateDisplayNameOnly(
+            for: conversation,
+            myEmail: myEmail,
+            normalizedSelfAddresses: normalizedSelfAddresses
+        )
+    }
+
+    /// The signed-in account's own addresses, normalized: `myEmail`, and the
+    /// stored `Account` row's address and send-as aliases. Must be called on
+    /// `context`'s queue.
+    ///
+    /// The loaded title leaves out every one of the user's addresses
+    /// (`ConversationParticipantExtractor.extractNonMeParticipants`, given
+    /// `AliasManager`'s set); the stored title left out `myEmail` alone, so a
+    /// group holding a participant row for one of the user's send-as aliases
+    /// was stored with the user's own name in it, and the row's title changed
+    /// when its participants loaded. This is `AliasManager`'s set without the
+    /// addresses it adds from the user's Contacts card: the stored title reads
+    /// nothing from Contacts, whose access can arrive or go at any time. A
+    /// failed read leaves `myEmail` alone, which is what was excluded before.
+    static func storedSelfAddresses(
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) -> Set<String> {
+        var rawAddresses = [myEmail]
+        let request = Account.fetchRequest()
+        request.fetchLimit = 1
+        do {
+            if let account = try context.fetch(request).first {
+                rawAddresses.append(account.email)
+                rawAddresses.append(contentsOf: account.aliasesArray)
+            }
+        } catch {
+            Log.error("Failed to read the account's aliases for a stored title", category: .conversation, error: error)
+        }
+        return ConversationParticipantExtractor.normalizedAliasSet(from: rawAddresses)
     }
 
     // MARK: - Batch Rollup Operations
@@ -60,8 +110,9 @@ struct ConversationRollupUpdater: Sendable {
                 return
             }
 
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in conversations {
-                self.updateRollups(for: conversation, myEmail: myEmail)
+                self.updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: selfAddresses)
             }
         }
     }
@@ -97,8 +148,9 @@ struct ConversationRollupUpdater: Sendable {
                 return false
             }
 
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in conversations {
-                self.updateRollups(for: conversation, myEmail: myEmail)
+                self.updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: selfAddresses)
             }
             return true
         }
@@ -133,8 +185,9 @@ struct ConversationRollupUpdater: Sendable {
                 return
             }
 
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in conversations {
-                self.updateRollups(for: conversation, myEmail: myEmail)
+                self.updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: selfAddresses)
             }
         }
     }
@@ -362,8 +415,13 @@ struct ConversationRollupUpdater: Sendable {
                 return
             }
 
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in conversations {
-                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+                self.updateDisplayNameOnly(
+                    for: conversation,
+                    myEmail: myEmail,
+                    normalizedSelfAddresses: selfAddresses
+                )
             }
         }
     }
@@ -398,8 +456,13 @@ struct ConversationRollupUpdater: Sendable {
                 return false
             }
 
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in conversations {
-                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+                self.updateDisplayNameOnly(
+                    for: conversation,
+                    myEmail: myEmail,
+                    normalizedSelfAddresses: selfAddresses
+                )
             }
             return true
         }
@@ -470,9 +533,14 @@ struct ConversationRollupUpdater: Sendable {
             }
 
             var repairedCount = 0
+            let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
             for conversation in candidates {
                 let titleBefore = conversation.displayName
-                self.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
+                self.updateDisplayNameOnly(
+                    for: conversation,
+                    myEmail: myEmail,
+                    normalizedSelfAddresses: selfAddresses
+                )
                 if conversation.displayName != titleBefore {
                     repairedCount += 1
                 }
@@ -497,9 +565,36 @@ struct ConversationRollupUpdater: Sendable {
 
     /// Updates only the stored display name from participants, excluding the current user.
     func updateDisplayNameOnly(for conversation: Conversation, myEmail: String) {
+        updateDisplayNameOnly(
+            for: conversation,
+            myEmail: myEmail,
+            normalizedSelfAddresses: conversation.managedObjectContext.map {
+                Self.storedSelfAddresses(in: $0, myEmail: myEmail)
+            } ?? ConversationParticipantExtractor.normalizedAliasSet(from: [myEmail])
+        )
+    }
+
+    private func updateDisplayNameOnly(
+        for conversation: Conversation,
+        myEmail: String,
+        normalizedSelfAddresses: Set<String>
+    ) {
         guard let participants = conversation.participants else { return }
 
         let normalizedMyEmail = EmailNormalizer.normalize(myEmail)
+        let orderedParticipants = ConversationParticipantExtractor.displayOrderedParticipants(participants)
+
+        // The user's own addresses are left out of the title, as the loaded
+        // title leaves them out (`storedSelfAddresses`). A conversation whose
+        // only other participants are the user's aliases (mail sent to one's
+        // own second address) keeps them: the loader has nobody to show for
+        // it and draws this stored title, which would otherwise name nobody.
+        let hasParticipantBeyondSelf = orderedParticipants.contains { entry in
+            guard let person = entry.participant.person,
+                  !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else { return false }
+            return !entry.normalizedEmail.isEmpty && !normalizedSelfAddresses.contains(entry.normalizedEmail)
+        }
+        let excludedSelfAddresses = hasParticipantBeyondSelf ? normalizedSelfAddresses : [normalizedMyEmail]
 
         // Log all participants for debugging
         let allParticipantEmails = participants.compactMap { $0.person?.email }
@@ -527,7 +622,7 @@ struct ConversationRollupUpdater: Sendable {
         // rollup cache's token, so a reordered title was also a cache miss for
         // that row. The loader walks the same order, so the stored title and
         // the loaded one agree.
-        for participant in ConversationParticipantExtractor.participantsInDisplayOrder(participants) {
+        for (participant, normalizedEmail) in orderedParticipants {
             guard let person = participant.person else { continue }
             if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
                 Log.diagnostic(
@@ -538,10 +633,9 @@ struct ConversationRollupUpdater: Sendable {
                 continue
             }
             let email = person.email
-            let normalizedEmail = EmailNormalizer.normalize(email)
 
             // Exclude current user from display name
-            if normalizedEmail == normalizedMyEmail {
+            if excludedSelfAddresses.contains(normalizedEmail) {
                 Log.diagnostic(.conversationRollups, "Excluding self: \(email)", category: .conversation)
                 continue
             }
