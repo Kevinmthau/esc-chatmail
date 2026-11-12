@@ -41,6 +41,9 @@ struct MacMailboxDetail: View, Equatable {
                     // Messages' transcript: tailed bubbles, time lines between groups of
                     // messages (`MessageBubbleStyle.mac`).
                     bubbleStyle: .mac,
+                    // Messages' composer: a "+" menu, a capsule field in which Return sends
+                    // (`ChatComposerStyle.floating`).
+                    composerStyle: .floating(.mac),
                     makeForwardComposeView: makeForwardComposeView,
                     // Never nil here: without it the chat would close itself with `dismiss`,
                     // which in this column closes the window (`ChatView.exitChat`).
