@@ -520,7 +520,14 @@ struct ConversationRollupUpdater: Sendable {
         var participantEmails: [String] = []
         let headerDisplayNamesByEmail = headerDisplayNamesByEmail(from: conversation)
 
-        for participant in participants {
+        // In display order, never as the set came: its order changes from one
+        // context to the next, so a sync could store the same group under
+        // another order of names. The row shows the stored title until its
+        // participants load, and the stored title is part of the participant
+        // rollup cache's token, so a reordered title was also a cache miss for
+        // that row. The loader walks the same order, so the stored title and
+        // the loaded one agree.
+        for participant in ConversationParticipantExtractor.participantsInDisplayOrder(participants) {
             guard let person = participant.person else { continue }
             if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
                 Log.diagnostic(
