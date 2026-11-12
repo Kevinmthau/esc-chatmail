@@ -22,6 +22,9 @@ struct ConversationRowPalette: Equatable {
     let unreadIndicator: Color
     let pin: Color
     let chevron: Color
+    /// The disc and the rings of a group's avatar. They are colors the row draws too, through
+    /// `AvatarStackView`, and they were chosen for the list's background.
+    let groupAvatar: GroupAvatarColors
 }
 
 extension ConversationRowPalette {
@@ -32,7 +35,8 @@ extension ConversationRowPalette {
         secondaryText: .secondary,
         unreadIndicator: .blue,
         pin: .orange,
-        chevron: .tertiaryLabel
+        chevron: .tertiaryLabel,
+        groupAvatar: .standard
     )
 
     /// White on the accent color, with the preview and the timestamp a step back from the
@@ -43,6 +47,7 @@ extension ConversationRowPalette {
         secondaryText: .white.opacity(0.8),
         unreadIndicator: .white,
         pin: .white,
-        chevron: .white.opacity(0.8)
+        chevron: .white.opacity(0.8),
+        groupAvatar: .onSelectionFill
     )
 }
