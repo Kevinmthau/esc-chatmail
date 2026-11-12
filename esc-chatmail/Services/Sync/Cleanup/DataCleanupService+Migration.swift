@@ -1062,9 +1062,11 @@ extension DataCleanupService {
                     if !touchedThisBatch.isEmpty {
                         // Roll up before each interim save so no published row carries
                         // stale unread counts; the final pass recomputes everything.
-                        for conversation in touchedThisBatch where !conversation.isDeleted {
-                            conversationManager.updateConversationRollups(for: conversation, myEmail: myEmail)
-                        }
+                        conversationManager.updateConversationRollups(
+                            for: touchedThisBatch.filter { !$0.isDeleted },
+                            in: context,
+                            myEmail: myEmail
+                        )
                     }
                     if context.hasChanges {
                         guard coreDataStack.saveIfNeeded(
@@ -1083,9 +1085,11 @@ extension DataCleanupService {
                 }
             }
 
-            for conversation in touchedThisBatch where !conversation.isDeleted {
-                conversationManager.updateConversationRollups(for: conversation, myEmail: myEmail)
-            }
+            conversationManager.updateConversationRollups(
+                for: touchedThisBatch.filter { !$0.isDeleted },
+                in: context,
+                myEmail: myEmail
+            )
             guard coreDataStack.saveIfNeeded(
                 context: context,
                 caller: "DataCleanupService.rehomeMessagesByParticipantSet.final"

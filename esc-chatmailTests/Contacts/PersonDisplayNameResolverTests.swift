@@ -215,6 +215,30 @@ final class PersonDisplayNameResolverTests: XCTestCase {
         XCTAssertEqual(result, "alice@example.com, Bob@example.com")
     }
 
+    /// The joined addresses follow participant display order (normalized
+    /// address), the order of the avatar stack beside the title.
+    ///
+    /// Revert-check: the sort by normalized key in
+    /// `PersonDisplayNameResolver.fallbackConversationName(participantEmails:)`.
+    /// Sorted by a locale-aware compare of the addresses as written,
+    /// `a.z@gmail.com` comes first.
+    func testFallbackConversationName_addressesDifferingInNormalizedOrder_followsNormalizedAddress() {
+        let expected = "ab@gmail.com, a.z@gmail.com, Bob@Example.com"
+
+        XCTAssertEqual(
+            PersonDisplayNameResolver.fallbackConversationName(
+                participantEmails: ["a.z@gmail.com", "Bob@Example.com", "ab@gmail.com"]
+            ),
+            expected
+        )
+        XCTAssertEqual(
+            PersonDisplayNameResolver.fallbackConversationName(
+                participantEmails: ["Bob@Example.com", "ab@gmail.com", "a.z@gmail.com"]
+            ),
+            expected
+        )
+    }
+
     func testFallbackConversationName_capsAtThreeWithOverflowIndicator() {
         let result = PersonDisplayNameResolver.fallbackConversationName(
             participantEmails: [

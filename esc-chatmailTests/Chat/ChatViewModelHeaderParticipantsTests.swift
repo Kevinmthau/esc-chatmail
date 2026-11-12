@@ -251,14 +251,3 @@ final class ChatViewModelHeaderParticipantsTests: XCTestCase {
         }
     }
 }
-
-/// A Contacts resolver that knows nobody, so these tests never ask the real Contacts store.
-private final class NobodyContactsResolver: ContactsResolving {
-    func ensureAuthorization() async throws {}
-
-    func lookup(email: String) async -> ContactMatch? {
-        nil
-    }
-
-    func prewarm(emails: [String]) async {}
-}

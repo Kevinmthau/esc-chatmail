@@ -346,11 +346,3 @@ final class ConversationParticipantDisplayOrderTests: XCTestCase {
         }
     }
 }
-
-/// An address book that knows nobody, so names come from the stored `Person`
-/// rows alone and the real Contacts store is never asked.
-private struct NobodyContactsResolver: ContactsResolving {
-    func ensureAuthorization() async throws {}
-    func lookup(email: String) async -> ContactMatch? { nil }
-    func prewarm(emails: [String]) async {}
-}
