@@ -245,6 +245,117 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(avatar.participantNames, ["Ada Lovelace"])
     }
 
+    /// The fallback text is built by walking the conversation's participants in Core Data, and
+    /// the header is re-evaluated with every update of the chat, so it is asked for only where
+    /// the avatar can draw it.
+    ///
+    /// Revert-check: replacing the `readsFallbackDisplayText` condition in
+    /// `ChatHeaderPolicy.avatar` with `true` makes this fail.
+    func testAvatar_firstNameGivesInitials_doesNotAskForTheFallbackText() {
+        var asked = 0
+        func fallback() -> String {
+            asked += 1
+            return "Ada Lovelace"
+        }
+
+        let avatar = ChatHeaderPolicy.avatar(
+            conversationType: .oneToOne,
+            participantInfo: Self.info(names: ["Ada Lovelace"], total: 1),
+            fallbackDisplayText: fallback()
+        )
+
+        XCTAssertEqual(asked, 0)
+        XCTAssertNil(avatar.fallbackDisplayText)
+    }
+
+    /// A participant whose name gives no initials is drawn from the fallback text, as in the
+    /// row (`SingleAvatarView.initialsSource`).
+    ///
+    /// Revert-check: replacing the `readsFallbackDisplayText` condition in
+    /// `ChatHeaderPolicy.avatar` with `participantNames.isEmpty` makes this fail.
+    func testAvatar_firstNameGivesNoInitials_keepsTheFallbackText() {
+        let avatar = ChatHeaderPolicy.avatar(
+            conversationType: .oneToOne,
+            participantInfo: Self.info(names: ["   "], total: 1),
+            fallbackDisplayText: "Ada Lovelace"
+        )
+
+        XCTAssertEqual(avatar.fallbackDisplayText, "Ada Lovelace")
+    }
+
+    /// The header leaves the fallback text out exactly where the avatar view that is drawn
+    /// cannot draw it: for names of every kind, in each layout, the answer is compared with
+    /// what that layout's view draws with the text and without it.
+    ///
+    /// Revert-check: returning `false` from `SingleAvatarView.readsFallbackDisplayText`, or
+    /// from `GroupAvatarView.readsFallbackDisplayText`, makes this fail. So does answering for
+    /// both layouts at once in `AvatarStackView.readsFallbackDisplayText` (the single view's
+    /// answer or the group's): a group whose first name is blank then reads a text that the
+    /// group circle never draws.
+    func testReadsFallbackDisplayText_isYesOnlyWhereTheAvatarViewThatIsDrawnDrawsTheText() {
+        let fallback = "Zed Fallback"
+        let lists: [[String]] = [
+            [], ["Ada Lovelace"], ["   "], ["ada@example.com"], ["3 Unknown Contacts"],
+            ["Ada Lovelace", "Grace Hopper"], ["   ", "Grace Hopper"]
+        ]
+
+        for names in lists {
+            for showsGroupAvatar in [false, true] {
+                let layout = AvatarStackView.resolvedLayout(
+                    participantCount: names.count,
+                    showsGroupAvatar: showsGroupAvatar
+                )
+                let drawsIt: Bool
+                switch layout {
+                case .single:
+                    drawsIt = SingleAvatarView.resolvedContent(
+                        avatarPhoto: nil, participant: names.first, fallbackDisplayText: fallback
+                    ) != SingleAvatarView.resolvedContent(
+                        avatarPhoto: nil, participant: names.first, fallbackDisplayText: nil
+                    )
+                case .group:
+                    // The group circle monograms the text only with no participants to draw.
+                    drawsIt = names.isEmpty
+                        && GroupAvatarView.resolvedEmptyContent(fallbackDisplayText: fallback)
+                            == .initials(fallback)
+                }
+
+                XCTAssertEqual(
+                    ChatHeaderPolicy.readsFallbackDisplayText(
+                        participantNames: names,
+                        showsGroupAvatar: showsGroupAvatar
+                    ),
+                    drawsIt,
+                    "\(names), showsGroupAvatar: \(showsGroupAvatar)"
+                )
+            }
+        }
+    }
+
+    // MARK: - The capsule's offset
+
+    /// Half a point is one pixel at 2x and stays; at 1x it is half a pixel and goes to a whole
+    /// one, so the name is not drawn across two pixel columns.
+    ///
+    /// Revert-check: returning `offset` unchanged from `ChatHeaderPolicy.pixelAlignedOffset`
+    /// makes this fail.
+    func testPixelAlignedOffset_isAWholeNumberOfTheDisplaysPixels() {
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 2), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 1), 1)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(2.5, displayScale: 2), 2.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.3, displayScale: 1), 0)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 0), 0.5, "No scale: left as it is")
+    }
+
+    /// Revert-check: dropping `displayScale.isFinite` from the guard in
+    /// `ChatHeaderPolicy.pixelAlignedOffset` makes this fail: the offset comes back NaN.
+    func testPixelAlignedOffset_scaleThatIsNotANumber_leavesTheOffsetAsItIs() {
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: .infinity), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: .nan), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: -2), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(.infinity, displayScale: 2), .infinity)
+    }
+
     // MARK: - The Mac's metrics
 
     /// The numbers that were measured (`docs/mac-imessage-ui-plan.md`, "Spike results" and "PR 3

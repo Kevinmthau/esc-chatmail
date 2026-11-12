@@ -86,25 +86,62 @@ enum ChatHeaderPolicy {
     static func avatar(
         conversationType: ConversationType,
         participantInfo: ParticipantLoader.ParticipantInfo?,
-        fallbackDisplayText: String
+        fallbackDisplayText: @autoclosure () -> String
     ) -> ChatHeaderAvatar {
-        ChatHeaderAvatar(
+        let participantNames = ConversationRowPolicy.resolvedAvatarDisplayNames(
+            conversationType: conversationType,
+            participantInfo: participantInfo
+        )
+        let showsGroupAvatar = ConversationRowPolicy.resolvedShowsGroupAvatar(
+            snapshotShowsGroupAvatar: ConversationSnapshot.showsGroupAvatar(
+                conversationType: conversationType
+            ),
+            conversationType: conversationType,
+            participantInfo: participantInfo
+        )
+        return ChatHeaderAvatar(
             photos: ConversationRowPolicy.resolvedAvatarPhotos(
                 conversationType: conversationType,
                 participantInfo: participantInfo
             ),
-            participantNames: ConversationRowPolicy.resolvedAvatarDisplayNames(
-                conversationType: conversationType,
-                participantInfo: participantInfo
-            ),
-            showsGroupAvatar: ConversationRowPolicy.resolvedShowsGroupAvatar(
-                snapshotShowsGroupAvatar: ConversationSnapshot.showsGroupAvatar(
-                    conversationType: conversationType
-                ),
-                conversationType: conversationType,
-                participantInfo: participantInfo
-            ),
-            fallbackDisplayText: fallbackDisplayText
+            participantNames: participantNames,
+            showsGroupAvatar: showsGroupAvatar,
+            fallbackDisplayText: readsFallbackDisplayText(
+                participantNames: participantNames,
+                showsGroupAvatar: showsGroupAvatar
+            )
+                ? fallbackDisplayText()
+                : nil
         )
+    }
+
+    /// Whether the avatar can draw from its fallback text at all, given the names it has and
+    /// the layout they are drawn in: `AvatarStackView`'s own answer. A single avatar reads the
+    /// text only for a name with no usable identity text, no name included; a group circle
+    /// only with no names at all. Where it is no the text is never drawn, and `avatar` does
+    /// not ask for it: the chat builds it by walking the conversation's participants in Core
+    /// Data, and the header is re-evaluated with every update of the chat.
+    static func readsFallbackDisplayText(participantNames: [String], showsGroupAvatar: Bool) -> Bool {
+        AvatarStackView.readsFallbackDisplayText(
+            participants: participantNames,
+            showsGroupAvatar: showsGroupAvatar
+        )
+    }
+
+    /// The name capsule's offset, moved to the nearest whole pixel of the display it is on.
+    ///
+    /// The measured offset is half a point (`ChatHeaderMetrics.principalItemCenterOffset`). That
+    /// is one pixel on a 2x display. On a 1x display it is half a pixel, and an offset is not
+    /// rounded the way a layout position is, so the capsule's edge and its text would be drawn
+    /// across two pixel columns and look soft. A whole pixel there is half a point off the
+    /// measured center, which cannot be seen; a blurred name can.
+    ///
+    /// The center was measured at 2x only. Where the toolbar puts the avatar on a 1x display
+    /// has not been measured, so there the capsule may be a pixel off the avatar's center.
+    ///
+    /// A scale or an offset that is not a finite number is left alone: rounding it gives NaN.
+    static func pixelAlignedOffset(_ offset: CGFloat, displayScale: CGFloat) -> CGFloat {
+        guard offset.isFinite, displayScale.isFinite, displayScale > 0 else { return offset }
+        return (offset * displayScale).rounded() / displayScale
     }
 }

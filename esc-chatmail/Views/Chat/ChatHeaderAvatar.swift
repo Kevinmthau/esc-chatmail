@@ -8,6 +8,7 @@ struct ChatHeaderAvatar {
     let participantNames: [String]
     let showsGroupAvatar: Bool
     /// What the avatar draws initials from while it has no participant to name: before the
-    /// participant load lands, and always for a mailing list.
-    let fallbackDisplayText: String
+    /// participant load lands, and always for a mailing list. Nil where the names leave it
+    /// nothing to draw (`ChatHeaderPolicy.readsFallbackDisplayText`).
+    let fallbackDisplayText: String?
 }

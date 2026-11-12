@@ -597,6 +597,169 @@ final class ConversationRollupUpdaterTests: XCTestCase {
         XCTAssertEqual(conversation.lastMessageDate, messageDate)
     }
 
+    // MARK: - The user's own send-as aliases
+
+    /// The loaded title leaves out every address of the user's; the stored one
+    /// left out `myEmail` alone.
+    ///
+    /// Revert-check: `excludedSelfAddresses.contains(normalizedEmail)` in
+    /// `updateDisplayNameOnly` (compared with `normalizedMyEmail` alone, the
+    /// title gains "Kevin"), and the `Account` read in
+    /// `ConversationRollupUpdater.storedSelfAddresses`.
+    func testUpdateDisplayNameOnly_groupHoldingSendAsAliasRow_leavesAliasOutOfStoredTitle() throws {
+        AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["Kevin.Work@corp.example"])
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .withDisplayName("Group")
+            .build(in: context)
+        addConversationParticipant(email: "ada@example.com", displayName: "Ada Lovelace", to: conversation)
+        addConversationParticipant(email: "kevin.work@corp.example", displayName: "Kevin Thau", to: conversation)
+        addConversationParticipant(email: "alan@example.com", displayName: "Alan Turing", to: conversation)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Ada & Alan")
+    }
+
+    /// Mail sent to one's own second address: the loader has nobody to show
+    /// and draws the stored title, so the stored title keeps the alias.
+    ///
+    /// Revert-check: `hasParticipantBeyondSelf` in `updateDisplayNameOnly`
+    /// (with the aliases always excluded, the title stays "Unknown Contact").
+    func testUpdateDisplayNameOnly_onlyOtherParticipantIsSendAsAlias_keepsAliasInStoredTitle() throws {
+        AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["kevin.work@corp.example"])
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .withDisplayName("Unknown Contact")
+            .build(in: context)
+        addConversationParticipant(email: "kevin.work@corp.example", displayName: "Kevin Thau", to: conversation)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Kevin Thau")
+    }
+
+    /// The batch entry points read the account once and hand it down.
+    ///
+    /// Revert-check: `normalizedSelfAddresses: selfAddresses` in
+    /// `updateDisplayNamesForConversations` (handed `[myEmail]`, the title
+    /// gains "Kevin").
+    func testUpdateDisplayNamesForConversations_groupHoldingSendAsAliasRow_leavesAliasOutOfStoredTitle() async throws {
+        AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["kevin.work@corp.example"])
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .withDisplayName("Group")
+            .build(in: context)
+        addConversationParticipant(email: "ada@example.com", displayName: "Ada Lovelace", to: conversation)
+        addConversationParticipant(email: "kevin.work@corp.example", displayName: "Kevin Thau", to: conversation)
+        addConversationParticipant(email: "alan@example.com", displayName: "Alan Turing", to: conversation)
+        try context.save()
+
+        let didUpdate = await updater.updateDisplayNamesForConversations(
+            conversationIDs: [conversation.objectID],
+            in: context,
+            myEmail: "me@example.com"
+        )
+
+        XCTAssertTrue(didUpdate)
+        XCTAssertEqual(conversation.displayName, "Ada & Alan")
+    }
+
+    /// The single-conversation rollup, the entry the send path and the draft
+    /// store use, reads the account's addresses too.
+    ///
+    /// Revert-check: the `storedSelfAddresses` read in
+    /// `updateRollups(for:myEmail:)` (handed `[myEmail]`, the title gains
+    /// "Kevin").
+    func testUpdateRollups_groupHoldingSendAsAliasRow_leavesAliasOutOfStoredTitle() throws {
+        let conversation = try makeGroupHoldingSendAsAliasRow()
+
+        updater.updateRollups(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Ada & Alan")
+    }
+
+    /// The synchronous batch entry the re-home migration uses.
+    ///
+    /// Revert-check: the `storedSelfAddresses` read in
+    /// `updateRollups(for:in:myEmail:)` (handed `[myEmail]`, the title gains
+    /// "Kevin").
+    ///
+    /// HONEST SCOPE: this pins that the batch excludes the aliases, not that
+    /// it reads the account once. A version that read it per conversation
+    /// would pass.
+    func testUpdateRollupsForConversationsInContext_groupHoldingSendAsAliasRow_leavesAliasOutOfStoredTitle() throws {
+        let conversation = try makeGroupHoldingSendAsAliasRow()
+
+        updater.updateRollups(for: [conversation], in: context, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "Ada & Alan")
+    }
+
+    /// A post the user sent to a list from a send-as alias is the user's own:
+    /// it must not count as a second sender and keep the machine title.
+    ///
+    /// Revert-check: `!normalizedSelfAddresses.contains(normalizedEmail)` in
+    /// `singleSenderDisplayName` (compared with the signed-in address alone,
+    /// two senders are counted and the title stays "tbpn.mail.beehiiv.com").
+    func testUpdateDisplayNameOnly_listBareListIdTitle_ownPostFromSendAsAlias_stillUpgradesToSingleSenderName() throws {
+        AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["kevin.work@corp.example"])
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .asList()
+            .withListId("tbpn.mail.beehiiv.com")
+            .withDisplayName("tbpn.mail.beehiiv.com")
+            .build(in: context)
+        addConversationParticipant(email: "tbpn@mail.beehiiv.com", displayName: nil, to: conversation)
+        MessageBuilder()
+            .withId("list-alias-sender-newsletter")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        MessageBuilder()
+            .withId("list-alias-sender-own-post")
+            .withSender(email: "Kevin.Work@corp.example", name: "Kevin Thau")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "me@example.com")
+
+        XCTAssertEqual(conversation.displayName, "TBPN")
+    }
+
+    /// With no signed-in address, a row with no usable address is left out of
+    /// the title, as it was when `myEmail` alone was compared.
+    ///
+    /// Revert-check: `.union([normalizedMyEmail])` in `updateDisplayNameOnly`
+    /// (without it the blank row is counted and the title gains "Ghost").
+    func testUpdateDisplayNameOnly_emptyMyEmail_groupWithBlankAddressRow_leavesBlankRowOutOfStoredTitle() throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Group")
+            .build(in: context)
+        addConversationParticipant(email: "ada@example.com", displayName: "Ada Lovelace", to: conversation)
+        addConversationParticipant(email: "", displayName: "Ghost Writer", to: conversation)
+        addConversationParticipant(email: "alan@example.com", displayName: "Alan Turing", to: conversation)
+        try context.save()
+
+        updater.updateDisplayNameOnly(for: conversation, myEmail: "")
+
+        XCTAssertEqual(conversation.displayName, "Ada & Alan")
+    }
+
     func testUpdateDisplayNameOnly_noRealNameUsesEmailAddress() throws {
         let conversation = ConversationBuilder()
             .withDisplayName("John Smith")
@@ -1255,6 +1418,23 @@ final class ConversationRollupUpdaterTests: XCTestCase {
 
         let title = try XCTUnwrap(conversation.displayName)
         XCTAssertTrue(["Alice & Jake", "Jake & Alice"].contains(title), title)
+    }
+
+    /// An account with one send-as alias, and a saved group of Ada, Alan and
+    /// a participant row for that alias.
+    private func makeGroupHoldingSendAsAliasRow() throws -> Conversation {
+        AccountBuilder()
+            .withEmail("me@example.com")
+            .withAliases(["kevin.work@corp.example"])
+            .build(in: context)
+        let conversation = ConversationBuilder()
+            .withDisplayName("Group")
+            .build(in: context)
+        addConversationParticipant(email: "ada@example.com", displayName: "Ada Lovelace", to: conversation)
+        addConversationParticipant(email: "kevin.work@corp.example", displayName: "Kevin Thau", to: conversation)
+        addConversationParticipant(email: "alan@example.com", displayName: "Alan Turing", to: conversation)
+        try context.save()
+        return conversation
     }
 
     @discardableResult
