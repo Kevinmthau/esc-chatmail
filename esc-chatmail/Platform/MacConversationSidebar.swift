@@ -35,9 +35,17 @@ struct MacConversationSidebar: View {
     let onNewMessage: @MainActor () -> Void
 
     @FocusState private var isSearchFieldFocused: Bool
-    /// Whether this window is the one the user is working in. A selected row is gray in a
-    /// window that is not.
-    private var windowAppearsActive = WindowAppearsActive()
+    /// Whether this window is the one the user is working in (`WindowAppearsActive` says what
+    /// that means on the Mac). A selected row is gray in a window that is not.
+    ///
+    /// Read from the environment here, not through a `WindowAppearsActive` property as in
+    /// `ChatView`. `MacMailboxView` builds this view with its memberwise initializer, and
+    /// `private var x = WindowAppearsActive()` is a parameter of that initializer under Swift
+    /// 6.2 (Xcode 26, which CI builds with), which makes the initializer private. A private
+    /// property with a property wrapper is not a parameter under either compiler. Swift 6.4
+    /// (Xcode 27) leaves the plain property out too, so that spelling builds on this Mac and
+    /// fails only CI's "Build (macOS)".
+    @Environment(\.appearsActive) private var appearsActive
 
     var body: some View {
         // Empty unless several rows are selected, and then one pass over the rows.
@@ -71,7 +79,7 @@ struct MacConversationSidebar: View {
             ForEach(viewModel.filteredConversationItems) { item in
                 let selectionFill = MacSidebarRowSelectionPolicy.fill(
                     isSelected: selection.contains(item.id),
-                    windowAppearsActive: windowAppearsActive.value
+                    windowAppearsActive: appearsActive
                 )
                 ConversationRowView(
                     snapshot: item.snapshot,
