@@ -10,6 +10,9 @@ import Foundation
 /// `ChatComposerFocus`. On iOS no field ever attaches, so `isFocused` stays false and a
 /// request does nothing.
 ///
+/// It carries one request that is not about the focus, because it is the composer's only way
+/// to the field: `commitPendingInput`, made by the send arrow before it sends.
+///
 /// The chat observes this, so a report publishes, and a publish must not land inside a SwiftUI
 /// update. AppKit tells a text view it lost the focus while SwiftUI is taking the view out of
 /// its window, so the field reports on the next turn of the run loop
@@ -27,6 +30,9 @@ final class ReplyFieldFocusBridge: ObservableObject {
     /// A request made while no field was attached. A chat asks for the focus as it appears,
     /// before its field is in a window; the field takes it when it attaches.
     private var pendingRequest: Bool?
+    /// Asks the attached field to commit the word an input method is still composing. Nil
+    /// until a field attaches.
+    private var commitFieldInput: (() -> Void)?
 
     /// The chat asks for the field to take or give up the focus.
     func requestFocus(_ wantsFocus: Bool) {
@@ -37,10 +43,23 @@ final class ReplyFieldFocusBridge: ObservableObject {
         }
     }
 
+    /// The composer is about to read the field's text from outside the field (the send
+    /// arrow): the field commits the word an input method is still composing, so the
+    /// composer's copy holds it. Return in the field needs no such request; the field decides
+    /// that key itself (`ReplyFieldKeyPolicy`). Nothing to do with no field attached.
+    func commitPendingInput() {
+        commitFieldInput?()
+    }
+
     /// `field` is in a window and can take the focus. A request made before now is applied.
-    func attach(field: AnyObject, applyFocus: @escaping (Bool) -> Void) {
+    func attach(
+        field: AnyObject,
+        applyFocus: @escaping (Bool) -> Void,
+        commitPendingInput: @escaping () -> Void = {}
+    ) {
         attachedField = ObjectIdentifier(field)
         self.applyFocus = applyFocus
+        commitFieldInput = commitPendingInput
         if let pendingRequest {
             self.pendingRequest = nil
             applyFocus(pendingRequest)
@@ -57,6 +76,7 @@ final class ReplyFieldFocusBridge: ObservableObject {
         guard attachedField == ObjectIdentifier(field) else { return }
         attachedField = nil
         applyFocus = nil
+        commitFieldInput = nil
         fieldDidChangeFocus(false)
     }
 

@@ -103,6 +103,25 @@ final class ChatComposerStyleSourceTests: XCTestCase {
         XCTAssertTrue(source.contains("        ) {\n            sendIfAllowed()\n        }\n"))
     }
 
+    /// The send arrow has the field commit a word still being composed before it sends: the
+    /// composer's copy lacks that word until then, and the reply went without it.
+    ///
+    /// Revert-check: deleting `focusBridge.commitPendingInput()` from the send arrow in
+    /// `MacChatReplyBarLayout`, or moving it after `onSend()`, makes this fail.
+    func testSendArrow_commitsAWordBeingComposed_beforeItSends() throws {
+        let source = try String(
+            contentsOf: repoFile("esc-chatmail/Platform/MacChatReplyBarLayout.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "            focusBridge.commitPendingInput()\n"
+                + "            onSend()\n"
+        ))
+        // The arrow is the layout's only caller of `onSend`; Return's is the field's own.
+        XCTAssertEqual(source.components(separatedBy: "            onSend()\n").count, 2)
+    }
+
     /// The Mac's field asks `canSend` of the text it holds, and Escape asks the policy.
     ///
     /// Revert-check: passing `canSend: { _ in true }` to `MacChatReplyBarLayout` makes the

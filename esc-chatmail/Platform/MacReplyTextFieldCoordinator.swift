@@ -12,6 +12,18 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
     private(set) weak var textView: MacReplyTextView?
     /// SwiftUI has taken the field apart (`dismantleNSView`).
     private var isDismantled = false
+    /// The composer's text as the field last knew it: what the view last gave the composer, or
+    /// what the composer last gave the view. While an input method is composing, the view runs
+    /// ahead of the composer by the word being composed, and this is how
+    /// `applyTextFromComposer` tells that apart from the composer replacing its text.
+    private var composerTextKnownToField: String
+    /// `applyTextFromComposer` is changing the view: what the view then reports as a change is
+    /// the composer's own text, not something to give the composer.
+    private var isApplyingComposerText = false
+    /// The field's own undo history. Without one a text view records in its window's, which
+    /// the search field and everything else in the window share, and emptying it after a send
+    /// (`applyTextFromComposer`) emptied theirs too.
+    private let fieldUndoManager = UndoManager()
 
     /// A second text layout, used only to measure: the height of a string at a width, without
     /// touching the layout the view draws from.
@@ -23,6 +35,7 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
 
     init(field: MacReplyTextField) {
         self.field = field
+        composerTextKnownToField = field.text
         super.init()
         measuringContainer.lineFragmentPadding = 0
         measuringLayoutManager.addTextContainer(measuringContainer)
@@ -52,7 +65,11 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
             if isInWindow {
                 // Publishes nothing, so it is done now: a request the chat made before the
                 // field existed is waiting for it.
-                bridge.attach(field: self) { [weak self] wantsFocus in self?.applyFocus(wantsFocus) }
+                bridge.attach(
+                    field: self,
+                    applyFocus: { [weak self] wantsFocus in self?.applyFocus(wantsFocus) },
+                    commitPendingInput: { [weak self] in self?.commitMarkedText() }
+                )
             } else {
                 self.detachFromBridgeSoon()
             }
@@ -103,23 +120,64 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
     /// Puts the composer's text in the view when the two differ: a draft restored when the
     /// chat opens, the field emptied by a send, a failed reply handed back.
     func applyTextFromComposer() {
-        guard let textView, textView.string != field.text else { return }
-        // Text an input method is still composing is the view's alone. Replacing the string
-        // under it would throw the composition away.
-        guard !textView.hasMarkedText() else { return }
-        textView.string = field.text
+        guard let textView else { return }
+        let composerText = field.text
+        guard textView.string != composerText else {
+            composerTextKnownToField = composerText
+            return
+        }
+        if textView.hasMarkedText() {
+            // The view tells the composer nothing about a word an input method is still
+            // composing, so while one is, the two differ and the composer is not wrong:
+            // replacing the string then would throw the composition away on any update.
+            guard composerText != composerTextKnownToField else { return }
+            // The composer's text was replaced from outside while a word was being composed.
+            // Its text wins, and the composition goes: left in place, the view kept all it
+            // showed, and the next change gave it back to the composer. After a send that was
+            // the mail just sent, back in the draft; after a failed reply was handed over, it
+            // was that reply gone.
+            textView.inputContext?.discardMarkedText()
+        }
+        isApplyingComposerText = true
+        textView.string = composerText
+        // Marking that outlived its text: end it without telling the composer of a change.
+        if textView.hasMarkedText() { textView.unmarkText() }
+        isApplyingComposerText = false
+        composerTextKnownToField = composerText
         // The text was replaced from outside, so nothing typed before it can be undone into
         // it: Undo after a send must not bring back the mail that was just sent.
-        textView.undoManager?.removeAllActions()
+        fieldUndoManager.removeAllActions()
         textView.enclosingScrollView?.invalidateIntrinsicContentSize()
     }
 
     func textDidChange(_ notification: Notification) {
-        guard let textView else { return }
+        guard let textView, !isApplyingComposerText else { return }
+        giveComposerTheViewsText(textView)
+        textView.enclosingScrollView?.invalidateIntrinsicContentSize()
+    }
+
+    private func giveComposerTheViewsText(_ textView: NSTextView) {
         if field.text != textView.string {
             field.text = textView.string
         }
-        textView.enclosingScrollView?.invalidateIntrinsicContentSize()
+        composerTextKnownToField = textView.string
+    }
+
+    /// Commits the word an input method is still composing, so the composer holds all the
+    /// field shows. Asked for by the send arrow before it sends
+    /// (`ReplyFieldFocusBridge.commitPendingInput`): a click on the arrow does not end a
+    /// composition, and the composer's copy lacks the word until it is committed, so the reply
+    /// went without it.
+    func commitMarkedText() {
+        guard let textView, textView.hasMarkedText() else { return }
+        textView.unmarkText()
+        textView.inputContext?.discardMarkedText()
+        // Whether or not the view reported the commit as a change.
+        giveComposerTheViewsText(textView)
+    }
+
+    func undoManager(for view: NSTextView) -> UndoManager? {
+        fieldUndoManager
     }
 
     // MARK: - Keys
@@ -145,14 +203,12 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
         switch action {
         case .send:
             // The composer sends its own copy of the text; make it this one first.
-            if field.text != textView.string {
-                field.text = textView.string
-            }
+            giveComposerTheViewsText(textView)
             field.onSend()
         case .insertNewline:
             textView.insertNewlineIgnoringFieldEditor(nil)
         case .commitMarkedText:
-            textView.unmarkText()
+            commitMarkedText()
         case .ignore:
             break
         case .cancel:

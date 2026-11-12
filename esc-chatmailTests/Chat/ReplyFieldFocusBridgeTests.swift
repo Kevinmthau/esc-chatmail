@@ -127,4 +127,25 @@ final class ReplyFieldFocusBridgeTests: XCTestCase {
         bridge.requestFocus(false)
         XCTAssertEqual(applied, [false])
     }
+
+    /// The send arrow's request reaches the attached field, and no field that has left.
+    ///
+    /// Revert-check: deleting `commitFieldInput = commitPendingInput` from `attach` makes the
+    /// first assertion fail; deleting `commitFieldInput = nil` from `detach` makes the second
+    /// fail.
+    func testCommitPendingInput_reachesTheAttachedField_andNoFieldThatHasLeft() {
+        let bridge = ReplyFieldFocusBridge()
+        var commits = 0
+        // With no field attached there is nothing to commit, and nothing is kept for later.
+        bridge.commitPendingInput()
+
+        bridge.attach(field: field, applyFocus: { _ in }, commitPendingInput: { commits += 1 })
+        XCTAssertEqual(commits, 0)
+        bridge.commitPendingInput()
+        XCTAssertEqual(commits, 1)
+
+        bridge.detach(field: field)
+        bridge.commitPendingInput()
+        XCTAssertEqual(commits, 1)
+    }
 }
