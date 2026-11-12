@@ -111,16 +111,13 @@ enum ChatHeaderPolicy {
         )
     }
 
-    /// Whether the avatar can draw from its fallback text at all, given the names it has.
-    ///
-    /// `AvatarStackView` reads the fallback in two places: a group circle with no participants
-    /// monograms it, and a single avatar draws initials from it where its one participant's name
-    /// gives none (`SingleAvatarView.initialsSource`). Both are the case of a first name with no
-    /// usable identity text, an empty list included. With a usable first name the text is never
-    /// drawn, and `avatar` does not ask for it: the chat builds it by walking the conversation's
+    /// Whether the avatar can draw from its fallback text at all, given the names it has:
+    /// `AvatarStackView`'s own answer, which is yes only for a first name with no usable
+    /// identity text, an empty list included. Where it is no the text is never drawn, and
+    /// `avatar` does not ask for it: the chat builds it by walking the conversation's
     /// participants in Core Data, and the header is re-evaluated with every update of the chat.
     static func readsFallbackDisplayText(participantNames: [String]) -> Bool {
-        SingleAvatarView.usableIdentityText(from: participantNames.first) == nil
+        AvatarStackView.readsFallbackDisplayText(participants: participantNames)
     }
 
     /// The name capsule's offset, moved to the nearest whole pixel of the display it is on.
@@ -130,8 +127,13 @@ enum ChatHeaderPolicy {
     /// rounded the way a layout position is, so the capsule's edge and its text would be drawn
     /// across two pixel columns and look soft. A whole pixel there is half a point off the
     /// measured center, which cannot be seen; a blurred name can.
+    ///
+    /// The center was measured at 2x only. Where the toolbar puts the avatar on a 1x display
+    /// has not been measured, so there the capsule may be a pixel off the avatar's center.
+    ///
+    /// A scale or an offset that is not a finite number is left alone: rounding it gives NaN.
     static func pixelAlignedOffset(_ offset: CGFloat, displayScale: CGFloat) -> CGFloat {
-        guard displayScale > 0 else { return offset }
+        guard offset.isFinite, displayScale.isFinite, displayScale > 0 else { return offset }
         return (offset * displayScale).rounded() / displayScale
     }
 }

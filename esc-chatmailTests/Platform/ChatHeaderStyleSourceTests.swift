@@ -20,8 +20,7 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
         let chats = try chatViewCalls(in: "esc-chatmail/Views/Main/ConversationListView.swift")
 
         for chat in chats {
-            XCTAssertTrue(chat.contains("headerStyle: .navigationTitle"), chat)
-            XCTAssertFalse(chat.contains(".avatarOverNameCapsule"), chat)
+            XCTAssertEqual(headerStyleArgument(of: chat), ".navigationTitle", chat)
         }
     }
 
@@ -32,8 +31,7 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
         let chats = try chatViewCalls(in: "esc-chatmail/Platform/MacMailboxDetail.swift")
 
         for chat in chats {
-            XCTAssertTrue(chat.contains("headerStyle: .avatarOverNameCapsule(.mac)"), chat)
-            XCTAssertFalse(chat.contains(".navigationTitle"), chat)
+            XCTAssertEqual(headerStyleArgument(of: chat), ".avatarOverNameCapsule(.mac)", chat)
         }
     }
 
@@ -71,10 +69,14 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
     /// parenthesis to the one that closes it, however the call is laid out. At least one, or
     /// the test fails: a file that builds no chat has nothing to pin.
     ///
-    /// Parentheses are counted as written, comments and strings included, so an unpaired one
-    /// among the arguments would be miscounted; neither call has one.
+    /// Line comments are taken out first, so a parenthesis in one is not counted. One in a
+    /// string literal still is, and an unpaired one there would be miscounted; neither call
+    /// has one.
     private func chatViewCalls(in relativePath: String) throws -> [String] {
         let source = try String(contentsOf: repoFile(relativePath), encoding: .utf8)
+            .components(separatedBy: "\n")
+            .map { line in line.range(of: "//").map { String(line[..<$0.lowerBound]) } ?? line }
+            .joined(separator: "\n")
         var calls: [String] = []
         var searchStart = source.startIndex
 
@@ -99,6 +101,23 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
 
         XCTAssertFalse(calls.isEmpty, "\(relativePath) no longer builds a ChatView")
         return calls
+    }
+
+    /// The whole value a call passes as `headerStyle:`, from the label to the comma that ends
+    /// the argument (one inside the value's own parentheses does not) or to the end of the
+    /// call. Nil where the call has no such argument. The whole value, so a style whose name
+    /// only begins with the expected one is not taken for it.
+    private func headerStyleArgument(of call: String) -> String? {
+        guard let label = call.range(of: "headerStyle:") else { return nil }
+        var depth = 0
+        var value = ""
+        for character in call[label.upperBound...] {
+            if character == "(" { depth += 1 }
+            if character == ")" { depth -= 1 }
+            if character == ",", depth == 0 { break }
+            value.append(character)
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private func repoFile(_ relativePath: String) -> URL {

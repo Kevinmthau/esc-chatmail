@@ -283,6 +283,42 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(avatar.fallbackDisplayText, "Ada Lovelace")
     }
 
+    /// The header leaves the fallback text out exactly where the avatar's views cannot draw
+    /// it, whichever layout draws them: what each view draws with the text and without it is
+    /// compared over names of every kind.
+    ///
+    /// Revert-check: returning `false` from `SingleAvatarView.readsFallbackDisplayText` makes
+    /// this fail.
+    ///
+    /// HONEST SCOPE: returning `false` from `GroupAvatarView.readsFallbackDisplayText` does not.
+    /// The group reads the text only with no participants, and there the single avatar's
+    /// answer is already yes, so the header's answer does not change; the group circle itself
+    /// would lose its monogram, which no test here draws.
+    func testReadsFallbackDisplayText_isNoOnlyWhereNeitherAvatarViewDrawsTheText() {
+        let fallback = "Zed Fallback"
+        let lists: [[String]] = [
+            [], ["Ada Lovelace"], ["   "], ["ada@example.com"], ["3 Unknown Contacts"],
+            ["Ada Lovelace", "Grace Hopper"], ["   ", "Grace Hopper"]
+        ]
+
+        for names in lists {
+            let singleDrawsIt = SingleAvatarView.resolvedContent(
+                avatarPhoto: nil, participant: names.first, fallbackDisplayText: fallback
+            ) != SingleAvatarView.resolvedContent(
+                avatarPhoto: nil, participant: names.first, fallbackDisplayText: nil
+            )
+            // The group circle monograms the text only with no participants to draw.
+            let groupDrawsIt = names.isEmpty
+                && GroupAvatarView.resolvedEmptyContent(fallbackDisplayText: fallback) == .initials(fallback)
+
+            XCTAssertEqual(
+                ChatHeaderPolicy.readsFallbackDisplayText(participantNames: names),
+                singleDrawsIt || groupDrawsIt,
+                "\(names)"
+            )
+        }
+    }
+
     // MARK: - The capsule's offset
 
     /// Half a point is one pixel at 2x and stays; at 1x it is half a pixel and goes to a whole
@@ -296,6 +332,15 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(2.5, displayScale: 2), 2.5)
         XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.3, displayScale: 1), 0)
         XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 0), 0.5, "No scale: left as it is")
+    }
+
+    /// Revert-check: dropping `displayScale.isFinite` from the guard in
+    /// `ChatHeaderPolicy.pixelAlignedOffset` makes this fail: the offset comes back NaN.
+    func testPixelAlignedOffset_scaleThatIsNotANumber_leavesTheOffsetAsItIs() {
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: .infinity), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: .nan), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: -2), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(.infinity, displayScale: 2), .infinity)
     }
 
     // MARK: - The Mac's metrics
