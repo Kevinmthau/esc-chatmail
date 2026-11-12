@@ -99,6 +99,17 @@ final class ConversationManager: Sendable {
         rollupUpdater.updateRollups(for: conversation, myEmail: myEmail)
     }
 
+    /// `updateConversationRollups(for:myEmail:)` for several conversations of
+    /// `context`, reading the account's own addresses once for all of them.
+    /// Must be called from within `context`'s queue.
+    func updateConversationRollups(
+        for conversations: some Sequence<Conversation>,
+        in context: NSManagedObjectContext,
+        myEmail: String
+    ) {
+        rollupUpdater.updateRollups(for: conversations, in: context, myEmail: myEmail)
+    }
+
     /// Refreshes stored conversation display names without touching sync-owned rollup fields.
     @MainActor
     func updateAllConversationDisplayNames(in context: NSManagedObjectContext) async {
