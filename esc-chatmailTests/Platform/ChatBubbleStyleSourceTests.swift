@@ -110,6 +110,47 @@ final class ChatBubbleStyleSourceTests: XCTestCase {
         ))
     }
 
+    /// The subject above a bubble is text too. At the column's width it ran 62 points past
+    /// the bubble under it in a 520-point chat column.
+    ///
+    /// Revert-check: deleting the `MessageTextWidthCap` modifier from the `subjectView(` call
+    /// in `MessageBubble.body` makes this fail.
+    func testSubject_takesTheTextsWidthCap() throws {
+        let bubble = try String(
+            contentsOf: repoFile("esc-chatmail/Views/Chat/MessageBubble.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(bubble.contains(
+            "                subjectView(showsCalendarInvitePreviewCard: showsCalendarInvitePreviewCard)\n"
+                + "                    .modifier(MessageTextWidthCap(\n"
+                + "                        maxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth),\n"
+                + "                        isFromMe: message.isFromMe\n"
+                + "                    ))\n"
+        ))
+    }
+
+    /// The width the cap is worked out from is the width the rows are laid out in: the
+    /// transcript's own `GeometryReader`, whose `viewportWidth` each bubble is handed
+    /// (`testTranscript_handsEachBubbleItsStyleItsRunPlacementAndTheTranscriptsWidth`). A row
+    /// given another number would wrap its text at one width's cap, and wrap it again when
+    /// the real width arrived: a height change after mount.
+    ///
+    /// Revert-check: passing `messagesScrollViewContent` a width that is not the reader's
+    /// (`viewportWidth: 0,`) makes the second assertion fail.
+    func testTranscriptWidth_isTheWidthTheRowsAreLaidOutIn() throws {
+        let transcript = try String(
+            contentsOf: repoFile("esc-chatmail/Views/Chat/ChatMessagesView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(transcript.contains(
+            "        GeometryReader { viewport in\n"
+                + "            messagesScrollViewContent(\n"
+        ))
+        XCTAssertTrue(transcript.contains("                viewportWidth: viewport.size.width,\n"))
+    }
+
     /// The arguments of the one call that opens with `opening` on a line of its own in a
     /// source file: from that line to the line that closes it at the call's own indentation.
     private func call(_ opening: String, in relativePath: String) throws -> String {

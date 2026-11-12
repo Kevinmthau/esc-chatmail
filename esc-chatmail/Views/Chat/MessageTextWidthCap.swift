@@ -7,6 +7,11 @@ import SwiftUI
 /// A style with no cap of its own gets the content back untouched, so the iOS row's view tree
 /// is what it was. Whether there is a cap is the style's to say and never changes for a row,
 /// so the branch never remounts the text.
+///
+/// The frame is as wide as the cap wherever the column has that much room, whatever the
+/// text's own width, and the text keeps to the row's side of it. Around content that draws
+/// nothing (a row with no subject, attachments with no text) it is no view at all, so it adds
+/// no line to the row's stack (`MessageTextWidthCapLayoutTests`).
 struct MessageTextWidthCap: ViewModifier {
     /// The cap, or nil for none.
     let maxWidth: CGFloat?

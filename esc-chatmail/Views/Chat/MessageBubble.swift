@@ -54,7 +54,9 @@ struct MessageBubble: View {
     /// name's row, the time line.
     var runPlacement: ChatTranscriptRunPlacement = .alone
     /// The transcript's width, for a style whose text bubbles take a share of it
-    /// (`MessageBubbleStyle.textBubbleMaxWidth`). 0 until the transcript has been laid out.
+    /// (`MessageBubbleStyle.textBubbleMaxWidth`). 0 only for a caller that gives none: the
+    /// transcript passes its `GeometryReader`'s width, the width the rows are laid out in, so
+    /// a row never wraps its text at one width's cap while it is drawn in another's.
     var transcriptWidth: CGFloat = 0
     /// Whether this row is the conversation's newest message
     /// (`MessageSendStatusLinePolicy.newestRowIndex`); only that row carries the "Sent" receipt.
@@ -237,7 +239,14 @@ struct MessageBubble: View {
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 senderNameView
 
+                // The subject is text, and keeps to the text's width as the bubble under it
+                // does: at the column's width it ran past that bubble's edge wherever an
+                // image is wider than the text's share.
                 subjectView(showsCalendarInvitePreviewCard: showsCalendarInvitePreviewCard)
+                    .modifier(MessageTextWidthCap(
+                        maxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth),
+                        isFromMe: message.isFromMe
+                    ))
 
                 attachmentsView(displayableAttachments)
 
