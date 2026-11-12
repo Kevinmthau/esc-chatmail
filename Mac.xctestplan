@@ -49,6 +49,7 @@
         "MacChatHeaderNameBarLayoutTests",
         "MacChatReplyBarLayoutTests",
         "MacConversationSidebarRowIdentityTests",
+        "MacConversationSidebarSelectionGuardTests",
         "MacReplyTextFieldTests",
         "MacSidebarCollapseGuardViewTests",
         "MacSidebarFilterBadgePolicyTests",

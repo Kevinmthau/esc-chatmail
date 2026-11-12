@@ -7,9 +7,9 @@ import Foundation
 /// The sidebar draws the selection itself and does not leave it to the list. A Mac list shows
 /// its selection in the accent color only while the list has the keyboard focus. With the caret
 /// in the reply field, which is where it is for most of the time a chat is open, the list's own
-/// selection turns gray; in Messages the open conversation stays colored. The fill the row
-/// draws also turns the list's own selection off (`MacSidebarListSelectionGuardView`), so there
-/// is one selection on screen and not one drawn over another.
+/// selection turns gray; in Messages the open conversation stays colored. The sidebar also
+/// turns the list's own selection off (`MacSidebarListSelectionGuardView`), so there is one
+/// selection on screen and not one drawn over another.
 ///
 /// The fill and the row's colors come from one decision here, because each is wrong without the
 /// other: white text on the list's gray selection cannot be read, and neither can dark text on

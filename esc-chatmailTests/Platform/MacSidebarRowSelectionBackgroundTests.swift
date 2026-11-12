@@ -9,6 +9,10 @@ import XCTest
 ///
 /// The two list tests mount a real SwiftUI `List`, off screen, and look for the `NSTableView`
 /// behind it. They are what pins that the guard in the fill reaches the list it is drawn in.
+/// The list here has the fill and nothing behind it, so the fill's guard is the one that turns
+/// the selection off, a turn of the main queue after the row is selected. The sidebar's list
+/// also has a guard behind it, which does it before any row is selected:
+/// `MacConversationSidebarSelectionGuardTests` mounts that.
 ///
 /// HONEST SCOPE: the list is a plain `.inset` `List(selection:)` with the sidebar's row
 /// background, not `MacConversationSidebar`, in a window that is never on screen. These pin
