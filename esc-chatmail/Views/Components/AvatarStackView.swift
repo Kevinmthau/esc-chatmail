@@ -3,22 +3,32 @@ import SwiftUI
 // MARK: - Avatar Stack View
 
 struct AvatarStackView: View {
+    /// The diameter the avatar drawings were designed at, and the iOS list's. Every size
+    /// inside them (the small avatars of a group, their offsets, the initials' font) is given
+    /// at this diameter and scales with `diameter`.
+    static let designDiameter: CGFloat = 44
+
     let avatarPhotos: [ProfilePhoto?]
     let participants: [String]
     let showsGroupAvatar: Bool
     let fallbackDisplayText: String?
+    /// The avatar's diameter. The Mac sidebar's is smaller than the iOS list's
+    /// (`ConversationRowMetrics`).
+    let diameter: CGFloat
 
     init(
         avatarPhotos: [ProfilePhoto],
         participants: [String],
         showsGroupAvatar: Bool = false,
-        fallbackDisplayText: String? = nil
+        fallbackDisplayText: String? = nil,
+        diameter: CGFloat = AvatarStackView.designDiameter
     ) {
         self.init(
             alignedAvatarPhotos: avatarPhotos.map(Optional.some),
             participants: participants,
             showsGroupAvatar: showsGroupAvatar,
-            fallbackDisplayText: fallbackDisplayText
+            fallbackDisplayText: fallbackDisplayText,
+            diameter: diameter
         )
     }
 
@@ -26,12 +36,14 @@ struct AvatarStackView: View {
         alignedAvatarPhotos: [ProfilePhoto?],
         participants: [String],
         showsGroupAvatar: Bool = false,
-        fallbackDisplayText: String? = nil
+        fallbackDisplayText: String? = nil,
+        diameter: CGFloat = AvatarStackView.designDiameter
     ) {
         self.avatarPhotos = alignedAvatarPhotos
         self.participants = participants
         self.showsGroupAvatar = showsGroupAvatar
         self.fallbackDisplayText = fallbackDisplayText
+        self.diameter = diameter
     }
 
     var body: some View {
@@ -43,14 +55,16 @@ struct AvatarStackView: View {
             GroupAvatarView(
                 avatarPhotos: avatarPhotos,
                 participants: participants,
-                fallbackDisplayText: fallbackDisplayText
+                fallbackDisplayText: fallbackDisplayText,
+                diameter: diameter
             )
         } else {
             // Single conversation - show single large avatar
             SingleAvatarView(
                 avatarPhoto: avatarPhotos.first ?? nil,
                 participant: participants.first,
-                fallbackDisplayText: fallbackDisplayText
+                fallbackDisplayText: fallbackDisplayText,
+                diameter: diameter
             )
         }
     }
@@ -80,15 +94,18 @@ struct SingleAvatarView: View {
     let avatarPhoto: ProfilePhoto?
     let participant: String?
     let fallbackDisplayText: String?
+    let diameter: CGFloat
 
     init(
         avatarPhoto: ProfilePhoto?,
         participant: String?,
-        fallbackDisplayText: String? = nil
+        fallbackDisplayText: String? = nil,
+        diameter: CGFloat = AvatarStackView.designDiameter
     ) {
         self.avatarPhoto = avatarPhoto
         self.participant = participant
         self.fallbackDisplayText = fallbackDisplayText
+        self.diameter = diameter
     }
 
     var body: some View {
@@ -101,7 +118,7 @@ struct SingleAvatarView: View {
             CachedAsyncImage(
                 imageData: photo.imageData,
                 imageURL: photo.url,
-                size: 44
+                size: diameter
             ) {
                 fallbackAvatarView(initialsSource: initialsSource)
             }
@@ -113,11 +130,11 @@ struct SingleAvatarView: View {
     @ViewBuilder
     private func fallbackAvatarView(initialsSource: String?) -> some View {
         if let initialsSource {
-            InitialsAvatarView(name: initialsSource, style: .standard)
+            InitialsAvatarView(name: initialsSource, style: .standard.scaled(to: diameter))
         } else {
             Image(systemName: "person.circle.fill")
                 .resizable()
-                .frame(width: 44, height: 44)
+                .frame(width: diameter, height: diameter)
                 .foregroundColor(.gray)
         }
     }
@@ -215,24 +232,34 @@ struct GroupAvatarView: View {
     let avatarPhotos: [ProfilePhoto?]
     let participants: [String]
     let fallbackDisplayText: String?
+    /// The whole avatar's diameter. `smallSize` and `offset` follow it.
+    let mainSize: CGFloat
 
     init(
         avatarPhotos: [ProfilePhoto?],
         participants: [String],
-        fallbackDisplayText: String? = nil
+        fallbackDisplayText: String? = nil,
+        diameter: CGFloat = AvatarStackView.designDiameter
     ) {
         self.avatarPhotos = avatarPhotos
         self.participants = participants
         self.fallbackDisplayText = fallbackDisplayText
+        self.mainSize = diameter
     }
 
-    private let mainSize: CGFloat = 44
-    private let smallSize: CGFloat = 20
+    /// 1 at the design diameter, where every size below is the number it is written as.
+    private var scale: CGFloat { mainSize / AvatarStackView.designDiameter }
+    /// A small avatar's diameter: 20 points at the design diameter.
+    private var smallSize: CGFloat { 20 * scale }
+    /// How far a small avatar sits from the center, along each axis: 8 points at the design
+    /// diameter.
+    private var offset: CGFloat { 8 * scale }
+    /// The small avatars' places for a group of four, as multiples of `offset`.
     private let positions: [(x: CGFloat, y: CGFloat)] = [
-        (x: -8, y: -8),   // Top left
-        (x: 8, y: -8),    // Top right
-        (x: 8, y: 8),     // Bottom right
-        (x: -8, y: 8)     // Bottom left
+        (x: -1, y: -1),   // Top left
+        (x: 1, y: -1),    // Top right
+        (x: 1, y: 1),     // Bottom right
+        (x: -1, y: 1)     // Bottom left
     ]
 
     var body: some View {
@@ -248,7 +275,7 @@ struct GroupAvatarView: View {
                case .initials(let initialsSource) = Self.resolvedEmptyContent(
                     fallbackDisplayText: fallbackDisplayText
                ) {
-                InitialsAvatarView(name: initialsSource, style: .standard)
+                InitialsAvatarView(name: initialsSource, style: .standard.scaled(to: mainSize))
             }
 
             // Show up to 4 small avatars
@@ -266,7 +293,7 @@ struct GroupAvatarView: View {
                     } else if index < participants.count,
                               let initialsSource = SingleAvatarView.usableIdentityText(from: participants[index]) {
                         // Show initials
-                        InitialsAvatarView(name: initialsSource, style: .compact)
+                        InitialsAvatarView(name: initialsSource, style: .compact.scaled(to: smallSize))
                     } else {
                         // Fallback to person icon
                         Circle()
@@ -274,7 +301,7 @@ struct GroupAvatarView: View {
                             .frame(width: smallSize, height: smallSize)
                             .overlay(
                                 Image(systemName: "person.fill")
-                                    .font(.system(size: 12))
+                                    .font(.system(size: 12 * scale))
                                     .foregroundColor(.white)
                             )
                             .overlay(
@@ -296,18 +323,18 @@ struct GroupAvatarView: View {
         switch total {
         case 2:
             // Two avatars: left and right
-            return index == 0 ? -8 : 8
+            return index == 0 ? -offset : offset
         case 3:
             // Three avatars: triangle arrangement
             switch index {
-            case 0: return 0      // Top center
-            case 1: return -8     // Bottom left
-            case 2: return 8      // Bottom right
+            case 0: return 0           // Top center
+            case 1: return -offset     // Bottom left
+            case 2: return offset      // Bottom right
             default: return 0
             }
         case 4:
             // Four avatars: corners
-            return positions[index].x
+            return positions[index].x * offset
         default:
             return 0
         }
@@ -321,13 +348,13 @@ struct GroupAvatarView: View {
         case 3:
             // Three avatars: triangle arrangement
             switch index {
-            case 0: return -8     // Top
-            case 1, 2: return 8   // Bottom
+            case 0: return -offset     // Top
+            case 1, 2: return offset   // Bottom
             default: return 0
             }
         case 4:
             // Four avatars: corners
-            return positions[index].y
+            return positions[index].y * offset
         default:
             return 0
         }
@@ -377,7 +404,7 @@ struct SmallCachedAvatarView: View {
             imageBorderWidth: 1.5
         ) {
             if let name {
-                InitialsAvatarView(name: name, style: .compact)
+                InitialsAvatarView(name: name, style: .compact.scaled(to: size))
             } else {
                 Circle()
                     .fill(Color.systemGray4)

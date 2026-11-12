@@ -92,7 +92,7 @@ App flow:
   - `esc-chatmail/Views/Main/ConversationListView.swift`
   - `esc-chatmail/Views/Chat/ChatView.swift`
   - `esc-chatmail/Views/Compose/ComposeView.swift`
-- `esc-chatmail/Platform/MailboxRootView.swift` picks the signed-in mailbox's shape. iOS pushes `ChatView` from `ConversationListView` in a `NavigationStack`. The Mac shows `MacMailboxView`: `MacConversationSidebar` beside a chat column (`MacMailboxDetail`), where the open chat is the sidebar's selected row (`MacSidebarSelectionPolicy`). Both lists share `ConversationListViewModel`, `ConversationRowView` and `conversationListLifecycle`.
+- `esc-chatmail/Platform/MailboxRootView.swift` picks the signed-in mailbox's shape. iOS pushes `ChatView` from `ConversationListView` in a `NavigationStack`. The Mac shows `MacMailboxView`: `MacConversationSidebar` beside a chat column (`MacMailboxDetail`), where the open chat is the sidebar's selected row (`MacSidebarSelectionPolicy`). Both lists share `ConversationListViewModel`, `ConversationRowView` and `conversationListLifecycle`. The row's sizes and colors are values each list passes it (`ConversationRowMetrics.iOS` / `.mac`, `ConversationRowPalette`), not platform checks in the row.
 
 State management:
 - Shared app services come from `esc-chatmail/Services/Dependencies/Dependencies.swift` via `@EnvironmentObject`.

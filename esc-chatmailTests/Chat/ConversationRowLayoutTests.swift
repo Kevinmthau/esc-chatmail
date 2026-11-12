@@ -110,7 +110,8 @@ final class ConversationRowLayoutTests: XCTestCase {
             conversationContext: viewContext,
             currentUserEmail: "me@example.com",
             // Never called: a list row loads no participants.
-            participantLoader: ParticipantLoader()
+            participantLoader: ParticipantLoader(),
+            metrics: .iOS
         )
         .environment(\.dynamicTypeSize, dynamicTypeSize)
 

@@ -34,6 +34,19 @@ struct InitialsAvatarStyle {
         borderWidth: 0,
         singleNamePrefixLength: 1
     )
+
+    /// This style at another diameter, with the initials' font scaled by the same factor. The
+    /// border keeps its width and the initials their count. At this style's own size it is
+    /// this style: the factor is exactly 1.
+    func scaled(to size: CGFloat) -> InitialsAvatarStyle {
+        InitialsAvatarStyle(
+            size: size,
+            fontSize: fontSize * (size / self.size),
+            borderColor: borderColor,
+            borderWidth: borderWidth,
+            singleNamePrefixLength: singleNamePrefixLength
+        )
+    }
 }
 
 /// Unified initials avatar view with configurable styles
