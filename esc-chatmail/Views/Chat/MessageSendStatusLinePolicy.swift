@@ -45,10 +45,39 @@ enum MessageSendStatusLinePolicy {
         /// so a receipt arriving or leaving changed the row's height anyway. Stacked, the height
         /// changes only when a caption appears or leaves, and only at these sizes.
         case stacked
+        /// A style with no timestamp under its bubbles (`MessageBubbleStyle.mac`): the caption
+        /// alone, on a line of its own under the bubble, as Messages draws "Delivered". Whether
+        /// a row has that line at all is `reservesCaptionLine`'s to say, not the caption's, so
+        /// a caption arriving, changing or leaving does not change the row's height.
+        case captionOnly
     }
 
-    static func arrangement(isAccessibilityTextSize: Bool) -> Arrangement {
-        isAccessibilityTextSize ? .stacked : .inline
+    /// - Parameter showsTimestamp: `MessageBubbleStyle.showsTimestampUnderBubble`.
+    static func arrangement(showsTimestamp: Bool = true, isAccessibilityTextSize: Bool) -> Arrangement {
+        guard showsTimestamp else { return .captionOnly }
+        return isAccessibilityTextSize ? .stacked : .inline
+    }
+
+    /// Whether a row in the `captionOnly` arrangement keeps a line under its bubble for the
+    /// caption, drawn or not.
+    ///
+    /// The line is there for the whole time a caption could come or go, which is what keeps the
+    /// old standalone status row's fault away (this type's header): the user's newest row has
+    /// it from its first frame, through the grace period with no caption, "Sending…" and
+    /// "Sent"; and a row with any durable status (pending, "Not sent", "Delivery unknown",
+    /// "Send failed") has it wherever it is in the transcript.
+    ///
+    /// Two changes of height remain, both when the line leaves a row that is no longer the
+    /// newest. A newer message arrives and takes the receipt, as in Messages: the old row
+    /// gives the line up in the update that appends the new one. And a reply sent before an
+    /// earlier one was accepted: the earlier row gives the line up when Gmail answers. Neither
+    /// is animated (`MessageBubble` animates the caption inside the line, not the line).
+    static func reservesCaptionLine(
+        presentation: MessageSendStatusPresentation,
+        isFromMe: Bool,
+        isNewestInTranscript: Bool
+    ) -> Bool {
+        presentation != .none || (isFromMe && isNewestInTranscript)
     }
 
     /// How long a send must stay pending before "Sending…" shows. Gmail usually accepts a reply

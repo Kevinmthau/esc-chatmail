@@ -136,6 +136,7 @@ struct ConversationListView: View {
                 conversation: conversation,
                 chatDependencies: chatDependencies,
                 headerStyle: .navigationTitle,
+                bubbleStyle: .standard,
                 makeForwardComposeView: { context in
                     ComposeView(mode: .forward(context), deps: deps)
                 }

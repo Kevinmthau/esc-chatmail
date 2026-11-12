@@ -147,6 +147,54 @@ final class MessageSendStatusLinePolicyTests: XCTestCase {
         XCTAssertEqual(Policy.arrangement(isAccessibilityTextSize: true), .stacked)
     }
 
+    // MARK: - A style with no timestamp under its bubbles (the Mac)
+
+    /// Revert-check: deleting the `showsTimestamp` guard from
+    /// `MessageSendStatusLinePolicy.arrangement` makes this fail: the Mac's rows would draw
+    /// the timestamp line Messages does not have.
+    func testArrangement_noTimestampUnderTheBubble_captionOnlyAtEveryTextSize() {
+        XCTAssertEqual(Policy.arrangement(showsTimestamp: false, isAccessibilityTextSize: false), .captionOnly)
+        XCTAssertEqual(Policy.arrangement(showsTimestamp: false, isAccessibilityTextSize: true), .captionOnly)
+        // The iPhone's arrangements, named through the same parameter.
+        XCTAssertEqual(Policy.arrangement(showsTimestamp: true, isAccessibilityTextSize: false), .inline)
+        XCTAssertEqual(Policy.arrangement(showsTimestamp: true, isAccessibilityTextSize: true), .stacked)
+    }
+
+    /// The user's newest row keeps the caption's line from its first frame: through the grace
+    /// period, when no caption shows, then "Sending…", then "Sent". Reserving it only once
+    /// there is a caption would grow the row under the user's eyes on every send, the fault
+    /// the timestamp line was introduced to remove.
+    ///
+    /// Revert-check: `presentation != .none` alone in
+    /// `MessageSendStatusLinePolicy.reservesCaptionLine` makes this fail.
+    func testReservesCaptionLine_usersNewestRow_evenWithNoStatus() {
+        XCTAssertTrue(Policy.reservesCaptionLine(presentation: .none, isFromMe: true, isNewestInTranscript: true))
+        XCTAssertTrue(Policy.reservesCaptionLine(presentation: .sending, isFromMe: true, isNewestInTranscript: true))
+    }
+
+    /// Revert-check: `isFromMe && isNewestInTranscript` alone makes this fail: a "Not sent" row
+    /// that is no longer the newest would have nowhere to say so.
+    func testReservesCaptionLine_anyDurableStatus_onAnyRow() {
+        for presentation in [
+            MessageSendStatusPresentation.sending, .notSent, .deliveryUnknown, .sendFailed
+        ] {
+            XCTAssertTrue(
+                Policy.reservesCaptionLine(presentation: presentation, isFromMe: true, isNewestInTranscript: false),
+                "\(presentation)"
+            )
+        }
+    }
+
+    /// Revert-check: returning true from `reservesCaptionLine` makes this fail: every row
+    /// would carry an empty line under its bubble.
+    func testReservesCaptionLine_rowsThatCanNeverShowACaption_haveNoLine() {
+        // An older row of the user's with nothing to report.
+        XCTAssertFalse(Policy.reservesCaptionLine(presentation: .none, isFromMe: true, isNewestInTranscript: false))
+        // Incoming rows, the newest included.
+        XCTAssertFalse(Policy.reservesCaptionLine(presentation: .none, isFromMe: false, isNewestInTranscript: true))
+        XCTAssertFalse(Policy.reservesCaptionLine(presentation: .none, isFromMe: false, isNewestInTranscript: false))
+    }
+
     /// Revert-check: dropping the `isShowingLatestWindow` guard in
     /// `MessageSendStatusLinePolicy.newestRowIndex` fails the older-window assertion.
     func testNewestRowIndex_isLastRowOfLatestWindowOnly() {

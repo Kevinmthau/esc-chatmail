@@ -9,8 +9,13 @@ struct ImageAttachmentBubble: View {
     @State private var reservedPixelSize: CGSize
     @State private var reservedPresentation: InlineImagePresentationPolicy
 
+    /// Set by a bubble style with its own image width (`MessageBubbleStyle.imageMaxWidth`). A
+    /// fixed number for the chat's life, like the cap below, so the frame this image reserved
+    /// at mount holds.
+    @Environment(\.imageAttachmentMaxWidth) private var styleMaxWidth
+
     private var maxWidth: CGFloat {
-        min(PlatformScreen.width * 0.65, MessageBubbleStyle.standard.maxBubbleWidth)
+        styleMaxWidth ?? min(PlatformScreen.width * 0.65, MessageBubbleStyle.standard.maxBubbleWidth)
     }
 
     init(
