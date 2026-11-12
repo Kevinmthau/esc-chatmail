@@ -332,7 +332,7 @@ Measured on macOS 27.2 in two more throwaway programs, each an `.inset` `List(se
 
 **Found, not changed here.**
 
-- **A group's title lists its participants in whatever order a `Set` gives them** (`ConversationParticipantExtractor.extractNonMeParticipants`). The iOS drawings showed "Grace, Ada, Alan" and "Alan, Ada, Grace" for one conversation, on `main` as well. The rollup cache holds one order for five minutes; after that it can change.
+- **A group's title lists its participants in whatever order a `Set` gives them** (`ConversationParticipantExtractor.extractNonMeParticipants`). The iOS drawings showed "Grace, Ada, Alan" and "Alan, Ada, Grace" for one conversation, on `main` as well. The rollup cache holds one order for five minutes; after that it can change. Fixed since, in a pull request of its own: the participants are shown in ascending order of normalized email address (`ConversationParticipantExtractor.participantsInDisplayOrder`), and the stored title is written in the same order.
 - **The chat's ⋯ menu draws with a disclosure chevron beside it** on the Mac. The spike's 36-point circle was a menu with `menuIndicator(.hidden)`, which `ChatView`'s menu does not have.
 
 **Not seen: check in the signed, sandboxed app.**

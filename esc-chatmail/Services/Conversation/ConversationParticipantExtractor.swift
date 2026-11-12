@@ -11,6 +11,71 @@ import CoreData
 /// async resolution. All entry points are non-isolated static functions over the
 /// passed-in objects/context, so they run safely inside a `context.perform` block.
 enum ConversationParticipantExtractor {
+    /// A conversation's participant rows in the order they are shown: ascending
+    /// by normalized email address.
+    ///
+    /// `Conversation.participants` is an unordered relationship, and the set
+    /// Core Data hands over has no fixed iteration order. Walked as it came,
+    /// one saved group of three gave up to four different orders over 40 loads
+    /// through fresh contexts, and more than one inside a single context once
+    /// its objects were refreshed (measured on the iOS 27.0 simulator, with
+    /// in-memory and SQLite stores). So a group read "Grace, Ada, Alan" on one
+    /// load and "Alan, Ada, Grace" on the next, a group of more than four also
+    /// changed which four people its title and avatar stack showed, and a
+    /// rollup could store the title in another order again. Anything that
+    /// shows the participants in a sequence walks this instead of the set: the
+    /// loaded title, the avatar stack and the Participants sheet
+    /// (`extractNonMeParticipants`), and the stored `Conversation.displayName`
+    /// (`ConversationRollupUpdater.updateDisplayNameOnly`), so the stored name
+    /// and the loaded one list the same people in the same order.
+    ///
+    /// Normalized address is the order of the `participantHash` inputs
+    /// (`makeParticipantSetIdentity` sorts them, and `ConversationFactory.create`
+    /// inserts the rows in that order) and the order the web app writes its
+    /// titles in. It needs nothing but the rows and compares the way
+    /// `calculateParticipantHash` does, with `String`'s own `<`, so it is the
+    /// same in every locale. It also stays put: an order by resolved name
+    /// would move when Contacts access arrives, and the rollup resolves no
+    /// contact names; most recent sender first would reorder the title with
+    /// every message.
+    ///
+    /// Rows that share one normalized address (nothing makes `Person.email`
+    /// unique) are ordered by the address as stored and then by stored name,
+    /// so the row that stands for the address is the same on every load. Rows
+    /// equal in all three show the same thing whichever comes first.
+    static func participantsInDisplayOrder(
+        _ participants: some Sequence<ConversationParticipant>
+    ) -> [ConversationParticipant] {
+        participants
+            .map { participant in
+                let person = participant.person
+                return (
+                    key: ParticipantDisplayOrderKey(
+                        normalizedEmail: person.map { EmailNormalizer.normalize($0.email) } ?? "",
+                        email: person?.email ?? "",
+                        displayName: person?.displayName ?? ""
+                    ),
+                    participant: participant
+                )
+            }
+            .sorted { $0.key < $1.key }
+            .map(\.participant)
+    }
+
+    private struct ParticipantDisplayOrderKey: Comparable {
+        let normalizedEmail: String
+        let email: String
+        let displayName: String
+
+        static func < (lhs: Self, rhs: Self) -> Bool {
+            (lhs.normalizedEmail, lhs.email, lhs.displayName)
+                < (rhs.normalizedEmail, rhs.email, rhs.displayName)
+        }
+    }
+
+    /// The conversation's other participants' addresses, deduplicated, in
+    /// display order (`participantsInDisplayOrder`). The first four are the ones
+    /// the avatar stack shows.
     static func extractNonMeParticipants(
         from conversation: Conversation,
         currentUserEmail: String,
@@ -27,7 +92,7 @@ enum ConversationParticipantExtractor {
         var seenEmails = Set<String>()
         var result: [String] = []
 
-        for participant in participants {
+        for participant in participantsInDisplayOrder(participants) {
             guard let person = participant.person else { continue }
             if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
                 continue
