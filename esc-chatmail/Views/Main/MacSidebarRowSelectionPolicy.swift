@@ -7,8 +7,9 @@ import Foundation
 /// The sidebar draws the selection itself and does not leave it to the list. A Mac list shows
 /// its selection in the accent color only while the list has the keyboard focus. With the caret
 /// in the reply field, which is where it is for most of the time a chat is open, the list's own
-/// selection turns gray; in Messages the open conversation stays colored. A fill the row draws
-/// covers the list's own exactly (measured off screen on macOS 27.2; "Spike results").
+/// selection turns gray; in Messages the open conversation stays colored. The fill the row
+/// draws also turns the list's own selection off (`MacSidebarListSelectionGuardView`), so there
+/// is one selection on screen and not one drawn over another.
 ///
 /// The fill and the row's colors come from one decision here, because each is wrong without the
 /// other: white text on the list's gray selection cannot be read, and neither can dark text on
@@ -38,10 +39,11 @@ enum MacSidebarRowSelectionPolicy {
     /// shares with another selected row and rounded at one it does not.
     ///
     /// A Mac list draws selected rows that touch as one shape, rounded only at its ends, and
-    /// that shape is still there under the sidebar's fills. A fill rounded at all four corners
-    /// would let it show at the corners between two selected rows: gray notches in the accent
-    /// color whenever the list does not have the keyboard focus (seen in an off-screen drawing
-    /// of the row on macOS 27.2).
+    /// the sidebar's fills keep that look. Where the list's own selection could not be turned
+    /// off (`MacSidebarListSelectionGuardView`) it is still there under the fills, and a fill
+    /// rounded at all four corners would let it show at the corners between two selected rows:
+    /// gray notches in the accent color whenever the list does not have the keyboard focus
+    /// (seen in an off-screen drawing of the row on macOS 27.2).
     struct Joins: Equatable {
         var above = false
         var below = false
@@ -54,6 +56,12 @@ enum MacSidebarRowSelectionPolicy {
     ///
     /// `orderedIDs` is the list's rows from top to bottom. A selected row the list is not
     /// showing (hidden by a search or a filter) joins nothing.
+    ///
+    /// The sidebar calls this each time its body is evaluated, which is at every publish of the
+    /// list and every key typed in the search field. So the walk stops at the last selected
+    /// row: the rows the user has selected are near the ones on screen, and the list can hold
+    /// thousands below them. Only a selected row the list is not showing makes it walk to the
+    /// end, because the walk cannot know that row is not further down.
     static func joins<IDs: Sequence>(
         orderedIDs: IDs,
         selection: Set<IDs.Element>
@@ -62,6 +70,7 @@ enum MacSidebarRowSelectionPolicy {
 
         var joins: [IDs.Element: Joins] = [:]
         var previousSelectedID: IDs.Element?
+        var selectedRowsNotYetMet = selection.count
         for id in orderedIDs {
             guard selection.contains(id) else {
                 previousSelectedID = nil
@@ -72,6 +81,8 @@ enum MacSidebarRowSelectionPolicy {
                 joins[id, default: .none].above = true
             }
             previousSelectedID = id
+            selectedRowsNotYetMet -= 1
+            if selectedRowsNotYetMet == 0 { break }
         }
         return joins
     }

@@ -15,20 +15,25 @@ struct AvatarStackView: View {
     /// The avatar's diameter. The Mac sidebar's is smaller than the iOS list's
     /// (`ConversationRowMetrics`).
     let diameter: CGFloat
+    /// A group avatar's disc and rings: `.standard` unless the avatar sits on the Mac
+    /// sidebar's selection fill (`ConversationRowPalette`).
+    let groupColors: GroupAvatarColors
 
     init(
         avatarPhotos: [ProfilePhoto],
         participants: [String],
         showsGroupAvatar: Bool = false,
         fallbackDisplayText: String? = nil,
-        diameter: CGFloat = AvatarStackView.designDiameter
+        diameter: CGFloat = AvatarStackView.designDiameter,
+        groupColors: GroupAvatarColors = .standard
     ) {
         self.init(
             alignedAvatarPhotos: avatarPhotos.map(Optional.some),
             participants: participants,
             showsGroupAvatar: showsGroupAvatar,
             fallbackDisplayText: fallbackDisplayText,
-            diameter: diameter
+            diameter: diameter,
+            groupColors: groupColors
         )
     }
 
@@ -37,13 +42,15 @@ struct AvatarStackView: View {
         participants: [String],
         showsGroupAvatar: Bool = false,
         fallbackDisplayText: String? = nil,
-        diameter: CGFloat = AvatarStackView.designDiameter
+        diameter: CGFloat = AvatarStackView.designDiameter,
+        groupColors: GroupAvatarColors = .standard
     ) {
         self.avatarPhotos = alignedAvatarPhotos
         self.participants = participants
         self.showsGroupAvatar = showsGroupAvatar
         self.fallbackDisplayText = fallbackDisplayText
         self.diameter = diameter
+        self.groupColors = groupColors
     }
 
     var body: some View {
@@ -56,7 +63,8 @@ struct AvatarStackView: View {
                 avatarPhotos: avatarPhotos,
                 participants: participants,
                 fallbackDisplayText: fallbackDisplayText,
-                diameter: diameter
+                diameter: diameter,
+                colors: groupColors
             )
         } else {
             // Single conversation - show single large avatar
@@ -234,17 +242,21 @@ struct GroupAvatarView: View {
     let fallbackDisplayText: String?
     /// The whole avatar's diameter. `smallSize` and `offset` follow it.
     let mainSize: CGFloat
+    /// The disc and the small avatars' rings, which depend on what the avatar sits on.
+    let colors: GroupAvatarColors
 
     init(
         avatarPhotos: [ProfilePhoto?],
         participants: [String],
         fallbackDisplayText: String? = nil,
-        diameter: CGFloat = AvatarStackView.designDiameter
+        diameter: CGFloat = AvatarStackView.designDiameter,
+        colors: GroupAvatarColors = .standard
     ) {
         self.avatarPhotos = avatarPhotos
         self.participants = participants
         self.fallbackDisplayText = fallbackDisplayText
         self.mainSize = diameter
+        self.colors = colors
     }
 
     /// 1 at the design diameter, where every size below is the number it is written as.
@@ -266,7 +278,7 @@ struct GroupAvatarView: View {
         ZStack {
             // Background circle
             Circle()
-                .fill(Color.systemGray6)
+                .fill(colors.disc)
                 .frame(width: mainSize, height: mainSize)
 
             // No resolved participants (load pending or failed): monogram the
@@ -288,12 +300,16 @@ struct GroupAvatarView: View {
                         SmallCachedAvatarView(
                             photo: avatarPhoto,
                             name: index < participants.count ? participants[index] : nil,
-                            size: smallSize
+                            size: smallSize,
+                            ringColor: colors.ring
                         )
                     } else if index < participants.count,
                               let initialsSource = SingleAvatarView.usableIdentityText(from: participants[index]) {
                         // Show initials
-                        InitialsAvatarView(name: initialsSource, style: .compact.scaled(to: smallSize))
+                        InitialsAvatarView(
+                            name: initialsSource,
+                            style: .compact.scaled(to: smallSize).bordered(in: colors.ring)
+                        )
                     } else {
                         // Fallback to person icon
                         Circle()
@@ -306,7 +322,7 @@ struct GroupAvatarView: View {
                             )
                             .overlay(
                                 Circle()
-                                    .stroke(Color.systemBackground, lineWidth: 1.5)
+                                    .stroke(colors.ring, lineWidth: 1.5)
                             )
                     }
                 }
@@ -393,6 +409,8 @@ struct SmallCachedAvatarView: View {
     let photo: ProfilePhoto
     let name: String?
     let size: CGFloat
+    /// The ring around the avatar, in the group's color for it (`GroupAvatarColors.ring`).
+    let ringColor: Color
 
     var body: some View {
         CachedAsyncImage(
@@ -400,11 +418,11 @@ struct SmallCachedAvatarView: View {
             imageURL: photo.url,
             size: size,
             showsProgressWhileLoading: false,
-            imageBorderColor: Color.systemBackground,
+            imageBorderColor: ringColor,
             imageBorderWidth: 1.5
         ) {
             if let name {
-                InitialsAvatarView(name: name, style: .compact.scaled(to: size))
+                InitialsAvatarView(name: name, style: .compact.scaled(to: size).bordered(in: ringColor))
             } else {
                 Circle()
                     .fill(Color.systemGray4)
@@ -416,7 +434,7 @@ struct SmallCachedAvatarView: View {
                     )
                     .overlay(
                         Circle()
-                            .stroke(Color.systemBackground, lineWidth: 1.5)
+                            .stroke(ringColor, lineWidth: 1.5)
                     )
             }
         }

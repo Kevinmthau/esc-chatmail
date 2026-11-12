@@ -139,7 +139,8 @@ struct ConversationRowView: View {
                     participants: participantNames,
                     showsGroupAvatar: showsGroupAvatar,
                     fallbackDisplayText: fallbackName,
-                    diameter: metrics.avatarDiameter
+                    diameter: metrics.avatarDiameter,
+                    groupColors: palette.groupAvatar
                 )
                     .frame(width: metrics.avatarDiameter, height: metrics.avatarDiameter)
             }

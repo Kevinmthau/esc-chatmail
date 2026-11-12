@@ -242,13 +242,36 @@ Measured on macOS 27.2 in a second throwaway program, this one a SwiftUI app wit
 - **Tests.** The full iOS suite passes: 4,912 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 270 tests in 26 suites, four of them new (`ConversationRowMetricsTests`, `AvatarStackViewLayoutTests`, `MacSidebarRowSelectionPolicyTests`, `MacSidebarFilterBadgePolicyTests`).
 - **Revert-checks.** Each of the 22 changes named in the new tests' `Revert-check:` comments was undone alone, and each time the test that names it failed.
 
+**Fixed after the review of PR 387 (2026-11-12).** That review's seven findings below the one that held the merge (the sidebar did not compile under CI's Swift 6.2, fixed in the PR itself). None of it has been seen in the app.
+
+Measured on macOS 27.2 in two more throwaway programs, each an `.inset` `List(selection:)` in a window never put on screen, and then drawn in the test host with the real row.
+
+- **The list no longer draws a selection of its own under the fill.** The fill covered the list's selection only because the two had the same shape, and that shape was measured on one system: the app also runs on macOS 26, where nothing here was run. A list that drew another shape would show gray around the fill whenever it did not have the keyboard focus. The fill now carries an empty AppKit view (`MacSidebarListSelectionGuardView`) that finds the `NSTableView` behind the list and sets its `selectionHighlightStyle` to `.none`, so there is one selection on screen.
+  - The list is an `NSTableView` (a `SwiftUIOutlineListView`), and a view in a row's `listRowBackground` is inside it, four superviews down. `layout()` is the call that found it: the view is not inside the table yet when it joins its window.
+  - With the style `.none` the list drew none of its gray selection, and none of its accent-colored one with its rows marked emphasized. A selection set from SwiftUI still reached the table's selected rows. The separators next to a selected row stayed hidden. The line between two selected rows stayed, darker without the focus and lighter with it, as under the list's own selection.
+  - SwiftUI never set the style back: not when a row's content changed, the selection changed or was emptied, every row was replaced, or the list was resized, scrolled, disabled, or switched between light and dark. So the guard assigns it, again at each `layout()`, and holds no observation, unlike `MacSidebarCollapseGuardView`.
+  - In the test host, 16 pictures of the real row in a real list (light and dark, one row selected and three, the active fill with the rows emphasized and not, the gray fill, and a control with no fill): the table's style was `.none` in every picture with a fill, and three selected rows drew as one shape.
+  - It depends on how SwiftUI builds a list on macOS 27.2. Where the guard finds no table, the list's selection is still drawn under the fill and the fill covers it where the shapes agree, which is what PR 2 had. That is why the fill keeps the list's shape and its square joins. `MacSidebarRowSelectionBackgroundTests` mounts a real list in the Mac plan, so on the system those tests run on, a change in how a list is built fails a test.
+  - Until the first row is selected there is no fill, so the table still has its own style then. Whether it draws that first selection for a frame was not measured.
+- **A row that is not selected has no background view.** `MacSidebarRowSelectionBackground.init` returns nil for it, and `listRowBackground` takes nil as the list's own background. Before, every row carried a clear shape.
+- **The walk for the joins stops at the last selected row.** The sidebar asks for the joins at every evaluation of its body. With several rows selected that was a pass over every loaded row; now it ends where the selection does, unless a selected row is hidden by a search or a filter.
+- **A group's avatar takes its disc and its rings from the row's palette** (`GroupAvatarColors`). They were literals chosen for the list's background, so in a dark window a selected group's avatar was a near-black disc with black rings on the accent color. On the accent color they are now white rings on a disc of white at 25%, the same in light and dark. On the gray fill and on no fill they are the literals, unchanged. Drawn off screen in both appearances, beside the old colors.
+  - **iOS draws the same pixels.** Six pictures from a throwaway hosted test on the simulator (iOS 27.0), on `main` at `1160dd23` and with these changes: rows at the default text size and at accessibility 3, and the avatar views (initials, the generic icon, photos, groups of two, three and four, a group's fallback initials and its empty disc), each in light and dark. Each pair of PNG files is byte for byte the same.
+  - The single initials avatar keeps its white ring, as before.
+- **The filter button says what its badge counts.** The badge is still the number 1. The button now has the filter's name as its accessibility value and a tooltip ("Showing only: Unread"; "Filter conversations" with All). Not checked with VoiceOver: whether it reads the badge's number as well is not known.
+- **Tests.** `MacConversationSidebarSourceTests` now pins that the fill is decided from the window's active state and given its joins, which nothing did. The two joins tests without a `Revert-check:` have one, or say why none exists. The full iOS suite passes: 4,927 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 292 tests in 28 suites, two of them new (`MacSidebarListSelectionGuardViewTests`, `MacSidebarRowSelectionBackgroundTests`).
+- **Revert-checks.** Each of the 26 changes named in these tests' `Revert-check:` comments was undone alone, and each time the test that names it failed.
+
 **Not seen: check in the signed, sandboxed app.**
 
 - The sidebar with real mail, beside Messages: the row's height, spacing and text sizes. `.mac` is a first reading of a screenshot, not a measurement.
 - That the open conversation stays in the accent color with the caret in the reply field, and turns gray when another app comes to the front. The off-screen window was never active, so the pictures were drawn with the fill given, not decided from the window.
 - Several selected rows: one shape, with no gray between them.
 - A row for a person, and a photo at 40 points. The Mac pictures are of mailing-list rows, which ask Contacts nothing; a Mac test host cannot be given Contacts access.
-- The filter badge: that it appears with a filter on and goes with All, and its color.
+- The filter badge: that it appears with a filter on and goes with All, and its color. With VoiceOver on: what it reads for the button with a filter on.
+- A right-click on a row that is not selected: the ring the list draws around it while the menu is open. The list's own selection is turned off now, and the measuring could not show whether the ring goes with it.
+- A selected group conversation, in a light window and a dark one: the avatar's disc and rings on the accent color.
+- On a Mac running macOS 26, if one is to hand: a selected row with the caret in the reply field. No gray should show around the fill.
 - The sidebar's material behind the list.
 - A swipe and a right-click on a row that has the fill. Their code did not change.
 

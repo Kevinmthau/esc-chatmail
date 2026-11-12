@@ -44,6 +44,8 @@
         "MacChatHeaderNameBarLayoutTests",
         "MacSidebarCollapseGuardViewTests",
         "MacSidebarFilterBadgePolicyTests",
+        "MacSidebarListSelectionGuardViewTests",
+        "MacSidebarRowSelectionBackgroundTests",
         "MacSidebarRowSelectionPolicyTests",
         "MacSidebarSelectionPolicyTests",
         "MacSidebarVisibilityPolicyTests",

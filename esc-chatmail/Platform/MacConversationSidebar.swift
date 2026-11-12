@@ -18,7 +18,8 @@ import CoreData
 ///
 /// How a selected row looks is the sidebar's, not the list's: the row sits on a fill the sidebar
 /// draws, in colors to match, so the open conversation stays in the accent color while the caret
-/// is in the reply field (`MacSidebarRowSelectionPolicy`).
+/// is in the reply field (`MacSidebarRowSelectionPolicy`). The fill also stops the list drawing
+/// a selection of its own under it (`MacSidebarListSelectionGuardView`).
 struct MacConversationSidebar: View {
     @ObservedObject var viewModel: ConversationListViewModel
     @ObservedObject var abandonedActions: AbandonedPendingActionsModel
@@ -48,7 +49,8 @@ struct MacConversationSidebar: View {
     @Environment(\.appearsActive) private var appearsActive
 
     var body: some View {
-        // Empty unless several rows are selected, and then one pass over the rows.
+        // Empty unless several rows are selected, and then one pass over the rows down to the
+        // last selected one.
         let selectionJoins = MacSidebarRowSelectionPolicy.joins(
             orderedIDs: viewModel.filteredConversationItems.lazy.map(\.id),
             selection: selection
@@ -92,6 +94,7 @@ struct MacConversationSidebar: View {
                 )
                 // The fill and the palette above come from one decision and go together:
                 // without this the row's white text sits on the list's own gray selection.
+                // Nil for a row that is not selected, which then has the list's own background.
                 .listRowBackground(
                     MacSidebarRowSelectionBackground(
                         fill: selectionFill,
@@ -152,6 +155,10 @@ struct MacConversationSidebar: View {
                 }
                 // A count of zero draws no badge.
                 .badge(MacSidebarFilterBadgePolicy.badgeCount(for: viewModel.currentFilter))
+                // The badge is a bare number. These say what it counts: the filter that is on,
+                // to VoiceOver as the button's value and to the pointer as its tooltip.
+                .accessibilityValue(MacSidebarFilterBadgePolicy.spokenValue(for: viewModel.currentFilter))
+                .help(MacSidebarFilterBadgePolicy.helpText(for: viewModel.currentFilter))
             }
         }
         .focusedSceneValue(
