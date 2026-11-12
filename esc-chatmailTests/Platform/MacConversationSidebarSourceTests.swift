@@ -16,8 +16,8 @@ import XCTest
 /// HONEST SCOPE: this reads source text, as `MacMailboxViewSourceTests` does, so it runs in the
 /// iOS suite although the view is Mac-only. It pins that the row takes the Mac's metrics, that
 /// the palette and the fill are both built from `selectionFill`, that the fill is decided from
-/// the window's active state and given its joins, and that the filter button is given the words
-/// for its badge. It matches the spelling of the source, so renaming a local fails it too. What
+/// the window's active state and given its joins, that the rows are identified by
+/// `MacSidebarRowID`, and that the filter button is given the words for its badge. It matches the spelling of the source, so renaming a local fails it too. What
 /// the list then draws was measured off screen, not seen in the app.
 final class MacConversationSidebarSourceTests: XCTestCase {
     /// Revert-check: passing `metrics: .iOS` to the row in `MacConversationSidebar.body` makes
@@ -80,6 +80,31 @@ final class MacConversationSidebarSourceTests: XCTestCase {
         XCTAssertTrue(joinsCall.contains("selection: selection"), joinsCall)
     }
 
+    /// A row's id in the list is a `MacSidebarRowID`, never the conversation's object ID:
+    /// identified by object IDs, a Mac list draws the wrong rows once a row has moved, which is
+    /// what the first native build did. The list's selection and its context menu carry the
+    /// same type, or they would not compile against the rows.
+    ///
+    /// This is the test of that which CI runs: the drawing tests
+    /// (`MacConversationSidebarRowIdentityTests`) are in the Mac plan, and CI runs no Mac tests.
+    ///
+    /// Revert-check: giving the rows back their object IDs in `MacConversationSidebar.body`
+    /// (`ForEach(viewModel.filteredConversationItems) { item in`, `List(selection: $selection)`
+    /// and `.contextMenu(forSelectionType: NSManagedObjectID.self)`) makes this fail.
+    func testRows_areIdentifiedByRowIDs_neverByObjectIDs() throws {
+        let source = try sidebarSource()
+
+        XCTAssertTrue(
+            source.contains("ForEach(viewModel.filteredConversationItems, id: \\.sidebarRowID) { item in"),
+            "The sidebar's rows are not identified by MacSidebarRowID"
+        )
+        XCTAssertTrue(source.contains("List(selection: rowSelection)"))
+        XCTAssertTrue(source.contains(".contextMenu(forSelectionType: MacSidebarRowID.self)"))
+        XCTAssertFalse(source.contains("ForEach(viewModel.filteredConversationItems) {"))
+        XCTAssertFalse(source.contains("List(selection: $selection)"))
+        XCTAssertFalse(source.contains("forSelectionType: NSManagedObjectID.self"))
+    }
+
     /// The filter button's badge is a bare number, so the button is also given the words for
     /// it (`MacSidebarFilterBadgePolicy`).
     ///
@@ -122,7 +147,7 @@ final class MacConversationSidebarSourceTests: XCTestCase {
         let source = try sidebarSource()
 
         let start = try XCTUnwrap(
-            source.range(of: "ForEach(viewModel.filteredConversationItems) { item in"),
+            source.range(of: "ForEach(viewModel.filteredConversationItems, id: \\.sidebarRowID) { item in"),
             "MacConversationSidebar no longer lists its rows the way this test reads them"
         )
         let end = try XCTUnwrap(

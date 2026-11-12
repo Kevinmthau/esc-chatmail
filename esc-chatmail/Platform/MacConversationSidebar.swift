@@ -16,6 +16,11 @@ import CoreData
 /// Command-click extend, and the arrow keys move it. One selected row is the open chat
 /// (`MacSidebarSelectionPolicy`).
 ///
+/// A row's id in the list is a `MacSidebarRowID`, never the conversation's `NSManagedObjectID`
+/// itself: identified by object IDs, the list drew the wrong rows once any row had moved. The
+/// mailbox's selection stays a set of object IDs, and this view converts at the list's edge
+/// (`rowSelection`).
+///
 /// How a selected row looks is the sidebar's, not the list's: the row sits on a fill the sidebar
 /// draws, in colors to match, so the open conversation stays in the accent color while the caret
 /// is in the reply field (`MacSidebarRowSelectionPolicy`). The fill also stops the list drawing
@@ -55,7 +60,7 @@ struct MacConversationSidebar: View {
             orderedIDs: viewModel.filteredConversationItems.lazy.map(\.id),
             selection: selection
         )
-        List(selection: $selection) {
+        List(selection: rowSelection) {
             if syncEngine.isBlockedByInsufficientStorage {
                 InsufficientStorageBanner(onTryAgain: {
                     Task { await viewModel.performSync() }
@@ -77,8 +82,9 @@ struct MacConversationSidebar: View {
                 .selectionDisabled()
             }
             // The row's identity, and so its selection value, is the conversation's object ID
-            // (`ConversationListItem.id`).
-            ForEach(viewModel.filteredConversationItems) { item in
+            // inside a `MacSidebarRowID`. Never `ConversationListItem.id` itself: identified by
+            // object IDs, the list draws stale rows after a row moves.
+            ForEach(viewModel.filteredConversationItems, id: \.sidebarRowID) { item in
                 let selectionFill = MacSidebarRowSelectionPolicy.fill(
                     isSelected: selection.contains(item.id),
                     windowAppearsActive: appearsActive
@@ -133,8 +139,8 @@ struct MacConversationSidebar: View {
         .animation(nil, value: viewModel.filteredConversationItems.count)
         // The menu's rows are the ones right-clicked: the whole selection when the click is
         // inside it, otherwise just the clicked row, which the selection then does not follow.
-        .contextMenu(forSelectionType: NSManagedObjectID.self) { conversationIDs in
-            contextMenuItems(for: conversationIDs)
+        .contextMenu(forSelectionType: MacSidebarRowID.self) { rowIDs in
+            contextMenuItems(for: MacSidebarRowID.conversationIDs(for: rowIDs))
         }
         // Delete archives the selected rows, as it removes the selected rows of any Mac list.
         // It reaches here only while the list has the keyboard focus, not while a text field
@@ -168,6 +174,14 @@ struct MacConversationSidebar: View {
                 search: { isSearchFieldFocused = true },
                 sync: { Task { await viewModel.performSync() } }
             )
+        )
+    }
+
+    /// The list's selection: the mailbox's (`selection`), as the list's row ids.
+    private var rowSelection: Binding<Set<MacSidebarRowID>> {
+        Binding(
+            get: { MacSidebarRowID.rowIDs(for: selection) },
+            set: { selection = MacSidebarRowID.conversationIDs(for: $0) }
         )
     }
 

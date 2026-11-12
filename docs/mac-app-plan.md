@@ -420,6 +420,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Revisit multiple windows after reviewing that rule.
 - **Layout.** On the Mac, use a `NavigationSplitView`: the conversation list (search and filters) in the sidebar, the chat in the detail column. Branch at the root view.
   - **Built 2026-11-10** (`MailboxRootView`, `MacMailboxView`). The detailed plan, and the restyle to match Messages that follows it, are in `docs/mac-imessage-ui-plan.md`.
+  - **Used with real mail 2026-11-12 (build 528):** the sidebar drew the wrong rows after the first sync, because its rows were identified by `NSManagedObjectID`. Fixed with `MacSidebarRowID` (`docs/mac-imessage-ui-plan.md`, "Found in the app"), and a Debug build with the fix was used on the real mailbox the same day with every row right. Not yet seen in a TestFlight build.
   - Keep the iPhone's `NavigationStack` as it is. The transcript's anchoring and reveal logic was tuned inside it.
 - **Settings.** A `Settings` scene replaces `Settings.bundle`, which has three rows: account email, a Sign Out toggle, and the version.
   - Sign Out calls the existing `AuthSession.signOut`. Don't add a seventh AuthSession path.
