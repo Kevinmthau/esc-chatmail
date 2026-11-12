@@ -100,8 +100,9 @@ struct MacMailboxView: View {
                     .accessibilityIdentifier("ComposeNewMessageButton")
                 }
             }
-            // The chat's own toolbar item shows the conversation's name; the window title
-            // would show it a second time beside it.
+            // The chat's own header shows the conversation's name, in the capsule under the
+            // toolbar's avatar (`ChatHeaderPolicy`); the window title would show it a second
+            // time, beside the avatar.
             .toolbar(removing: .title)
         }
         .onChange(of: visibleConversationIDs) { _, visibleIDs in

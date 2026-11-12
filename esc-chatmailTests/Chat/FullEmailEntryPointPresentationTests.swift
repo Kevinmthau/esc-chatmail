@@ -57,7 +57,8 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies(
                 fullEmailOpener: MockEntryPointFullEmailOpener(preparedArtifact: nil)
-            )
+            ),
+            headerStyle: .navigationTitle
         )
 
         let names = storedPropertyNames(of: view)

@@ -20,6 +20,12 @@ struct ConversationSnapshot: Equatable {
     /// synthesized `Equatable` correctly ignores it (`conversationType` itself
     /// is compared).
     var showsGroupAvatar: Bool {
+        Self.showsGroupAvatar(conversationType: conversationType)
+    }
+
+    /// The rule behind `showsGroupAvatar`, for a caller that has a conversation's type and no
+    /// snapshot: the chat header draws the row's avatar (`ChatHeaderPolicy.avatar`).
+    static func showsGroupAvatar(conversationType: ConversationType) -> Bool {
         conversationType != .oneToOne
     }
 

@@ -35,6 +35,9 @@ struct MacMailboxDetail: View, Equatable {
                 ChatView(
                     conversation: conversation,
                     chatDependencies: chatDependencies,
+                    // Messages' header: the avatar in the toolbar, the name in a capsule
+                    // under it (`ChatHeaderPolicy`).
+                    headerStyle: .avatarOverNameCapsule(.mac),
                     makeForwardComposeView: makeForwardComposeView,
                     // Never nil here: without it the chat would close itself with `dismiss`,
                     // which in this column closes the window (`ChatView.exitChat`).

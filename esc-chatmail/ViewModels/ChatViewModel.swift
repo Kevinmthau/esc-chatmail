@@ -121,6 +121,16 @@ final class ChatViewModel: ObservableObject {
     @Published var destination: ChatDestination?
     @Published var resolvedDisplayName: String?
     @Published var effectiveParticipantCount: Int?
+    /// The participants `resolvedDisplayName` and `effectiveParticipantCount` were read from,
+    /// with their names and photos, for the Mac chat header's avatar
+    /// (`ChatHeaderPolicy.avatar`). Nil until the load lands, and always for a mailing list,
+    /// which loads none (`shouldLoadResolvedDisplayName`).
+    ///
+    /// Set in the same main-actor turn as the other two, which SwiftUI takes as one update, so
+    /// the iOS chat, which never reads this, is not updated again for it. That is SwiftUI's
+    /// documented behavior and was not measured; the iOS chat was drawn before and after this
+    /// existed and the pictures match (`docs/mac-imessage-ui-plan.md`, "PR 3 as built").
+    @Published private(set) var participantInfo: ParticipantLoader.ParticipantInfo?
     @Published var sendErrorAlert: ChatSendErrorAlert?
 
     // MARK: - Composer State
@@ -1385,6 +1395,36 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Display Name Resolution
 
+    /// How many participants the chat asks `ParticipantLoader` for. It is part of the rollup
+    /// cache's key, so it has to be the number the conversation's row asks for
+    /// (`ConversationRowView.maxDisplayedParticipants`): with another number the chat would
+    /// load and cache a second copy of what its row already holds, and
+    /// `cachedParticipantInfo()` would never find the row's.
+    private static let rollupMaxParticipants = 4
+
+    /// What the rollup cache already holds for this conversation, with photos: what its row in
+    /// the list loaded. The Mac chat header draws its avatar from this until
+    /// `loadResolvedDisplayName()` lands (`ChatHeaderPolicy.participantInfo`).
+    ///
+    /// A read of the cache and nothing else: it loads nothing and publishes nothing. Nil for a
+    /// mailing list, whose row loads no participants either.
+    func cachedParticipantInfo() -> ParticipantLoader.ParticipantInfo? {
+        guard Self.shouldLoadResolvedDisplayName(
+            conversationType: conversation.conversationType
+        ), let myEmail = authSession.userEmail else {
+            return nil
+        }
+
+        return participantLoader.cachedParticipantInfo(
+            conversationObjectID: conversationObjectID,
+            participantHash: conversation.participantHash,
+            currentUserEmail: myEmail,
+            maxParticipants: Self.rollupMaxParticipants,
+            fallbackDisplayName: conversationDisplayNameHint,
+            includePhotos: true
+        )
+    }
+
     /// Loads the resolved display name for the conversation participants.
     /// Call from ChatView on appear.
     func loadResolvedDisplayName() {
@@ -1406,7 +1446,7 @@ final class ChatViewModel: ObservableObject {
                     from: self.conversationObjectID,
                     in: conversationContext,
                     currentUserEmail: myEmail,
-                    maxParticipants: 4,
+                    maxParticipants: Self.rollupMaxParticipants,
                     participantHash: self.conversation.participantHash,
                     fallbackDisplayName: self.conversationDisplayNameHint
                 )
@@ -1414,7 +1454,7 @@ final class ChatViewModel: ObservableObject {
                 info = await self.participantLoader.loadParticipants(
                     from: self.conversation,
                     currentUserEmail: myEmail,
-                    maxParticipants: 4
+                    maxParticipants: Self.rollupMaxParticipants
                 )
             }
 
@@ -1424,6 +1464,7 @@ final class ChatViewModel: ObservableObject {
                 participantDisplayName: info.formattedDisplayName
             )
             self.effectiveParticipantCount = info.totalUniqueParticipants
+            self.participantInfo = info
         }
     }
 

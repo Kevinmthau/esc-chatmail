@@ -5,8 +5,8 @@ import Combine
 struct ConversationRowView: View {
     /// Maximum participants shown in the row's avatar stack and name rollup.
     /// This value is a `ParticipantRollupCache` key component — it must agree
-    /// with the `maxParticipants: 4` literals in `ChatViewModel`, or the two
-    /// surfaces silently fork the rollup cache.
+    /// with `ChatViewModel.rollupMaxParticipants`, or the two surfaces silently
+    /// fork the rollup cache (`ChatViewModelHeaderParticipantsTests`).
     private let maxDisplayedParticipants = 4
 
     /// Use snapshot to avoid re-renders from unrelated Conversation property changes

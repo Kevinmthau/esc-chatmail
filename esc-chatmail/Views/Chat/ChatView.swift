@@ -16,6 +16,10 @@ struct ChatView: View {
     // and needs the reactivity; navigation no longer depends on it.
     @State private var replySendIsInFlight = false
     private let chatDependencies: ChatDependencies
+    /// How this chat shows whose it is: its name as the navigation title where it is pushed
+    /// (iOS), or Messages' avatar and name capsule in the Mac's chat column
+    /// (`ChatHeaderPolicy`). Fixed for the chat's life.
+    private let headerStyle: ChatHeaderStyle
     private let makeForwardComposeView: @MainActor (ComposeForwardModeContext) -> ComposeView
     /// How this chat leaves the screen when it closes itself; nil pops it with `dismiss`
     /// (`exitChat()`).
@@ -31,6 +35,7 @@ struct ChatView: View {
     init(
         conversation: Conversation,
         chatDependencies: ChatDependencies,
+        headerStyle: ChatHeaderStyle,
         makeForwardComposeView: @escaping @MainActor (ComposeForwardModeContext) -> ComposeView = { context in
             ComposeView(mode: .forward(context))
         },
@@ -38,6 +43,7 @@ struct ChatView: View {
     ) {
         self.conversation = conversation
         self.chatDependencies = chatDependencies
+        self.headerStyle = headerStyle
         self.makeForwardComposeView = makeForwardComposeView
         self.onExit = onExit
         self._viewModel = StateObject(
@@ -68,25 +74,46 @@ struct ChatView: View {
                 )
             }
         )
+        // The Mac header's name capsule, in a bar under the toolbar. On the transcript, so the
+        // bar is the top of its safe area: a constant inset from the moment the chat mounts
+        // (`ChatHeaderPolicy.nameBarMetrics`). Nothing on iOS, whose name is the title below.
+        .macChatHeaderNameBar(
+            metrics: ChatHeaderPolicy.nameBarMetrics(for: headerStyle),
+            name: navigationDisplayName,
+            opensParticipants: headerOpensParticipants,
+            onOpenParticipants: presentParticipantsList
+        )
         .navigationTitle(navigationDisplayName)
         .inlineNavigationTitle()
         .navigationBarBackButtonHidden(!allowsNavigationExit)
         .toolbar {
             ToolbarItem(placement: .principal) {
-                Text(navigationDisplayName)
-                    .font(.headline)
-                    .frame(maxWidth: .infinity)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        guard Self.allowsParticipantListPresentation(
-                            conversationType: conversation.conversationType
-                        ) else {
-                            return
+                switch ChatHeaderPolicy.principalItem(for: headerStyle) {
+                case .title:
+                    Text(navigationDisplayName)
+                        .font(.headline)
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            guard Self.allowsParticipantListPresentation(
+                                conversationType: conversation.conversationType
+                            ) else {
+                                return
+                            }
+                            presentParticipantsList()
                         }
-                        isTextFieldFocused = false
-                        viewModel.contactManager.showingParticipantsList = true
-                    }
+                case .avatar(let diameter):
+                    ChatHeaderAvatarButton(
+                        avatar: headerAvatar,
+                        diameter: diameter,
+                        opensParticipants: headerOpensParticipants,
+                        onOpenParticipants: presentParticipantsList
+                    )
+                }
             }
+            // The Mac header's avatar is drawn bare, as Messages' is, not on the glass the
+            // Mac's toolbar puts behind an item. Nothing on iOS.
+            .macSharedBackgroundHidden(ChatHeaderPolicy.hidesPrincipalItemGlass(for: headerStyle))
 
             ToolbarItemGroup(placement: .trailingBarEdge) {
                 Menu {
@@ -191,6 +218,14 @@ struct ChatView: View {
             return displayNameForNavigation
         }
 
+        return fallbackDisplayName
+    }
+
+    /// The conversation's name from what is stored on it, before and without the participant
+    /// load: the title until `displayNameForNavigation` has a name, and what the Mac header's
+    /// avatar draws initials from while it has no participant to name, as the conversation's
+    /// row does (`ConversationRowView.fallbackDisplayName`).
+    private var fallbackDisplayName: String {
         let participantEmails = conversation.participants?
             .compactMap { participant -> String? in
                 guard let person = participant.person,
@@ -209,6 +244,32 @@ struct ChatView: View {
             hint: conversation.displayName,
             participantEmails: participantEmails
         )
+    }
+
+    /// Whether a click on the Mac header's avatar or name opens Participants. The iOS title's
+    /// tap asks the same question itself.
+    private var headerOpensParticipants: Bool {
+        ChatHeaderPolicy.opensParticipants(conversationType: conversation.conversationType)
+    }
+
+    /// The Mac header's avatar: the row's, from what the view model loaded or, until then,
+    /// what the row already cached. Read only where the header draws an avatar.
+    private var headerAvatar: ChatHeaderAvatar {
+        ChatHeaderPolicy.avatar(
+            conversationType: conversation.conversationType,
+            participantInfo: ChatHeaderPolicy.participantInfo(
+                loaded: viewModel.participantInfo,
+                cached: viewModel.cachedParticipantInfo()
+            ),
+            fallbackDisplayText: fallbackDisplayName
+        )
+    }
+
+    /// Opens Participants, a sheet (`activeDestination`). Every header control that opens it
+    /// first asks whether this conversation's does.
+    private func presentParticipantsList() {
+        isTextFieldFocused = false
+        viewModel.contactManager.showingParticipantsList = true
     }
 
     private var isChatActiveAndUncovered: Bool {
