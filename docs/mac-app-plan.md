@@ -131,7 +131,7 @@ A session applied this phase with explicit permission to edit `project.pbxproj`;
   - The signature has the hardened runtime and these entitlements: `com.apple.security.app-sandbox`, `com.apple.security.network.client`, `com.apple.security.personal-information.addressbook`, `com.apple.security.files.user-selected.read-write`, and `keychain-access-groups` with the team-prefixed `com.esc.inboxchat`.
   - As a Debug build it also has `com.apple.security.get-task-allow`. It has none of the testing exceptions that a test host carries (PR F).
   - The embedded profile is "Mac Team Provisioning Profile: com.esc.inboxchat".
-  - The Mac it was built on had no signing certificate and no Mac profile. With Kevin's permission, the first build passed `-allowProvisioningUpdates`, and Xcode created both in the developer account. That build also wrote `esc-chatmail.xcodeproj/xcshareddata/xcodecloud/manifest.json`, which is untracked.
+  - The Mac it was built on had no signing certificate and no Mac profile. With Kevin's permission, the first build passed `-allowProvisioningUpdates`, and Xcode created both in the developer account. That build also wrote `esc-chatmail.xcodeproj/xcshareddata/xcodecloud/manifest.json`, which was untracked until it was committed on 2026-11-11.
 - **The processed Mac `Info.plist`.**
   - No build variable is left unresolved, and none of the iOS-only keys is present.
   - The one registered URL scheme is the reversed `GOOGLE_CLIENT_ID`, and it is the scheme of `GOOGLE_REDIRECT_URI`.
