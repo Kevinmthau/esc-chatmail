@@ -17,20 +17,24 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
     /// Revert-check: passing `headerStyle: .avatarOverNameCapsule(.mac)` to the `ChatView` in
     /// `ConversationListView` makes this fail.
     func testIOSList_pushesItsChatWithTheNavigationTitleHeader() throws {
-        let chat = try chatViewCall(in: "esc-chatmail/Views/Main/ConversationListView.swift")
+        let chats = try chatViewCalls(in: "esc-chatmail/Views/Main/ConversationListView.swift")
 
-        XCTAssertTrue(chat.contains("headerStyle: .navigationTitle,"), chat)
-        XCTAssertFalse(chat.contains(".avatarOverNameCapsule"), chat)
+        for chat in chats {
+            XCTAssertTrue(chat.contains("headerStyle: .navigationTitle"), chat)
+            XCTAssertFalse(chat.contains(".avatarOverNameCapsule"), chat)
+        }
     }
 
     /// Revert-check: passing `headerStyle: .navigationTitle` to the `ChatView` in
     /// `MacMailboxDetail` makes this fail: the Mac's toolbar would show the conversation's name
     /// where Messages has the avatar, and there would be no name capsule.
     func testMacChatColumn_showsItsChatWithTheAvatarOverNameCapsuleHeaderAtTheMacsSizes() throws {
-        let chat = try chatViewCall(in: "esc-chatmail/Platform/MacMailboxDetail.swift")
+        let chats = try chatViewCalls(in: "esc-chatmail/Platform/MacMailboxDetail.swift")
 
-        XCTAssertTrue(chat.contains("headerStyle: .avatarOverNameCapsule(.mac),"), chat)
-        XCTAssertFalse(chat.contains(".navigationTitle"), chat)
+        for chat in chats {
+            XCTAssertTrue(chat.contains("headerStyle: .avatarOverNameCapsule(.mac)"), chat)
+            XCTAssertFalse(chat.contains(".navigationTitle"), chat)
+        }
     }
 
     /// The avatar's toolbar item is taken off the toolbar's glass, and the name capsule's
@@ -63,23 +67,38 @@ final class ChatHeaderStyleSourceTests: XCTestCase {
         )
     }
 
-    /// The arguments of the one `ChatView(` call in a source file: from its opening parenthesis
-    /// to the line that closes it at the call's own indentation.
-    private func chatViewCall(in relativePath: String) throws -> String {
-        let lines = try String(contentsOf: repoFile(relativePath), encoding: .utf8)
-            .components(separatedBy: "\n")
+    /// The arguments of every `ChatView(` call in a source file, each from its opening
+    /// parenthesis to the one that closes it, however the call is laid out. At least one, or
+    /// the test fails: a file that builds no chat has nothing to pin.
+    ///
+    /// Parentheses are counted as written, comments and strings included, so an unpaired one
+    /// among the arguments would be miscounted; neither call has one.
+    private func chatViewCalls(in relativePath: String) throws -> [String] {
+        let source = try String(contentsOf: repoFile(relativePath), encoding: .utf8)
+        var calls: [String] = []
+        var searchStart = source.startIndex
 
-        let openings = lines.indices.filter {
-            lines[$0].trimmingCharacters(in: .whitespaces) == "ChatView("
+        while let opening = source.range(of: "ChatView(", range: searchStart..<source.endIndex) {
+            searchStart = opening.upperBound
+            // `MacChatView(` or `makeChatView(` is some other call.
+            if opening.lowerBound > source.startIndex {
+                let before = source[source.index(before: opening.lowerBound)]
+                if before.isLetter || before.isNumber || before == "_" { continue }
+            }
+
+            var depth = 1
+            var index = opening.upperBound
+            while index < source.endIndex, depth > 0 {
+                if source[index] == "(" { depth += 1 }
+                if source[index] == ")" { depth -= 1 }
+                if depth > 0 { index = source.index(after: index) }
+            }
+            XCTAssertEqual(depth, 0, "A ChatView call in \(relativePath) is never closed")
+            calls.append(String(source[opening.upperBound..<index]))
         }
-        XCTAssertEqual(openings.count, 1, "\(relativePath) no longer builds exactly one ChatView")
-        let opening = try XCTUnwrap(openings.first)
-        let indentation = lines[opening].prefix { $0 == " " }
-        let closing = try XCTUnwrap(
-            lines[(opening + 1)...].firstIndex { $0 == indentation + ")" },
-            "The ChatView call in \(relativePath) has no closing line this test can find"
-        )
-        return lines[(opening + 1)..<closing].joined(separator: "\n")
+
+        XCTAssertFalse(calls.isEmpty, "\(relativePath) no longer builds a ChatView")
+        return calls
     }
 
     private func repoFile(_ relativePath: String) -> URL {
