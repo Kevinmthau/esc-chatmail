@@ -1,6 +1,6 @@
 # Plan: make the Mac app look and work like Messages on the Mac
 
-Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day); PRs 2 to 6 have not started.** The spike's results are under "Spike results". PR 1 is compiled and unit-tested on both platforms but has not been seen in the app; "PR 1 as built" lists what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
+Written 2026-11-10 against `main` at `fd9b773d`, from a screenshot of Messages on macOS 26 and from reading the app's views. **Status: the spike and PR 1 are done (same day), and PR 2 is built (2026-11-11); PRs 3 to 6 have not started.** The spike's results are under "Spike results". PRs 1 and 2 are compiled and unit-tested on both platforms but have not been seen in the app; "PR 1 as built" and "PR 2 as built" list what to check there. The Mac app's current look was read from the code, not seen: the app holds real mail, so nobody launches it to check UI (see "How each PR is checked").
 
 This plan is the detailed version of the Windows, Layout, Toolbar and Selection items of Phase 2 in `docs/mac-app-plan.md`, plus a restyle that Phase 2 did not ask for. The Settings scene, file drag and drop, Save Attachment, the name and the icon stay in that document.
 
@@ -46,7 +46,7 @@ Each has a recommendation; none blocks the spike or PR 1.
 6. **New Message.** Messages writes a new message in the chat column, not in a sheet. Recommended: keep the sheet until PR 6. Compose holds its sheet until transmission admission, and the inline version has to keep that contract.
 7. **The header's trailing button.** FaceTime has no meaning here. Recommended: the existing ⋯ menu (Archive, Report Spam, Discard draft).
 8. **Selection color.** Decided by the spike: the system accent. This Mac's accent is `#2E676B`, the teal in the screenshot, and a native selected row drew in it. The app's `AccentColor` asset is empty, so it already follows the system.
-9. **The selected row while you type** (new, from the spike). A native list shows its selection in the accent color only while the list itself has keyboard focus. With the caret in the reply field, the selected conversation turns gray; in Messages it stays colored. Recommended: the row draws its own fill, which the spike showed covers the native one exactly. The cost is that the row also sets its own text colors.
+9. **The selected row while you type** (new, from the spike). A native list shows its selection in the accent color only while the list itself has keyboard focus. With the caret in the reply field, the selected conversation turns gray; in Messages it stays colored. Recommended: the row draws its own fill, which the spike showed covers the native one exactly. The cost is that the row also sets its own text colors. **PR 2 built the recommendation** (2026-11-11). Kevin had been told it was unconfirmed and has not said otherwise; going back to the list's own selection means deleting the row's `listRowBackground` and its palette argument in `MacConversationSidebar`.
 
 ## Spike results (2026-11-10)
 
@@ -207,6 +207,50 @@ Measured on macOS 27.2 in a second throwaway program, this one a SwiftUI app wit
 - **Separators** come with the `.inset` style, from the text column. Keep the row's `listRowSeparatorLeading` guide so an initials avatar doesn't pull them left (`ConversationRowView.swift:73`).
 - **Filter button.** `.badge` on the `Menu` while a filter other than All is on.
 - **Check in the app:** the sidebar's material behind the `.inset` list, which the captures could not show.
+
+### PR 2 as built (2026-11-11)
+
+**What is there.**
+
+- **The row's numbers are a value.** `ConversationRowMetrics` holds the row's sizes, spacing and fonts, and `ConversationRowPalette` its colors. `ConversationRowView` takes its metrics as a required argument, so each list names its own: `.iOS` in `ConversationListView`, `.mac` in `MacConversationSidebar`.
+  - `.iOS` and the standard palette are the literals the row held, moved. `ConversationRowMetricsTests` pins every field.
+  - `.mac`: a 40-point avatar, an 8-point unread dot, the name 13 points bold (`.headline` on macOS), the preview and the time 13 points regular (`.body`), no chevron.
+- **The avatar takes a diameter.** `AvatarStackView(…diameter:)`, 44 points by default. Everything inside it was a literal for 44 points and now scales from that: the small avatars of a group, their offsets, the initials' font. PR 3's 40-point header avatar can pass 40.
+- **The sidebar draws the selection** (decision 9). `MacSidebarRowSelectionPolicy` decides two things from one input, and the sidebar applies both:
+  - The fill behind the row (`listRowBackground`, `MacSidebarRowSelectionBackground`): the system's selection color while the window appears active, whether or not the list has the keyboard focus, and the system's gray while it does not. It has the spike's geometry, 10 points in with a radius of 8.
+  - The row's colors on it: on the accent color the name, the unread dot and the pin are white, and the preview and the time are white at 80% (`ConversationRowPalette.onSelectionFill`). On the gray and on no fill the row keeps its standard colors.
+- **The filter button has a badge** while a filter other than All is on (`MacSidebarFilterBadgePolicy`).
+
+**Where it differs from the plan above, or settles what the plan left open.**
+
+- **Selected rows that touch are drawn as one shape.** The list draws them so, rounded only at the ends, and that shape is still there under the fills. With every fill rounded at all four corners, the list's gray showed at the corners between two selected rows; this was seen in the first off-screen drawing. The fill is now square at an edge it shares with another selected row (`MacSidebarRowSelectionPolicy.joins`).
+- **The badge is the number 1.** `badge(_:)` on a toolbar button's menu draws a count, and zero draws nothing, so the count is the number of filters on. The spike saw such a badge drawn red.
+- **The time is in the preview's font,** as on iOS. The plan gave sizes for the name and the preview only.
+- **The row is 73.5 points tall** in the sidebar's list, where the iPhone's row was 80.5. The list adds 16 points on each side of the row's content, as the spike measured, and the separator starts at the text, 80 points in.
+- **The initials avatar keeps its white ring.** It is the avatar's own border and the iOS list has it too. It shows in a dark window and on a selected row; Messages has none.
+- **The selection drew blue, not teal.** In the app's own process (the test host) the system's selection color was `#0064E1` in a light window and `#0059D1` in a dark one. The spike's program, on this Mac, drew `#2E676B`. This Mac has no accent color set (`defaults read -g AppleAccentColor` finds no key), and the app's `AccentColor` asset is empty. The fill uses the system's color whatever it is, so nothing here depends on the answer; decision 8 may.
+
+**Checked.**
+
+- **iOS draws the same pixels.** A throwaway hosted test drew the row and the avatar views on the simulator (iOS 27.0), on `main` at `b52b7f3d` and on this branch: six pictures, and each pair of PNG files is byte for byte the same.
+  - Rows: a mailing list, a named person, a person with no name, the generic icon, unread, pinned, an empty snippet and a name that truncates, at the default text size and at accessibility 3, light and dark.
+  - Avatars: initials, the generic icon, a photo, a group's fallback initials and its empty circle, groups of two, three and four, and a group with photos.
+- **The Mac row was drawn off screen** by a second throwaway hosted test, in the signed, sandboxed test host on macOS 27.2: the real `ConversationRowView` with the Mac metrics, in a real `.inset` `List(selection:)`, with the sidebar's own row background. 24 pictures: light and dark, one row selected and several, the active fill and the gray one, with the list's rows marked emphasized (as AppKit marks them when the list has the focus) and not.
+  - No pixel of the list's own gray selection was left showing inside the selected rows, in any of the eight active-fill pictures.
+  - An unselected row is pixel for pixel the same with the sidebar's clear row background as without it.
+  - With the list's own selection and the standard colors, an emphasized row's unread dot stayed blue on the blue fill, and its pin orange. That is what the palette is for.
+- **Tests.** The full iOS suite passes: 4,912 tests. `Mac.xctestplan` passes in the signed, sandboxed test host: 270 tests in 26 suites, four of them new (`ConversationRowMetricsTests`, `AvatarStackViewLayoutTests`, `MacSidebarRowSelectionPolicyTests`, `MacSidebarFilterBadgePolicyTests`).
+- **Revert-checks.** Each of the 22 changes named in the new tests' `Revert-check:` comments was undone alone, and each time the test that names it failed.
+
+**Not seen: check in the signed, sandboxed app.**
+
+- The sidebar with real mail, beside Messages: the row's height, spacing and text sizes. `.mac` is a first reading of a screenshot, not a measurement.
+- That the open conversation stays in the accent color with the caret in the reply field, and turns gray when another app comes to the front. The off-screen window was never active, so the pictures were drawn with the fill given, not decided from the window.
+- Several selected rows: one shape, with no gray between them.
+- A row for a person, and a photo at 40 points. The Mac pictures are of mailing-list rows, which ask Contacts nothing; a Mac test host cannot be given Contacts access.
+- The filter badge: that it appears with a filter on and goes with All, and its color.
+- The sidebar's material behind the list.
+- A swipe and a right-click on a row that has the fill. Their code did not change.
 
 ## PR 3: the chat header
 
