@@ -245,6 +245,59 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(avatar.participantNames, ["Ada Lovelace"])
     }
 
+    /// The fallback text is built by walking the conversation's participants in Core Data, and
+    /// the header is re-evaluated with every update of the chat, so it is asked for only where
+    /// the avatar can draw it.
+    ///
+    /// Revert-check: replacing the `readsFallbackDisplayText` condition in
+    /// `ChatHeaderPolicy.avatar` with `true` makes this fail.
+    func testAvatar_firstNameGivesInitials_doesNotAskForTheFallbackText() {
+        var asked = 0
+        func fallback() -> String {
+            asked += 1
+            return "Ada Lovelace"
+        }
+
+        let avatar = ChatHeaderPolicy.avatar(
+            conversationType: .oneToOne,
+            participantInfo: Self.info(names: ["Ada Lovelace"], total: 1),
+            fallbackDisplayText: fallback()
+        )
+
+        XCTAssertEqual(asked, 0)
+        XCTAssertNil(avatar.fallbackDisplayText)
+    }
+
+    /// A participant whose name gives no initials is drawn from the fallback text, as in the
+    /// row (`SingleAvatarView.initialsSource`).
+    ///
+    /// Revert-check: replacing the `readsFallbackDisplayText` condition in
+    /// `ChatHeaderPolicy.avatar` with `participantNames.isEmpty` makes this fail.
+    func testAvatar_firstNameGivesNoInitials_keepsTheFallbackText() {
+        let avatar = ChatHeaderPolicy.avatar(
+            conversationType: .oneToOne,
+            participantInfo: Self.info(names: ["   "], total: 1),
+            fallbackDisplayText: "Ada Lovelace"
+        )
+
+        XCTAssertEqual(avatar.fallbackDisplayText, "Ada Lovelace")
+    }
+
+    // MARK: - The capsule's offset
+
+    /// Half a point is one pixel at 2x and stays; at 1x it is half a pixel and goes to a whole
+    /// one, so the name is not drawn across two pixel columns.
+    ///
+    /// Revert-check: returning `offset` unchanged from `ChatHeaderPolicy.pixelAlignedOffset`
+    /// makes this fail.
+    func testPixelAlignedOffset_isAWholeNumberOfTheDisplaysPixels() {
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 2), 0.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 1), 1)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(2.5, displayScale: 2), 2.5)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.3, displayScale: 1), 0)
+        XCTAssertEqual(ChatHeaderPolicy.pixelAlignedOffset(0.5, displayScale: 0), 0.5, "No scale: left as it is")
+    }
+
     // MARK: - The Mac's metrics
 
     /// The numbers that were measured (`docs/mac-imessage-ui-plan.md`, "Spike results" and "PR 3

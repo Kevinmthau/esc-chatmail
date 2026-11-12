@@ -107,12 +107,13 @@ final class MacChatHeaderNameBarLayoutTests: XCTestCase {
         window.contentView = host
         host.layoutSubtreeIfNeeded()
 
-        // The middle of the transcript, well below the bar, watched for a second and a half:
-        // the transcript was in the first drawings and left them a moment after the view
-        // mounted, so one sample taken at once proves nothing.
+        // The middle of the transcript, well below the bar, drawn fifteen times a tenth of a
+        // second apart: the transcript was in the first drawings and left them a moment after
+        // the view mounted, so one sample taken at once proves nothing. A count of drawings,
+        // not a stretch of time: on a busy machine each takes longer and all are still made.
+        let sampleCount = 15
         var samples: [NSColor] = []
-        let deadline = Date().addingTimeInterval(1.5)
-        while Date() < deadline {
+        for _ in 0..<sampleCount {
             if let color = Self.color(in: host, at: NSPoint(x: size.width / 2, y: size.height / 2)) {
                 samples.append(color)
             }
@@ -120,7 +121,9 @@ final class MacChatHeaderNameBarLayoutTests: XCTestCase {
         }
         window.contentView = nil
 
-        XCTAssertGreaterThan(samples.count, 5)
+        // A machine that cannot draw off screen at all says nothing about the bar.
+        try XCTSkipIf(samples.isEmpty, "The view could not be drawn off screen on this machine")
+        XCTAssertEqual(samples.count, sampleCount, "Some drawings could not be made")
         let missing = samples.filter { $0.blueComponent < 0.9 || $0.redComponent > 0.1 }
         XCTAssertTrue(
             missing.isEmpty,

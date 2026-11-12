@@ -14,6 +14,9 @@ struct MacChatHeaderNameBar: View {
     let name: String
     let opensParticipants: Bool
     let onOpenParticipants: () -> Void
+    /// The display's pixels per point, for the bar's offset. An environment value, not a plain
+    /// property, so it is no part of the memberwise initializer.
+    @Environment(\.displayScale) private var displayScale
 
     var body: some View {
         ChatHeaderParticipantsButton(opensParticipants: opensParticipants, action: onOpenParticipants) {
@@ -53,8 +56,14 @@ struct MacChatHeaderNameBar: View {
         // the chat mounts (`ChatHeaderMetrics.nameBarHeight`).
         .frame(height: metrics.nameBarHeight)
         // Under the avatar: the toolbar centers its principal item this far right of the chat
-        // column's center (`ChatHeaderMetrics.principalItemCenterOffset`).
-        .offset(x: metrics.principalItemCenterOffset)
+        // column's center (`ChatHeaderMetrics.principalItemCenterOffset`), taken to a whole
+        // pixel so the name is not drawn across two (`ChatHeaderPolicy.pixelAlignedOffset`).
+        .offset(
+            x: ChatHeaderPolicy.pixelAlignedOffset(
+                metrics.principalItemCenterOffset,
+                displayScale: displayScale
+            )
+        )
     }
 }
 #endif
