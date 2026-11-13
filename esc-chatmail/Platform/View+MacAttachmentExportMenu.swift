@@ -1,9 +1,9 @@
 import SwiftUI
 
 extension View {
-    /// Gives an attachment in a Mac chat its menu: Quick Look, Save Attachment… and Save All
-    /// Attachments… (`MacAttachmentExportMenu`). Nothing on iOS, where the view is returned as
-    /// it is.
+    /// Gives an attachment in a Mac chat its menu: Quick Look, Open for a kind of file that is
+    /// opened, Save Attachment… and Save All Attachments… (`MacAttachmentExportMenu`). Nothing
+    /// on iOS, where the view is returned as it is.
     ///
     /// - Parameters:
     ///   - attachment: The attachment this view shows.

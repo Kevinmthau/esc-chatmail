@@ -2,9 +2,10 @@
 import SwiftUI
 
 /// The menu a right-click on an attachment in a Mac chat opens
-/// (`View.macAttachmentExportMenu`): Quick Look, Save Attachment…, and Save All Attachments…
-/// where the message shows more than one (`AttachmentExportPolicy.menu`), then the entries
-/// of the message the attachment is in.
+/// (`View.macAttachmentExportMenu`): Quick Look, Open for a kind of file that is opened
+/// (`AttachmentOpenPolicy`, `MacAttachmentOpener`), Save Attachment…, and Save All
+/// Attachments… where the message shows more than one (`AttachmentExportPolicy.menu`), then
+/// the entries of the message the attachment is in.
 ///
 /// The message's row has a menu of its own (Reply, Forward, View original email). A right-click
 /// on a view with its own context menu opens that one and not the one around it: measured in
@@ -26,6 +27,7 @@ struct MacAttachmentExportMenu: ViewModifier {
     let shownAttachments: [Attachment]
     let onQuickLook: () -> Void
     var exporter: MacAttachmentExporter = .shared
+    var opener: MacAttachmentOpener = .shared
     /// The attachment's file and name, nil where it has no file. A parameter so the tests can
     /// keep their files in a temporary directory.
     var resolveItem: (Attachment) -> AttachmentExportItem? = { AttachmentExportItem(attachment: $0) }
@@ -37,6 +39,9 @@ struct MacAttachmentExportMenu: ViewModifier {
         content.contextMenu {
             let entries = AttachmentExportPolicy.menu(
                 isReady: attachment.isReady,
+                isOpenable: AttachmentOpenPolicy.isOpenable(
+                    filename: AttachmentExportItem.exportFilename(of: attachment)
+                ),
                 readyCount: shownAttachments.filter(\.isReady).count,
                 shownCount: shownAttachments.count
             )
@@ -57,6 +62,12 @@ struct MacAttachmentExportMenu: ViewModifier {
         switch item {
         case .quickLook:
             onQuickLook()
+        case .open:
+            let exportItem = resolveItem(attachment)
+            let displayFilename = AttachmentExportItem.displayFilename(of: attachment)
+            Task {
+                await opener.open(exportItem, displayFilename: displayFilename)
+            }
         case .save:
             let exportItem = resolveItem(attachment)
             let displayFilename = AttachmentExportItem.displayFilename(of: attachment)

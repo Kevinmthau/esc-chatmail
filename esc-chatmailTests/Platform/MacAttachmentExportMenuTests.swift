@@ -17,8 +17,8 @@ import XCTest
 /// colored square, not on the app's attachment views (`AttachmentGridView` loads thumbnails
 /// and starts downloads as it appears); that those views carry it is
 /// `AttachmentExportSourceTests`' to pin, and that the transcript's row hands its entries down
-/// is `MacEnclosingMessageMenuSourceTests`'. The save panel is a stand-in. None of it has
-/// been seen in the app.
+/// is `MacEnclosingMessageMenuSourceTests`'. The save panel is a stand-in, and Open hands
+/// its copy to a closure, never to `NSWorkspace`. None of it has been seen in the app.
 @MainActor
 final class MacAttachmentExportMenuTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -88,7 +88,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
+            ["Quick Look:on", "Open:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
         )
         XCTAssertEqual(try harness.menuEntries(at: harness.pointOnText), ["Reply:on", "Forward:on"])
     }
@@ -118,7 +118,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:on", "Save Attachment…:on"]
+            ["Quick Look:on", "Open:on", "Save Attachment…:on"]
         )
     }
 
@@ -128,7 +128,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
+            ["Quick Look:off", "Open:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
         )
     }
 
@@ -142,15 +142,68 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:on", "Save Attachment…:on", "Save All Attachments…:on", "---", "Reply:on", "Forward:on"]
+            [
+                "Quick Look:on", "Open:on", "Save Attachment…:on", "Save All Attachments…:on",
+                "---", "Reply:on", "Forward:on"
+            ]
         )
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(1)),
-            ["Quick Look:off", "Save Attachment…:off", "Save All Attachments…:on", "---", "Reply:on", "Forward:on"]
+            [
+                "Quick Look:off", "Open:off", "Save Attachment…:off", "Save All Attachments…:on",
+                "---", "Reply:on", "Forward:on"
+            ]
         )
     }
 
+    /// Open is in the menu only for a kind of file that is opened (`AttachmentOpenPolicy`).
+    ///
+    /// Revert-check: passing `isOpenable: true` to `AttachmentExportPolicy.menu` in
+    /// `MacAttachmentExportMenu.body` makes this fail: an installer's menu would offer Open.
+    func testMenu_ofAKindThatIsNotOpened_hasNoOpen() throws {
+        let harness = try makeHarness([try attachment("Setup.pkg"), try attachment("run.command")])
+
+        for index in 0..<2 {
+            XCTAssertEqual(
+                try harness.menuEntries(at: harness.pointOnAttachment(index)),
+                ["Quick Look:on", "Save Attachment…:on", "Save All Attachments…:on", "---", "Reply:on", "Forward:on"]
+            )
+        }
+    }
+
     // MARK: - What the entries do
+
+    /// Revert-check: calling `resolveItem` with `shownAttachments.first` in place of
+    /// `attachment` in the `.open` case makes this fail: the second attachment's menu opens
+    /// the first.
+    func testOpen_opensACopyOfTheAttachmentThatWasClicked_underItsName() async throws {
+        let harness = try makeHarness([
+            try attachment("Beach.jpg", bytes: "beach"),
+            try attachment("dir/Tickets.pdf", bytes: "tickets")
+        ])
+
+        try harness.choose("Open", at: harness.pointOnAttachment(1))
+        try await waitUntil { !harness.panels.opened.isEmpty }
+
+        let copy = try XCTUnwrap(harness.panels.opened.first)
+        XCTAssertEqual(harness.panels.opened.count, 1)
+        XCTAssertEqual(copy.lastPathComponent, "Tickets.pdf")
+        XCTAssertEqual(try String(contentsOf: copy, encoding: .utf8), "tickets")
+        XCTAssertFalse(FileManager.default.isWritableFile(atPath: copy.path))
+        XCTAssertEqual(harness.panels.alerts, [])
+    }
+
+    /// Revert-check: returning from the `.open` case when `resolveItem` answers nil makes this
+    /// fail.
+    func testOpen_whoseFileIsGone_saysSo() async throws {
+        let harness = try makeHarness([try attachment("Report.pdf", bytes: nil)])
+
+        try harness.choose("Open", at: harness.pointOnAttachment(0))
+        try await waitUntil { !harness.panels.alerts.isEmpty }
+
+        XCTAssertEqual(harness.panels.opened, [])
+        XCTAssertEqual(harness.panels.alerts, ["Attachment Not Opened|Report.pdf is no longer on this Mac."])
+    }
 
     /// Revert-check: calling `resolveItem` with `shownAttachments.first` in place of
     /// `attachment` in the `.save` case makes this fail: the second attachment's menu saves
@@ -230,6 +283,8 @@ private final class MenuPanels {
     var folderCounts: [Int] = []
     var alerts: [String] = []
     var quickLooked: [NSManagedObjectID] = []
+    /// The copies the menu's Open handed to the system, which here opens nothing.
+    var opened: [URL] = []
     /// The message's entries that were chosen, from either menu.
     var messageActions: [String] = []
 
@@ -242,6 +297,20 @@ private final class MenuPanels {
             chooseFolder: { count in
                 self.folderCounts.append(count)
                 return self.folderAnswer
+            },
+            presentFailure: { title, message in
+                self.alerts.append("\(title)|\(message)")
+            }
+        )
+    }
+
+    /// An opener whose copies go to `directory` and which hands nothing to `NSWorkspace`.
+    func makeOpener(copiesIn directory: URL) -> MacAttachmentOpener {
+        MacAttachmentOpener(
+            makeCopy: { try AttachmentOpenCopy.prepare($0, in: directory) },
+            openFile: { url in
+                self.opened.append(url)
+                return true
             },
             presentFailure: { title, message in
                 self.alerts.append("\(title)|\(message)")
@@ -263,6 +332,7 @@ private final class Harness {
         let panels = MenuPanels()
         self.panels = panels
         let exporter = panels.makeExporter()
+        let opener = panels.makeOpener(copiesIn: directory.appendingPathComponent("Opened", isDirectory: true))
         let cell = MacMessageRowStandInLayout.cell
         host = MacOffscreenHost(
             window: window,
@@ -281,6 +351,7 @@ private final class Harness {
                                     shownAttachments: attachments,
                                     onQuickLook: { panels.quickLooked.append(attachment.objectID) },
                                     exporter: exporter,
+                                    opener: opener,
                                     resolveItem: { attachment in
                                         AttachmentExportItem(
                                             attachment: attachment,

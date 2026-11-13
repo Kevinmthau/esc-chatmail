@@ -10,6 +10,9 @@ enum AttachmentExportPolicy {
     /// One entry of an attachment's menu.
     enum MenuItem: Equatable {
         case quickLook
+        /// Opens the attachment in the app the system has for its kind. Only in the menu of
+        /// an attachment whose kind is opened (`AttachmentOpenPolicy`).
+        case open
         case save
         /// Saves every attachment the message shows that has a file; `count` of them.
         case saveAll(count: Int)
@@ -22,16 +25,27 @@ enum AttachmentExportPolicy {
     /// file disabled until it has one: a menu that came and went with a download would be a
     /// different menu from one click to the next.
     ///
+    /// Open is the one entry that depends on the attachment itself: it is there only for a
+    /// kind of file that is opened (`AttachmentOpenPolicy`). The kind is the attachment's for
+    /// good, so that menu too is the same from one click to the next.
+    ///
     /// - Parameters:
     ///   - isReady: The clicked attachment has its file (downloaded, or sent from here).
+    ///   - isOpenable: The clicked attachment is of a kind that is opened in another app.
     ///   - readyCount: How many of the attachments the message shows have theirs, the clicked
     ///     one included.
     ///   - shownCount: How many attachments the message shows.
-    static func menu(isReady: Bool, readyCount: Int, shownCount: Int) -> [(item: MenuItem, isEnabled: Bool)] {
-        var items: [(item: MenuItem, isEnabled: Bool)] = [
-            (.quickLook, isReady),
-            (.save, isReady)
-        ]
+    static func menu(
+        isReady: Bool,
+        isOpenable: Bool,
+        readyCount: Int,
+        shownCount: Int
+    ) -> [(item: MenuItem, isEnabled: Bool)] {
+        var items: [(item: MenuItem, isEnabled: Bool)] = [(.quickLook, isReady)]
+        if isOpenable {
+            items.append((.open, isReady))
+        }
+        items.append((.save, isReady))
         // One attachment has nothing to add to "Save Attachment…".
         if shownCount > 1 {
             items.append((.saveAll(count: readyCount), readyCount > 0))
@@ -43,6 +57,8 @@ enum AttachmentExportPolicy {
         switch item {
         case .quickLook:
             return "Quick Look"
+        case .open:
+            return "Open"
         case .save:
             return "Save Attachment…"
         case .saveAll:
