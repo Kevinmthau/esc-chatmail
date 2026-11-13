@@ -17,15 +17,7 @@ struct SignOutMenuActionPublisher: ViewModifier {
         content
             .focusedSceneValue(
                 \.signOutMenuAction,
-                SignOutMenuAction(
-                    isEnabled: SignOutMenuPolicy.isEnabled(
-                        isAuthenticated: account.isAuthenticated,
-                        holdsAccountWhileSignedOut: controller.holdsAccountWhileSignedOut,
-                        isSigningOut: controller.isSigningOut
-                    ),
-                    controller: controller,
-                    account: account
-                )
+                SignOutMenuAction(controller: controller, account: account)
             )
             .onAppear {
                 controller.refreshHeldAccount(account: account)

@@ -22,4 +22,15 @@ final class MacMainWindowPolicyTests: XCTestCase {
         XCTAssertFalse(MacMainWindowPolicy.closingQuitsApp(windowIdentifier: nil))
         XCTAssertFalse(MacMainWindowPolicy.closingQuitsApp(windowIdentifier: ""))
     }
+
+    /// `MailboxWindowSheet` asks this of every window the app has.
+    ///
+    /// Revert-check: returning true for every identifier from
+    /// `MacMainWindowPolicy.isMailboxWindow` makes this fail: the Settings window's own alert
+    /// would count as a sheet on the mailbox window.
+    func testIsMailboxWindow_onlyTheMailboxWindow() {
+        XCTAssertTrue(MacMainWindowPolicy.isMailboxWindow(windowIdentifier: MacMainWindowPolicy.windowID))
+        XCTAssertFalse(MacMainWindowPolicy.isMailboxWindow(windowIdentifier: "com_apple_SwiftUI_Settings_window"))
+        XCTAssertFalse(MacMainWindowPolicy.isMailboxWindow(windowIdentifier: nil))
+    }
 }

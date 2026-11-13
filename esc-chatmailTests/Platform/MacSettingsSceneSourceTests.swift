@@ -101,6 +101,63 @@ final class MacSettingsSceneSourceTests: XCTestCase {
         XCTAssertTrue(view.contains(".signOutMenuAction(controller: signOut, account: authSession)"))
     }
 
+    /// With the Settings window in front, the focused window is the Settings window, and a
+    /// sheet on the mailbox window behind it has to be asked for by name.
+    ///
+    /// Revert-check: dropping `|| MailboxWindowSheet.isAttached` from
+    /// `SignOutMenuAction.perform` makes this fail: Sign Out… confirmed in the Settings
+    /// window would close New Message on the mailbox window with the typed message in it.
+    func testSignOutAction_refusesUnderASheetOnEitherWindow() throws {
+        let action = try source("esc-chatmail/Platform/SignOutMenuAction.swift")
+
+        XCTAssertTrue(
+            action.contains("focusedWindowHasSheet: FocusedWindowSheet.isAttached || MailboxWindowSheet.isAttached"),
+            action
+        )
+    }
+
+    /// One rule for whether Sign Out… can be chosen, read by the menu command and by the
+    /// Settings window's button, and it counts a sign-out running in the other window.
+    ///
+    /// Revert-check: passing `controller.isSigningOut` as `isSigningOut:` in
+    /// `SignOutMenuAction.init` makes this fail, and so does computing
+    /// `SignOutMenuPolicy.isEnabled` again in `MacSettingsView` or
+    /// `SignOutMenuActionPublisher`.
+    func testSignOutAction_isTheOnePlaceThatDecidesEnabled() throws {
+        let action = try source("esc-chatmail/Platform/SignOutMenuAction.swift")
+        let view = try source("esc-chatmail/Platform/MacSettingsView.swift")
+        let publisher = try source("esc-chatmail/Platform/SignOutMenuActionPublisher.swift")
+
+        XCTAssertTrue(action.contains("isSigningOut: controller.isAnySignOutRunning"), action)
+        // The call, with its parenthesis: the publisher's comment names the function.
+        XCTAssertFalse(view.contains("SignOutMenuPolicy.isEnabled("), view)
+        XCTAssertFalse(publisher.contains("SignOutMenuPolicy.isEnabled("), publisher)
+        XCTAssertTrue(view.contains("SignOutMenuAction(controller: signOut, account: authSession)"), view)
+        XCTAssertTrue(publisher.contains("SignOutMenuAction(controller: controller, account: account)"), publisher)
+    }
+
+    /// The Settings window can be closed while its sign-out runs, so it tells its controller
+    /// how to ask whether it is on screen, and the mailbox window's controller is the one
+    /// that shows a failure then.
+    ///
+    /// Revert-check: deleting the `MacWindowVisibilityProbe` background from
+    /// `MacSettingsView.body` makes this fail, and so does constructing `ContentView`'s
+    /// controller without `showsFailuresOfOffScreenWindows: true`.
+    func testSettingsWindow_reportsWhetherItIsOnScreen_andTheMailboxShowsItsFailures() throws {
+        let view = try source("esc-chatmail/Platform/MacSettingsView.swift")
+        let contentView = try source("esc-chatmail/App/ContentView.swift")
+
+        XCTAssertTrue(
+            view.contains(".background(MacWindowVisibilityProbe { signOut.setAlertHost(isOnScreen: $0) })"),
+            view
+        )
+        XCTAssertTrue(
+            contentView.contains("SettingsAppSignOutController(showsFailuresOfOffScreenWindows: true)"),
+            contentView
+        )
+        XCTAssertFalse(view.contains("showsFailuresOfOffScreenWindows"), view)
+    }
+
     private func source(_ path: String) throws -> String {
         // This file is esc-chatmailTests/Platform/, so the repo root is three directories up.
         let sourceURL = URL(fileURLWithPath: #filePath)

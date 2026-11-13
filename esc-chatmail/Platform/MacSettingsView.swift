@@ -22,6 +22,16 @@ import SwiftUI
 /// the overlay, until teardown replaces it with the sign-in view. Nothing sent or changed
 /// there in that time gets through: `signOut()` closes admission before its first suspension.
 ///
+/// Three things the two windows' controllers must agree on, each of which went wrong with
+/// the controllers knowing only about themselves:
+/// - Sign Out… asks nothing while the mailbox window has a sheet attached, although this
+///   window has none (`MailboxWindowSheet`): confirmed here, the sign-out closed New Message
+///   on the mailbox window with the typed message in it.
+/// - Sign Out… is disabled in both windows while either one's sign-out runs
+///   (`SettingsAppSignOutController.isAnySignOutRunning`).
+/// - This window can be closed while its sign-out runs. A failure is then shown on the
+///   mailbox window (`MacWindowVisibilityProbe`, `SettingsAppSignOutActivity`).
+///
 /// HONEST SCOPE: nobody has seen this window. That the alert attaches to it was measured in
 /// the stand-in program; the rest is read from the code.
 struct MacSettingsView: View {
@@ -38,15 +48,7 @@ struct MacSettingsView: View {
     }
 
     var body: some View {
-        let signOutAction = SignOutMenuAction(
-            isEnabled: SignOutMenuPolicy.isEnabled(
-                isAuthenticated: authSession.isAuthenticated,
-                holdsAccountWhileSignedOut: signOut.holdsAccountWhileSignedOut,
-                isSigningOut: signOut.isSigningOut
-            ),
-            controller: signOut,
-            account: authSession
-        )
+        let signOutAction = SignOutMenuAction(controller: signOut, account: authSession)
         Form {
             Section {
                 LabeledContent(
@@ -80,6 +82,9 @@ struct MacSettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
         .settingsAppSignOutAlerts(for: signOut)
         .signOutMenuAction(controller: signOut, account: authSession)
+        // This window can be closed while its sign-out runs. A failure is then shown on the
+        // mailbox window (`SettingsAppSignOutActivity`).
+        .background(MacWindowVisibilityProbe { signOut.setAlertHost(isOnScreen: $0) })
     }
 }
 #endif

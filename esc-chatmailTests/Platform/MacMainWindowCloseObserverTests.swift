@@ -109,5 +109,23 @@ final class MacMainWindowCloseObserverTests: XCTestCase {
 
         XCTAssertEqual(quitCount, 0)
     }
+
+    /// The block holds the quit and not the observer, so only the observer's `deinit` takes
+    /// it off the center.
+    ///
+    /// Revert-check: deleting the `deinit` from `MacMainWindowCloseObserver` makes this fail:
+    /// an observer nobody holds would still quit the app.
+    func testReleasedWithoutStop_asksNothing() {
+        autoreleasepool {
+            let released = MacMainWindowCloseObserver(notificationCenter: center, quit: { [weak self] in
+                self?.quitCount += 1
+            })
+            released.start()
+        }
+
+        postWillClose(windowIdentifier: MacMainWindowPolicy.windowID)
+
+        XCTAssertEqual(quitCount, 0)
+    }
 }
 #endif

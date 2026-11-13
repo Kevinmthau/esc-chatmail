@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import esc_chatmail
 
@@ -14,6 +15,8 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
     private var preferences: SettingsAppPreferences!
     private var account: FakeAccount!
     private var prompter: FakePrompter!
+    /// The test's own, so a sign-out left running by one test is not another's.
+    private var activity: SettingsAppSignOutActivity!
     private var controller: SettingsAppSignOutController!
 
     override func setUp() {
@@ -23,13 +26,15 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         preferences = SettingsAppPreferences(defaults: defaults)
         account = FakeAccount()
         prompter = FakePrompter()
-        controller = SettingsAppSignOutController(preferences: preferences, prompter: prompter)
+        activity = SettingsAppSignOutActivity()
+        controller = SettingsAppSignOutController(preferences: preferences, prompter: prompter, activity: activity)
     }
 
     override func tearDown() {
         account.releaseSignOut(returning: true)
         defaults.removePersistentDomain(forName: suiteName)
         controller = nil
+        activity = nil
         prompter = nil
         account = nil
         preferences = nil
@@ -358,6 +363,138 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertFalse(controller.holdsAccountWhileSignedOut)
     }
 
+    // MARK: - Two windows
+
+    // HONEST SCOPE: the two windows are two controllers sharing one
+    // `SettingsAppSignOutActivity`, as the Mac's mailbox and Settings windows do. That the
+    // Sign Out… command and button read `isAnySignOutRunning` is `SignOutMenuAction`'s, and
+    // that the Settings window reports whether it is on screen is `MacSettingsView` wiring
+    // (`MacSettingsSceneSourceTests`, `MacWindowVisibilityProbeTests`). Nobody has seen
+    // either on screen.
+
+    /// A sign-out started in one window disables Sign Out… in the other, which read as
+    /// enabled before and beeped when chosen.
+    ///
+    /// Revert-check: removing `activity.signOutDidBegin()` from
+    /// `SettingsAppSignOutController.signOutConfirmed` makes this fail, and so does dropping
+    /// `|| activity.isSigningOut` from `isAnySignOutRunning`.
+    func testIsAnySignOutRunning_anotherWindowsSignOut_isTrueUntilItEnds() async throws {
+        let other = makeOtherWindowsController()
+        account.suspendsSignOut = true
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        await waitUntil { self.account.signOutCallCount == 1 }
+
+        XCTAssertTrue(controller.isAnySignOutRunning)
+        XCTAssertTrue(other.controller.isAnySignOutRunning)
+        XCTAssertFalse(other.controller.isSigningOut, "the progress is drawn by the window that started it")
+
+        account.releaseSignOut(returning: true)
+        await waitUntil { !self.controller.isSigningOut }
+
+        // Revert-check: removing `activity.signOutDidEnd()` from
+        // `SettingsAppSignOutController.signOutConfirmed` makes these fail: Sign Out… would
+        // stay disabled in every window until the app is quit.
+        XCTAssertFalse(controller.isAnySignOutRunning)
+        XCTAssertFalse(other.controller.isAnySignOutRunning)
+    }
+
+    /// The other window's command is drawn from its own controller, so that controller must
+    /// publish when the shared answer changes.
+    ///
+    /// Revert-check: removing the `activity.objectWillChange.sink` from
+    /// `SettingsAppSignOutController.init` makes this fail: the other window's Sign Out…
+    /// would keep the state it was last drawn with.
+    func testAnotherWindowsSignOut_republishesThisWindowsController() async throws {
+        let other = makeOtherWindowsController()
+        var otherPublishCount = 0
+        let observation = other.controller.objectWillChange.sink { otherPublishCount += 1 }
+        defer { observation.cancel() }
+        account.suspendsSignOut = true
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        XCTAssertEqual(otherPublishCount, 1)
+
+        await waitUntil { self.account.signOutCallCount == 1 }
+        account.releaseSignOut(returning: true)
+        await waitUntil { !self.controller.isSigningOut }
+        XCTAssertEqual(otherPublishCount, 2)
+    }
+
+    /// The Mac's Settings window can be closed while its sign-out runs. Its failure alert
+    /// would wait there unseen, with the mailbox still signed in and nothing said.
+    ///
+    /// Revert-check: calling `prompter.presentFailure()` unconditionally from
+    /// `SettingsAppSignOutController.presentFailure` makes this fail.
+    func testSignOut_cleanupNeverBegan_windowOffScreen_showsFailureInFallbackWindow() async throws {
+        let mailbox = makeOtherWindowsController(showsFailuresOfOffScreenWindows: true)
+        controller.setAlertHost(isOnScreen: { false })
+        account.signOutResult = false
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        await waitUntil { mailbox.prompter.failureCount == 1 }
+
+        XCTAssertEqual(prompter.failureCount, 0)
+        XCTAssertFalse(controller.isAnySignOutRunning)
+    }
+
+    /// Revert-check: dropping `!alertHostIsOnScreen()` from
+    /// `SettingsAppSignOutController.presentFailure` makes this fail: the failure would come
+    /// up on the mailbox window, behind the Settings window that asked.
+    func testSignOut_cleanupNeverBegan_windowOnScreen_showsFailureInItsOwnWindow() async throws {
+        let mailbox = makeOtherWindowsController(showsFailuresOfOffScreenWindows: true)
+        controller.setAlertHost(isOnScreen: { true })
+        account.signOutResult = false
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        await waitUntil { self.prompter.failureCount == 1 }
+
+        XCTAssertEqual(mailbox.prompter.failureCount, 0)
+    }
+
+    /// With no window to take it, the failure is still raised in its own window, and shows
+    /// when that window is next opened: no worse than before there was a fallback.
+    ///
+    /// Revert-check: returning from `SettingsAppSignOutController.presentFailure` whenever
+    /// `alertHostIsOnScreen()` is false, without asking what
+    /// `activity.showFailureInFallbackWindow()` did, makes this fail.
+    func testSignOut_cleanupNeverBegan_windowOffScreenAndNoFallback_showsFailureInItsOwnWindow() async throws {
+        let other = makeOtherWindowsController(showsFailuresOfOffScreenWindows: false)
+        controller.setAlertHost(isOnScreen: { false })
+        account.signOutResult = false
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        try XCTUnwrap(prompter.onSignOut)()
+        await waitUntil { self.prompter.failureCount == 1 }
+
+        XCTAssertEqual(other.prompter.failureCount, 0)
+    }
+
+    /// The fallback is named weakly: a mailbox controller that has gone must not be kept
+    /// alive by the activity, and a failure handed to it is not taken as shown.
+    ///
+    /// Revert-check: capturing `self` strongly in the `setFailureFallback` closure in
+    /// `SettingsAppSignOutController.init` makes this fail.
+    func testFailureFallback_controllerReleased_showsNothingAndIsNotKept() {
+        weak var weakFallback: SettingsAppSignOutController?
+        autoreleasepool {
+            let fallback = SettingsAppSignOutController(
+                preferences: preferences,
+                prompter: FakePrompter(),
+                activity: activity,
+                showsFailuresOfOffScreenWindows: true
+            )
+            weakFallback = fallback
+        }
+
+        XCTAssertNil(weakFallback)
+        XCTAssertFalse(activity.showFailureInFallbackWindow())
+    }
+
     // MARK: - Platform prompter
 
     /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
@@ -391,6 +528,20 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
 
     private func requestSignOut() {
         defaults.set(true, forKey: SettingsAppPreferences.signOutRequestedKey)
+    }
+
+    /// A second window's controller, sharing this test's activity.
+    private func makeOtherWindowsController(
+        showsFailuresOfOffScreenWindows: Bool = false
+    ) -> (controller: SettingsAppSignOutController, prompter: FakePrompter) {
+        let otherPrompter = FakePrompter()
+        let other = SettingsAppSignOutController(
+            preferences: preferences,
+            prompter: otherPrompter,
+            activity: activity,
+            showsFailuresOfOffScreenWindows: showsFailuresOfOffScreenWindows
+        )
+        return (other, otherPrompter)
     }
 
     /// Polls `condition` until it holds or `timeout` elapses. The condition is

@@ -11,7 +11,10 @@ struct ContentView: View {
     @EnvironmentObject private var authSession: AuthSession
     @EnvironmentObject private var dependencies: Dependencies
     @Environment(\.scenePhase) private var scenePhase
-    @StateObject private var settingsAppSignOut = SettingsAppSignOutController()
+    /// The mailbox window is on screen for as long as the Mac app runs, so its controller
+    /// also shows the failure of a sign-out the Settings window started and was then closed
+    /// on (`SettingsAppSignOutActivity`). Nothing on iOS asks for that.
+    @StateObject private var settingsAppSignOut = SettingsAppSignOutController(showsFailuresOfOffScreenWindows: true)
 
     var body: some View {
         Group {

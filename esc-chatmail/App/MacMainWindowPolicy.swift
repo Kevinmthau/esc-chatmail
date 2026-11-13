@@ -21,6 +21,12 @@ enum MacMainWindowPolicy {
     /// only. A Settings window, a sheet, a Quick Look panel and an off-screen web view host
     /// all close without ending anything.
     static func closingQuitsApp(windowIdentifier: String?) -> Bool {
+        isMailboxWindow(windowIdentifier: windowIdentifier)
+    }
+
+    /// Whether the window with this identifier is the mailbox window. A window with no
+    /// identifier is not.
+    static func isMailboxWindow(windowIdentifier: String?) -> Bool {
         windowIdentifier == windowID
     }
 }

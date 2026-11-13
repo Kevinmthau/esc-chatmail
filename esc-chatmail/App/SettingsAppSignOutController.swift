@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 /// Acts on the Settings app's Sign Out switch for `ContentView`, which only
@@ -9,7 +10,9 @@ import Foundation
 ///
 /// The Mac has no Settings app page. Its Sign Out… menu command asks through
 /// `requestSignOut(account:focusedWindowHasSheet:)` instead, and reaches the
-/// same confirmation and the same single `signOut()`.
+/// same confirmation and the same single `signOut()`. So does the Sign Out… button
+/// in its Settings window, which has a controller of its own; what the two
+/// windows' controllers share is `SettingsAppSignOutActivity`.
 @MainActor
 final class SettingsAppSignOutController: ObservableObject {
     /// True from a confirmed Settings-app sign-out until `signOut()` returns.
@@ -29,16 +32,59 @@ final class SettingsAppSignOutController: ObservableObject {
 
     private let preferences: SettingsAppPreferences
     private let prompter: SettingsAppSignOutPrompting
+    private let activity: SettingsAppSignOutActivity
+    private var activityObservation: AnyCancellable?
 
-    /// `prompter` defaults inside the body: `PlatformSettingsAppSignOutPrompter`
-    /// is main-actor isolated, and a default argument is evaluated in the
-    /// caller's (here nonisolated) context.
+    /// Whether the window that shows this controller's alerts is on screen. Always true
+    /// unless a window says otherwise (`setAlertHost(isOnScreen:)`).
+    private var alertHostIsOnScreen: @MainActor () -> Bool = { true }
+
+    /// `prompter` and `activity` default inside the body: `PlatformSettingsAppSignOutPrompter`
+    /// and `SettingsAppSignOutActivity.shared` are main-actor isolated, and a default
+    /// argument is evaluated in the caller's (here nonisolated) context.
+    ///
+    /// - Parameter showsFailuresOfOffScreenWindows: True for the controller of a window that
+    ///   is on screen for as long as the app runs: the mailbox's (`ContentView`). It then
+    ///   shows the failure of a sign-out another window started and can no longer report
+    ///   (`SettingsAppSignOutActivity.showFailureInFallbackWindow()`).
     init(
         preferences: SettingsAppPreferences = SettingsAppPreferences(),
-        prompter: SettingsAppSignOutPrompting? = nil
+        prompter: SettingsAppSignOutPrompting? = nil,
+        activity: SettingsAppSignOutActivity? = nil,
+        showsFailuresOfOffScreenWindows: Bool = false
     ) {
+        let activity = activity ?? .shared
         self.preferences = preferences
         self.prompter = prompter ?? PlatformSettingsAppSignOutPrompter()
+        self.activity = activity
+        // A sign-out another window's controller runs changes `isAnySignOutRunning` here, so
+        // it must redraw what observes this controller: the Sign Out… command and button.
+        activityObservation = activity.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        if showsFailuresOfOffScreenWindows {
+            activity.setFailureFallback { [weak self] in
+                guard let self else { return false }
+                self.prompter.presentFailure()
+                return true
+            }
+        }
+    }
+
+    /// True while any window's confirmed sign-out is running, this one's included. The Mac's
+    /// Sign Out… command and button are disabled from it (`SignOutMenuAction`), so they read
+    /// as busy in every window. `isSigningOut` stays this controller's own: it draws the
+    /// progress in the window that started the sign-out.
+    var isAnySignOutRunning: Bool {
+        isSigningOut || activity.isSigningOut
+    }
+
+    /// Tells the controller how to ask whether the window that shows its alerts is on screen
+    /// (`MacWindowVisibilityProbe`). The Mac's Settings window can be closed while its
+    /// sign-out runs, and a failure alert raised then would wait, unseen, for the window to
+    /// be opened again.
+    func setAlertHost(isOnScreen: @escaping @MainActor () -> Bool) {
+        alertHostIsOnScreen = isOnScreen
     }
 
     /// The prompter when it is the SwiftUI-alert one (the Mac's default), which
@@ -146,15 +192,27 @@ final class SettingsAppSignOutController: ObservableObject {
         // for this switch to end — the same verdict the policy discards on.
         guard !account.isDurablySignedOut(), !isSigningOut else { return }
         isSigningOut = true
+        activity.signOutDidBegin()
         Task {
             let didSignOut = await account.signOut()
             isSigningOut = false
+            activity.signOutDidEnd()
             if !didSignOut {
                 // Cleanup never began (the reset marker could not be saved), so
                 // the account is still signed in; say so rather than nothing.
                 Log.error("Settings-app sign-out did not start; the account is still signed in", category: .auth)
-                prompter.presentFailure()
+                presentFailure()
             }
         }
+    }
+
+    /// Says a confirmed sign-out never started: in this controller's window, or, when that
+    /// window is off screen, in the fallback window. With no fallback to take it, it is
+    /// still raised here, and shows when the window is next opened.
+    private func presentFailure() {
+        if !alertHostIsOnScreen(), activity.showFailureInFallbackWindow() {
+            return
+        }
+        prompter.presentFailure()
     }
 }
