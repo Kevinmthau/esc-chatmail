@@ -10,13 +10,15 @@ import XCTest
 /// is how the menu the user sees is found. Mac only, so it runs in `Mac.xctestplan`.
 ///
 /// The stand-in row has what the transcript's row has around an attachment: a context menu of
-/// its own, with a preview.
+/// its own, with a preview, whose entries it also hands down to the views inside it
+/// (`View.macEnclosingMessageMenu`).
 ///
 /// HONEST SCOPE: no menu is opened and nothing is clicked. The modifier is mounted on a
 /// colored square, not on the app's attachment views (`AttachmentGridView` loads thumbnails
 /// and starts downloads as it appears); that those views carry it is
-/// `AttachmentExportSourceTests`' to pin. The save panel is a stand-in. None of it has been
-/// seen in the app.
+/// `AttachmentExportSourceTests`' to pin, and that the transcript's row hands its entries down
+/// is `MacEnclosingMessageMenuSourceTests`'. The save panel is a stand-in. None of it has
+/// been seen in the app.
 @MainActor
 final class MacAttachmentExportMenuTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -60,8 +62,8 @@ final class MacAttachmentExportMenuTests: XCTestCase {
         return attachment
     }
 
-    private func makeHarness(_ attachments: [Attachment]) -> Harness {
-        let harness = Harness(attachments: attachments, directory: directory)
+    private func makeHarness(_ attachments: [Attachment], inAMessageRow: Bool = true) -> Harness {
+        let harness = Harness(attachments: attachments, directory: directory, inAMessageRow: inAMessageRow)
         harnesses.append(harness)
         return harness
     }
@@ -84,14 +86,45 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
     /// Revert-check: deleting the `contextMenu` from `MacAttachmentExportMenu.body` makes the
     /// first assertion fail: a right-click on the attachment opens the message's menu.
-    func testRightClick_onAnAttachment_opensItsMenu_andOnTheRestOfTheRow_theMessages() throws {
+    /// Deleting the `if let messageMenu` block from it makes the first fail too: the
+    /// attachment's menu has no Reply or Forward.
+    func testRightClick_onAnAttachment_opensItsMenu_endingWithTheMessages_andOnTheRestOfTheRow_theMessages() throws {
         let harness = makeHarness([try attachment("Report.pdf")])
+
+        XCTAssertEqual(
+            try harness.menuEntries(at: harness.pointOnAttachment(0)),
+            ["Quick Look:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
+        )
+        XCTAssertEqual(try harness.menuEntries(at: harness.pointOnText), ["Reply:on", "Forward:on"])
+    }
+
+    /// The entries handed down are the row's own, and choosing one does what it does in the
+    /// row's menu.
+    ///
+    /// Revert-check: deleting the `if let messageMenu` block from
+    /// `MacAttachmentExportMenu.body` makes this fail: the attachment's menu has no Reply.
+    func testReply_chosenFromAnAttachmentsMenu_isTheMessagesReply() throws {
+        let harness = makeHarness([try attachment("Beach.jpg"), try attachment("Tickets.pdf")])
+
+        try harness.choose("Reply", at: harness.pointOnAttachment(1))
+        try harness.choose("Forward", at: harness.pointOnText)
+
+        XCTAssertEqual(harness.panels.messageActions, ["Reply", "Forward"])
+        XCTAssertEqual(harness.panels.quickLooked, [])
+    }
+
+    /// An attachment drawn where no row hands it a message's entries has its own, with no
+    /// separator after them.
+    ///
+    /// Revert-check: drawing the `Divider()` outside the `if let messageMenu` block makes
+    /// this fail.
+    func testMenu_ofAnAttachmentOutsideAMessageRow_hasItsOwnEntriesOnly() throws {
+        let harness = makeHarness([try attachment("Report.pdf")], inAMessageRow: false)
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
             ["Quick Look:on", "Save Attachment…:on"]
         )
-        XCTAssertEqual(try harness.menuEntries(at: harness.pointOnText), ["Reply:on", "Forward:on"])
     }
 
     /// Revert-check: deleting `.disabled(!entry.isEnabled)` makes this fail.
@@ -100,7 +133,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:off", "Save Attachment…:off"]
+            ["Quick Look:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
         )
     }
 
@@ -114,11 +147,11 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
-            ["Quick Look:on", "Save Attachment…:on", "Save All Attachments…:on"]
+            ["Quick Look:on", "Save Attachment…:on", "Save All Attachments…:on", "---", "Reply:on", "Forward:on"]
         )
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(1)),
-            ["Quick Look:off", "Save Attachment…:off", "Save All Attachments…:on"]
+            ["Quick Look:off", "Save Attachment…:off", "Save All Attachments…:on", "---", "Reply:on", "Forward:on"]
         )
     }
 
@@ -202,6 +235,8 @@ private final class MenuPanels {
     var folderCounts: [Int] = []
     var alerts: [String] = []
     var quickLooked: [NSManagedObjectID] = []
+    /// The message's entries that were chosen, from either menu.
+    var messageActions: [String] = []
 
     func makeExporter() -> MacAttachmentExporter {
         MacAttachmentExporter(
@@ -221,7 +256,8 @@ private final class MenuPanels {
 }
 
 /// A message's row as far as menus go: text above, its attachments in a line below, and the
-/// row's own menu around both.
+/// row's own menu around both, with its entries handed down as `ChatMessagesView` hands its
+/// own. With `inAMessageRow` false, the attachments alone, with no menu around them.
 private struct RowStandIn: View {
     static let cell: CGFloat = 100
 
@@ -229,8 +265,28 @@ private struct RowStandIn: View {
     let panels: MenuPanels
     let exporter: MacAttachmentExporter
     let directory: URL
+    let inAMessageRow: Bool
 
     var body: some View {
+        if inAMessageRow {
+            content
+                .contentShape(Rectangle())
+                .macEnclosingMessageMenu { messageEntries }
+                .contextMenu { messageEntries } preview: {
+                    Text("Preview")
+                }
+        } else {
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var messageEntries: some View {
+        Button("Reply") { panels.messageActions.append("Reply") }
+        Button("Forward") { panels.messageActions.append("Forward") }
+    }
+
+    private var content: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("The message's text")
                 .frame(width: Self.cell * 3, height: Self.cell)
@@ -256,13 +312,6 @@ private struct RowStandIn: View {
             }
             .frame(width: Self.cell * 3, height: Self.cell, alignment: .leading)
         }
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Reply") {}
-            Button("Forward") {}
-        } preview: {
-            Text("Preview")
-        }
     }
 }
 
@@ -272,7 +321,7 @@ private final class Harness {
     private let window: NSWindow
     private let host: NSHostingView<RowStandIn>
 
-    init(attachments: [Attachment], directory: URL) {
+    init(attachments: [Attachment], directory: URL, inAMessageRow: Bool) {
         let size = CGSize(width: RowStandIn.cell * 3, height: RowStandIn.cell * 2)
         window = NSWindow(
             contentRect: NSRect(x: -30000, y: -30000, width: size.width, height: size.height),
@@ -286,7 +335,8 @@ private final class Harness {
                 attachments: attachments,
                 panels: panels,
                 exporter: panels.makeExporter(),
-                directory: directory
+                directory: directory,
+                inAMessageRow: inAMessageRow
             )
         )
         host.frame = NSRect(origin: .zero, size: size)
@@ -327,7 +377,9 @@ private final class Harness {
     func menuEntries(at point: NSPoint) throws -> [String] {
         let menu = try menu(at: point)
         menu.update()
-        return menu.items.map { "\($0.title):\($0.isEnabled ? "on" : "off")" }
+        return menu.items.map {
+            $0.isSeparatorItem ? "---" : "\($0.title):\($0.isEnabled ? "on" : "off")"
+        }
     }
 
     /// Chooses the entry titled `title`, as a click on it would.

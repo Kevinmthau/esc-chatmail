@@ -22,7 +22,8 @@ final class ChatComposerState: ObservableObject {
     @Published var attachments: [Attachment]
     @Published var isProcessingAttachments = false
     /// Files dropped on the chat that the composer's attachment picker has yet to take
-    /// (`receiveDroppedFiles`). The picker clears it as it starts the import.
+    /// (`receiveDroppedFiles`). The picker clears it as it starts the import, and until then
+    /// no other drop is taken: this is the only place the first one's files are kept.
     @Published var pendingFileDrop: DraftFileDrop?
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
@@ -83,7 +84,8 @@ final class ChatComposerState: ObservableObject {
     var acceptsDroppedFiles: Bool {
         DraftFileDropPolicy.acceptsFiles(
             allowsDraftMutation: ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending),
-            isProcessingAttachments: isProcessingAttachments
+            isProcessingAttachments: isProcessingAttachments,
+            hasPendingDrop: pendingFileDrop != nil
         )
     }
 
@@ -93,7 +95,8 @@ final class ChatComposerState: ObservableObject {
         switch DraftFileDropPolicy.decision(
             droppedURLs: urls,
             allowsDraftMutation: ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending),
-            isProcessingAttachments: isProcessingAttachments
+            isProcessingAttachments: isProcessingAttachments,
+            hasPendingDrop: pendingFileDrop != nil
         ) {
         case .refuse:
             return false
