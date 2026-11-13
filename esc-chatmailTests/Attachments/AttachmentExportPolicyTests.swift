@@ -7,13 +7,33 @@ import XCTest
 final class AttachmentExportPolicyTests: XCTestCase {
     private typealias Policy = AttachmentExportPolicy
 
-    private func entries(isReady: Bool, readyCount: Int, shownCount: Int) -> [String] {
-        Policy.menu(isReady: isReady, readyCount: readyCount, shownCount: shownCount).map {
+    private func entries(isReady: Bool, isOpenable: Bool = false, readyCount: Int, shownCount: Int) -> [String] {
+        Policy.menu(isReady: isReady, isOpenable: isOpenable, readyCount: readyCount, shownCount: shownCount).map {
             "\(Policy.title(for: $0.item)):\($0.isEnabled ? "on" : "off")"
         }
     }
 
     // MARK: - The menu
+
+    /// Open follows Quick Look, for a kind of file that is opened and no other, and like the
+    /// other entries that need the file it waits for it.
+    ///
+    /// Revert-check: appending `.open` whatever `isOpenable` is makes the last assertion
+    /// fail; enabling it whatever `isReady` is makes the second fail.
+    func testMenu_aKindThatIsOpened_addsOpenAfterQuickLook_enabledOnceItHasItsFile() {
+        XCTAssertEqual(
+            entries(isReady: true, isOpenable: true, readyCount: 1, shownCount: 1),
+            ["Quick Look:on", "Open:on", "Save Attachment…:on"]
+        )
+        XCTAssertEqual(
+            entries(isReady: false, isOpenable: true, readyCount: 1, shownCount: 2),
+            ["Quick Look:off", "Open:off", "Save Attachment…:off", "Save All Attachments…:on"]
+        )
+        XCTAssertEqual(
+            entries(isReady: true, isOpenable: false, readyCount: 1, shownCount: 1),
+            ["Quick Look:on", "Save Attachment…:on"]
+        )
+    }
 
     /// Revert-check: appending `.saveAll` whatever `shownCount` is makes this fail. One
     /// attachment has nothing for Save All to add.
@@ -52,7 +72,7 @@ final class AttachmentExportPolicyTests: XCTestCase {
     }
 
     func testMenu_saveAllCarriesTheNumberOfFilesItSaves() {
-        let items = Policy.menu(isReady: true, readyCount: 2, shownCount: 5).map(\.item)
+        let items = Policy.menu(isReady: true, isOpenable: false, readyCount: 2, shownCount: 5).map(\.item)
         XCTAssertEqual(items, [.quickLook, .save, .saveAll(count: 2)])
     }
 

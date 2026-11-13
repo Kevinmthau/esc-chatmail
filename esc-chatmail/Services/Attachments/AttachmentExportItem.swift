@@ -35,9 +35,17 @@ struct AttachmentExportItem: Equatable {
             return nil
         }
         self.sourceURL = sourceURL
+        self.filename = Self.exportFilename(of: attachment)
+    }
+
+    /// The name a save, a drag or Open gives the attachment's file, whether or not it has
+    /// that file yet: the attachment's menu asks before the download ends, to know its kind
+    /// (`AttachmentOpenPolicy`).
+    static func exportFilename(of attachment: Attachment) -> String {
+        guard isLive(attachment) else { return AttachmentExportPolicy.fallbackBaseName }
         // The type's extension, not the stored file's: that one is whatever followed the last
         // dot of the sender's name (`AttachmentExportPolicy.filename`).
-        self.filename = AttachmentExportPolicy.filename(
+        return AttachmentExportPolicy.filename(
             storedFilename: attachment.filename,
             typeExtension: AttachmentPaths.fileExtension(for: attachment.mimeType)
         )
