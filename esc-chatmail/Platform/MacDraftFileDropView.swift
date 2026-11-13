@@ -32,9 +32,12 @@ final class MacDraftFileDropView: NSView {
         registerForDraggedTypes([.fileURL])
     }
 
-    @available(*, unavailable)
+    /// The app builds this view in code and nothing decodes one. A decoded view is still a
+    /// working one, registered as the other initializer registers it: the alternative is a
+    /// trap, and the release build has none.
     required init?(coder: NSCoder) {
-        fatalError("MacDraftFileDropView is built in code")
+        super.init(coder: coder)
+        registerForDraggedTypes([.fileURL])
     }
 
     /// Nil, so a click on the chat's empty space is never this view's. A drag does not ask
