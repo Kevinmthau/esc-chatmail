@@ -15,15 +15,27 @@ struct MailboxMenuActions {
     let search: @MainActor () -> Void
     /// Runs a user-initiated sync: the Mac's pull-to-refresh, which has no gesture there.
     let sync: @MainActor () -> Void
+    /// What Mark as Read / Mark as Unread would do to the sidebar's selected conversations, as
+    /// of the sidebar's last update: the command's title. Nil with nothing to act on, which
+    /// disables it.
+    let readState: MailboxMenuPolicy.ReadStateCommand?
+    /// Marks the sidebar's selected conversations read or unread. Which of the two is decided
+    /// again when this is called (`ConversationListViewModel.changeReadState`), so a title a
+    /// sync has overtaken does not decide it.
+    let changeReadState: @MainActor () -> Void
 
     init(
         newMessage: @escaping @MainActor () -> Void,
         search: @escaping @MainActor () -> Void,
-        sync: @escaping @MainActor () -> Void
+        sync: @escaping @MainActor () -> Void,
+        readState: MailboxMenuPolicy.ReadStateCommand?,
+        changeReadState: @escaping @MainActor () -> Void
     ) {
         self.newMessage = newMessage
         self.search = search
         self.sync = sync
+        self.readState = readState
+        self.changeReadState = changeReadState
     }
 
     /// The New Message command was chosen. Beeps and opens nothing while the focused window has

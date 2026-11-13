@@ -433,7 +433,20 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - Not yet seen on screen: the command, its alerts, or its state under a sheet.
 - **Menus and shortcuts:**
   - Cmd-N new message, Cmd-R sync now, Cmd-F search. **Built** (`MailboxCommands`; Cmd-R is Mailbox > Get New Mail).
-  - Delete archives (**built**, `MacConversationSidebar`); Cmd-Shift-U toggles unread (**not built**: the row's right-click menu and its swipe toggle it).
+  - Delete archives (**built**, `MacConversationSidebar`).
+  - Cmd-Shift-U toggles unread. **Built 2026-11-13** as Mailbox > Mark as Read / Mark as Unread (`MailboxCommands`).
+    - **What it acts on** (`MacSidebarSelectionPolicy.readStateTargets`). One selected conversation: that one, even while a search hides its row, because it is the open chat. Several: the selected rows the list is showing, as for Delete. Nothing selected: the item is disabled and reads Mark as Unread.
+    - **Which way** (`MailboxMenuPolicy.readStateCommand`). If any of them is unread, Mark as Read, which changes only the unread ones; otherwise Mark as Unread. Mail's rule for several messages; for one conversation it is the toggle the row's right-click menu and swipe already make, through the same calls.
+    - **Decided when chosen.** The title is drawn at the sidebar's last update. The action reads the counts again (`ConversationListViewModel.changeReadState`), so a sync between the two cannot make it do the opposite of what the conversation now needs.
+    - **Not under a sheet rule.** It presents nothing, so it is not refused while a sheet is attached, like Get New Mail and Search.
+    - **Measured in the sandboxed test host** (macOS 27.2): the app's menu bar there is the real one, and its Mailbox menu has the item after a separator with Command-Shift-U, which no other item in the menu bar has (`MailboxCommandsMenuTests`).
+    - **Not seen: check in the app.** The command has not been chosen anywhere.
+      - With a chat open, Cmd-Shift-U marks it unread: the row gets its dot and the menu item changes to Mark as Read. The chat stays open. It is expected to stay unread until its row is selected again, as after the right-click menu's Mark as Unread: read from the code, a chat marks its conversation read when it appears and marks mail that arrives while it is open, and nothing else.
+      - Pressed again, it marks the chat read.
+      - With the caret in the reply field or the search field, the shortcut is expected to work and type nothing.
+      - With several rows selected, one of them unread: all become read. Pressed again: all become unread.
+      - With a search hiding the open chat's row, the item's title can be a step behind, because the sidebar updates on changes to the rows it shows. The action is still right.
+    - **Left out.** Mark as Read / Mark as Unread in the right-click menu of several selected rows, which still offers only Archive and Report Spam.
   - Space opens Quick Look on an attachment; Escape leaves selection. **Not built.** A click on an attachment opens Quick Look. Space needs an attachment to be selected first, and nothing in the transcript can be selected.
   - Return sends; Option-Return or Shift-Return adds a new line. **Built** in the reply field (`ReplyFieldKeyPolicy`; `docs/mac-imessage-ui-plan.md`, PR 5).
 - **Toolbar.** New message, sync and search go in the window toolbar.

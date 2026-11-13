@@ -32,6 +32,31 @@ final class MacSidebarSelectionPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.actionTargets(requested: [9], visibleIDs: [1, 2, 3]), [])
     }
 
+    // MARK: - Mark as Read / Mark as Unread
+
+    /// The open chat stays in the chat column while a search hides its row, and the command is
+    /// about the chat in front of the user.
+    ///
+    /// Revert-check: returning `Set(visibleIDs.filter(selection.contains))` for every selection
+    /// from `MacSidebarSelectionPolicy.readStateTargets` makes this fail: Command-Shift-U would
+    /// be disabled with a chat open.
+    func testReadStateTargets_oneSelectedConversation_isTheTarget_listedOrNot() {
+        XCTAssertEqual(Policy.readStateTargets(selection: [9], visibleIDs: [1, 2, 3]), [9])
+        XCTAssertEqual(Policy.readStateTargets(selection: [2], visibleIDs: [1, 2, 3]), [2])
+    }
+
+    /// Revert-check: returning `selection` for every selection from
+    /// `MacSidebarSelectionPolicy.readStateTargets` makes this fail: the command would change
+    /// rows the user cannot see, which Delete does not.
+    func testReadStateTargets_severalSelected_areTheRowsTheListShows() {
+        XCTAssertEqual(Policy.readStateTargets(selection: [1, 2, 9], visibleIDs: [1, 2, 3]), [1, 2])
+        XCTAssertEqual(Policy.readStateTargets(selection: [8, 9], visibleIDs: [1, 2, 3]), [])
+    }
+
+    func testReadStateTargets_nothingSelected_isEmpty() {
+        XCTAssertEqual(Policy.readStateTargets(selection: Set<Int>(), visibleIDs: [1, 2, 3]), [])
+    }
+
     // MARK: - After a list action
 
     /// Revert-check: returning `remaining` (the empty set) at the end of
