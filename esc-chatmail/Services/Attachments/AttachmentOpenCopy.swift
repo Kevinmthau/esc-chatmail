@@ -12,9 +12,14 @@ import Foundation
 /// The copies are account data, and they are kept where account data already is:
 /// `Attachments/Opened/` in Application Support. Sign-out and a fresh install remove the whole
 /// `Attachments` directory, the check for files left from another account counts what is in
-/// it (`AuthSession.hasStoredFiles`), and the orphan sweep removes the `Opened` folder once
-/// nothing has been opened for its grace period (`AttachmentDownloader`). Nothing new had to be
-/// told about them. Never put them in the temporary directory, which none of those know.
+/// it (`AccountScopedMailboxFileInspector.hasStoredFiles`), and the orphan sweep removes the
+/// `Opened` folder once nothing has been opened for its grace period (`AttachmentDownloader`,
+/// `markInUse`). Never put them in the temporary directory, which none of those know.
+///
+/// Making a copy writes into that directory, so whatever makes one does it as registered
+/// account work (`AttachmentAccountWorkRegistry`, as `MacAttachmentOpener` does): sign-out
+/// drains that registry before it removes `Attachments`, and a copy made outside it could
+/// land in the directory while it is being removed, or after.
 ///
 /// Read-only by permission, never locked with the user-immutable flag: removing a directory
 /// fails on a locked file inside it, and sign-out's removal of `Attachments` must not fail.
@@ -37,11 +42,17 @@ enum AttachmentOpenCopy {
     /// it under the attachment's name: two attachments both called `image.jpg` do not share
     /// one, and opening the same attachment again makes no second copy.
     ///
-    /// - Parameter directory: Where the copies are kept. The tests give a temporary one.
+    /// Every copy handed out, a new one or the one made before, moves the date of `directory`
+    /// to `now` (`markInUse`): that date is what the orphan sweep reads.
+    ///
+    /// - Parameters:
+    ///   - directory: Where the copies are kept. The tests give a temporary one.
+    ///   - now: The time the folder of copies is marked as used at.
     static func prepare(
         _ item: AttachmentExportItem,
         in directory: URL,
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        now: Date = Date()
     ) throws -> URL {
         guard fileManager.fileExists(atPath: item.sourceURL.path) else {
             throw AttachmentFileExport.ExportError.sourceMissing(filename: item.filename)
@@ -50,6 +61,7 @@ enum AttachmentOpenCopy {
         let copy = folder.appendingPathComponent(item.filename, isDirectory: false)
         do {
             if isCurrent(copy, of: item, fileManager: fileManager) {
+                markInUse(directory, at: now, fileManager: fileManager)
                 return copy
             }
             // A copy that is not the attachment's (cut short, or left under another name)
@@ -60,6 +72,7 @@ enum AttachmentOpenCopy {
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
             try fileManager.copyItem(at: item.sourceURL, to: copy)
             try fileManager.setAttributes([.posixPermissions: readOnlyPermissions], ofItemAtPath: copy.path)
+            markInUse(directory, at: now, fileManager: fileManager)
             return copy
         } catch {
             throw AttachmentFileExport.ExportError.copyFailed(
@@ -67,6 +80,25 @@ enum AttachmentOpenCopy {
                 reason: error.localizedDescription
             )
         }
+    }
+
+    /// Moves the folder of copies' modification date to `date`.
+    ///
+    /// The orphan sweep (`AttachmentDownloader.cleanupOrphanedFiles`) removes the whole folder
+    /// once its own dates are older than the sweep's grace period, and no attachment row
+    /// names it. A new attachment's folder moves that date by being added, but a copy that is
+    /// handed out again adds nothing, so without this an attachment opened a second time more
+    /// than the grace period after the last new one was a file in a folder the next sweep
+    /// removed, under the app it had just been handed to.
+    ///
+    /// A date that cannot be set is not a reason to refuse the Open: the copy is there. What
+    /// is left then is what was there before, and no worse.
+    ///
+    /// HONEST SCOPE: a sweep that has already judged the folder old, and removes it in the
+    /// moment after this, still wins. That needs the folder idle for the whole grace period
+    /// and the Open inside the sweep's own run, and it costs one "could not be opened".
+    static func markInUse(_ directory: URL, at date: Date, fileManager: FileManager = .default) {
+        try? fileManager.setAttributes([.modificationDate: date], ofItemAtPath: directory.path)
     }
 
     /// The folder for one attachment's copy: its stored file's name, which is the

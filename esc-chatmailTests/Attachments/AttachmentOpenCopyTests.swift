@@ -120,6 +120,49 @@ final class AttachmentOpenCopyTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: opened.path), ["remote_abc.pdf"])
     }
 
+    /// The orphan sweep removes the folder of copies once its own dates are older than the
+    /// sweep's grace period. A copy handed out again adds nothing to the folder, so the date
+    /// is moved for it.
+    ///
+    /// Revert-check: deleting the `markInUse` call from the `if isCurrent(...)` branch of
+    /// `AttachmentOpenCopy.prepare` makes this fail: two hours on, the folder the copy was
+    /// just handed out of is still one the sweep removes.
+    func testPrepare_openedAgain_marksTheFolderOfCopiesAsUsed_soTheSweepLeavesIt() throws {
+        let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "bytes")
+        let firstOpen = Date()
+        _ = try AttachmentOpenCopy.prepare(item, in: opened, now: firstOpen)
+        let twoHoursOn = firstOpen.addingTimeInterval(2 * 60 * 60)
+        let sweepCutoff = twoHoursOn.addingTimeInterval(-AttachmentDownloader.orphanSweepRecentFileGracePeriod)
+        // A new URL for each look, as the sweep has from its own directory listing: a URL
+        // keeps the dates it was first asked for, and `opened` asked twice answered the
+        // second time with the first one's.
+        let folderAsTheSweepSeesIt = { URL(fileURLWithPath: self.opened.path) }
+        // Left alone, the folder is one a sweep two hours on removes.
+        XCTAssertTrue(AttachmentDownloader.isOldEnoughToSweep(folderAsTheSweepSeesIt(), cutoff: sweepCutoff))
+
+        _ = try AttachmentOpenCopy.prepare(item, in: opened, now: twoHoursOn)
+
+        XCTAssertFalse(AttachmentDownloader.isOldEnoughToSweep(folderAsTheSweepSeesIt(), cutoff: sweepCutoff))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: opened.path), ["remote_abc.pdf"])
+    }
+
+    /// Revert-check: deleting the `markInUse` call after `setAttributes` in
+    /// `AttachmentOpenCopy.prepare` makes this fail.
+    ///
+    /// HONEST SCOPE: in the app a new copy's folder moves the date by being added, at the
+    /// time it is added. This pins that the date is the one `prepare` was given.
+    func testPrepare_aNewCopy_marksTheFolderOfCopiesAsUsedAtTheGivenTime() throws {
+        let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "bytes")
+        let given = Date().addingTimeInterval(3 * 60 * 60)
+
+        _ = try AttachmentOpenCopy.prepare(item, in: opened, now: given)
+
+        let modified = try XCTUnwrap(
+            try FileManager.default.attributesOfItem(atPath: opened.path)[.modificationDate] as? Date
+        )
+        XCTAssertEqual(modified.timeIntervalSince(given), 0, accuracy: 1)
+    }
+
     /// A copy cut short by a quit is not the attachment.
     ///
     /// Revert-check: answering true from `AttachmentOpenCopy.isCurrent` for any file that

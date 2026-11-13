@@ -304,7 +304,8 @@ private final class MenuPanels {
         )
     }
 
-    /// An opener whose copies go to `directory` and which hands nothing to `NSWorkspace`.
+    /// An opener whose copies go to `directory` and which hands nothing to `NSWorkspace`. Its
+    /// account boundary is its own: the shared one is the process's.
     func makeOpener(copiesIn directory: URL) -> MacAttachmentOpener {
         MacAttachmentOpener(
             makeCopy: { try AttachmentOpenCopy.prepare($0, in: directory) },
@@ -314,7 +315,8 @@ private final class MenuPanels {
             },
             presentFailure: { title, message in
                 self.alerts.append("\(title)|\(message)")
-            }
+            },
+            registry: AttachmentAccountWorkRegistry()
         )
     }
 }

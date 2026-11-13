@@ -552,9 +552,11 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - It is read-only by permission (0444), which a document app shows as locked. Not locked with the user-immutable flag: removing a directory fails on a locked file inside it, and sign-out's removal of `Attachments` must not fail.
   - **Where the copies are: `Attachments/Opened/` in Application Support**, because they are account data and everything that handles account data already covers that directory. Read from the code, not run:
     - Sign-out removes the whole `Attachments` directory (`AuthSession`), and so does the fresh-install handler.
-    - The check for files left from another account counts what is in it (`AuthSession.hasStoredFiles`).
+    - The check for files left from another account counts what is in it (`AccountScopedMailboxFileInspector.hasStoredFiles`).
     - The orphan sweep (`AttachmentDownloader`) removes any entry of `Attachments` that no attachment row names once it is older than the sweep's grace period, and `Opened` is such an entry. Its date moves when a copy is added, so it goes once nothing has been opened for that long.
-    - Nothing new was wired into `AuthSession`. Never move the copies to the temporary directory, which none of those know.
+    - A copy handed out again adds nothing to the folder, so every copy handed out sets the folder's date itself (`AttachmentOpenCopy.markInUse`, PR 413's review). Before that, an attachment opened a second time more than the grace period after the last new one was in a folder the next sweep removed. A sweep that has already judged the folder old and removes it in the same moment still wins; that costs one "could not be opened".
+    - The copy is made as a registered operation of `AttachmentAccountWorkRegistry` (PR 413's review), the boundary `AuthSession` already drains before it removes `Attachments`, so nothing new was wired into `AuthSession`. A copy in a bare detached task could land in the directory while it was being removed, or after. An Open that a sign-out overtakes opens nothing and shows no alert.
+    - Never move the copies to the temporary directory, which none of those know.
   - **`NSWorkspace` is behind a closure** on `MacAttachmentOpener`, as the save panels are on the exporter, so no test launches an app.
   - **Tests.** `AttachmentOpenPolicyTests` and `AttachmentOpenCopyTests` (both platforms); `MacAttachmentOpenerTests` and more in `MacAttachmentExportMenuTests` (the Mac plan; the real menu is read from the hosting view and Open chosen from it); more in `AttachmentExportPolicyTests`.
   - **Not seen: check in the signed, sandboxed app.** Nothing has been opened.
