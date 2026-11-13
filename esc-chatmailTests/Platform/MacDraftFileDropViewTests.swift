@@ -118,6 +118,36 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
+    /// AppKit asks about a drag at every move of the pointer, and what a drag carries is a
+    /// question to the pasteboard server. It is asked once for each drag.
+    ///
+    /// The pasteboard is emptied after the drag came in, which no real drag's is: it is how
+    /// a second question would show, by being answered differently.
+    ///
+    /// Revert-check: passing `Self.carriesFiles(sender.draggingPasteboard)` in place of
+    /// `carriesFiles(sender)` in `MacDraftFileDropView.operation(for:)` makes the update's
+    /// assertion fail. Returning the kept answer whatever the drag's sequence number makes
+    /// the last assertion fail.
+    func testFileDrag_isAskedOfThePasteboardOnce_andTheNextDragIsAskedAgain() throws {
+        let harness = try Harness()
+        let pasteboard = FakeDraggingInfo.pasteboard(holding: [URL(fileURLWithPath: "/tmp/One.pdf") as NSURL])
+        let drag = FakeDraggingInfo(pasteboard: pasteboard, window: harness.window)
+        XCTAssertEqual(harness.dropView.draggingEntered(drag), .copy)
+
+        pasteboard.clearContents()
+        XCTAssertFalse(MacDraftFileDropView.carriesFiles(pasteboard))
+
+        XCTAssertEqual(harness.dropView.draggingUpdated(drag), .copy)
+        // The drop reads the files themselves, whatever was kept, and finds none.
+        XCTAssertFalse(harness.dropView.performDragOperation(drag))
+        XCTAssertTrue(harness.model.drops.isEmpty)
+
+        let text = FakeDraggingInfo.text("Some words", in: harness.window)
+        XCTAssertNotEqual(text.draggingSequenceNumber, drag.draggingSequenceNumber)
+        XCTAssertEqual(harness.dropView.draggingEntered(text), [])
+        harness.close()
+    }
+
     /// The drop view is behind the whole chat and must take no click from it.
     ///
     /// Revert-check: deleting the `hitTest(_:)` override from `MacDraftFileDropView` makes
@@ -343,6 +373,82 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
+    // MARK: - The picker and a pending drop
+
+    /// A drop the composer took is the picker's to import. One that reaches the picker while
+    /// an import runs waits for that import to end; it is not cleared and forgotten, which
+    /// is what the picker did with it before: the files had left the user's pointer and
+    /// nothing was attached or said.
+    ///
+    /// HONEST SCOPE: the drop here holds no files, so taking it imports nothing: an import
+    /// would write to this host's attachment folder, which is the real app's, and a drop's
+    /// alert would be presented on the test's window. What is pinned is when the picker
+    /// takes the request, seen by the request being cleared.
+    ///
+    /// Revert-check: clearing the request above the guard in
+    /// `AttachmentPicker.importPendingFileDropIfIdle` makes the first assertion fail;
+    /// deleting the `.onChange(of: isProcessing)` from `AttachmentPicker.body` makes the
+    /// wait fail.
+    func testPicker_givenADropDuringAnImport_keepsIt_andTakesItWhenTheImportEnds() async throws {
+        let model = PickerModel()
+        let harness = PickerHarness(model: model)
+        defer { harness.close() }
+        let drop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
+
+        model.isProcessing = true
+        model.fileDrop = drop
+        harness.settle()
+        XCTAssertEqual(model.fileDrop, drop)
+
+        model.isProcessing = false
+        try await harness.waitUntil { model.fileDrop == nil }
+    }
+
+    /// Revert-check: deleting the `.onChange(of: fileDrop.wrappedValue…)` from
+    /// `AttachmentPicker.body` makes this fail.
+    func testPicker_givenADropWhileIdle_takesIt() async throws {
+        let model = PickerModel()
+        let harness = PickerHarness(model: model)
+        defer { harness.close() }
+
+        model.fileDrop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
+
+        try await harness.waitUntil { model.fileDrop == nil }
+    }
+
+    /// A drop taken while no picker was on screen is still the composer's only copy of it,
+    /// and the composer takes no other until it is gone.
+    ///
+    /// Revert-check: dropping `initial: true` from the picker's `onChange` makes this fail.
+    func testPicker_comingOnScreenWithADropPending_takesIt() async throws {
+        let model = PickerModel()
+        model.fileDrop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
+        let harness = PickerHarness(model: model)
+        defer { harness.close() }
+
+        try await harness.waitUntil { model.fileDrop == nil }
+    }
+
+    // MARK: - The stand-in drag
+
+    /// A named pasteboard is the pasteboard server's and outlives the test that made it. The
+    /// stand-in drag releases its own as it goes.
+    ///
+    /// Revert-check: deleting the `deinit` from `FakeDraggingInfo` makes the second
+    /// assertion fail.
+    func testFakeDrag_releasesItsPasteboard_whenItIsGone() {
+        var name: NSPasteboard.Name?
+        autoreleasepool {
+            let drag = FakeDraggingInfo.files([URL(fileURLWithPath: "/tmp/One.pdf")], in: nil)
+            name = drag.draggingPasteboard.name
+            XCTAssertTrue(MacDraftFileDropView.carriesFiles(NSPasteboard(name: drag.draggingPasteboard.name)))
+        }
+
+        let after = NSPasteboard(name: name!)
+        XCTAssertFalse(MacDraftFileDropView.carriesFiles(after))
+        after.releaseGlobally()
+    }
+
     // MARK: - The import of a dropped file
 
     /// Why a drop's import does not ask for a security scope. In the Mac's sandbox a file URL
@@ -403,6 +509,73 @@ final class MacDraftFileDropViewTests: XCTestCase {
 }
 
 // MARK: - Harness
+
+private final class PickerModel: ObservableObject {
+    @Published var attachments: [Attachment] = []
+    @Published var isProcessing = false
+    @Published var fileDrop: DraftFileDrop?
+}
+
+/// The Mac composer's attachment picker, with a composer's bindings.
+private struct PickerStandIn: View {
+    @ObservedObject var model: PickerModel
+
+    var body: some View {
+        AttachmentPicker(
+            attachments: $model.attachments,
+            isProcessing: $model.isProcessing,
+            style: .plusMenu(diameter: 28),
+            fileDrop: $model.fileDrop
+        )
+    }
+}
+
+@MainActor
+private final class PickerHarness {
+    private let window: NSWindow
+    private let host: NSHostingView<PickerStandIn>
+
+    init(model: PickerModel) {
+        window = NSWindow(
+            contentRect: NSRect(x: -30000, y: -30000, width: 100, height: 100),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        host = NSHostingView(rootView: PickerStandIn(model: model))
+        host.frame = NSRect(x: 0, y: 0, width: 100, height: 100)
+        window.contentView = host
+        settle()
+    }
+
+    /// Lets SwiftUI finish its update and run the `onChange` actions it owes.
+    func settle() {
+        host.layoutSubtreeIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        host.layoutSubtreeIfNeeded()
+    }
+
+    func waitUntil(
+        timeout: TimeInterval = 5,
+        pollIntervalNanoseconds: UInt64 = 10_000_000,
+        _ condition: () -> Bool
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                return XCTFail("The condition was not met in \(timeout) s")
+            }
+            host.layoutSubtreeIfNeeded()
+            try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+    }
+
+    func close() {
+        window.contentView = nil
+        window.close()
+    }
+}
 
 private final class DropModel: ObservableObject {
     var text: String

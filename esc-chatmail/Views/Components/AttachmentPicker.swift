@@ -23,7 +23,7 @@ struct AttachmentPicker: View {
     /// (the Mac's composer). What a picker returns is handled the same either way.
     var style: AttachmentPickerStyle = .inlineButtons
     /// Files dropped on the chat, for this picker to import (`DraftFileDrop`). The picker takes
-    /// each request once and clears it. Nothing sets one on iOS.
+    /// each request once and clears it as it starts on it. Nothing sets one on iOS.
     var fileDrop: Binding<DraftFileDrop?> = .constant(nil)
     @Environment(\.managedObjectContext) private var viewContext
     @State private var showPhotoPicker = false
@@ -73,10 +73,14 @@ struct AttachmentPicker: View {
             onOperationChanged: { documentProcessingTask = $0 },
             onImportFailures: { importErrorMessage = DraftAttachmentImport.failureMessage($0) }
         )
-        .onChange(of: fileDrop.wrappedValue) { _, drop in
-            guard let drop else { return }
-            fileDrop.wrappedValue = nil
-            importDroppedFiles(drop)
+        // A drop is imported when it arrives, or, where an import is running then, when that
+        // one ends (`importPendingFileDropIfIdle`). `initial`, for a drop that was taken
+        // while no picker was on screen to hear of it.
+        .onChange(of: fileDrop.wrappedValue, initial: true) { _, _ in
+            importPendingFileDropIfIdle()
+        }
+        .onChange(of: isProcessing) { _, _ in
+            importPendingFileDropIfIdle()
         }
         .alert("Some Attachments Weren’t Added", isPresented: Binding(
             get: { importErrorMessage != nil },
@@ -88,17 +92,27 @@ struct AttachmentPicker: View {
         }
     }
     
+    /// Starts on the composer's pending drop unless an import is running
+    /// (`DraftFileDropPolicy.startsImport`), and is asked again when that import ends.
+    ///
+    /// A drop is decided before it gets here (`DraftFileDropPolicy.decision`), and refused
+    /// during an import, so one already running is not expected. It is still checked: two
+    /// imports share `isProcessing`, and the first to end would turn it off under the other.
+    /// The drop is left where it is then, not cleared. The chat told AppKit the drop was
+    /// taken, so the files did not slide back, and clearing it here attached nothing and said
+    /// nothing.
+    private func importPendingFileDropIfIdle() {
+        guard DraftFileDropPolicy.startsImport(
+            hasPendingDrop: fileDrop.wrappedValue != nil,
+            isProcessingAttachments: isProcessing
+        ), let drop = fileDrop.wrappedValue else { return }
+        fileDrop.wrappedValue = nil
+        importDroppedFiles(drop)
+    }
+
     /// Imports the files of a drop as the Files picker imports its own, and names the files
     /// the drop could not take in the alert the import's failures use.
-    ///
-    /// A drop is decided before it gets here (`DraftFileDropPolicy.decision`), so an import
-    /// already running is not expected. It is still checked: two imports share `isProcessing`,
-    /// and the first to end would turn it off under the other.
     private func importDroppedFiles(_ drop: DraftFileDrop) {
-        guard !isProcessing else {
-            Log.warning("A file drop arrived during an attachment import and was not imported", category: .ui)
-            return
-        }
         let unsupported = DraftFileDropPolicy.failures(forUnsupportedFilenames: drop.unsupportedFilenames)
         if let message = DraftAttachmentImport.failureMessage(unsupported) {
             importErrorMessage = message
