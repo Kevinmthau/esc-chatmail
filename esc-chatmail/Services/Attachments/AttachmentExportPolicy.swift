@@ -83,10 +83,13 @@ enum AttachmentExportPolicy {
     ///
     /// - Parameters:
     ///   - storedFilename: `Attachment.filename`.
-    ///   - sourceExtension: The extension of the file on disk. Given to a name with nothing
-    ///     after a dot, where the download took it from the attachment's type, so the saved
-    ///     file opens.
-    static func filename(storedFilename: String, sourceExtension: String) -> String {
+    ///   - typeExtension: The extension for the attachment's type
+    ///     (`AttachmentPaths.fileExtension(for:)` of its MIME type). Given to a name that has
+    ///     no extension of its own (`splitExtension`), so the saved file opens. Not the
+    ///     extension of the file on disk: the download names that after whatever follows the
+    ///     name's last dot, so for `Screen Shot at 1.02.33` it is `33` and says nothing of
+    ///     the type.
+    static func filename(storedFilename: String, typeExtension: String) -> String {
         // Unicode scalars throughout, never `Character`s. A "/" followed by a combining scalar
         // (a zero-width joiner, an accent) is one `Character` that is not "/", so a split on
         // `Character`s kept `Library/\u{200D}x.plist` whole, and Save All wrote it into a
@@ -105,8 +108,10 @@ enum AttachmentExportPolicy {
         if name.isEmpty {
             name = fallbackBaseName
         }
-        let cleanExtension = sourceExtension.filter { $0.isLetter || $0.isNumber }
-        if !hasSuffixAfterDot(name), !cleanExtension.isEmpty, cleanExtension != unknownTypeExtension {
+        let cleanExtension = typeExtension.filter { $0.isLetter || $0.isNumber }
+        if splitExtension(of: name).pathExtension.isEmpty,
+           !cleanExtension.isEmpty,
+           cleanExtension != unknownTypeExtension {
             // A name that ended in a dot would otherwise get two.
             while name.unicodeScalars.last == "." {
                 name = string(name.unicodeScalars.dropLast())
@@ -116,21 +121,10 @@ enum AttachmentExportPolicy {
         return truncated(name)
     }
 
-    /// The extension the download gives a file whose type it does not know
-    /// (`AttachmentPaths.fileExtension`). It says nothing about the file, so it is not added
-    /// to a name: `Makefile` stays `Makefile`.
+    /// The extension given to a file whose type is not known (`AttachmentPaths.fileExtension`).
+    /// It says nothing about the file, so it is not added to a name: `Makefile` stays
+    /// `Makefile`.
     static let unknownTypeExtension = AttachmentPaths.fileExtension(for: "application/octet-stream")
-
-    /// Whether a name already ends in something after a dot, so the stored file's extension is
-    /// not added to it. Looser than `splitExtension`: `main.c++` and `notes.txt~` end in
-    /// one, and the download named the stored file after it. A space ends the claim:
-    /// `report v1.2 final` has none.
-    static func hasSuffixAfterDot(_ name: String) -> Bool {
-        let scalars = Array(name.unicodeScalars)
-        guard let dot = scalars.lastIndex(of: "."), dot > 0 else { return false }
-        let suffix = scalars[(dot + 1)...]
-        return !suffix.isEmpty && !suffix.contains(where: { $0.properties.isWhitespace })
-    }
 
     private static func string<S: Sequence>(_ scalars: S) -> String where S.Element == Unicode.Scalar {
         var view = String.UnicodeScalarView()
@@ -159,19 +153,33 @@ enum AttachmentExportPolicy {
     /// The longest run after a name's last dot that is still read as its type.
     private static let maximumExtensionLength = 16
 
-    /// A name's extension and what stands before it. Only letters and digits after the last
-    /// dot are an extension: `report v1.2 final` has none, and is given the file's own.
+    /// A name's extension and what stands before it: the one rule for it, asked by everything
+    /// that needs to know (whether the type's extension is added, where a number goes in
+    /// `availableFilename`, what `truncated` keeps, the type a dragged file is announced as).
+    ///
+    /// What follows the last dot is an extension when it is short, has no space in it and is
+    /// not all digits:
+    /// - `main.c++` and `notes.txt~` have one. Letters and digits alone would be too strict.
+    /// - `report v1.2 final` has none: a space ends the claim.
+    /// - `Screen Shot at 1.02.33`, `Report 2026.11.13` and `v2.0` have none. Digits after a
+    ///   dot are far more often a time, a date or a version than a type, and read as an
+    ///   extension they left the saved file with no type at all. The cost is `archive.001`,
+    ///   which is given its type's extension where that is known.
+    ///
+    /// Unicode scalars, as in `filename`: a dot with a combining mark after it is still a dot.
     static func splitExtension(of name: String) -> (base: String, pathExtension: String) {
-        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else {
+        let scalars = Array(name.unicodeScalars)
+        guard let dot = scalars.lastIndex(of: "."), dot > 0 else {
             return (name, "")
         }
-        let candidate = name[name.index(after: dot)...]
+        let candidate = scalars[(dot + 1)...]
         guard !candidate.isEmpty,
               candidate.count <= maximumExtensionLength,
-              candidate.allSatisfy({ $0.isLetter || $0.isNumber }) else {
+              !candidate.contains(where: { $0.properties.isWhitespace }),
+              !candidate.allSatisfy({ $0.properties.generalCategory == .decimalNumber }) else {
             return (name, "")
         }
-        return (String(name[..<dot]), String(candidate))
+        return (string(scalars[..<dot]), string(candidate))
     }
 
     /// The direction marks, embeddings, overrides and isolates.

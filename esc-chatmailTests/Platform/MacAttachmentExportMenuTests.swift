@@ -44,26 +44,21 @@ final class MacAttachmentExportMenuTests: XCTestCase {
         try await super.tearDown()
     }
 
-    /// An attachment whose file, where it has one, is `<its id>.<ext>` in the temporary
-    /// directory.
     private func attachment(
         _ filename: String,
         state: Attachment.State = .downloaded,
         bytes: String? = "bytes"
     ) throws -> Attachment {
-        let id = "local_\(UUID().uuidString)"
-        let attachment = AttachmentBuilder().withId(id).withFilename(filename).build(in: context)
-        attachment.state = state
-        let stored = "\(id).\((filename as NSString).pathExtension)"
-        attachment.localURL = stored
-        if let bytes {
-            try Data(bytes.utf8).write(to: directory.appendingPathComponent(stored))
-        }
-        return attachment
+        try FileBackedAttachmentFixture.make(filename, state: state, bytes: bytes, in: context, directory: directory)
     }
 
-    private func makeHarness(_ attachments: [Attachment], inAMessageRow: Bool = true) -> Harness {
-        let harness = Harness(attachments: attachments, directory: directory, inAMessageRow: inAMessageRow)
+    private func makeHarness(_ attachments: [Attachment], inAMessageRow: Bool = true) throws -> Harness {
+        let harness = Harness(
+            window: try makeTestHostWindow(),
+            attachments: attachments,
+            directory: directory,
+            inAMessageRow: inAMessageRow
+        )
         harnesses.append(harness)
         return harness
     }
@@ -89,7 +84,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Deleting the `if let messageMenu` block from it makes the first fail too: the
     /// attachment's menu has no Reply or Forward.
     func testRightClick_onAnAttachment_opensItsMenu_endingWithTheMessages_andOnTheRestOfTheRow_theMessages() throws {
-        let harness = makeHarness([try attachment("Report.pdf")])
+        let harness = try makeHarness([try attachment("Report.pdf")])
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
@@ -104,7 +99,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: deleting the `if let messageMenu` block from
     /// `MacAttachmentExportMenu.body` makes this fail: the attachment's menu has no Reply.
     func testReply_chosenFromAnAttachmentsMenu_isTheMessagesReply() throws {
-        let harness = makeHarness([try attachment("Beach.jpg"), try attachment("Tickets.pdf")])
+        let harness = try makeHarness([try attachment("Beach.jpg"), try attachment("Tickets.pdf")])
 
         try harness.choose("Reply", at: harness.pointOnAttachment(1))
         try harness.choose("Forward", at: harness.pointOnText)
@@ -119,7 +114,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: drawing the `Divider()` outside the `if let messageMenu` block makes
     /// this fail.
     func testMenu_ofAnAttachmentOutsideAMessageRow_hasItsOwnEntriesOnly() throws {
-        let harness = makeHarness([try attachment("Report.pdf")], inAMessageRow: false)
+        let harness = try makeHarness([try attachment("Report.pdf")], inAMessageRow: false)
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
@@ -129,7 +124,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
 
     /// Revert-check: deleting `.disabled(!entry.isEnabled)` makes this fail.
     func testMenu_ofAnAttachmentStillDownloading_hasItsEntriesDisabled() throws {
-        let harness = makeHarness([try attachment("Report.pdf", state: .queued, bytes: nil)])
+        let harness = try makeHarness([try attachment("Report.pdf", state: .queued, bytes: nil)])
 
         XCTAssertEqual(
             try harness.menuEntries(at: harness.pointOnAttachment(0)),
@@ -140,7 +135,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: passing `shownCount: 1` to `AttachmentExportPolicy.menu` makes the first
     /// assertion fail; passing `readyCount: 0` makes Save All read as off.
     func testMenu_whereTheMessageShowsSeveral_addsSaveAll_onEachOfThem() throws {
-        let harness = makeHarness([
+        let harness = try makeHarness([
             try attachment("Beach.jpg"),
             try attachment("Loading.png", state: .queued, bytes: nil)
         ])
@@ -161,7 +156,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// `attachment` in the `.save` case makes this fail: the second attachment's menu saves
     /// the first.
     func testSaveAttachment_savesTheAttachmentThatWasClicked_underItsName() async throws {
-        let harness = makeHarness([
+        let harness = try makeHarness([
             try attachment("Beach.jpg", bytes: "beach"),
             try attachment("dir/Tickets.pdf", bytes: "tickets")
         ])
@@ -179,7 +174,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: returning from the `.save` case when `resolveItem` answers nil makes this
     /// fail.
     func testSaveAttachment_whoseFileIsGone_saysSo() async throws {
-        let harness = makeHarness([try attachment("Report.pdf", bytes: nil)])
+        let harness = try makeHarness([try attachment("Report.pdf", bytes: nil)])
 
         try harness.choose("Save Attachment…", at: harness.pointOnAttachment(0))
         try await waitUntil { !harness.panels.alerts.isEmpty }
@@ -191,7 +186,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: passing `[attachment]` in place of `shownAttachments` in the `.saveAll`
     /// case makes this fail.
     func testSaveAll_savesEveryAttachmentWithAFile_whicheverWasClicked() async throws {
-        let harness = makeHarness([
+        let harness = try makeHarness([
             try attachment("image.jpg", bytes: "one"),
             try attachment("image.jpg", bytes: "two"),
             try attachment("Loading.png", state: .queued, bytes: nil)
@@ -216,7 +211,7 @@ final class MacAttachmentExportMenuTests: XCTestCase {
     /// Revert-check: deleting `onQuickLook()` from the `.quickLook` case makes this fail.
     func testQuickLook_opensTheAttachmentThatWasClicked() throws {
         let attachments = [try attachment("Beach.jpg"), try attachment("Tickets.pdf")]
-        let harness = makeHarness(attachments)
+        let harness = try makeHarness(attachments)
 
         try harness.choose("Quick Look", at: harness.pointOnAttachment(1))
 
@@ -255,145 +250,73 @@ private final class MenuPanels {
     }
 }
 
-/// A message's row as far as menus go: text above, its attachments in a line below, and the
-/// row's own menu around both, with its entries handed down as `ChatMessagesView` hands its
-/// own. With `inAMessageRow` false, the attachments alone, with no menu around them.
-private struct RowStandIn: View {
-    static let cell: CGFloat = 100
-
-    let attachments: [Attachment]
-    let panels: MenuPanels
-    let exporter: MacAttachmentExporter
-    let directory: URL
-    let inAMessageRow: Bool
-
-    var body: some View {
-        if inAMessageRow {
-            content
-                .contentShape(Rectangle())
-                .macEnclosingMessageMenu { messageEntries }
-                .contextMenu { messageEntries } preview: {
-                    Text("Preview")
-                }
-        } else {
-            content
-        }
-    }
-
-    @ViewBuilder
-    private var messageEntries: some View {
-        Button("Reply") { panels.messageActions.append("Reply") }
-        Button("Forward") { panels.messageActions.append("Forward") }
-    }
-
-    private var content: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("The message's text")
-                .frame(width: Self.cell * 3, height: Self.cell)
-            HStack(spacing: 0) {
-                ForEach(attachments, id: \.objectID) { attachment in
-                    Color.red
-                        .frame(width: Self.cell, height: Self.cell)
-                        .modifier(
-                            MacAttachmentExportMenu(
-                                attachment: attachment,
-                                shownAttachments: attachments,
-                                onQuickLook: { panels.quickLooked.append(attachment.objectID) },
-                                exporter: exporter,
-                                resolveItem: { attachment in
-                                    AttachmentExportItem(
-                                        attachment: attachment,
-                                        resolveURL: { $0.map { directory.appendingPathComponent($0) } }
-                                    )
-                                }
-                            )
-                        )
-                }
-            }
-            .frame(width: Self.cell * 3, height: Self.cell, alignment: .leading)
-        }
-    }
-}
-
+/// The suite's harness: the shared row stand-in (`MacMessageRowStandIn`) with the real menu
+/// modifier on a colored square for each attachment, in the shared off-screen host.
 @MainActor
 private final class Harness {
-    let panels = MenuPanels()
-    private let window: NSWindow
-    private let host: NSHostingView<RowStandIn>
+    private static let columns = 3
 
-    init(attachments: [Attachment], directory: URL, inAMessageRow: Bool) {
-        let size = CGSize(width: RowStandIn.cell * 3, height: RowStandIn.cell * 2)
-        window = NSWindow(
-            contentRect: NSRect(x: -30000, y: -30000, width: size.width, height: size.height),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.isReleasedWhenClosed = false
-        host = NSHostingView(
-            rootView: RowStandIn(
-                attachments: attachments,
-                panels: panels,
-                exporter: panels.makeExporter(),
-                directory: directory,
-                inAMessageRow: inAMessageRow
+    let panels: MenuPanels
+    private let host: MacOffscreenHost
+
+    init(window: NSWindow, attachments: [Attachment], directory: URL, inAMessageRow: Bool) {
+        let panels = MenuPanels()
+        self.panels = panels
+        let exporter = panels.makeExporter()
+        let cell = MacMessageRowStandInLayout.cell
+        host = MacOffscreenHost(
+            window: window,
+            size: MacMessageRowStandInLayout.size(columns: Self.columns),
+            rootView: MacMessageRowStandIn(
+                columns: Self.columns,
+                inAMessageRow: inAMessageRow,
+                onMessageAction: { panels.messageActions.append($0) },
+                attachments: {
+                    ForEach(attachments, id: \.objectID) { attachment in
+                        Color.red
+                            .frame(width: cell, height: cell)
+                            .modifier(
+                                MacAttachmentExportMenu(
+                                    attachment: attachment,
+                                    shownAttachments: attachments,
+                                    onQuickLook: { panels.quickLooked.append(attachment.objectID) },
+                                    exporter: exporter,
+                                    resolveItem: { attachment in
+                                        AttachmentExportItem(
+                                            attachment: attachment,
+                                            resolveURL: { $0.map { directory.appendingPathComponent($0) } }
+                                        )
+                                    }
+                                )
+                            )
+                    }
+                }
             )
         )
-        host.frame = NSRect(origin: .zero, size: size)
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
         // SwiftUI finishes its first update on a later turn of the run loop.
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-        host.layoutSubtreeIfNeeded()
+        host.settle()
     }
 
-    /// Window coordinates, y up: the text is the upper half and the attachments the lower.
     var pointOnText: NSPoint {
-        NSPoint(x: RowStandIn.cell * 1.5, y: RowStandIn.cell * 1.5)
+        MacMessageRowStandInLayout.pointOnText(columns: Self.columns)
     }
 
     func pointOnAttachment(_ index: Int) -> NSPoint {
-        NSPoint(x: RowStandIn.cell * (CGFloat(index) + 0.5), y: RowStandIn.cell * 0.5)
+        MacMessageRowStandInLayout.pointOnAttachment(index)
     }
 
-    /// The menu AppKit would open for a right-click at `point`.
-    func menu(at point: NSPoint) throws -> NSMenu {
-        let event = try XCTUnwrap(
-            NSEvent.mouseEvent(
-                with: .rightMouseDown,
-                location: point,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 1,
-                pressure: 1
-            )
-        )
-        return try XCTUnwrap(host.menu(for: event), "No menu at \(point)")
-    }
-
+    /// The entries of the menu AppKit would open for a right-click at `point`.
     func menuEntries(at point: NSPoint) throws -> [String] {
-        let menu = try menu(at: point)
-        menu.update()
-        return menu.items.map {
-            $0.isSeparatorItem ? "---" : "\($0.title):\($0.isEnabled ? "on" : "off")"
-        }
+        host.entries(of: try XCTUnwrap(try host.menu(at: point), "No menu at \(point)"))
     }
 
     /// Chooses the entry titled `title`, as a click on it would.
     func choose(_ title: String, at point: NSPoint) throws {
-        let menu = try menu(at: point)
-        let index = menu.indexOfItem(withTitle: title)
-        XCTAssertGreaterThanOrEqual(index, 0, "No \"\(title)\" in \(menu.items.map(\.title))")
-        guard index >= 0 else { return }
-        menu.performActionForItem(at: index)
+        try host.choose(title, at: point)
     }
 
     func close() {
-        window.contentView = nil
-        window.close()
+        host.close()
     }
 }
 #endif
