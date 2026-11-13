@@ -25,6 +25,31 @@ struct DocumentAttachmentImporter {
     let onImportFailures: @MainActor ([String]) -> Void
     /// The account boundary the import registers with, so sign-out cancels and drains it.
     var registry: AttachmentAccountWorkRegistry = .shared
+    /// Whether each file must come with a security scope to be read (`SecurityScope`).
+    var securityScope: SecurityScope = .required
+
+    /// What the import asks of a file's security scope before it reads the file.
+    enum SecurityScope: Equatable {
+        /// The file must open a scope: a picker's files do, and one that does not is not the
+        /// user's pick.
+        case required
+        /// A scope is opened when the file has one, and the file is read either way: a file
+        /// dropped on the window. In the Mac's sandbox
+        /// `startAccessingSecurityScopedResource()` answers false for a file URL that came
+        /// from no picker (measured in the sandboxed test host, 2026-11-12, for one read from
+        /// a pasteboard), so requiring it would refuse every drop. A dropped file's permission
+        /// to be read is expected to come with the drag. One the app cannot read fails at the
+        /// size check, by name.
+        case ifOffered
+
+        /// Whether to go on to read a file whose scope did (`true`) or did not open.
+        func allowsReading(didStartAccessing: Bool) -> Bool {
+            switch self {
+            case .required: return didStartAccessing
+            case .ifOffered: return true
+            }
+        }
+    }
 
     /// Starts importing `urls` as an account-scoped operation and reports it through
     /// `onOperationChanged`, so its owner can cancel it.
@@ -59,11 +84,15 @@ struct DocumentAttachmentImporter {
 
         documentLoop: for url in urls {
             guard generation.isActive else { break }
-            guard url.startAccessingSecurityScopedResource() else {
+            let didStartAccessing = url.startAccessingSecurityScopedResource()
+            // Balanced on every path out of this file's turn, and only when the scope opened.
+            defer {
+                if didStartAccessing { url.stopAccessingSecurityScopedResource() }
+            }
+            guard securityScope.allowsReading(didStartAccessing: didStartAccessing) else {
                 failures.append(DraftAttachmentImport.ImportError.unreadable(filename: url.lastPathComponent).localizedDescription)
                 continue
             }
-            defer { url.stopAccessingSecurityScopedResource() }
 
             let filename = url.lastPathComponent
             var mimeType = mimeType(for: url.pathExtension)

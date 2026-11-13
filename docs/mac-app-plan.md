@@ -1,6 +1,6 @@
 # Plan: replace the web app with a Mac app
 
-Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status (2026-11-10): Phase 0 is applied, and every Phase 1 PR is merged.** The Mac app was first launched on 2026-11-10, signed and sandboxed. Sign-in, initial sync and opening a chat worked; the rest of Phase 1's check is still to walk (see "First launch"). Phases 2 to 4 have not started. The error counts in this plan were measured before Phase 1, by test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
+Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status (2026-11-10): Phase 0 is applied, and every Phase 1 PR is merged.** The Mac app was first launched on 2026-11-10, signed and sandboxed. Sign-in, initial sync and opening a chat worked; the rest of Phase 1's check is still to walk (see "First launch"). Phase 2 is partly built: each of its entries says what is (2026-11-12). Phases 3 and 4 have not started. The error counts in this plan were measured before Phase 1, by test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
 
 ## Summary
 
@@ -432,19 +432,44 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - Its failure alert names the command. It named a Settings switch the Mac does not have.
     - Not yet seen on screen: the command, its alerts, or its state under a sheet.
 - **Menus and shortcuts:**
-  - Cmd-N new message, Cmd-R sync now, Cmd-F search.
-  - Delete archives; Cmd-Shift-U toggles unread.
-  - Space opens Quick Look on an attachment; Escape leaves selection.
-  - Return sends; Option-Return or Shift-Return adds a new line (`.onKeyPress`).
+  - Cmd-N new message, Cmd-R sync now, Cmd-F search. **Built** (`MailboxCommands`; Cmd-R is Mailbox > Get New Mail).
+  - Delete archives (**built**, `MacConversationSidebar`); Cmd-Shift-U toggles unread (**not built**: the row's right-click menu and its swipe toggle it).
+  - Space opens Quick Look on an attachment; Escape leaves selection. **Not built.** A click on an attachment opens Quick Look. Space needs an attachment to be selected first, and nothing in the transcript can be selected.
+  - Return sends; Option-Return or Shift-Return adds a new line. **Built** in the reply field (`ReplyFieldKeyPolicy`; `docs/mac-imessage-ui-plan.md`, PR 5).
 - **Toolbar.** New message, sync and search go in the window toolbar.
-- **Selection.**
+  - **Built:** New Message, at the chat column's leading edge. Search is the sidebar's own field, as in Messages.
+  - **Not built:** a sync button. Sync is the Cmd-R menu command only; Messages' toolbar has nothing like it.
+- **Selection.** **Built** (`docs/mac-imessage-ui-plan.md`, PR 1).
   - `List(selection:)` with Shift-click and Cmd-click drives the existing selection service and batch actions.
   - Rows and message bubbles get right-click menus.
 - **Files.**
-  - Drop files into the composer, through the existing draft-attachment import.
-  - Drag attachments out of a message.
-  - Add Save Attachment… (`fileExporter`).
-  - Open attachments in their default app (`NSWorkspace`).
+  - Drop files into the composer, through the existing draft-attachment import. **Built 2026-11-12 for the chat's reply** (below). Not for New Message or Forward, whose sheet has its own attachment code (`ComposeInputBar`).
+  - Drag attachments out of a message. **Not built.**
+  - Add Save Attachment… (`fileExporter`). **Not built.**
+  - Open attachments in their default app (`NSWorkspace`). **Not built.** It needs a rule for which kinds of file may be opened: `NSWorkspace.open` on an attachment runs whatever the file's type launches.
+
+  **Files dropped on a chat, as built (2026-11-12).** A file dragged from the Finder onto the chat column, anywhere on it, becomes an attachment of the reply.
+
+  - **What it takes.** What the "+" menu's Files picker offers, images and PDFs, through the same import (`DocumentAttachmentImporter`): the same size budget, the same re-encoding of images, the same placeholder and thumbnail. A dropped file of another kind, or a folder, is named in the alert that import failures use ("… can’t be attached. Only images and PDFs can be."). A drop is refused, and the pointer shows no copy badge, where the picker's button is disabled: while a send owns the draft and while another import is running (`DraftFileDropPolicy`). It is also refused while the window has a sheet attached.
+  - **How.** `ChatView` puts one AppKit view behind the whole chat (`View.macDraftFileDrop`, `MacDraftFileDropView`), registered for file URLs and returning nil from `hitTest`, so it takes drags and no clicks. A drop becomes `ChatComposerState.pendingFileDrop`, which the composer's `AttachmentPicker` imports once and clears. The chat does not observe the composer's state for this: the drop view's closures read it when a drag asks.
+  - **Why not SwiftUI's `dropDestination`.** Measured in the sandboxed test host on macOS 27.2, by giving the window's own private drag hit test (`-[NSWindow _findDragTargetFrom:]`) a stand-in drag at points over a chat-shaped view:
+    - A SwiftUI drop destination is an AppKit view placed behind the content. Over SwiftUI-drawn content, and over an AppKit view not registered for drags, AppKit chose it.
+    - Over the reply field it chose the field's text view, which **typed the file's path into the draft**.
+    - Over a web view it chose the web view, with `hitTest` returning nil (`makeNonInteractive()`) and after `unregisterDraggedTypes()` alike. Given the drop, the web view **loaded the dropped file in place of its page**, as a navigation of type `.other` (its delegate in that measurement allowed everything). A preview card's delegate allows `.other`, the type of its own first load, so a file dropped on an email card in the transcript is expected to have replaced the card's content, on any Mac build before this change. That was read from the card's delegate, not run with it.
+    - A drop view of the app's own can be handed a drag by another view, which a private SwiftUI view cannot. So the text view and the web view hand a file drag to the drop view under the pointer (`MacFileDropForwarder`), and it can refuse a drag before the drop where a SwiftUI destination can only refuse the drop.
+  - **The reply field** (`MacReplyTextView`). A drag of files goes to the chat; with no chat behind the field it is refused, so a path is never typed. A drag of text is the text view's, as before.
+  - **Every email web view** (`LayoutAwareWKWebView`: preview cards and the reader). No drag reaches WebKit any more. A drag of files goes to the chat behind the web view; every other drag, and a file drag over the reader's sheet, is refused.
+  - **Security scope.** In the sandboxed test host `startAccessingSecurityScopedResource()` answers false for a file URL that came from no picker, read from a pasteboard or not. The pickers' import requires that call to succeed; a drop's import does not (`DocumentAttachmentImporter.SecurityScope.ifOffered`) and reads the file anyway. The test host logged "No sandbox extension entry in cache when one was expected … flavor: public.file-url" for the tests' stand-in pasteboards, so a real drag's pasteboard is expected to carry the permission to read its files. That is the one link not measured: no file from outside the container was dropped.
+  - **Tests.** `DraftFileDropPolicyTests` (both platforms) and `MacDraftFileDropViewTests` (the Mac plan): the real drop view, the real reply field and a real `LayoutAwareWKWebView` in a window that is never shown, each handed a stand-in drag (`FakeDraggingInfo`). `DocumentAttachmentImporterTests` gained the import of a real file, which it had no test of. `ChatFileDropSourceTests` pins the wiring from the chat to the picker. Each of the 46 changes named in their `Revert-check:` comments was undone alone, and each time a test that names it failed.
+  - **Not seen: check in the signed, sandboxed app.**
+    - A PDF and an image dragged from the Finder onto the transcript, onto the reply field and onto an email card: each appears in the strip above the field, and nothing is typed and no card changes.
+    - A file from outside the app's container is read. If the alert says it "could not be read", the drag's permission did not reach the import.
+    - The pointer's copy badge over the chat, and none while a send is in flight or over the sidebar.
+    - A `.zip` dropped: the alert names it. A PDF and a `.zip` together: the PDF is attached and the alert names the `.zip`.
+    - A drag over the chat while a sheet is up (New Message, the reader): whether AppKit offers it at all was not measured; it should be refused.
+    - A photo dragged from Photos, an image from Safari, an attachment from Mail: these are file promises, not files, and are not taken. Whether the pointer shows a badge for them was not measured.
+    - Scrolling the transcript and clicking its empty space are as before, with the drop view behind it.
+  - **Left out.** Paste: a file copied in the Finder and pasted into the field still types its path (measured by having the text view read a pasteboard of a file URL), and a copied image is not attached. A highlight on the chat while a file is over it. File promises. The New Message and Forward sheet.
 - **Closing the window quits the app. Decided 2026-11-11 (decision 7).** The alternative was to keep running and syncing like Mail, where clicking the Dock icon reopens the window. Sync follows the app's lifetime, so it stops when the window closes.
   - **How.** The app's only scene is a `Window` (built 2026-11-10), and SwiftUI quits such an app when its window closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. Nothing else was added for it.
   - **Measured 2026-11-11 in a stand-in program** on macOS 27.2, not in the app:

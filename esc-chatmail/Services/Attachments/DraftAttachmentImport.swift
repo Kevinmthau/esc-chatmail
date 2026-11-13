@@ -22,6 +22,9 @@ enum DraftAttachmentImport {
         case sizeLimit(filename: String)
         case unreadable(filename: String)
         case cannotSave(filename: String)
+        /// The file is neither an image nor a PDF, which is all a draft takes. Only a file
+        /// dropped on a chat can be one (`DraftFileDropPolicy`): the pickers offer nothing else.
+        case unsupportedType(filename: String)
 
         var errorDescription: String? {
             switch self {
@@ -31,6 +34,8 @@ enum DraftAttachmentImport {
                 return "\(filename) could not be read. Try selecting it again."
             case .cannotSave(let filename):
                 return "\(filename) could not be saved. Free some device storage and try again."
+            case .unsupportedType(let filename):
+                return "\(filename) can’t be attached. Only images and PDFs can be."
             }
         }
     }
