@@ -23,6 +23,12 @@ struct AttachmentGrid: View {
                     imagePresentation: imagePresentations[attachment.objectID] ?? .standard,
                     onTap: { onTap(attachment) }
                 )
+                // On the cell, not the grid: the menu is the clicked attachment's.
+                .macAttachmentExportMenu(
+                    attachment: attachment,
+                    shownAttachments: attachments,
+                    onQuickLook: { onTap(attachment) }
+                )
             }
         }
         .cornerRadius(14)

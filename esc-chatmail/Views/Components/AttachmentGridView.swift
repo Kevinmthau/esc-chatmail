@@ -44,6 +44,16 @@ struct AttachmentGridView: View {
                         )
                     }
                 )
+                .macAttachmentExportMenu(
+                    attachment: attachment,
+                    shownAttachments: resolvedAttachments,
+                    onQuickLook: {
+                        presentQuickLook(
+                            for: attachment,
+                            in: resolvedAttachments
+                        )
+                    }
+                )
             } else if resolvedAttachments.count > 1 {
                 AttachmentGrid(
                     attachments: resolvedAttachments,

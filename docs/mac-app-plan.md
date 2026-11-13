@@ -445,7 +445,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 - **Files.**
   - Drop files into the composer, through the existing draft-attachment import. **Built 2026-11-12 for the chat's reply** (below). Not for New Message or Forward, whose sheet has its own attachment code (`ComposeInputBar`).
   - Drag attachments out of a message. **Not built.**
-  - Add Save Attachment… (`fileExporter`). **Not built.**
+  - Add Save Attachment…. **Built 2026-11-13** (below), with AppKit's save panel, not `fileExporter`.
   - Open attachments in their default app (`NSWorkspace`). **Not built.** It needs a rule for which kinds of file may be opened: `NSWorkspace.open` on an attachment runs whatever the file's type launches.
 
   **Files dropped on a chat, as built (2026-11-12).** A file dragged from the Finder onto the chat column, anywhere on it, becomes an attachment of the reply.
@@ -470,6 +470,24 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - A photo dragged from Photos, an image from Safari, an attachment from Mail: these are file promises, not files, and are not taken. Whether the pointer shows a badge for them was not measured.
     - Scrolling the transcript and clicking its empty space are as before, with the drop view behind it.
   - **Left out.** Paste: a file copied in the Finder and pasted into the field still types its path (measured by having the text view read a pasteboard of a file URL), and a copied image is not attached. A highlight on the chat while a file is over it. File promises. The New Message and Forward sheet.
+  **Save Attachment…, as built (2026-11-13).** A right-click on an attachment in a chat opens the attachment's own menu: Quick Look, Save Attachment…, and Save All Attachments… where the message shows more than one.
+
+  - **Where the menu is.** On each attachment view (`View.macAttachmentExportMenu`, `MacAttachmentExportMenu`), applied by `AttachmentGridView` to a single attachment and by `AttachmentGrid` to each cell. The message's row has a menu of its own; a right-click on a view with its own context menu opens that one. Measured in the sandboxed test host on macOS 27.2, by asking the hosting view for the menu of a right-click (`NSHostingView.menu(for:)`): a `contextMenu` inside another that has a preview answered with the inner one's entries. So on an attachment the menu has no Reply or Forward; those stay on the rest of the row.
+  - **Why on the attachment and not in the message's menu.** Which attachments a message shows is decided in its bubble, from the HTML analysis its load produces (`AttachmentDisplayFilter`). The row's menu has only the row's snapshot and would list inline images the bubble hides.
+  - **The entries** (`AttachmentExportPolicy.menu`). The same entries for every state of the attachment, with those that need its file disabled until it has one. Save All counts and saves the attachments that have their file.
+  - **The name** (`AttachmentExportPolicy.filename`). The sender's, which is untrusted, with these removed: any path (only the last component is kept, `/` and `\` both read as separators), control characters, the characters that change the direction text is drawn in, and leading dots. A `:` becomes `-`. A name with no extension gets the stored file's. An empty one is "Attachment". The file on disk is named for its storage identity and is never the name offered.
+  - **Which file** (`AttachmentExportItem`). The attachment's own, through `readableLocalURLValue`. Never the preview image, which Quick Look falls back to: for a document that is a picture of its first page.
+  - **The panels** (`MacAttachmentSavePanels`). `NSSavePanel` for one file, with the name in its field; `NSOpenPanel` choosing a folder for Save All. Each is a sheet on the app's window. The sandbox lets the app write where a panel returned because `ENABLE_USER_SELECTED_FILES` is `readwrite` for the Mac. Not `fileExporter`: it writes the file itself, so the copy, the name of each file of a Save All and what happens to a file already there could not be tested or chosen.
+  - **The copy** (`AttachmentFileExport`), off the main thread. Save Attachment… replaces a file at the chosen place, which the panel has asked about, and only after it has found the attachment's file. Save All replaces nothing: a name already in the folder, or used by an earlier attachment of the same save, gets a number (`image 2.jpg`). What could not be saved is listed in one alert.
+  - **A sign-out while a panel is up** deletes the files. The save then says the attachment is no longer on this Mac and writes nothing. The panel is not closed for it.
+  - **Tests.** `AttachmentExportPolicyTests`, `AttachmentFileExportTests` and `AttachmentExportItemTests` (both platforms, files in a temporary directory); `MacAttachmentExporterTests` (the Mac plan, stand-ins for the panels and the alert); `MacAttachmentExportMenuTests` (the Mac plan: the real modifier on a stand-in row, its menu read from the hosting view and its entries chosen with `performActionForItem`); `AttachmentExportSourceTests` pins that the two attachment views carry the menu.
+  - **Not seen: check in the signed, sandboxed app.**
+    - A right-click on a photo, on a PDF card and on a cell of a grid opens the three entries, and a right-click beside the bubble still opens Reply and Forward.
+    - Save Attachment… opens a sheet with the attachment's name in the field, and the saved file opens. Saving over an existing file asks first.
+    - Save All Attachments… asks for a folder and writes every file, numbering names that are taken.
+    - A right-click on an attachment in a window that is not the front one: which window the sheet attaches to.
+    - A click on an attachment still opens Quick Look.
+  - **Left out.** The menu on iOS. Reply and Forward in the attachment's menu. Attachments shown inside the full email reader. Dragging an attachment out of a message, which is the next item.
 - **Closing the window quits the app. Decided 2026-11-11 (decision 7).** The alternative was to keep running and syncing like Mail, where clicking the Dock icon reopens the window. Sync follows the app's lifetime, so it stops when the window closes.
   - **How.** The app's only scene is a `Window` (built 2026-11-10), and SwiftUI quits such an app when its window closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. Nothing else was added for it.
   - **Measured 2026-11-11 in a stand-in program** on macOS 27.2, not in the app:
