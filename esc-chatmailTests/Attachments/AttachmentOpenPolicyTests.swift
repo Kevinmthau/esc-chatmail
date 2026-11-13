@@ -69,6 +69,65 @@ final class AttachmentOpenPolicyTests: XCTestCase {
         XCTAssertFalse(Policy.isOpenable(filename: "logo.svg"))
     }
 
+    /// The system files Windows Media's redirectors under sound and film, and each is an XML
+    /// file of addresses for a player to fetch: a link file under another name.
+    ///
+    /// Revert-check: taking both `.text` out of `AttachmentOpenPolicy.refusedWithinFamilies`
+    /// and `com.microsoft.advanced-stream-redirector` out of
+    /// `refusedIdentifiersWithinFamilies` makes this fail on the Mac, where `song.wax` is
+    /// `public.audio` and `clip.wvx` is `public.movie`; taking `com.real.realaudio` out makes
+    /// it fail there for `radio.ram`.
+    ///
+    /// HONEST SCOPE: the redirectors are refused twice, as text and as redirectors, and
+    /// taking out either refusal alone leaves this passing. And a system that does not
+    /// declare one of these types refuses its extension as an unknown one, so there the names
+    /// pass whatever the rule says. `declared` counts the types this system does declare, and
+    /// the Mac must declare all three.
+    func testIsOpenable_aListOfLinksFiledUnderSoundOrFilm_isNot() {
+        for name in ["song.wax", "clip.wvx", "list.asx", "radio.ram", "radio.ra", "mix.m3u", "mix.m3u8", "mix.pls"] {
+            XCTAssertFalse(Policy.isOpenable(filename: name), name)
+        }
+
+        let families: [UTType] = [.audio, .movie]
+        var declared = 0
+        for identifier in ["com.microsoft.windows-media-wax", "com.microsoft.windows-media-wvx", "com.real.realaudio"] {
+            guard let type = UTType(identifier) else { continue }
+            declared += 1
+            XCTAssertTrue(families.contains(where: { type.conforms(to: $0) }), identifier)
+            XCTAssertFalse(Policy.isOpenable(type), identifier)
+        }
+        #if os(macOS)
+        XCTAssertEqual(declared, 3)
+        #endif
+    }
+
+    /// Refusing text inside the families must cost none of the kinds they are there for.
+    ///
+    /// Revert-check: adding `.audiovisualContent` or `.image` to
+    /// `AttachmentOpenPolicy.refusedWithinFamilies` makes this fail.
+    func testIsOpenable_theKindsTheFamiliesAreFor_areNotText_andAreStillOpened() {
+        let types: [UTType] = [
+            .jpeg, .png, .heic, .gif, .tiff, .webP, .bmp, .rawImage,
+            .mp3, .wav, .aiff, .mpeg4Audio,
+            .quickTimeMovie, .mpeg4Movie, .mpeg2Video, .avi,
+            .pdf
+        ]
+        for type in types {
+            XCTAssertFalse(type.conforms(to: .text), type.identifier)
+            XCTAssertTrue(Policy.isOpenable(type), type.identifier)
+        }
+        for name in ["voice.m4a", "clip.m4v", "scan.tiff"] {
+            XCTAssertTrue(Policy.isOpenable(filename: name), name)
+        }
+        #if os(macOS)
+        // Windows Media's and RealMedia's own sound and film, beside the link files that are
+        // refused. Asked on the Mac, which declares them; iOS need not.
+        for name in ["old.wmv", "old.wma", "film.rm"] {
+            XCTAssertTrue(Policy.isOpenable(filename: name), name)
+        }
+        #endif
+    }
+
     /// Revert-check: returning true from `AttachmentOpenPolicy.isOpenable(_:)` for any type
     /// that conforms to `.data` makes this fail.
     func testIsOpenable_programsInstallersArchivesAndWebPages_areNot() {

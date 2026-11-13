@@ -20,9 +20,30 @@ enum AttachmentOpenPolicy {
         .image, .audio, .movie, .video, .pdf
     ]
 
-    /// Kinds of image, sound and film that are not opened all the same. An SVG is a web page
-    /// in all but name: it opens in the browser and can carry script.
-    private static let refusedWithinFamilies: [UTType] = [.svg]
+    /// Kinds of image, sound and film that are not opened all the same.
+    ///
+    /// - An SVG is a web page in all but name: it opens in the browser and can carry script.
+    /// - A picture, a sound or a film that is text is not one: it is a script or a list of
+    ///   links. The system files Windows Media's redirectors under sound and film (`.wax` is
+    ///   `public.audio`, `.wvx` is `public.movie`), and each is an XML file naming the
+    ///   addresses a player is to fetch: a link file, which is never opened. Both are refused
+    ///   twice over, as text and as redirectors (their parent type is named below); either
+    ///   refusal alone holds them, and each also holds what the other does not name. SVG is
+    ///   text too, and stays named for itself.
+    /// - RealAudio is refused whole: a `.ram` file is a line of text with an address in it,
+    ///   and the system gives it the type of the sound itself, so the two cannot be told
+    ///   apart. A playlist conforms to none of the families today; it is named so that stays
+    ///   true of whatever is declared under it.
+    private static let refusedWithinFamilies: [UTType] = [.svg, .text, .playlist]
+        + refusedIdentifiersWithinFamilies.compactMap { UTType($0) }
+
+    /// The refused kinds the system has no constant for. One a system does not declare is
+    /// passed over: no file there has that type, and its extension gets a made-up type that
+    /// is refused for that.
+    static let refusedIdentifiersWithinFamilies = [
+        "com.microsoft.advanced-stream-redirector",
+        "com.real.realaudio"
+    ]
 
     /// Kinds opened only as themselves, never by conformance: a macro-enabled Word file is
     /// another type, and stays one that is not opened.
@@ -37,7 +58,8 @@ enum AttachmentOpenPolicy {
         "public.comma-separated-values-text",
         "public.tab-separated-values-text",
         "net.daringfireball.markdown",
-        // Office documents without macros.
+        // Office documents that are not the macro-enabled types. The older three (`.doc`,
+        // `.xls`, `.ppt`) have no macro-free form and can carry one; Office asks before it runs.
         "org.openxmlformats.wordprocessingml.document",
         "org.openxmlformats.spreadsheetml.sheet",
         "org.openxmlformats.presentationml.presentation",
