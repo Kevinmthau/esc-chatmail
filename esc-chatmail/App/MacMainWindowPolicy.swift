@@ -13,7 +13,8 @@ import Foundation
 /// So the app quits itself when this window closes (`MacMainWindowCloseObserver`).
 enum MacMainWindowPolicy {
     /// The `Window` scene's id, which AppKit gives its window as its identifier (measured in
-    /// the same program: the window's `identifier` read `main`).
+    /// the same program: the window's `identifier` read `main`; `MacMainWindowCloseObserverTests`
+    /// reads it from the app's own window in the Mac test host).
     static let windowID = "main"
 
     /// Whether closing the window with this identifier quits the app: the mailbox window

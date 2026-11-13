@@ -543,7 +543,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - Settings never opened: closing the window quit. Settings opened and closed again, then the window closed: it quit.
       - Settings open, the window closed: the program ran on with only the Settings window, and quit when that was closed.
       - With the program quitting itself when the window with the scene's id closed, it quit at once in all three cases, and `applicationShouldTerminate` was called once in each, including the ones where SwiftUI's own quit follows the same close.
-      - The window's AppKit `identifier` was the scene's id, `main`. The Settings window's was `com_apple_SwiftUI_Settings_window`.
+      - The window's AppKit `identifier` was the scene's id, `main`. The Settings window's was `com_apple_SwiftUI_Settings_window`. The app's own window reads `main` too, in the Mac test host (`MacMainWindowCloseObserverTests`).
     - **The quit must be asked for from the run loop** (`perform(_:with:afterDelay:)`), never from a block on the main queue or a main-actor task. The delegate holds a quit for a send in flight and answers from a main-actor task. Asked for from a main-queue block, with the delegate answering `.terminateLater` and replying from the main queue a second and a half later, the stand-in never quit: `terminate(_:)` waits inside the block, and the queue cannot run the reply. Asked for from the run loop, it quit when the reply came, in all three cases.
     - The observer is not started in the unit-test host.
     - Not seen in the app: nothing has closed the app's window with its Settings window open, with or without a send in flight.
