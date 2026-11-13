@@ -218,7 +218,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
         let rightClick = try harness.mouse(.rightMouseDown, at: harness.pointOnAttachment)
         XCTAssertEqual(
             harness.entries(of: source.menu(for: rightClick)),
-            ["Quick Look:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
+            ["Quick Look:on", "Open:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
         )
         // And beside the attachment, the message's.
         XCTAssertFalse(harness.hitView(at: harness.pointOnText) === source)
@@ -283,7 +283,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
             XCTAssertNil(harness.optionalDragSource(), "\(state)")
             XCTAssertEqual(
                 harness.entries(of: try harness.hostMenu(at: harness.pointOnAttachment)),
-                ["Quick Look:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
+                ["Quick Look:off", "Open:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
             )
         }
     }

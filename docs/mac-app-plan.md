@@ -483,7 +483,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - Drop files into the composer, through the existing draft-attachment import. **Built 2026-11-12 for the chat's reply** (below). Not for New Message or Forward, whose sheet has its own attachment code (`ComposeInputBar`).
   - Drag attachments out of a message. **Built 2026-11-13** (below), as a file promise.
   - Add Save Attachment…. **Built 2026-11-13** (below), with AppKit's save panel, not `fileExporter`.
-  - Open attachments in their default app (`NSWorkspace`). **Not built.** It needs a rule for which kinds of file may be opened: `NSWorkspace.open` on an attachment runs whatever the file's type launches.
+  - Open attachments in their default app (`NSWorkspace`). **Built 2026-11-13** (below), for a named list of kinds, as a read-only copy.
 
   **Files dropped on a chat, as built (2026-11-12).** A file dragged from the Finder onto the chat column, anywhere on it, becomes an attachment of the reply.
 
@@ -544,6 +544,34 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - Scrolling with the pointer over an attachment, and a click on an attachment in a window that is not the front one (expected only to bring the window forward).
     - Dragging a file to a folder that already has one of that name: the promise is not kept and nothing is replaced; what the Finder says then was not seen.
   - **Left out.** Dragging several attachments at once. A picture of the attachment as the drag's image (it is the file's icon). Dragging on iOS.
+
+  **Opening an attachment in another app, as built (2026-11-13).** An attachment's right-click menu has Open after Quick Look, for the kinds of file below. It opens the attachment in the app the Mac has for its kind. A click on an attachment still opens Quick Look.
+
+  - **Which kinds: Kevin to confirm the list** (`AttachmentOpenPolicy`). Opening a file hands it to whatever app the system has for it, and the file is the sender's, so the kinds are named and everything else is left to Save Attachment….
+    - **Opened:** images, audio, video and PDFs, by family. By name, and only as themselves: plain text, RTF, CSV and TSV, Markdown; Word, Excel and PowerPoint files (`.docx`, `.xlsx`, `.pptx`, `.doc`, `.xls`, `.ppt`); Pages, Numbers and Keynote files; EPUB; calendar invitations (`.ics`); contact cards (`.vcf`).
+    - **Not opened:** apps, scripts and source code, installers, disk images, archives, web pages, link files (`.webloc`, `.inetloc`, and the media redirectors `.wax`, `.wvx`, `.asx`, `.ram`, with RealAudio's `.ra`), playlists, configuration profiles, macro-enabled Office files (`.docm`, `.xlsm`, `.pptm`), SVG, a name with no extension, and any kind the system does not know. Their menu has no Open.
+    - **Three traps the list is built around.** Every script conforms to plain text (`run.command` is `public.plain-text` by conformance), so plain text is named as itself and is not a family. An SVG is an image by conformance, but opens in the browser and can carry script, so it is refused inside the image family. And the system files link files under sound and film: `.wax` is `public.audio` and `.wvx` is `public.movie` (measured on macOS 27.2), each an XML list of addresses for a player to fetch, so anything in the families that is also text is refused; RealAudio is refused whole, because a `.ram` link file has the sound's own type (PR 413's review).
+    - **For the list's confirmation:** the older `.doc`, `.xls` and `.ppt` have no macro-free form, so one of them can carry a macro as a `.docm` does. They are opened, and Office asks before it runs one.
+    - **The kind is read from the name's last extension**, the name the copy is opened under, because that is what the system picks the app by. The type the email claims is not asked.
+    - The opener asks the rule again before it opens anything (`MacAttachmentOpener`), so it holds whatever calls it.
+  - **What is opened: a read-only copy** (`AttachmentOpenCopy`), never the app's stored file.
+    - The stored file is named for its storage identity, which the other app would show. And the other app could change it: Preview saves a markup into the file it has open, which would be the app's copy of the mail.
+    - The copy has the name a save would offer, in a folder of its own named for the stored file, so two attachments called `image.jpg` do not share one and opening the same attachment again makes no second copy.
+    - It is read-only by permission (0444), which a document app shows as locked. Not locked with the user-immutable flag: removing a directory fails on a locked file inside it, and sign-out's removal of `Attachments` must not fail.
+  - **Where the copies are: `Attachments/Opened/` in Application Support**, because they are account data and everything that handles account data already covers that directory. Read from the code, not run:
+    - Sign-out removes the whole `Attachments` directory (`AuthSession`), and so does the fresh-install handler.
+    - The check for files left from another account counts what is in it (`AuthSession.hasStoredFiles`).
+    - The orphan sweep (`AttachmentDownloader`) removes any entry of `Attachments` that no attachment row names once it is older than the sweep's grace period, and `Opened` is such an entry. Its date moves when a copy is added, so it goes once nothing has been opened for that long.
+    - Nothing new was wired into `AuthSession`. Never move the copies to the temporary directory, which none of those know.
+  - **`NSWorkspace` is behind a closure** on `MacAttachmentOpener`, as the save panels are on the exporter, so no test launches an app.
+  - **Tests.** `AttachmentOpenPolicyTests` and `AttachmentOpenCopyTests` (both platforms); `MacAttachmentOpenerTests` and more in `MacAttachmentExportMenuTests` (the Mac plan; the real menu is read from the hosting view and Open chosen from it); more in `AttachmentExportPolicyTests`.
+  - **Not seen: check in the signed, sandboxed app.** Nothing has been opened.
+    - Open on a photo, a PDF and a Word file: each opens in its app, under the attachment's name.
+    - Whether the sandbox lets `NSWorkspace` hand another app a file from this app's container at all. If it does not, the alert says the file could not be opened.
+    - What Preview shows for the read-only copy when a markup is tried: expected to offer a duplicate.
+    - An installer, a zip and an HTML attachment have no Open in their menu, and still have Save Attachment….
+    - After a sign-out, `Attachments/Opened` is gone.
+  - **Left out.** Open With, to choose the app. Open as what a double-click does. Open on iOS. Opening several at once.
 - **Closing the window quits the app. Decided 2026-11-11 (decision 7).** The alternative was to keep running and syncing like Mail, where clicking the Dock icon reopens the window. Sync follows the app's lifetime, so it stops when the window closes.
   - **How.** The mailbox is a `Window` scene (built 2026-11-10), and SwiftUI quits an app whose one `Window` closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for.
   - **Since the Settings scene (2026-11-13) the app also quits itself** when the mailbox window closes (`MacMainWindowPolicy`, `MacMainWindowCloseObserver`, started by `MacAppDelegate`). SwiftUI's own quit is not enough with a second scene:
