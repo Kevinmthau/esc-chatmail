@@ -3,13 +3,15 @@ import Foundation
 
 /// What the app's sign-out controllers share. Each window has a `SettingsAppSignOutController`
 /// of its own, so that a confirmation is an alert on the window that asked, and on the Mac
-/// there are two such windows: the mailbox and Settings (`MacSettingsView`). Two things
+/// there are two such windows: the mailbox and Settings (`MacSettingsView`). Three things
 /// about a sign-out belong to the app and not to the window that started it:
 ///
 /// - **That one is running.** A controller knew only about its own, so while a sign-out
 ///   started in Settings ran, the mailbox window's Sign Out… command stayed enabled, and
 ///   choosing it beeped with nothing to say why. Every controller's command is disabled from
 ///   this (`SettingsAppSignOutController.isAnySignOutRunning`).
+/// - **That one is being asked about.** Sign Out… asks nothing in one window while the
+///   other's confirmation is up (`isConfirmationActiveInAnyWindow()`).
 /// - **Where a failure is shown when the window that started it has gone.** The Settings
 ///   window can be closed while its sign-out runs, and its alert then has no window to
 ///   appear on. The mailbox window is there for as long as the Mac app runs (closing it
@@ -29,8 +31,37 @@ final class SettingsAppSignOutActivity: ObservableObject {
 
     private var failureFallback: (@MainActor () -> Bool)?
 
+    /// Each controller's answer to "is your confirmation up?", nil once that controller has
+    /// gone (`addConfirmationSource`).
+    private var confirmationSources: [@MainActor () -> Bool?] = []
+
     var isSigningOut: Bool {
         runningSignOutCount > 0
+    }
+
+    /// Names a window's confirmation, so another window's Sign Out… can know it is up.
+    /// `isActive` answers nil once its controller has gone, and is then forgotten.
+    func addConfirmationSource(_ isActive: @escaping @MainActor () -> Bool?) {
+        confirmationSources.append(isActive)
+    }
+
+    /// Whether any window's sign-out confirmation is up. A controller knew only about its
+    /// own, so with the Settings window's confirmation up, Sign Out… chosen with the mailbox
+    /// window in front asked again. The first alert was then still up when the second one's
+    /// sign-out had finished, and after a new sign-in it named the old account and signed
+    /// the new one out.
+    ///
+    /// Asked of every prompter at the moment it is called. It is never kept or counted: an
+    /// alert can leave the screen without either of its handlers running, and a count left
+    /// above zero would refuse every later Sign Out….
+    func isConfirmationActiveInAnyWindow() -> Bool {
+        var isActive = false
+        confirmationSources.removeAll { source in
+            guard let answer = source() else { return true }
+            isActive = isActive || answer
+            return false
+        }
+        return isActive
     }
 
     /// Every `signOutDidBegin()` is followed by exactly one `signOutDidEnd()`, on every

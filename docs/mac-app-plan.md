@@ -443,6 +443,9 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - **Sign Out… is disabled in both windows while either one's sign-out runs.** Before, the other window's command stayed enabled and beeped when chosen. Whether it can be chosen is decided in one place, `SignOutMenuAction.init`, for the menu command and the button.
       - **A failure of a sign-out started in Settings is shown on the mailbox window when the Settings window has been closed.** Its alert had no window to appear on and waited until Settings was opened again, with the mailbox still signed in and nothing said. The Settings view tells its controller how to ask whether its window is on screen (`MacWindowVisibilityProbe`, read from AppKit when the failure happens, not kept from `onAppear` and `onDisappear`).
       - The "signing out" overlay is still drawn only by the window that started the sign-out.
+    - **Two more, from the review of PR 414 (2026-11-13).**
+      - **The Settings window looks at the mailbox window again when the user answers Sign Out.** Its confirmation is a sheet on the Settings window only, so the mailbox window still takes clicks while it is up: New Message could be opened and typed in after Sign Out… was chosen, and the answer then closed it. The Settings window's controller is made with `refusesConfirmedSignOut:` (`MailboxWindowSheet.refusesSignOutConfirmedElsewhere`); with a sheet on the mailbox window it beeps and signs nothing out. The mailbox window's controller has no such look, because its own confirmation is the sheet on the mailbox window.
+      - **Sign Out… asks nothing in one window while the other's confirmation is up** (`SettingsAppSignOutActivity.isConfirmationActiveInAnyWindow`). With the Settings window's alert up, the app menu's Sign Out… with the mailbox window in front asked again. Answered there, the Settings alert stayed up through the sign-out and a new sign-in, still naming the old account, and its Sign Out button then signed the new one out. Each prompter is asked when the command is chosen; nothing is kept or counted.
     - **Not seen: check in the app.** Nobody has opened the window.
       - Settings… and Command-Comma open it. It shows the signed-in address and the version, and is as tall as its content.
       - Sign Out… in the window asks on the Settings window. Cancel leaves everything as it was. Sign Out shows "Signing Out…" in the window, the mailbox window changes to the sign-in view, and the Account row reads Not Signed In with the button disabled.
@@ -451,6 +454,8 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - Close the mailbox window with Settings open: the app quits.
       - Close Settings alone: the app keeps running.
       - With New Message open on the mailbox window and Settings in front, Sign Out… in the Settings window beeps and asks nothing.
+      - Choose Sign Out… in the Settings window, leave its alert up, open New Message on the mailbox window, then answer Sign Out: a beep, the account stays signed in, and New Message is still open.
+      - With the Settings window's alert up, the app menu's Sign Out… with the mailbox window in front beeps and asks nothing.
       - During a sign-out started in Settings, the app menu's Sign Out… is disabled with the mailbox window in front.
       - Not possible to check by hand without a failing sign-out: the failure alert coming up on the mailbox window after Settings was closed.
       - The app menu reads About, Settings…, Sign Out…, Services, each group under a separator.

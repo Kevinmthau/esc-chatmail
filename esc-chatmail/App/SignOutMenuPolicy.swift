@@ -38,7 +38,8 @@ enum SignOutMenuPolicy {
     ///   above zero would leave the Mac with no way to sign out, because the Settings window's
     ///   button asks through this too.
     /// - `SettingsAppSignOutPolicy` would not ask now (no account left to sign out, or a
-    ///   request already being handled) → refuse.
+    ///   request already being handled, in this window or another: the Mac's two windows
+    ///   never both ask) → refuse.
     /// - Otherwise → confirm.
     static func choice(focusedWindowHasSheet: Bool, decision: SettingsAppSignOutPolicy.Decision) -> Choice {
         guard !focusedWindowHasSheet, decision == .confirm else { return .refuse }

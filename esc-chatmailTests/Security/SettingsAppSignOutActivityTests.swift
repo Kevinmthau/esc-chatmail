@@ -44,6 +44,53 @@ final class SettingsAppSignOutActivityTests: XCTestCase {
         XCTAssertTrue(activity.isSigningOut)
     }
 
+    /// Revert-check: answering from a value kept when a source last said true, in
+    /// `SettingsAppSignOutActivity.isConfirmationActiveInAnyWindow`, makes this fail: an
+    /// alert that left the screen with neither handler run would refuse every later
+    /// Sign Out….
+    func testIsConfirmationActiveInAnyWindow_asksEverySourceEachTime() {
+        let activity = SettingsAppSignOutActivity()
+        var mailboxIsAsking = false
+        var settingsIsAsking = false
+        activity.addConfirmationSource { mailboxIsAsking }
+        activity.addConfirmationSource { settingsIsAsking }
+        XCTAssertFalse(activity.isConfirmationActiveInAnyWindow())
+
+        settingsIsAsking = true
+        XCTAssertTrue(activity.isConfirmationActiveInAnyWindow())
+
+        settingsIsAsking = false
+        mailboxIsAsking = true
+        XCTAssertTrue(activity.isConfirmationActiveInAnyWindow())
+
+        mailboxIsAsking = false
+        XCTAssertFalse(activity.isConfirmationActiveInAnyWindow())
+    }
+
+    /// A source answers nil once its controller has gone. The Settings window can be opened
+    /// and closed any number of times, and each controller it made would otherwise be asked
+    /// for as long as the app runs.
+    ///
+    /// Revert-check: keeping a source that answered nil, in
+    /// `SettingsAppSignOutActivity.isConfirmationActiveInAnyWindow`, makes this fail.
+    func testIsConfirmationActiveInAnyWindow_sourceGone_isForgottenAndOthersAreKept() {
+        let activity = SettingsAppSignOutActivity()
+        var goneAskedCount = 0
+        var keptIsAsking = false
+        activity.addConfirmationSource {
+            goneAskedCount += 1
+            return nil
+        }
+        activity.addConfirmationSource { keptIsAsking }
+
+        XCTAssertFalse(activity.isConfirmationActiveInAnyWindow())
+        XCTAssertEqual(goneAskedCount, 1)
+
+        keptIsAsking = true
+        XCTAssertTrue(activity.isConfirmationActiveInAnyWindow())
+        XCTAssertEqual(goneAskedCount, 1)
+    }
+
     func testShowFailureInFallbackWindow_noFallback_isFalse() {
         XCTAssertFalse(SettingsAppSignOutActivity().showFailureInFallbackWindow())
     }

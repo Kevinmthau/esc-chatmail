@@ -158,6 +158,23 @@ final class MacSettingsSceneSourceTests: XCTestCase {
         XCTAssertFalse(view.contains("showsFailuresOfOffScreenWindows"), view)
     }
 
+    /// Only the Settings window's controller looks at the mailbox window again when the user
+    /// answers Sign Out. The mailbox window's own confirmation is the sheet on the mailbox
+    /// window, so its controller, asked the same, would refuse every sign-out it confirmed.
+    ///
+    /// Revert-check: constructing `MacSettingsView`'s controller with no
+    /// `refusesConfirmedSignOut:` makes this fail, and so does giving `ContentView`'s one.
+    func testSettingsWindow_asksAboutTheMailboxWindowAgainWhenSignOutIsConfirmed() throws {
+        let view = try source("esc-chatmail/Platform/MacSettingsView.swift")
+        let contentView = try source("esc-chatmail/App/ContentView.swift")
+
+        XCTAssertTrue(
+            view.contains("refusesConfirmedSignOut: { MailboxWindowSheet.refusesSignOutConfirmedElsewhere() }"),
+            view
+        )
+        XCTAssertFalse(contentView.contains("refusesConfirmedSignOut"), contentView)
+    }
+
     private func source(_ path: String) throws -> String {
         // This file is esc-chatmailTests/Platform/, so the repo root is three directories up.
         let sourceURL = URL(fileURLWithPath: #filePath)

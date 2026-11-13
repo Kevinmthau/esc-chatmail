@@ -45,6 +45,44 @@ final class MailboxWindowSheetTests: XCTestCase {
         XCTAssertFalse(MailboxWindowSheet.isAttached(among: [settings, unnamed, mailbox]))
     }
 
+    /// Asked when the Settings window's confirmation is answered: New Message can be opened
+    /// on the mailbox window while that confirmation is up.
+    ///
+    /// Revert-check: returning false from
+    /// `MailboxWindowSheet.refusesSignOutConfirmedElsewhere(among:beep:)` makes this fail,
+    /// and so does dropping its `beep()`: the answer would look ignored.
+    func testRefusesSignOutConfirmedElsewhere_mailboxWindowHasSheet_refusesAndBeeps() {
+        let settings = makeWindow(identifier: "com_apple_SwiftUI_Settings_window", hasSheet: false)
+        let mailbox = makeWindow(identifier: MacMainWindowPolicy.windowID, hasSheet: true)
+        var beepCount = 0
+
+        let refuses = MailboxWindowSheet.refusesSignOutConfirmedElsewhere(
+            among: [settings, mailbox],
+            beep: { beepCount += 1 }
+        )
+
+        XCTAssertTrue(refuses)
+        XCTAssertEqual(beepCount, 1)
+    }
+
+    /// Revert-check: returning true whatever the windows are, or beeping before the look,
+    /// in `MailboxWindowSheet.refusesSignOutConfirmedElsewhere(among:beep:)` makes this fail:
+    /// the Settings window could never sign out, or every sign-out there would beep.
+    func testRefusesSignOutConfirmedElsewhere_noSheetOnTheMailboxWindow_neitherRefusesNorBeeps() {
+        // The confirmation being answered is itself a sheet, on the Settings window.
+        let settings = makeWindow(identifier: "com_apple_SwiftUI_Settings_window", hasSheet: true)
+        let mailbox = makeWindow(identifier: MacMainWindowPolicy.windowID, hasSheet: false)
+        var beepCount = 0
+
+        let refuses = MailboxWindowSheet.refusesSignOutConfirmedElsewhere(
+            among: [settings, mailbox],
+            beep: { beepCount += 1 }
+        )
+
+        XCTAssertFalse(refuses)
+        XCTAssertEqual(beepCount, 0)
+    }
+
     private func makeWindow(identifier: String?, hasSheet: Bool) -> NSWindow {
         let window = SheetStubWindow(
             contentRect: NSRect(x: -30_000, y: -30_000, width: 100, height: 100),
