@@ -71,6 +71,8 @@
         "MacSidebarVisibilityPolicyTests",
         "MacUnitTestHostPolicyTests",
         "MacUnitTestHostStoreTests",
+        "MailboxCommandsMenuTests",
+        "MailboxCommandsSourceTests",
         "MailboxMenuPolicyTests",
         "MessageBubbleRowPolicyTests",
         "MessageBubbleStyleTests",

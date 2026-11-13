@@ -189,6 +189,71 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    /// What the Mac's Mark as Read / Mark as Unread command (Command-Shift-U) would do to the
+    /// named conversations now: `MailboxMenuPolicy.readStateCommand` over their inbox unread
+    /// counts. Nil when none of them exists any more, which disables the command.
+    ///
+    /// Read from the conversations themselves, as `changeReadState` does, not from the rows'
+    /// snapshots: the open chat is among them even while a search hides its row.
+    func readStateCommand(
+        forConversationsWithIDs conversationIDs: Set<NSManagedObjectID>
+    ) -> MailboxMenuPolicy.ReadStateCommand? {
+        MailboxMenuPolicy.readStateCommand(
+            unreadCounts: liveConversations(withIDs: conversationIDs).map { Int($0.inboxUnreadCount) }
+        )
+    }
+
+    /// Runs the Mac's Mark as Read / Mark as Unread command on the named conversations: all of
+    /// them one way, decided here from their counts at this moment, not from the title the
+    /// menu last drew. A conversation already as the command leaves it is passed over.
+    ///
+    /// Each conversation's change runs as the one its row's toggle makes
+    /// (`toggleConversationReadState`), under that toggle's task key.
+    ///
+    /// - Parameter perform: Makes one conversation's change. Nil in the app, which runs it
+    ///   through `messageActions`; the tests record the calls.
+    func changeReadState(
+        ofConversationsWithIDs conversationIDs: Set<NSManagedObjectID>,
+        perform: ((MailboxMenuPolicy.ReadStateCommand, Conversation) -> Void)? = nil
+    ) {
+        let conversations = liveConversations(withIDs: conversationIDs)
+        guard let command = MailboxMenuPolicy.readStateCommand(
+            unreadCounts: conversations.map { Int($0.inboxUnreadCount) }
+        ) else {
+            return
+        }
+        let perform = perform ?? { [weak self] command, conversation in
+            self?.runReadStateChange(command, on: conversation)
+        }
+        for conversation in conversations
+        where MailboxMenuPolicy.changesReadState(command, unreadCount: Int(conversation.inboxUnreadCount)) {
+            perform(command, conversation)
+        }
+    }
+
+    private func runReadStateChange(_ command: MailboxMenuPolicy.ReadStateCommand, on conversation: Conversation) {
+        let convID = conversation.objectID
+        taskManager.run("toggleRead-\(convID)") { [weak self] in
+            guard let self = self else { return }
+            switch command {
+            case .markRead:
+                await messageActions.markConversationAsRead(conversation: conversation)
+            case .markUnread:
+                await messageActions.markConversationAsUnread(conversation: conversation)
+            }
+        }
+    }
+
+    /// The named conversations that still exist. One a sync deleted is left out.
+    private func liveConversations(withIDs conversationIDs: Set<NSManagedObjectID>) -> [Conversation] {
+        conversationIDs.compactMap { conversationID in
+            guard let conversation = conversation(withID: conversationID), !conversation.isDeleted else {
+                return nil
+            }
+            return conversation
+        }
+    }
+
     func archiveSelectedConversations() {
         selectionService.archiveSelectedConversations()
     }

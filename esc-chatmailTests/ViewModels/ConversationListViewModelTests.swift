@@ -727,6 +727,122 @@ final class ConversationListViewModelTests: XCTestCase {
     /// `ConversationListDependencies.forTesting`, so storage, migration
     /// flags, and the contact loader never fall back to `Dependencies.shared`
     /// / `CoreDataStack.shared` / `UserDefaults.standard`.
+    // MARK: - Mark as Read / Mark as Unread (the Mac's Command-Shift-U)
+
+    /// The command's `perform` records what it was asked to do, so nothing here reaches
+    /// `MessageActions`, which the test bundle still takes from `Dependencies.shared`.
+    ///
+    /// HONEST SCOPE: the change itself (`runReadStateChange`, the calls the row's toggle makes)
+    /// is not run by any test here.
+    private func recordedReadStateChanges(
+        of conversations: [Conversation],
+        in viewModel: ConversationListViewModel
+    ) -> [NSManagedObjectID: MailboxMenuPolicy.ReadStateCommand] {
+        var changes: [NSManagedObjectID: MailboxMenuPolicy.ReadStateCommand] = [:]
+        viewModel.changeReadState(
+            ofConversationsWithIDs: Set(conversations.map(\.objectID)),
+            perform: { command, conversation in
+                XCTAssertNil(changes[conversation.objectID], "One conversation was changed twice")
+                changes[conversation.objectID] = command
+            }
+        )
+        return changes
+    }
+
+    private func makeConversation(name: String, unreadCount: Int32) -> Conversation {
+        let conversation = makeConversation(name: name, snippet: name, date: 100)
+        conversation.inboxUnreadCount = unreadCount
+        return conversation
+    }
+
+    /// Revert-check: deleting the `where MailboxMenuPolicy.changesReadState(...)` clause from
+    /// `ConversationListViewModel.changeReadState` makes this fail: the two read conversations
+    /// would be asked to be marked read as well.
+    func testChangeReadState_someUnread_marksOnlyThoseRead() throws {
+        let alice = makeConversation(name: "Alice", unreadCount: 0)
+        let bob = makeConversation(name: "Bob", unreadCount: 2)
+        let carol = makeConversation(name: "Carol", unreadCount: 0)
+        try viewContext.save()
+        let viewModel = makeViewModel()
+        viewModel.onAppear(in: viewContext)
+
+        XCTAssertEqual(
+            viewModel.readStateCommand(forConversationsWithIDs: [alice.objectID, bob.objectID, carol.objectID]),
+            .markRead
+        )
+        XCTAssertEqual(
+            recordedReadStateChanges(of: [alice, bob, carol], in: viewModel),
+            [bob.objectID: .markRead]
+        )
+    }
+
+    /// Revert-check: swapping the two cases `MailboxMenuPolicy.readStateCommand` returns makes
+    /// this fail, and `testChangeReadState_someUnread_marksOnlyThoseRead` with it.
+    func testChangeReadState_allRead_marksEachUnread() throws {
+        let alice = makeConversation(name: "Alice", unreadCount: 0)
+        let bob = makeConversation(name: "Bob", unreadCount: 0)
+        try viewContext.save()
+        let viewModel = makeViewModel()
+        viewModel.onAppear(in: viewContext)
+
+        XCTAssertEqual(
+            viewModel.readStateCommand(forConversationsWithIDs: [alice.objectID, bob.objectID]),
+            .markUnread
+        )
+        XCTAssertEqual(
+            recordedReadStateChanges(of: [alice, bob], in: viewModel),
+            [alice.objectID: .markUnread, bob.objectID: .markUnread]
+        )
+    }
+
+    /// The title is drawn at the sidebar's last update, and a sync can change a count before
+    /// the key is pressed. The count at the press decides.
+    ///
+    /// HONEST SCOPE: there is nothing to revert here. `changeReadState` takes no command, so
+    /// it can only read the counts itself; this fails if one is ever passed in from the title.
+    func testChangeReadState_decidesFromTheCountsAtThatMoment() throws {
+        let alice = makeConversation(name: "Alice", unreadCount: 0)
+        try viewContext.save()
+        let viewModel = makeViewModel()
+        viewModel.onAppear(in: viewContext)
+        XCTAssertEqual(viewModel.readStateCommand(forConversationsWithIDs: [alice.objectID]), .markUnread)
+
+        alice.inboxUnreadCount = 1
+
+        XCTAssertEqual(recordedReadStateChanges(of: [alice], in: viewModel), [alice.objectID: .markRead])
+    }
+
+    /// Revert-check: deleting `!conversation.isDeleted` from
+    /// `ConversationListViewModel.liveConversations` makes this fail: a conversation a sync
+    /// deleted would be counted, and handed on to be changed.
+    func testChangeReadState_conversationDeletedMeanwhile_isLeftOut() throws {
+        let alice = makeConversation(name: "Alice", unreadCount: 0)
+        let bob = makeConversation(name: "Bob", unreadCount: 4)
+        try viewContext.save()
+        let viewModel = makeViewModel()
+        viewModel.onAppear(in: viewContext)
+
+        viewContext.delete(bob)
+
+        XCTAssertEqual(
+            viewModel.readStateCommand(forConversationsWithIDs: [alice.objectID, bob.objectID]),
+            .markUnread
+        )
+        XCTAssertEqual(
+            recordedReadStateChanges(of: [alice, bob], in: viewModel),
+            [alice.objectID: .markUnread]
+        )
+        XCTAssertNil(viewModel.readStateCommand(forConversationsWithIDs: [bob.objectID]))
+        XCTAssertEqual(recordedReadStateChanges(of: [bob], in: viewModel), [:])
+    }
+
+    func testReadStateCommand_nothingNamed_isNil() {
+        let viewModel = makeViewModel()
+        viewModel.onAppear(in: viewContext)
+
+        XCTAssertNil(viewModel.readStateCommand(forConversationsWithIDs: []))
+    }
+
     private func makeViewModel(
         searchService: ConversationSearchService? = nil,
         filterService: ConversationFilterService? = nil,

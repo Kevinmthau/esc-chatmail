@@ -37,6 +37,24 @@ enum MacSidebarSelectionPolicy {
         requested.intersection(visibleIDs)
     }
 
+    /// The conversations the Mailbox menu's Mark as Read / Mark as Unread command acts on
+    /// (Command-Shift-U; `MailboxMenuPolicy.readStateCommand`).
+    ///
+    /// - One selected conversation → that one, listed or not. It is the open chat, in front of
+    ///   the user in the chat column even while a search hides its row, and the command reads
+    ///   as being about it.
+    /// - Several → the selected rows the list is showing, as for Delete (`actionTargets`).
+    ///
+    /// `visibleIDs` is walked only for several selected rows: this is asked on every update of
+    /// the sidebar, where one selected row is the usual case.
+    static func readStateTargets<ID: Hashable, Visible: Sequence>(
+        selection: Set<ID>,
+        visibleIDs: Visible
+    ) -> Set<ID> where Visible.Element == ID {
+        guard selection.count > 1 else { return selection }
+        return Set(visibleIDs.filter(selection.contains))
+    }
+
     /// The selection after the user archives or reports `actedOn` from the list.
     ///
     /// When that empties the selection, it moves to the row that takes the removed rows' place

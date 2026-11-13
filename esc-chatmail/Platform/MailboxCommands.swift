@@ -1,16 +1,21 @@
 #if os(macOS)
 import SwiftUI
 
-/// The Mac's mailbox menu commands: New Message, Search and Get New Mail. Each does what a
-/// control in the window does (`MailboxMenuActions`); none adds a path of its own.
+/// The Mac's mailbox menu commands: New Message, Get New Mail, Search, and Mark as Read or Mark
+/// as Unread. Each does what a control in the window does (`MailboxMenuActions`); none adds a
+/// path of its own.
 ///
 /// New Message takes Command-N in place of File > New Window. The app has one window on
 /// purpose: `ChatReplyComposerDirectory` lets only the newest composer write a conversation's
 /// draft, so two windows on one chat would fight over it.
 ///
 /// Chosen while the focused window has a sheet attached, New Message beeps and opens nothing
-/// (`MailboxMenuPolicy.newMessageChoice`). Search and Get New Mail are not checked: neither
-/// presents anything.
+/// (`MailboxMenuPolicy.newMessageChoice`). The others are not checked: none presents anything.
+///
+/// Mark as Read / Mark as Unread (Command-Shift-U, Mail's and Messages' shortcut) acts on the
+/// sidebar's selected conversations: the open chat, or the selected rows
+/// (`MacSidebarSelectionPolicy.readStateTargets`). Its title says which way it goes
+/// (`MailboxMenuPolicy.readStateCommand`), and it is disabled with nothing selected.
 struct MailboxCommands: Commands {
     @FocusedValue(\.mailboxMenuActions) private var actions
 
@@ -34,6 +39,14 @@ struct MailboxCommands: Commands {
             }
             .keyboardShortcut("f", modifiers: .command)
             .disabled(actions == nil)
+
+            Divider()
+
+            Button(MailboxMenuPolicy.readStateTitle(for: actions?.readState)) {
+                actions?.changeReadState()
+            }
+            .keyboardShortcut("u", modifiers: [.command, .shift])
+            .disabled(actions?.readState == nil)
         }
     }
 }

@@ -61,6 +61,12 @@ struct MacConversationSidebar: View {
             orderedIDs: viewModel.filteredConversationItems.lazy.map(\.id),
             selection: selection
         )
+        // What Command-Shift-U acts on. One selected row, the usual case, costs no pass over
+        // the rows.
+        let readStateTargets = MacSidebarSelectionPolicy.readStateTargets(
+            selection: selection,
+            visibleIDs: viewModel.filteredConversationItems.lazy.map(\.id)
+        )
         List(selection: rowSelection) {
             if syncEngine.isBlockedByInsufficientStorage {
                 InsufficientStorageBanner(onTryAgain: {
@@ -183,7 +189,9 @@ struct MacConversationSidebar: View {
             MailboxMenuActions(
                 newMessage: onNewMessage,
                 search: { isSearchFieldFocused = true },
-                sync: { Task { await viewModel.performSync() } }
+                sync: { Task { await viewModel.performSync() } },
+                readState: viewModel.readStateCommand(forConversationsWithIDs: readStateTargets),
+                changeReadState: { viewModel.changeReadState(ofConversationsWithIDs: readStateTargets) }
             )
         )
     }
