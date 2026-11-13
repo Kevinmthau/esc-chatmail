@@ -2,7 +2,7 @@ import Foundation
 
 /// The Settings-app sign-out confirmation and failure as SwiftUI alerts: the Mac's
 /// `SettingsAppSignOutPrompting` (`PlatformSettingsAppSignOutPrompter`), shown by
-/// `SettingsAppSignOutAlertModifier` on `ContentView`.
+/// `SettingsAppSignOutAlertModifier` on `ContentView` and on the Settings window.
 ///
 /// iOS keeps `SettingsAppSignOutPrompter`, a UIKit alert from the topmost view controller: a
 /// SwiftUI alert on the root view never appears there while a Compose or chat sheet is up. On the
@@ -10,10 +10,11 @@ import Foundation
 /// to close (measured on macOS 27.2, 2026-11-10). The Mac's command therefore asks nothing while
 /// the window has a sheet attached (`SignOutMenuPolicy.choice`).
 ///
-/// The Mac has no Settings app page (`Settings.bundle` is iOS-only), so until the Mac gets its own
-/// Settings scene, the app menu's Sign Out… command (`SignOutCommands`) is the only thing that
-/// asks for a sign-out there. That is why the failure alert names the command, where the iOS
-/// prompt names the Settings switch.
+/// The Mac has no Settings app page (`Settings.bundle` is iOS-only). What asks for a sign-out
+/// there is the app menu's Sign Out… command (`SignOutCommands`) and the same command as a
+/// button in the Settings window (`MacSettingsView`), each through the controller of the window
+/// in front. The failure alert names the menu command, which is there with either window in
+/// front, where the iOS prompt names the Settings switch.
 ///
 /// The alert is published as a value. `answer(_:signOut:)` runs exactly one of its handlers; when
 /// the alert leaves the screen any other way, `alertDidDismiss(_:)` clears it and runs neither,
