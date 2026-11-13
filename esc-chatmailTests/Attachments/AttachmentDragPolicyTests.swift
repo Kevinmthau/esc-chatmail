@@ -31,6 +31,15 @@ final class AttachmentDragPolicyTests: XCTestCase {
         XCTAssertFalse(Policy.isClick(didStartDrag: true, releasedInside: false))
     }
 
+    /// Revert-check: returning `isReady` alone from `takesMouse` makes the third fail, and
+    /// `isLive` alone the second.
+    func testTakesMouse_onlyWhileTheAttachmentIsThereAndHasItsFile() {
+        XCTAssertTrue(Policy.takesMouse(isLive: true, isReady: true))
+        XCTAssertFalse(Policy.takesMouse(isLive: true, isReady: false))
+        XCTAssertFalse(Policy.takesMouse(isLive: false, isReady: true))
+        XCTAssertFalse(Policy.takesMouse(isLive: false, isReady: false))
+    }
+
     /// Revert-check: returning true from `allowsCopy` makes the second fail.
     func testAllowsCopy_onlyOutsideTheApp() {
         XCTAssertTrue(Policy.allowsCopy(outsideApplication: true))

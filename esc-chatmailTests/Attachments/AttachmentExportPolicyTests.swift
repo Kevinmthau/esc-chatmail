@@ -59,18 +59,18 @@ final class AttachmentExportPolicyTests: XCTestCase {
     // MARK: - The saved file's name
 
     func testFilename_aPlainName_isKept() {
-        XCTAssertEqual(Policy.filename(storedFilename: "Q3 report.pdf", sourceExtension: "pdf"), "Q3 report.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "IMG_0042.HEIC", sourceExtension: "jpg"), "IMG_0042.HEIC")
-        XCTAssertEqual(Policy.filename(storedFilename: "résumé 履歴書.docx", sourceExtension: "docx"), "résumé 履歴書.docx")
+        XCTAssertEqual(Policy.filename(storedFilename: "Q3 report.pdf", typeExtension: "pdf"), "Q3 report.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "IMG_0042.HEIC", typeExtension: "jpg"), "IMG_0042.HEIC")
+        XCTAssertEqual(Policy.filename(storedFilename: "résumé 履歴書.docx", typeExtension: "docx"), "résumé 履歴書.docx")
     }
 
     /// Revert-check: taking the whole stored name in place of its last component makes this
     /// fail. A name from an email must not be able to say where the file goes.
     func testFilename_aPath_keepsOnlyItsLastComponent() {
-        XCTAssertEqual(Policy.filename(storedFilename: "../../Library/x.plist", sourceExtension: "plist"), "x.plist")
-        XCTAssertEqual(Policy.filename(storedFilename: "/etc/passwd", sourceExtension: "txt"), "passwd.txt")
-        XCTAssertEqual(Policy.filename(storedFilename: "C:\\Users\\me\\tax.pdf", sourceExtension: "pdf"), "tax.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "folder/", sourceExtension: "pdf"), "folder.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "../../Library/x.plist", typeExtension: "plist"), "x.plist")
+        XCTAssertEqual(Policy.filename(storedFilename: "/etc/passwd", typeExtension: "txt"), "passwd.txt")
+        XCTAssertEqual(Policy.filename(storedFilename: "C:\\Users\\me\\tax.pdf", typeExtension: "pdf"), "tax.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "folder/", typeExtension: "pdf"), "folder.pdf")
     }
 
     /// A "/" with a combining scalar after it is one `Character` that is not "/". Found in
@@ -87,7 +87,7 @@ final class AttachmentExportPolicyTests: XCTestCase {
             "a/\u{200D}b/\u{0301}c/\u{FE0F}evil.plist"
         ]
         for stored in names {
-            let name = Policy.filename(storedFilename: stored, sourceExtension: "plist")
+            let name = Policy.filename(storedFilename: stored, typeExtension: "plist")
             XCTAssertFalse(name.unicodeScalars.contains("/"), name.debugDescription)
             XCTAssertFalse(name.unicodeScalars.contains("\\"), name.debugDescription)
             XCTAssertFalse(name.contains("Library"), name.debugDescription)
@@ -99,8 +99,8 @@ final class AttachmentExportPolicyTests: XCTestCase {
     /// Revert-check: replacing the colon with `replacingOccurrences(of:with:)` on the string,
     /// or not at all, makes this fail: the first leaves `:\u{0301}` as it is.
     func testFilename_aColon_becomesAHyphen() {
-        XCTAssertEqual(Policy.filename(storedFilename: "Call 10:30.txt", sourceExtension: "txt"), "Call 10-30.txt")
-        XCTAssertEqual(Policy.filename(storedFilename: "a:\u{0301}b.txt", sourceExtension: "txt"), "a-\u{0301}b.txt")
+        XCTAssertEqual(Policy.filename(storedFilename: "Call 10:30.txt", typeExtension: "txt"), "Call 10-30.txt")
+        XCTAssertEqual(Policy.filename(storedFilename: "a:\u{0301}b.txt", typeExtension: "txt"), "a-\u{0301}b.txt")
     }
 
     /// Revert-check: deleting the `directionScalars` check from `isRemoved` makes the first
@@ -108,15 +108,15 @@ final class AttachmentExportPolicyTests: XCTestCase {
     /// override draws `invoice\u{202E}fdp.exe` as `invoiceexe.pdf`.
     func testFilename_directionAndControlCharacters_areRemoved() {
         XCTAssertEqual(
-            Policy.filename(storedFilename: "invoice\u{202E}fdp.exe", sourceExtension: "exe"),
+            Policy.filename(storedFilename: "invoice\u{202E}fdp.exe", typeExtension: "exe"),
             "invoicefdp.exe"
         )
         XCTAssertEqual(
-            Policy.filename(storedFilename: "a\u{0000}b\nc\td\u{2028}e.pdf", sourceExtension: "pdf"),
+            Policy.filename(storedFilename: "a\u{0000}b\nc\td\u{2028}e.pdf", typeExtension: "pdf"),
             "abcde.pdf"
         )
         XCTAssertEqual(
-            Policy.filename(storedFilename: "\u{2066}x\u{2069}\u{200F}.pdf", sourceExtension: "pdf"),
+            Policy.filename(storedFilename: "\u{2066}x\u{2069}\u{200F}.pdf", typeExtension: "pdf"),
             "x.pdf"
         )
     }
@@ -124,7 +124,7 @@ final class AttachmentExportPolicyTests: XCTestCase {
     /// A zero-width joiner is part of an emoji and of some scripts' spelling, so it stays.
     func testFilename_aJoinedEmoji_isKeptWhole() {
         let family = "👨\u{200D}👩\u{200D}👧"
-        XCTAssertEqual(Policy.filename(storedFilename: "\(family).png", sourceExtension: "png"), "\(family).png")
+        XCTAssertEqual(Policy.filename(storedFilename: "\(family).png", typeExtension: "png"), "\(family).png")
     }
 
     /// Revert-check: deleting the `while name.unicodeScalars.first == "."` loop makes this
@@ -132,71 +132,82 @@ final class AttachmentExportPolicyTests: XCTestCase {
     /// dot with an accent on it is not the `Character` ".", and the file's first byte is still
     /// a dot. A leading dot would hide the saved file.
     func testFilename_leadingDots_areRemoved() {
-        XCTAssertEqual(Policy.filename(storedFilename: ".hidden.txt", sourceExtension: "txt"), "hidden.txt")
-        XCTAssertEqual(Policy.filename(storedFilename: ".. .zshrc", sourceExtension: "txt"), "zshrc.txt")
-        let accented = Policy.filename(storedFilename: ".\u{0301}hidden.txt", sourceExtension: "txt")
+        XCTAssertEqual(Policy.filename(storedFilename: ".hidden.txt", typeExtension: "txt"), "hidden.txt")
+        XCTAssertEqual(Policy.filename(storedFilename: ".. .zshrc", typeExtension: "txt"), "zshrc.txt")
+        let accented = Policy.filename(storedFilename: ".\u{0301}hidden.txt", typeExtension: "txt")
         XCTAssertNotEqual(accented.utf8.first, UInt8(ascii: "."))
         XCTAssertTrue(accented.hasSuffix("hidden.txt"))
     }
 
     /// Revert-check: deleting `name = fallbackBaseName` (the first) makes this fail.
     func testFilename_nothingUsable_isAttachmentWithTheFilesExtension() {
-        XCTAssertEqual(Policy.filename(storedFilename: "", sourceExtension: "pdf"), "Attachment.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "   ", sourceExtension: "jpg"), "Attachment.jpg")
-        XCTAssertEqual(Policy.filename(storedFilename: "..", sourceExtension: "png"), "Attachment.png")
-        XCTAssertEqual(Policy.filename(storedFilename: "///", sourceExtension: ""), "Attachment")
-        XCTAssertEqual(Policy.filename(storedFilename: "\u{202E}", sourceExtension: "pdf"), "Attachment.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "", typeExtension: "pdf"), "Attachment.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "   ", typeExtension: "jpg"), "Attachment.jpg")
+        XCTAssertEqual(Policy.filename(storedFilename: "..", typeExtension: "png"), "Attachment.png")
+        XCTAssertEqual(Policy.filename(storedFilename: "///", typeExtension: ""), "Attachment")
+        XCTAssertEqual(Policy.filename(storedFilename: "\u{202E}", typeExtension: "pdf"), "Attachment.pdf")
     }
 
     /// Revert-check: appending the extension only where the name is empty makes this fail. A
-    /// name with no extension gets the file's own, so the saved file opens.
-    func testFilename_aNameWithoutAnExtension_getsTheFilesOwn() {
-        XCTAssertEqual(Policy.filename(storedFilename: "scan", sourceExtension: "pdf"), "scan.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "scan.", sourceExtension: "pdf"), "scan.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "report v1.2 final", sourceExtension: "pdf"), "report v1.2 final.pdf")
-        XCTAssertEqual(Policy.filename(storedFilename: "scan", sourceExtension: ""), "scan")
+    /// name with no extension gets its type's, so the saved file opens.
+    func testFilename_aNameWithoutAnExtension_getsItsTypes() {
+        XCTAssertEqual(Policy.filename(storedFilename: "scan", typeExtension: "pdf"), "scan.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "scan.", typeExtension: "pdf"), "scan.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "report v1.2 final", typeExtension: "pdf"), "report v1.2 final.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "scan", typeExtension: ""), "scan")
         // The extension is the app's own, made from the type, but it is not trusted either.
-        XCTAssertEqual(Policy.filename(storedFilename: "scan", sourceExtension: "p/d.f"), "scan.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "scan", typeExtension: "p/d.f"), "scan.pdf")
     }
 
-    /// The download names the stored file after whatever follows the name's last dot, so
-    /// adding that to the name again doubles it. Found in review of PR 406.
+    /// Digits after a name's last dot are a time, a date or a version far more often than a
+    /// type. Read as an extension they left the saved file with none: a screenshot named for
+    /// the time it was taken was saved as `Screen Shot at 1.02.33`, which nothing opens.
+    /// Found in review of PR 408.
     ///
-    /// Revert-check: deciding with `splitExtension(of: name).pathExtension.isEmpty` in place of
-    /// `hasSuffixAfterDot` makes the first two fail (`main.c++.c`, `notes.txt~.txt`); deleting
-    /// the `unknownTypeExtension` term makes the third (`Makefile.dat`).
-    func testFilename_aNameThatEndsInSomethingAfterADot_orAFileOfNoKnownType_getsNothingAdded() {
-        XCTAssertEqual(Policy.filename(storedFilename: "main.c++", sourceExtension: "c++"), "main.c++")
-        XCTAssertEqual(Policy.filename(storedFilename: "notes.txt~", sourceExtension: "txt~"), "notes.txt~")
-        XCTAssertEqual(Policy.unknownTypeExtension, "dat")
-        XCTAssertEqual(Policy.filename(storedFilename: "Makefile", sourceExtension: "dat"), "Makefile")
+    /// Revert-check: deleting the all-digits term from the guard in `splitExtension` makes the
+    /// first three fail.
+    func testFilename_aNameThatEndsInDigitsAfterADot_getsItsTypesExtension() {
+        XCTAssertEqual(
+            Policy.filename(storedFilename: "Screen Shot at 1.02.33", typeExtension: "png"),
+            "Screen Shot at 1.02.33.png"
+        )
+        XCTAssertEqual(Policy.filename(storedFilename: "Report 2026.11.13", typeExtension: "pdf"), "Report 2026.11.13.pdf")
+        XCTAssertEqual(Policy.filename(storedFilename: "v2.0", typeExtension: "pdf"), "v2.0.pdf")
+        // A digit beside a letter is a type, and an unknown type still adds nothing.
+        XCTAssertEqual(Policy.filename(storedFilename: "song.mp3", typeExtension: "dat"), "song.mp3")
+        XCTAssertEqual(Policy.filename(storedFilename: "backup.7z", typeExtension: "zip"), "backup.7z")
+        XCTAssertEqual(Policy.filename(storedFilename: "archive.001", typeExtension: "dat"), "archive.001")
     }
 
-    func testHasSuffixAfterDot() {
-        XCTAssertTrue(Policy.hasSuffixAfterDot("a.pdf"))
-        XCTAssertTrue(Policy.hasSuffixAfterDot("main.c++"))
-        XCTAssertTrue(Policy.hasSuffixAfterDot("notes.txt~"))
-        XCTAssertFalse(Policy.hasSuffixAfterDot("scan"))
-        XCTAssertFalse(Policy.hasSuffixAfterDot("scan."))
-        XCTAssertFalse(Policy.hasSuffixAfterDot("report v1.2 final"))
+    /// A name's own extension is kept and nothing is added to it, whatever characters it is
+    /// made of, and a file of no known type gets nothing either. Found in review of PR 406.
+    ///
+    /// Revert-check: allowing only letters and digits in `splitExtension` makes the first two
+    /// fail (`main.c++.txt`, `notes.txt~.txt`); deleting the `unknownTypeExtension` term from
+    /// `filename` makes the last (`Makefile.dat`).
+    func testFilename_aNameWithAnExtensionOfItsOwn_orAFileOfNoKnownType_getsNothingAdded() {
+        XCTAssertEqual(Policy.filename(storedFilename: "main.c++", typeExtension: "txt"), "main.c++")
+        XCTAssertEqual(Policy.filename(storedFilename: "notes.txt~", typeExtension: "txt"), "notes.txt~")
+        XCTAssertEqual(Policy.unknownTypeExtension, "dat")
+        XCTAssertEqual(Policy.filename(storedFilename: "Makefile", typeExtension: "dat"), "Makefile")
     }
 
     func testFilename_aNameWithAnExtension_keepsIt_whateverTheFileHas() {
-        XCTAssertEqual(Policy.filename(storedFilename: "photo.jpeg", sourceExtension: "jpg"), "photo.jpeg")
-        XCTAssertEqual(Policy.filename(storedFilename: "archive.tar.gz", sourceExtension: "bin"), "archive.tar.gz")
+        XCTAssertEqual(Policy.filename(storedFilename: "photo.jpeg", typeExtension: "jpg"), "photo.jpeg")
+        XCTAssertEqual(Policy.filename(storedFilename: "archive.tar.gz", typeExtension: "bin"), "archive.tar.gz")
     }
 
     /// Revert-check: returning `name` from `truncated` makes this fail. A file name can be 255
     /// bytes; a longer one cannot be saved at all.
     func testFilename_aVeryLongName_isShortenedBeforeItsExtension() {
         let long = String(repeating: "a", count: 400) + ".pdf"
-        let name = Policy.filename(storedFilename: long, sourceExtension: "pdf")
+        let name = Policy.filename(storedFilename: long, typeExtension: "pdf")
         XCTAssertEqual(name.utf8.count, Policy.maximumFilenameUTF8Count)
         XCTAssertTrue(name.hasSuffix(".pdf"))
 
         // Cut between characters, never inside one.
         let wide = String(repeating: "語", count: 200) + ".pdf"
-        let wideName = Policy.filename(storedFilename: wide, sourceExtension: "pdf")
+        let wideName = Policy.filename(storedFilename: wide, typeExtension: "pdf")
         XCTAssertLessThanOrEqual(wideName.utf8.count, Policy.maximumFilenameUTF8Count)
         XCTAssertGreaterThan(wideName.utf8.count, Policy.maximumFilenameUTF8Count - 4)
         XCTAssertTrue(wideName.hasSuffix(".pdf"))
@@ -205,21 +216,52 @@ final class AttachmentExportPolicyTests: XCTestCase {
         // One `Character` longer than any name may be: a letter under 300 accents. A cut
         // between `Character`s kept none of it and returned ".pdf", a hidden file.
         let stacked = "a" + String(repeating: "\u{0301}", count: 300) + ".pdf"
-        let stackedName = Policy.filename(storedFilename: stacked, sourceExtension: "pdf")
+        let stackedName = Policy.filename(storedFilename: stacked, typeExtension: "pdf")
         XCTAssertLessThanOrEqual(stackedName.utf8.count, Policy.maximumFilenameUTF8Count)
         XCTAssertEqual(stackedName.unicodeScalars.first, "a")
         XCTAssertTrue(stackedName.hasSuffix(".pdf"))
     }
 
-    func testSplitExtension_onlyLettersAndDigitsAfterTheLastDotAreAnExtension() {
-        XCTAssertEqual(Policy.splitExtension(of: "a.pdf").base, "a")
-        XCTAssertEqual(Policy.splitExtension(of: "a.pdf").pathExtension, "pdf")
-        XCTAssertEqual(Policy.splitExtension(of: "a.tar.gz").base, "a.tar")
-        XCTAssertEqual(Policy.splitExtension(of: "a.tar.gz").pathExtension, "gz")
-        XCTAssertEqual(Policy.splitExtension(of: "v1.2 final").pathExtension, "")
-        XCTAssertEqual(Policy.splitExtension(of: "name.").pathExtension, "")
-        XCTAssertEqual(Policy.splitExtension(of: "name").pathExtension, "")
-        XCTAssertEqual(Policy.splitExtension(of: "a." + String(repeating: "x", count: 17)).pathExtension, "")
+    /// The one rule for a name's extension, which everything that needs one asks: whether the
+    /// type's is added, where `availableFilename` puts its number, what `truncated` keeps, and
+    /// the type a dragged file is announced as. There were two, and `main.c++` had an
+    /// extension for the first of those and none for the rest.
+    ///
+    /// Revert-check: each term of the guard in `splitExtension`, deleted alone, makes the
+    /// assertion that names it fail.
+    func testSplitExtension_isShort_hasNoSpace_andIsNotAllDigits() {
+        func parts(_ name: String) -> [String] {
+            let split = Policy.splitExtension(of: name)
+            return [split.base, split.pathExtension]
+        }
+
+        XCTAssertEqual(parts("a.pdf"), ["a", "pdf"])
+        XCTAssertEqual(parts("a.tar.gz"), ["a.tar", "gz"])
+        XCTAssertEqual(parts("main.c++"), ["main", "c++"])
+        XCTAssertEqual(parts("notes.txt~"), ["notes", "txt~"])
+        XCTAssertEqual(parts("song.mp3"), ["song", "mp3"])
+        // A space ends the claim.
+        XCTAssertEqual(parts("v1.2 final"), ["v1.2 final", ""])
+        // All digits: a time, a date, a version.
+        XCTAssertEqual(parts("Screen Shot at 1.02.33"), ["Screen Shot at 1.02.33", ""])
+        XCTAssertEqual(parts("archive.001"), ["archive.001", ""])
+        // Nothing after the dot, no dot, a dot that leads, and too long to be a type.
+        XCTAssertEqual(parts("name."), ["name.", ""])
+        XCTAssertEqual(parts("name"), ["name", ""])
+        XCTAssertEqual(parts(".profile"), [".profile", ""])
+        XCTAssertEqual(parts("a." + String(repeating: "x", count: 16)), ["a", String(repeating: "x", count: 16)])
+        XCTAssertEqual(parts("a." + String(repeating: "x", count: 17))[1], "")
+        // A dot with a combining mark after it is still the dot (unicode scalars).
+        XCTAssertEqual(parts("a.\u{0301}pdf"), ["a", "\u{0301}pdf"])
+    }
+
+    /// Revert-check: allowing only letters and digits in `splitExtension` makes this fail:
+    /// `truncated` then cuts through the `.c++` it no longer reads as an extension.
+    func testFilename_aVeryLongNameWithAnOddExtension_keepsTheExtension() {
+        let name = Policy.filename(storedFilename: String(repeating: "a", count: 400) + ".c++", typeExtension: "txt")
+
+        XCTAssertEqual(name.utf8.count, Policy.maximumFilenameUTF8Count)
+        XCTAssertTrue(name.hasSuffix("a.c++"))
     }
 
     // MARK: - A name that is free
@@ -233,6 +275,9 @@ final class AttachmentExportPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.availableFilename("Photo.jpg") { taken.contains($0) }, "Photo 4.jpg")
         XCTAssertEqual(Policy.availableFilename("notes") { $0 == "notes" }, "notes 2")
         XCTAssertEqual(Policy.availableFilename("a.tar.gz") { $0 == "a.tar.gz" }, "a.tar 2.gz")
+        // By the same rule as everything else: before an odd extension, after a version.
+        XCTAssertEqual(Policy.availableFilename("main.c++") { $0 == "main.c++" }, "main 2.c++")
+        XCTAssertEqual(Policy.availableFilename("v1.2") { $0 == "v1.2" }, "v1.2 2")
     }
 
     // MARK: - Words

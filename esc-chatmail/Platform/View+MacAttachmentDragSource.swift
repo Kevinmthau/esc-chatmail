@@ -6,7 +6,9 @@ extension View {
     /// Nothing on iOS, where the view is returned as it is.
     ///
     /// The drag source is in front of the attachment and takes its clicks, so it is there only
-    /// while the attachment has its file, and hands a click on to `onClick`. Apply it before
+    /// while the attachment has its file, and hands a click on to `onClick`. It is put there
+    /// when the row is drawn, so it also asks at every press whether the attachment still has
+    /// its file, and takes no press where it does not. Apply it before
     /// `macAttachmentExportMenu`, so the menu's view contains it.
     ///
     /// - Parameters:
@@ -22,7 +24,15 @@ extension View {
             if attachment.isReady {
                 MacAttachmentDragSource(
                     resolveItem: { AttachmentExportItem(attachment: attachment) },
-                    onClick: onClick
+                    onClick: onClick,
+                    takesMouse: {
+                        // A row sync deleted has no state left to read.
+                        let isLive = !attachment.isDeleted && attachment.managedObjectContext != nil
+                        return AttachmentDragPolicy.takesMouse(
+                            isLive: isLive,
+                            isReady: isLive && attachment.isReady
+                        )
+                    }
                 )
                 .accessibilityHidden(true)
             }

@@ -4,6 +4,15 @@ import CoreGraphics
 /// (`MacAttachmentDragSourceView`): when a press becomes a drag, when it is a click, and where
 /// the drag may be dropped.
 enum AttachmentDragPolicy {
+    /// Whether the view over the attachment takes the mouse at all, asked at every press. Only
+    /// while the attachment is still there and has its file. The view is put there when the
+    /// row is drawn, and the attachment can change before the row is drawn again: a file that
+    /// went missing is downloaded again, and where that fails the attachment's own button and
+    /// its retry control must get the click, not a view that would open Quick Look on nothing.
+    static func takesMouse(isLive: Bool, isReady: Bool) -> Bool {
+        isLive && isReady
+    }
+
     /// How far the pointer moves with the button down before the press is a drag. Less is
     /// the hand's own movement during a click.
     static let dragThreshold: CGFloat = 4

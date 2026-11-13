@@ -77,11 +77,26 @@ final class AttachmentExportItemTests: XCTestCase {
     }
 
     /// Revert-check: passing the stored filename through unchanged makes this fail.
-    func testItem_cleansTheSendersName_andGivesItTheFilesExtension() throws {
+    func testItem_cleansTheSendersName_andGivesItItsTypesExtension() throws {
         try write("Attachments/local_abc.pdf")
         let attachment = localAttachment(filename: "../../.ssh/scan", localURL: "Attachments/local_abc.pdf")
+        attachment.mimeType = "application/pdf"
 
         XCTAssertEqual(try XCTUnwrap(item(for: attachment)).filename, "scan.pdf")
+    }
+
+    /// The download names the stored file after whatever follows the last dot of the sender's
+    /// name, so for a screenshot named for its time the file on disk ends in `.33`. The name
+    /// offered takes its extension from the attachment's type.
+    ///
+    /// Revert-check: passing `sourceURL.pathExtension` as `typeExtension` in
+    /// `AttachmentExportItem.init(attachment:)` makes this fail (`…1.02.33.33`).
+    func testItem_forANameThatEndsInDigits_takesItsExtensionFromTheType_notTheFileOnDisk() throws {
+        try write("Attachments/local_abc.33")
+        let attachment = localAttachment(filename: "Screen Shot at 1.02.33", localURL: "Attachments/local_abc.33")
+        attachment.mimeType = "image/png"
+
+        XCTAssertEqual(try XCTUnwrap(item(for: attachment)).filename, "Screen Shot at 1.02.33.png")
     }
 
     /// Revert-check: deleting `attachment.isReady` from the initializer's guard makes this

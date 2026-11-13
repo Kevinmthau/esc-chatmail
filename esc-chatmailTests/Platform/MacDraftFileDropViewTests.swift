@@ -27,7 +27,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// calling `onDropFiles` makes this fail; returning `[]` from `operation(for:)` makes the
     /// first assertion fail.
     func testFileDrag_overTheChat_isACopy_andTheDropHandsOverTheFilesInOrder() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let files = [URL(fileURLWithPath: "/tmp/One.pdf"), URL(fileURLWithPath: "/tmp/Two.png")]
         let drag = FakeDraggingInfo.files(files, in: harness.window)
 
@@ -45,7 +45,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: returning true from `performDragOperation` whatever `onDropFiles`
     /// answers makes this fail.
     func testDrop_theChatRefuses_isNotTaken() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         harness.model.takesDrops = false
         let drag = FakeDraggingInfo.files([URL(fileURLWithPath: "/tmp/One.pdf")], in: harness.window)
 
@@ -58,7 +58,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// answers makes every assertion fail; dropping the `operation(for:)` guard from
     /// `performDragOperation` makes the last two fail.
     func testFileDrag_whileTheReplyCannotTakeFiles_isRefused_beforeAndAtTheDrop() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         harness.model.accepts = false
         let drag = FakeDraggingInfo.files([URL(fileURLWithPath: "/tmp/One.pdf")], in: harness.window)
 
@@ -72,7 +72,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
 
     /// A send or an import can start between the drag coming in and the drop.
     func testDrop_afterTheReplyStoppedTakingFiles_isRefused() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let drag = FakeDraggingInfo.files([URL(fileURLWithPath: "/tmp/One.pdf")], in: harness.window)
         XCTAssertEqual(harness.dropView.draggingEntered(drag), .copy)
 
@@ -87,7 +87,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// pasteboard holds makes the text drag fail; reading every URL (`options: [:]`) in
     /// `carriesFiles` makes the link fail.
     func testDrag_ofTextOrALink_isNotTheChats() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let text = FakeDraggingInfo.text("Some words", in: harness.window)
         let link = FakeDraggingInfo(
             pasteboard: FakeDraggingInfo.pasteboard(
@@ -107,7 +107,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: passing `sourceAllowsCopy: true` in `operation(for:)` whatever the
     /// source allows makes this fail.
     func testFileDrag_whoseSourceAllowsNoCopy_isRefused() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let drag = FakeDraggingInfo.files(
             [URL(fileURLWithPath: "/tmp/One.pdf")],
             in: harness.window,
@@ -129,7 +129,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// assertion fail. Returning the kept answer whatever the drag's sequence number makes
     /// the last assertion fail.
     func testFileDrag_isAskedOfThePasteboardOnce_andTheNextDragIsAskedAgain() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let pasteboard = FakeDraggingInfo.pasteboard(holding: [URL(fileURLWithPath: "/tmp/One.pdf") as NSURL])
         let drag = FakeDraggingInfo(pasteboard: pasteboard, window: harness.window)
         XCTAssertEqual(harness.dropView.draggingEntered(drag), .copy)
@@ -153,7 +153,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: deleting the `hitTest(_:)` override from `MacDraftFileDropView` makes
     /// this fail.
     func testDropView_takesNoClicks() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
         let inside = NSPoint(x: harness.dropView.bounds.midX, y: harness.dropView.bounds.midY)
         XCTAssertTrue(harness.dropView.bounds.contains(inside))
 
@@ -164,7 +164,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: deleting `registerForDraggedTypes([.fileURL])` from the initializer
     /// makes this fail. Unregistered, AppKit never offers the view a drag at all.
     func testDropView_isRegisteredForFiles_andFillsTheChat() throws {
-        let harness = try Harness()
+        let harness = try Harness(window: try makeTestHostWindow())
 
         XCTAssertEqual(harness.dropView.registeredDraggedTypes, [.fileURL])
         XCTAssertEqual(harness.dropView.convert(harness.dropView.bounds, to: nil).size, Harness.size)
@@ -199,7 +199,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// frame holds the point makes the second assertion fail; returning nil for it always
     /// makes the first fail.
     func testDropViewLookup_findsTheChatUnderAPoint_andNothingOutsideIt() throws {
-        let harness = try Harness(chatSize: CGSize(width: 200, height: 150))
+        let harness = try Harness(window: try makeTestHostWindow(), chatSize: CGSize(width: 200, height: 150))
         let frame = harness.dropView.convert(harness.dropView.bounds, to: nil)
 
         XCTAssertTrue(
@@ -222,7 +222,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// `performDragOperation` overrides from `MacReplyTextView` makes this fail: the drop is
     /// not handed over and "/tmp/One.pdf" is typed into the draft.
     func testFileDrag_onTheReplyField_goesToTheChat_andTypesNothing() throws {
-        let harness = try Harness(text: "Hello")
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
         let textView = try harness.replyTextView()
         let drag = FakeDraggingInfo.files(
             [URL(fileURLWithPath: "/tmp/One.pdf")],
@@ -245,7 +245,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: answering `nil` from `MacFileDropForwarder.draggingEntered` where it
     /// finds no drop view (so the text view takes the drag) makes this fail.
     func testFileDrag_onAReplyFieldWithNoChatBehindIt_isRefused_andTypesNothing() throws {
-        let harness = try Harness(text: "Hello", hasDropView: false)
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello", hasDropView: false)
         let textView = try harness.replyTextView()
         let drag = FakeDraggingInfo.files(
             [URL(fileURLWithPath: "/tmp/One.pdf")],
@@ -266,7 +266,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// `?? super.draggingEntered(sender)`, and the same in `performDragOperation`) makes
     /// this fail.
     func testTextDrag_onTheReplyField_isStillTheTextViews() throws {
-        let harness = try Harness(text: "")
+        let harness = try Harness(window: try makeTestHostWindow(), text: "")
         let textView = try harness.replyTextView()
         let drag = FakeDraggingInfo.text(
             "Dragged words",
@@ -289,7 +289,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: deleting `end()` from `MacFileDropForwarder.draggingExited` makes this
     /// fail: the text drag's update is answered as the file drag was.
     func testFileDrag_thatLeavesTheField_isForgotten() throws {
-        let harness = try Harness(text: "")
+        let harness = try Harness(window: try makeTestHostWindow(), text: "")
         let textView = try harness.replyTextView()
         let at = textView.convert(NSPoint(x: 5, y: 5), to: nil)
         harness.model.accepts = false
@@ -309,7 +309,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// `LayoutAwareWKWebView` makes this fail: WebKit takes the drop and nothing reaches the
     /// chat.
     func testFileDrag_onAnEmailCard_goesToTheChat() throws {
-        let harness = try Harness(hasWebView: true)
+        let harness = try Harness(window: try makeTestHostWindow(), hasWebView: true)
         let webView = try harness.webView()
         let drag = FakeDraggingInfo.files(
             [URL(fileURLWithPath: "/tmp/One.pdf")],
@@ -333,7 +333,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: deleting the drag overrides from `LayoutAwareWKWebView` makes this fail:
     /// WebKit answers the drag with a copy and takes the drop.
     func testFileDrag_onAWebViewWithNoChatBehindIt_isRefused() throws {
-        let harness = try Harness(hasDropView: false, hasWebView: true)
+        let harness = try Harness(window: try makeTestHostWindow(), hasDropView: false, hasWebView: true)
         let webView = try harness.webView()
         let drag = FakeDraggingInfo.files(
             [URL(fileURLWithPath: "/tmp/One.pdf")],
@@ -354,7 +354,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// Revert-check: answering with `super`'s where the forwarder answers nil (as
     /// `MacReplyTextView` does) makes this fail.
     func testTextOrLinkDrag_onAWebView_isRefused() throws {
-        let harness = try Harness(hasWebView: true)
+        let harness = try Harness(window: try makeTestHostWindow(), hasWebView: true)
         let webView = try harness.webView()
         let at = webView.convert(NSPoint(x: webView.bounds.midX, y: webView.bounds.midY), to: nil)
         let link = FakeDraggingInfo(
@@ -391,7 +391,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// wait fail.
     func testPicker_givenADropDuringAnImport_keepsIt_andTakesItWhenTheImportEnds() async throws {
         let model = PickerModel()
-        let harness = PickerHarness(model: model)
+        let harness = PickerHarness(window: try makeTestHostWindow(), model: model)
         defer { harness.close() }
         let drop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
 
@@ -408,7 +408,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     /// `AttachmentPicker.body` makes this fail.
     func testPicker_givenADropWhileIdle_takesIt() async throws {
         let model = PickerModel()
-        let harness = PickerHarness(model: model)
+        let harness = PickerHarness(window: try makeTestHostWindow(), model: model)
         defer { harness.close() }
 
         model.fileDrop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
@@ -423,7 +423,7 @@ final class MacDraftFileDropViewTests: XCTestCase {
     func testPicker_comingOnScreenWithADropPending_takesIt() async throws {
         let model = PickerModel()
         model.fileDrop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [])
-        let harness = PickerHarness(model: model)
+        let harness = PickerHarness(window: try makeTestHostWindow(), model: model)
         defer { harness.close() }
 
         try await harness.waitUntil { model.fileDrop == nil }
@@ -532,28 +532,20 @@ private struct PickerStandIn: View {
 
 @MainActor
 private final class PickerHarness {
-    private let window: NSWindow
-    private let host: NSHostingView<PickerStandIn>
+    private let host: MacOffscreenHost
 
-    init(model: PickerModel) {
-        window = NSWindow(
-            contentRect: NSRect(x: -30000, y: -30000, width: 100, height: 100),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
+    init(window: NSWindow, model: PickerModel) {
+        host = MacOffscreenHost(
+            window: window,
+            size: CGSize(width: 100, height: 100),
+            rootView: PickerStandIn(model: model)
         )
-        window.isReleasedWhenClosed = false
-        host = NSHostingView(rootView: PickerStandIn(model: model))
-        host.frame = NSRect(x: 0, y: 0, width: 100, height: 100)
-        window.contentView = host
         settle()
     }
 
     /// Lets SwiftUI finish its update and run the `onChange` actions it owes.
     func settle() {
-        host.layoutSubtreeIfNeeded()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
-        host.layoutSubtreeIfNeeded()
+        host.settle()
     }
 
     func waitUntil(
@@ -566,14 +558,13 @@ private final class PickerHarness {
             guard Date() < deadline else {
                 return XCTFail("The condition was not met in \(timeout) s")
             }
-            host.layoutSubtreeIfNeeded()
+            host.hostingView.layoutSubtreeIfNeeded()
             try await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
     }
 
     func close() {
-        window.contentView = nil
-        window.close()
+        host.close()
     }
 }
 
@@ -644,25 +635,21 @@ private final class Harness {
     nonisolated static let size = CGSize(width: 400, height: 300)
 
     let model: DropModel
-    let window: NSWindow
-    private let host: NSHostingView<ChatStandIn>
+    private let host: MacOffscreenHost
     private let foundDropView: MacDraftFileDropView?
 
     init(
+        window: NSWindow,
         text: String = "",
         chatSize: CGSize = Harness.size,
         hasDropView: Bool = true,
         hasWebView: Bool = false
     ) throws {
-        model = DropModel(text: text)
-        window = NSWindow(
-            contentRect: NSRect(x: -30000, y: -30000, width: Self.size.width, height: Self.size.height),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.isReleasedWhenClosed = false
-        host = NSHostingView(
+        let model = DropModel(text: text)
+        self.model = model
+        host = MacOffscreenHost(
+            window: window,
+            size: Self.size,
             rootView: ChatStandIn(
                 model: model,
                 chatSize: chatSize,
@@ -670,21 +657,19 @@ private final class Harness {
                 hasWebView: hasWebView
             )
         )
-        host.frame = NSRect(origin: .zero, size: Self.size)
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
         // SwiftUI builds its AppKit views on a later turn of the run loop.
-        let deadline = Date().addingTimeInterval(5)
-        while Self.first(MacReplyTextView.self, in: host) == nil, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-        host.layoutSubtreeIfNeeded()
-        foundDropView = Self.first(MacDraftFileDropView.self, in: host)
+        host.waitForView(MacReplyTextView.self)
+        foundDropView = host.first(MacDraftFileDropView.self)
         if hasDropView {
             _ = try XCTUnwrap(foundDropView, "The drop view was not built")
         } else {
             XCTAssertNil(foundDropView)
         }
+    }
+
+    /// The window the chat is in, for the stand-in drags.
+    var window: NSWindow {
+        host.window
     }
 
     var dropView: MacDraftFileDropView {
@@ -693,24 +678,15 @@ private final class Harness {
     }
 
     func replyTextView() throws -> MacReplyTextView {
-        try XCTUnwrap(Self.first(MacReplyTextView.self, in: host), "The field's text view was not built")
+        try XCTUnwrap(host.first(MacReplyTextView.self), "The field's text view was not built")
     }
 
     func webView() throws -> LayoutAwareWKWebView {
-        try XCTUnwrap(Self.first(LayoutAwareWKWebView.self, in: host), "The web view was not built")
+        try XCTUnwrap(host.first(LayoutAwareWKWebView.self), "The web view was not built")
     }
 
     func close() {
-        window.contentView = nil
-        window.close()
-    }
-
-    private static func first<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
-        if let match = view as? T { return match }
-        for subview in view.subviews {
-            if let match = first(type, in: subview) { return match }
-        }
-        return nil
+        host.close()
     }
 }
 #endif

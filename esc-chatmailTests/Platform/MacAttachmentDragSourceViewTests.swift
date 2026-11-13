@@ -11,8 +11,9 @@ import XCTest
 /// when it starts a drag and with what, and that a right-click on it still gets the
 /// attachment's menu. Mac only, so it runs in `Mac.xctestplan`.
 ///
-/// HONEST SCOPE: the real view is mounted over a stand-in attachment (a button), inside a
-/// stand-in for the row with its menus, in a window that is never shown. It is handed mouse
+/// HONEST SCOPE: the real view is mounted over a stand-in attachment (a button), inside the
+/// shared stand-in for the row with its menus (`MacMessageRowStandIn`), in a window that is
+/// never shown (`MacOffscreenHost`). It is handed mouse
 /// events directly, which is what AppKit does once its hit test has chosen it; the hit test
 /// itself is asked which view it chooses. No dragging session is started: `beginSession` is
 /// replaced, because a session is the window server's and follows the real pointer. So
@@ -46,26 +47,16 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
         try await super.tearDown()
     }
 
-    /// An attachment whose file, where it has one, is `<its id>.<ext>` in the temporary
-    /// directory.
     private func attachment(
         _ filename: String,
         state: Attachment.State = .downloaded,
         bytes: String? = "bytes"
     ) throws -> Attachment {
-        let id = "local_\(UUID().uuidString)"
-        let attachment = AttachmentBuilder().withId(id).withFilename(filename).build(in: context)
-        attachment.state = state
-        let stored = "\(id).\((filename as NSString).pathExtension)"
-        attachment.localURL = stored
-        if let bytes {
-            try Data(bytes.utf8).write(to: directory.appendingPathComponent(stored))
-        }
-        return attachment
+        try FileBackedAttachmentFixture.make(filename, state: state, bytes: bytes, in: context, directory: directory)
     }
 
-    private func makeHarness(_ attachment: Attachment) -> Harness {
-        let harness = Harness(attachment: attachment, directory: directory)
+    private func makeHarness(_ attachment: Attachment) throws -> Harness {
+        let harness = Harness(window: try makeTestHostWindow(), attachment: attachment, directory: directory)
         harnesses.append(harness)
         return harness
     }
@@ -75,7 +66,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// Revert-check: deleting `onClick()` from `mouseUp` makes this fail: a click on an
     /// attachment that has its file would open nothing.
     func testPress_releasedInPlace_isTheAttachmentsClick_andStartsNoDrag() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
 
         source.mouseDown(with: try harness.mouse(.leftMouseDown, at: harness.pointOnAttachment))
@@ -89,7 +80,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// `AttachmentDragPolicy.startsDrag`, makes this fail: a click with a shaky hand would
     /// drag and open nothing.
     func testPress_thatMovesLessThanTheThreshold_isStillAClick() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
         let press = harness.pointOnAttachment
 
@@ -105,7 +96,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// assertion fail; deleting `!didStartDrag` from its guard makes it 3; deleting
     /// `didStartDrag = true` makes the click count 1.
     func testPress_thatMovesPastTheThreshold_startsOneDragOfThePromise_andIsNotAClick() throws {
-        let harness = makeHarness(try attachment("dir/Q3 report.pdf", bytes: "report bytes"))
+        let harness = try makeHarness(try attachment("dir/Q3 report.pdf", bytes: "report bytes"))
         let source = try harness.dragSource()
         let press = harness.pointOnAttachment
 
@@ -139,7 +130,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     ///
     /// Revert-check: centering the dragging frame on the view's origin makes this fail.
     func testDrag_drawsItsIconUnderThePress() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
         let press = harness.pointOnAttachment
 
@@ -158,7 +149,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// the second assertion fail: dragging an attachment whose file is gone would open Quick
     /// Look when the button came up.
     func testDrag_ofAnAttachmentWhoseFileIsGone_startsNothing_andIsNotAClick() throws {
-        let harness = makeHarness(try attachment("Report.pdf", bytes: nil))
+        let harness = try makeHarness(try attachment("Report.pdf", bytes: nil))
         let source = try harness.dragSource()
         let press = harness.pointOnAttachment
 
@@ -172,7 +163,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
 
     /// Revert-check: passing `releasedInside: true` to `isClick` makes this fail.
     func testPress_releasedOffTheAttachment_isNotAClick() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
 
         source.mouseDown(with: try harness.mouse(.leftMouseDown, at: harness.pointOnAttachment))
@@ -186,7 +177,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     ///
     /// Revert-check: deleting `guard pressLocation != nil` from `mouseUp` makes this fail.
     func testRelease_withNoPressOnTheView_isNotAClick() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
 
         source.mouseUp(with: try harness.mouse(.leftMouseUp, at: harness.pointOnAttachment))
@@ -199,7 +190,7 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     ///
     /// Revert-check: deleting `didStartDrag = false` from `mouseDown` makes this fail.
     func testAClick_afterADragWhoseReleaseNeverCame_isAClick() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
         let press = harness.pointOnAttachment
 
@@ -220,18 +211,46 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// Revert-check: deleting the `menu(for:)` override from `MacAttachmentDragSourceView`
     /// makes the second assertion fail: the view has no menu of its own.
     func testTheDragSource_isWhatAPressHits_andARightClickOnItGetsTheAttachmentsMenu() throws {
-        let harness = makeHarness(try attachment("Report.pdf"))
+        let harness = try makeHarness(try attachment("Report.pdf"))
         let source = try harness.dragSource()
 
         XCTAssertTrue(harness.hitView(at: harness.pointOnAttachment) === source)
         let rightClick = try harness.mouse(.rightMouseDown, at: harness.pointOnAttachment)
         XCTAssertEqual(
             harness.entries(of: source.menu(for: rightClick)),
-            ["Quick Look:on", "Save Attachment…:on"]
+            ["Quick Look:on", "Save Attachment…:on", "---", "Reply:on", "Forward:on"]
         )
         // And beside the attachment, the message's.
         XCTAssertFalse(harness.hitView(at: harness.pointOnText) === source)
         XCTAssertEqual(harness.entries(of: try harness.hostMenu(at: harness.pointOnText)), ["Reply:on", "Forward:on"])
+    }
+
+    /// The view is put over the attachment when the row is drawn, and the attachment can lose
+    /// its file before the row is drawn again (a missing file's download failing). The view
+    /// then takes no press: the click, and a right-click, are the attachment's own view's, with
+    /// its retry control. Found in review of PR 408: the view took the click and opened Quick
+    /// Look, without the check every attachment button makes.
+    ///
+    /// The stand-in observes nothing of the attachment, so the view is still mounted after
+    /// the state changes, which is the case this pins.
+    ///
+    /// Revert-check: deleting the `hitTest` override from `MacAttachmentDragSourceView` makes
+    /// the assertion after the state change fail, and so does passing `takesMouse: { true }`
+    /// in `macAttachmentDragSource`.
+    func testTheDragSource_overAnAttachmentThatLostItsFile_takesNoPress_thoughItIsStillThere() throws {
+        let attachment = try attachment("Report.pdf")
+        let harness = try makeHarness(attachment)
+        let source = try harness.dragSource()
+        XCTAssertTrue(harness.hitView(at: harness.pointOnAttachment) === source)
+
+        attachment.state = .failed
+
+        XCTAssertTrue(harness.optionalDragSource() === source)
+        let hit = try XCTUnwrap(harness.hitView(at: harness.pointOnAttachment), "Nothing takes the press")
+        XCTAssertFalse(hit === source)
+        // A right-click there is still answered with a menu, by the views behind. Its entries
+        // are as the stand-in last drew them, so they are not read here.
+        XCTAssertNotNil(try harness.hostMenu(at: harness.pointOnAttachment))
     }
 
     /// Revert-check: returning `.copy` from `sourceOperationMask(for:)` whatever the context
@@ -256,15 +275,15 @@ final class MacAttachmentDragSourceViewTests: XCTestCase {
     /// loop's assertion fail.
     func testTheDragSource_isOverAnAttachmentOnlyWhileItHasItsFile() throws {
         for state in [Attachment.State.downloaded, .uploaded] {
-            let harness = makeHarness(try attachment("Report.pdf", state: state))
+            let harness = try makeHarness(try attachment("Report.pdf", state: state))
             XCTAssertNotNil(harness.optionalDragSource(), "\(state)")
         }
         for state in [Attachment.State.queued, .failed, .uploading] {
-            let harness = makeHarness(try attachment("Report.pdf", state: state, bytes: nil))
+            let harness = try makeHarness(try attachment("Report.pdf", state: state, bytes: nil))
             XCTAssertNil(harness.optionalDragSource(), "\(state)")
             XCTAssertEqual(
                 harness.entries(of: try harness.hostMenu(at: harness.pointOnAttachment)),
-                ["Quick Look:off", "Save Attachment…:off"]
+                ["Quick Look:off", "Save Attachment…:off", "---", "Reply:on", "Forward:on"]
             )
         }
     }
@@ -284,70 +303,44 @@ private final class DragModel: ObservableObject {
     var sessions: [Session] = []
 }
 
-/// A message's row as far as the mouse goes: text above, one attachment below (a button, as
-/// every attachment view is), the attachment's drag source and menu on it, and the row's own
-/// menu around both.
-private struct DragRowStandIn: View {
-    static let cell: CGFloat = 100
-
-    let attachment: Attachment
-    let model: DragModel
-    let directory: URL
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("The message's text")
-                .frame(width: Self.cell * 2, height: Self.cell)
-            Button {} label: {
-                Color.red.frame(width: Self.cell, height: Self.cell)
-            }
-            .buttonStyle(PlainButtonStyle())
-            .macAttachmentDragSource(attachment: attachment, onClick: { model.clicks += 1 })
-            .macAttachmentExportMenu(
-                attachment: attachment,
-                shownAttachments: [attachment],
-                onQuickLook: {}
-            )
-            .frame(width: Self.cell * 2, height: Self.cell, alignment: .leading)
-        }
-        .contentShape(Rectangle())
-        .contextMenu {
-            Button("Reply") {}
-            Button("Forward") {}
-        } preview: {
-            Text("Preview")
-        }
-    }
-}
-
+/// The suite's harness: the shared row stand-in (`MacMessageRowStandIn`) with one attachment,
+/// a button as every attachment view is, carrying the real drag source and menu modifiers in
+/// the order the app applies them, in the shared off-screen host.
 @MainActor
 private final class Harness {
-    let model = DragModel()
-    private let window: NSWindow
-    private let host: NSHostingView<DragRowStandIn>
-    private let directory: URL
+    private static let columns = 2
 
-    init(attachment: Attachment, directory: URL) {
-        self.directory = directory
-        let size = CGSize(width: DragRowStandIn.cell * 2, height: DragRowStandIn.cell * 2)
-        window = NSWindow(
-            contentRect: NSRect(x: -30000, y: -30000, width: size.width, height: size.height),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
+    let model: DragModel
+    private let host: MacOffscreenHost
+
+    init(window: NSWindow, attachment: Attachment, directory: URL) {
+        let model = DragModel()
+        self.model = model
+        let cell = MacMessageRowStandInLayout.cell
+        host = MacOffscreenHost(
+            window: window,
+            size: MacMessageRowStandInLayout.size(columns: Self.columns),
+            rootView: MacMessageRowStandIn(
+                columns: Self.columns,
+                onMessageAction: { _ in },
+                attachments: {
+                    Button {} label: {
+                        Color.red.frame(width: cell, height: cell)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .macAttachmentDragSource(attachment: attachment, onClick: { model.clicks += 1 })
+                    .macAttachmentExportMenu(
+                        attachment: attachment,
+                        shownAttachments: [attachment],
+                        onQuickLook: {}
+                    )
+                }
+            )
         )
-        window.isReleasedWhenClosed = false
-        host = NSHostingView(rootView: DragRowStandIn(attachment: attachment, model: model, directory: directory))
-        host.frame = NSRect(origin: .zero, size: size)
-        window.contentView = host
-        host.layoutSubtreeIfNeeded()
-        // SwiftUI builds its AppKit views on a later turn of the run loop.
-        let deadline = Date().addingTimeInterval(attachment.isReady ? 5 : 0.3)
-        while optionalDragSource() == nil, Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
-        }
-        host.layoutSubtreeIfNeeded()
-        if let source = optionalDragSource() {
+        // SwiftUI builds its AppKit views on a later turn of the run loop. An attachment
+        // with no file gets no drag source, so there is nothing to wait long for.
+        let source = host.waitForView(MacAttachmentDragSourceView.self, timeout: attachment.isReady ? 5 : 0.3)
+        if let source {
             // The app's lookup reads Application Support; the tests' files are elsewhere.
             source.resolveItem = { [directory] in
                 AttachmentExportItem(
@@ -361,17 +354,16 @@ private final class Harness {
         }
     }
 
-    /// Window coordinates, y up: the text is the upper half, the attachment the lower left.
     var pointOnText: NSPoint {
-        NSPoint(x: DragRowStandIn.cell * 0.5, y: DragRowStandIn.cell * 1.5)
+        MacMessageRowStandInLayout.pointOnText(columns: Self.columns)
     }
 
     var pointOnAttachment: NSPoint {
-        NSPoint(x: DragRowStandIn.cell * 0.5, y: DragRowStandIn.cell * 0.5)
+        MacMessageRowStandInLayout.pointOnAttachment()
     }
 
     func optionalDragSource() -> MacAttachmentDragSourceView? {
-        Self.first(MacAttachmentDragSourceView.self, in: host)
+        host.first(MacAttachmentDragSourceView.self)
     }
 
     func dragSource() throws -> MacAttachmentDragSourceView {
@@ -379,50 +371,23 @@ private final class Harness {
     }
 
     func hitView(at point: NSPoint) -> NSView? {
-        host.hitTest(point)
+        host.hitView(at: point)
     }
 
     func mouse(_ type: NSEvent.EventType, at point: NSPoint) throws -> NSEvent {
-        try XCTUnwrap(
-            NSEvent.mouseEvent(
-                with: type,
-                location: point,
-                modifierFlags: [],
-                timestamp: 0,
-                windowNumber: window.windowNumber,
-                context: nil,
-                eventNumber: 0,
-                clickCount: 1,
-                pressure: 1
-            )
-        )
+        try host.mouse(type, at: point)
     }
 
     func hostMenu(at point: NSPoint) throws -> NSMenu? {
-        host.menu(for: try mouse(.rightMouseDown, at: point))
+        try host.menu(at: point)
     }
 
     func entries(of menu: NSMenu?) -> [String] {
-        guard let menu else { return [] }
-        menu.update()
-        return menu.items.map { "\($0.title):\($0.isEnabled ? "on" : "off")" }
+        host.entries(of: menu)
     }
 
     func close() {
-        window.contentView = nil
-        window.close()
-    }
-
-    private static func first<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
-        if let match = view as? T {
-            return match
-        }
-        for subview in view.subviews {
-            if let match = first(type, in: subview) {
-                return match
-            }
-        }
-        return nil
+        host.close()
     }
 }
 #endif

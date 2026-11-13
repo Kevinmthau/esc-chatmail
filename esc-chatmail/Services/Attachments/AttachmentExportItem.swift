@@ -35,16 +35,18 @@ struct AttachmentExportItem: Equatable {
             return nil
         }
         self.sourceURL = sourceURL
+        // The type's extension, not the stored file's: that one is whatever followed the last
+        // dot of the sender's name (`AttachmentExportPolicy.filename`).
         self.filename = AttachmentExportPolicy.filename(
             storedFilename: attachment.filename,
-            sourceExtension: sourceURL.pathExtension
+            typeExtension: AttachmentPaths.fileExtension(for: attachment.mimeType)
         )
     }
 
     /// The name to report an attachment under when it has no file to save.
     static func displayFilename(of attachment: Attachment) -> String {
         guard isLive(attachment) else { return AttachmentExportPolicy.fallbackBaseName }
-        return AttachmentExportPolicy.filename(storedFilename: attachment.filename, sourceExtension: "")
+        return AttachmentExportPolicy.filename(storedFilename: attachment.filename, typeExtension: "")
     }
 
     /// The attachments of a message as Save All takes them: a value for each that has its

@@ -15,7 +15,8 @@ import UniformTypeIdentifiers
 /// moves `AttachmentDragPolicy.dragThreshold` starts the drag, and one released in place is
 /// the click the attachment's button would have had, handed on through `onClick`. It is only
 /// put over an attachment that has its file, where that click is the button's whole job (the
-/// retry control exists only on a failed one). Everything else passes it by: a right-click
+/// retry control exists only on a failed one), and it takes no press once the attachment has
+/// lost its file (`hitTest`). Everything else passes it by: a right-click
 /// gets the menu of the views behind it (`menu(for:)`), and the scroll wheel is not handled
 /// here at all.
 final class MacAttachmentDragSourceView: NSView, NSDraggingSource {
@@ -23,6 +24,9 @@ final class MacAttachmentDragSourceView: NSView, NSDraggingSource {
     var resolveItem: @MainActor () -> AttachmentExportItem? = { nil }
     /// A click on the attachment.
     var onClick: @MainActor () -> Void = {}
+    /// Whether the attachment has its file now (`AttachmentDragPolicy.takesMouse`). Asked at
+    /// every press, because the view can outlast the state it was put there for.
+    var takesMouse: @MainActor () -> Bool = { true }
     /// Starts the dragging session. A property so the tests never start one: a session is
     /// the window server's, and follows the real pointer.
     var beginSession: @MainActor (MacAttachmentDragSourceView, [NSDraggingItem], NSEvent) -> Void = { view, items, event in
@@ -39,6 +43,12 @@ final class MacAttachmentDragSourceView: NSView, NSDraggingSource {
     /// A press on the attachment never moves the window, whatever the window allows.
     override var mouseDownCanMoveWindow: Bool {
         false
+    }
+
+    /// Nil while the attachment has no file, so the press, and a right-click, go to the
+    /// attachment's own view behind this one, as they did before this view was put there.
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        takesMouse() ? super.hitTest(point) : nil
     }
 
     // MARK: - The left mouse button
