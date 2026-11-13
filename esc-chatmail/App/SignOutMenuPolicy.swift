@@ -32,7 +32,8 @@ enum SignOutMenuPolicy {
     ///   nothing on screen to explain it. `focusedWindowHasSheet` is read from AppKit at the
     ///   moment the command is chosen (`FocusedWindowSheet`). It must stay a live read and never
     ///   become a count of the sheets the app presented: a count that stuck above zero would
-    ///   disable the Mac's only way to sign out.
+    ///   leave the Mac with no way to sign out, because the Settings window's button asks through
+    ///   this too.
     /// - `SettingsAppSignOutPolicy` would not ask now (no account left to sign out, or a
     ///   request already being handled) → refuse.
     /// - Otherwise → confirm.

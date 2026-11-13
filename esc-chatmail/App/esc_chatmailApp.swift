@@ -81,25 +81,34 @@ struct esc_chatmailApp: App {
         // the newest composer write a conversation's draft, so two windows on
         // one chat would fight over it; a `Window` scene cannot be opened twice.
         //
-        // It is also the app's only scene, and SwiftUI quits an app whose one
-        // `Window` closes. That is the decided behavior (2026-11-11), not a
-        // side effect to fix: the app does not keep running and syncing with
-        // its window closed, as Mail does. Quitting goes through
-        // `MacAppDelegate`, which holds it for a send in flight. A
-        // `WindowGroup` here would leave the app running with no window,
-        // unless the delegate also returned true from
+        // Closing it quits the app. That is the decided behavior (2026-11-11),
+        // not a side effect to fix: the app does not keep running and syncing
+        // with its window closed, as Mail does. SwiftUI quits an app whose one
+        // `Window` closes, but not while the Settings window below is open, so
+        // `MacAppDelegate` also quits when this window closes
+        // (`MacMainWindowPolicy`). Quitting goes through that delegate either
+        // way, which holds it for a send in flight. A `WindowGroup` here would
+        // leave the app running with no window, unless the delegate also
+        // returned true from
         // `applicationShouldTerminateAfterLastWindowClosed(_:)`
         // (`docs/mac-app-plan.md`, "Closing the window").
-        Window("MushMail", id: Self.mainWindowID) {
+        Window("MushMail", id: MacMainWindowPolicy.windowID) {
             rootContent
                 // Room for the sidebar's narrowest width beside a readable chat.
                 .frame(minWidth: 700, minHeight: 480)
         }
         .defaultSize(width: 900, height: 860)
         .commands {
-            // The Mac's only way to sign out until it has a Settings scene.
+            // Sign Out… in the app menu, under the Settings… item the scene
+            // below adds. The Settings window has the same command as a button.
             SignOutCommands()
             MailboxCommands()
+        }
+
+        // The app menu's Settings… (Command-Comma): the account, Sign Out… and
+        // the version, where iOS has its page in the Settings app.
+        Settings {
+            settingsContent
         }
         #else
         WindowGroup {
@@ -109,7 +118,21 @@ struct esc_chatmailApp: App {
     }
 
     #if os(macOS)
-    private static let mainWindowID = "main"
+    /// The Settings window's content. Nothing to act on until `initializeApp()`
+    /// has finished, as for the mailbox window: before that the session is the
+    /// unrestored placeholder, and a sign-out asked for then would start an
+    /// auth transition ahead of the fresh-install check and the launch restore.
+    /// The unit-test host never initializes, so it never mounts the view.
+    @ViewBuilder
+    private var settingsContent: some View {
+        if isInitialized {
+            MacSettingsView(authSession: dependencies.authSession)
+        } else {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: MacSettingsPolicy.windowWidth, height: 120)
+        }
+    }
     #endif
 
     /// The window's content on both platforms: the loading view until

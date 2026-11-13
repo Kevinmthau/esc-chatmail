@@ -431,6 +431,22 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - It is enabled for an account still held behind `SignInView` after a launch restore that failed retryably, which iOS could already sign out.
       - Its failure alert names the command. It named a Settings switch the Mac does not have.
     - Not yet seen on screen: the command, its alerts, or its state under a sheet.
+  - **Built 2026-11-13** (`MacSettingsView`, the app menu's Settings…, Command-Comma). The window has the Account row, a Sign Out… button with a line under it, and the Version row (`MacSettingsPolicy`). The app menu's Sign Out… command is kept.
+    - **Sign Out… in the window is the menu command as a button.** It asks through `SettingsAppSignOutController.requestSignOut` and ends in the same confirmation and the same `AuthSession.signOut`. No AuthSession path was added.
+    - **The window has its own controller**, as each window does. The confirmation is then an alert on the Settings window, where the user asked (measured: an alert raised from the Settings view is a sheet on the Settings window). And the window publishes the menu command too: while Settings has the keyboard the mailbox window's focused values are not the menu's, so without that the app menu's Sign Out… would be disabled whenever Settings is in front.
+    - **A sign-out started in Settings shows its progress in Settings.** The mailbox window draws its overlay only for a sign-out its own controller started, so the mailbox stays on screen, without the overlay, until teardown replaces it with the sign-in view. Nothing sent or changed there in that time gets through: `signOut()` closes admission before its first suspension.
+    - **Nothing to act on before the app has initialized.** The window shows a spinner until `initializeApp()` has finished, as the mailbox window shows its loading view: a sign-out asked for earlier would start an auth transition ahead of the fresh-install check and the launch restore.
+    - **Sign Out… moved in the app menu.** With the scene added, `CommandGroup(after: .appSettings)` put Sign Out… above the Settings… item (read from the test host's real menu bar). It is now in a group of its own before Services, which puts it under Settings… and its separator (`MacSettingsMenuTests`).
+    - **Closing the mailbox window with Settings open** needed a fix: see "Closing the window" below.
+    - **Not seen: check in the app.** Nobody has opened the window.
+      - Settings… and Command-Comma open it. It shows the signed-in address and the version, and is as tall as its content.
+      - Sign Out… in the window asks on the Settings window. Cancel leaves everything as it was. Sign Out shows "Signing Out…" in the window, the mailbox window changes to the sign-in view, and the Account row reads Not Signed In with the button disabled.
+      - With Settings in front, the app menu's Sign Out… is enabled and asks on the Settings window.
+      - With the mailbox window in front and Settings open behind it, the app menu's Sign Out… asks on the mailbox window, as before.
+      - Close the mailbox window with Settings open: the app quits.
+      - Close Settings alone: the app keeps running.
+      - The app menu reads About, Settings…, Sign Out…, Services, each group under a separator.
+    - **Left out.** A shared "signing out" overlay on the mailbox window for a sign-out started in Settings. Anything else in the window: there are no other settings.
 - **Menus and shortcuts:**
   - Cmd-N new message, Cmd-R sync now, Cmd-F search. **Built** (`MailboxCommands`; Cmd-R is Mailbox > Get New Mail).
   - Delete archives (**built**, `MacConversationSidebar`).
@@ -521,14 +537,23 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - Dragging a file to a folder that already has one of that name: the promise is not kept and nothing is replaced; what the Finder says then was not seen.
   - **Left out.** Dragging several attachments at once. A picture of the attachment as the drag's image (it is the file's icon). Dragging on iOS.
 - **Closing the window quits the app. Decided 2026-11-11 (decision 7).** The alternative was to keep running and syncing like Mail, where clicking the Dock icon reopens the window. Sync follows the app's lifetime, so it stops when the window closes.
-  - **How.** The app's only scene is a `Window` (built 2026-11-10), and SwiftUI quits such an app when its window closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for. Nothing else was added for it.
+  - **How.** The mailbox is a `Window` scene (built 2026-11-10), and SwiftUI quits an app whose one `Window` closes; a `WindowGroup` app keeps running. The quit goes through `MacAppDelegate`, so a send in flight is still waited for.
+  - **Since the Settings scene (2026-11-13) the app also quits itself** when the mailbox window closes (`MacMainWindowPolicy`, `MacMainWindowCloseObserver`, started by `MacAppDelegate`). SwiftUI's own quit is not enough with a second scene:
+    - **Measured 2026-11-13 in a stand-in program** on macOS 27.2 (one `Window`, one `Settings` scene, a delegate that does not answer `applicationShouldTerminateAfterLastWindowClosed`, windows kept invisible):
+      - Settings never opened: closing the window quit. Settings opened and closed again, then the window closed: it quit.
+      - Settings open, the window closed: the program ran on with only the Settings window, and quit when that was closed.
+      - With the program quitting itself when the window with the scene's id closed, it quit at once in all three cases, and `applicationShouldTerminate` was called once in each, including the ones where SwiftUI's own quit follows the same close.
+      - The window's AppKit `identifier` was the scene's id, `main`. The Settings window's was `com_apple_SwiftUI_Settings_window`.
+    - **The quit must be asked for from the run loop** (`perform(_:with:afterDelay:)`), never from a block on the main queue or a main-actor task. The delegate holds a quit for a send in flight and answers from a main-actor task. Asked for from a main-queue block, with the delegate answering `.terminateLater` and replying from the main queue a second and a half later, the stand-in never quit: `terminate(_:)` waits inside the block, and the queue cannot run the reply. Asked for from the run loop, it quit when the reply came, in all three cases.
+    - The observer is not started in the unit-test host.
+    - Not seen in the app: nothing has closed the app's window with its Settings window open, with or without a send in flight.
   - **Measured 2026-11-11 in a stand-in program** on macOS 27.2, not in the app:
     - Closing the window of a one-`Window` app called `applicationShouldTerminate` on the delegate installed with `@NSApplicationDelegateAdaptor`, and the process exited.
     - It still quit with a borderless window that is never ordered in, the shape of `OffscreenWebViewHost`'s window.
     - It still quit with a `Settings` scene declared and not open.
     - A `WindowGroup` app was still running three seconds after its window closed. It quit once its delegate returned true from `applicationShouldTerminateAfterLastWindowClosed(_:)`.
-    - Not measured: closing the main window while a Settings window is open.
-  - Keep the primary scene a single `Window`. If it ever becomes a `WindowGroup`, add that delegate method, or the app is left running with no window.
+    - Not measured then: closing the main window while a Settings window is open. Measured 2026-11-13, above.
+  - Keep the primary scene a single `Window`, and keep its id `MacMainWindowPolicy.windowID`, which is how the observer knows the window. If it ever becomes a `WindowGroup`, add that delegate method, or the app is left running with no window.
 - **Name and icon.** Both are in place.
   - **Icon (2026-11-11).** `AppIcon` has the ten macOS slots (16, 32, 128, 256 and 512 points, at 1x and 2x) beside the iOS image, whose entries are unchanged.
     - **The files.** Seven `mac-icon-<pixels>.png` files fill the ten slots. `Scripts/make-mac-app-icon.swift` makes them from the iOS image: run it again when that image changes, and do not edit them by hand.
