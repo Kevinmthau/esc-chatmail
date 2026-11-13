@@ -30,7 +30,12 @@ final class MacSettingsMenuTests: XCTestCase {
         let signOutIndex = try XCTUnwrap(items.firstIndex(where: { $0.title == "Sign Out…" }), titles.description)
 
         XCTAssertGreaterThan(signOutIndex, settingsIndex, titles.description)
-        XCTAssertTrue(items[signOutIndex - 1].isSeparatorItem, titles.description)
+        // Asked through `indices`, like the item after: an assertion that fails goes on, and
+        // an index out of range would end the test host and the Mac plan's run with it.
+        XCTAssertTrue(
+            items.indices.contains(signOutIndex - 1) && items[signOutIndex - 1].isSeparatorItem,
+            titles.description
+        )
         // Revert-check: deleting the `Divider()` from `SignOutCommands`' group makes this
         // fail: Sign Out… would sit directly on Services.
         XCTAssertTrue(

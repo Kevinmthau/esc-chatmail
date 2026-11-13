@@ -70,6 +70,8 @@
         "MacSettingsPolicyTests",
         "MacSettingsSceneSourceTests",
         "MacSidebarCollapseGuardViewTests",
+        "MacWindowVisibilityProbeTests",
+        "MailboxWindowSheetTests",
         "MacSidebarFilterBadgePolicyTests",
         "MacSidebarListSelectionGuardViewTests",
         "MacSidebarRowIDTests",

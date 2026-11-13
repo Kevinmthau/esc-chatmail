@@ -438,6 +438,11 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - **Nothing to act on before the app has initialized.** The window shows a spinner until `initializeApp()` has finished, as the mailbox window shows its loading view: a sign-out asked for earlier would start an auth transition ahead of the fresh-install check and the launch restore.
     - **Sign Out… moved in the app menu.** With the scene added, `CommandGroup(after: .appSettings)` put Sign Out… above the Settings… item (read from the test host's real menu bar). It is now in a group of its own before Services, which puts it under Settings… and its separator (`MacSettingsMenuTests`).
     - **Closing the mailbox window with Settings open** needed a fix: see "Closing the window" below.
+    - **Three fixes from the review of PR 412 (2026-11-13).** Each window's controller knew only about itself. What they share now is `SettingsAppSignOutActivity`.
+      - **Sign Out… asks nothing while the mailbox window has a sheet attached**, with Settings in front too (`MailboxWindowSheet`). With Settings in front the key and main windows are both the Settings window, so `FocusedWindowSheet` saw no sheet, and a sign-out confirmed there closed New Message on the mailbox window with the typed message in it. The button beeps, as the menu command does under a sheet.
+      - **Sign Out… is disabled in both windows while either one's sign-out runs.** Before, the other window's command stayed enabled and beeped when chosen. Whether it can be chosen is decided in one place, `SignOutMenuAction.init`, for the menu command and the button.
+      - **A failure of a sign-out started in Settings is shown on the mailbox window when the Settings window has been closed.** Its alert had no window to appear on and waited until Settings was opened again, with the mailbox still signed in and nothing said. The Settings view tells its controller how to ask whether its window is on screen (`MacWindowVisibilityProbe`, read from AppKit when the failure happens, not kept from `onAppear` and `onDisappear`).
+      - The "signing out" overlay is still drawn only by the window that started the sign-out.
     - **Not seen: check in the app.** Nobody has opened the window.
       - Settings… and Command-Comma open it. It shows the signed-in address and the version, and is as tall as its content.
       - Sign Out… in the window asks on the Settings window. Cancel leaves everything as it was. Sign Out shows "Signing Out…" in the window, the mailbox window changes to the sign-in view, and the Account row reads Not Signed In with the button disabled.
@@ -445,6 +450,9 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
       - With the mailbox window in front and Settings open behind it, the app menu's Sign Out… asks on the mailbox window, as before.
       - Close the mailbox window with Settings open: the app quits.
       - Close Settings alone: the app keeps running.
+      - With New Message open on the mailbox window and Settings in front, Sign Out… in the Settings window beeps and asks nothing.
+      - During a sign-out started in Settings, the app menu's Sign Out… is disabled with the mailbox window in front.
+      - Not possible to check by hand without a failing sign-out: the failure alert coming up on the mailbox window after Settings was closed.
       - The app menu reads About, Settings…, Sign Out…, Services, each group under a separator.
     - **Left out.** A shared "signing out" overlay on the mailbox window for a sign-out started in Settings. Anything else in the window: there are no other settings.
 - **Menus and shortcuts:**

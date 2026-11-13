@@ -61,6 +61,14 @@ final class MacMainWindowCloseObserver {
         observation = nil
     }
 
+    /// The block holds `quit` and not this object, so without this an observer released
+    /// before `stop()` would go on quitting the app with nothing left to stop it.
+    deinit {
+        if let observation {
+            notificationCenter.removeObserver(observation)
+        }
+    }
+
     /// Asks the app to quit on the run loop's next turn. See the type's comment for why this
     /// is neither `DispatchQueue.main.async` nor a `Task`.
     static func quitFromRunLoop() {

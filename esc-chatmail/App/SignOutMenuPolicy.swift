@@ -29,11 +29,14 @@ enum SignOutMenuPolicy {
     /// - The focused window has a sheet attached → refuse. The confirmation is an alert on that
     ///   window, and a Mac window shows one sheet at a time: raised under New Message or the
     ///   reader it would stay queued, unseen, until that sheet closed, and then appear with
-    ///   nothing on screen to explain it. `focusedWindowHasSheet` is read from AppKit at the
-    ///   moment the command is chosen (`FocusedWindowSheet`). It must stay a live read and never
-    ///   become a count of the sheets the app presented: a count that stuck above zero would
-    ///   leave the Mac with no way to sign out, because the Settings window's button asks through
-    ///   this too.
+    ///   nothing on screen to explain it. `focusedWindowHasSheet` is also true while the
+    ///   mailbox window has a sheet and the Settings window is the focused one: the alert
+    ///   would be seen there, but the sign-out it confirms would close that sheet, New Message
+    ///   and its typed text included, unasked. Both are read from AppKit at the moment the
+    ///   command is chosen (`FocusedWindowSheet`, `MailboxWindowSheet`). It must stay a live
+    ///   read and never become a count of the sheets the app presented: a count that stuck
+    ///   above zero would leave the Mac with no way to sign out, because the Settings window's
+    ///   button asks through this too.
     /// - `SettingsAppSignOutPolicy` would not ask now (no account left to sign out, or a
     ///   request already being handled) → refuse.
     /// - Otherwise → confirm.
