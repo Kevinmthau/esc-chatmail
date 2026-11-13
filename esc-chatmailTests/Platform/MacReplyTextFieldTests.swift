@@ -157,6 +157,50 @@ final class MacReplyTextFieldTests: XCTestCase {
         harness.close()
     }
 
+    /// An input method may answer the discard of its composition by ending it in the view,
+    /// and the view reports the end of a composition as a change. That report must not reach
+    /// the composer: it would hand over all the view still shows, which after a send is the
+    /// mail just sent, and the next update would put it back in the field.
+    ///
+    /// HONEST SCOPE: no input method runs here. Its answer is stood in for by replacing
+    /// `NSTextInputContext.discardMarkedText`, for this test only, with one that unmarks the
+    /// text in its client. Whether any real input method answers a discard that way was not
+    /// measured; this pins that the field is safe if one does.
+    ///
+    /// Revert-check: moving `isApplyingComposerText = true` in `applyTextFromComposer` back
+    /// below the `discardMarkedText()` call makes this fail: the composer holds
+    /// "Hello にほん" again.
+    func testComposerReplacingItsText_whenTheDiscardEndsTheCompositionInTheView_givesTheComposerNothing() async throws {
+        let harness = try await Harness(text: "Hello ")
+        try harness.compose("にほん")
+        var discards = 0
+        let method = try XCTUnwrap(
+            class_getInstanceMethod(
+                NSTextInputContext.self,
+                #selector(NSTextInputContext.discardMarkedText)
+            )
+        )
+        let standIn: @convention(block) (NSTextInputContext) -> Void = { context in
+            discards += 1
+            (context.client as? NSTextView)?.unmarkText()
+        }
+        let original = method_setImplementation(method, imp_implementationWithBlock(standIn))
+        defer { _ = method_setImplementation(method, original) }
+
+        harness.model.text = ""
+        await harness.waitUntil { harness.textView.string.isEmpty }
+        // Time for the update a stray report to the composer would have caused.
+        await harness.nextMainQueueTurn()
+        await harness.nextMainQueueTurn()
+
+        // Without this the stand-in never ran and the rest checks nothing.
+        XCTAssertEqual(discards, 1)
+        XCTAssertEqual(harness.model.text, "")
+        XCTAssertEqual(harness.textView.string, "")
+        XCTAssertFalse(harness.textView.hasMarkedText())
+        harness.close()
+    }
+
     /// While a word is being composed the view is ahead of the composer by that word, and an
     /// update for any other reason must not take the composition away.
     ///
