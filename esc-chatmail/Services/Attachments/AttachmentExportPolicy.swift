@@ -1,7 +1,7 @@
 import Foundation
 
 /// What a chat offers for an attachment that is saved out of the app (the Mac's Save
-/// Attachment…; `AttachmentExportMenuModifier`), and the name the saved file is given.
+/// Attachment…; `MacAttachmentExportMenu`), and the name the saved file is given.
 ///
 /// An attachment's name is the sender's, taken from the email as it came, and the file on disk
 /// is named for its storage identity (`AttachmentPaths`), so the name a save offers is made
@@ -83,34 +83,59 @@ enum AttachmentExportPolicy {
     ///
     /// - Parameters:
     ///   - storedFilename: `Attachment.filename`.
-    ///   - sourceExtension: The extension of the file on disk, which the download took from
-    ///     the attachment's type. Given to a name that has none, so the saved file opens.
+    ///   - sourceExtension: The extension of the file on disk. Given to a name with nothing
+    ///     after a dot, where the download took it from the attachment's type, so the saved
+    ///     file opens.
     static func filename(storedFilename: String, sourceExtension: String) -> String {
-        let lastComponent = storedFilename
+        // Unicode scalars throughout, never `Character`s. A "/" followed by a combining scalar
+        // (a zero-width joiner, an accent) is one `Character` that is not "/", so a split on
+        // `Character`s kept `Library/\u{200D}x.plist` whole, and Save All wrote it into a
+        // `Library` folder of the folder the user chose. The same goes for a leading dot.
+        let lastComponent = Array(storedFilename.unicodeScalars)
             .split(whereSeparator: { $0 == "/" || $0 == "\\" })
-            .last
-            .map(String.init) ?? ""
-        let scalars = lastComponent.unicodeScalars.filter { !isRemoved($0) }
-        var name = String(String.UnicodeScalarView(scalars))
-            .replacingOccurrences(of: ":", with: "-")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        while name.hasPrefix(".") {
-            name.removeFirst()
-            name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            .last ?? []
+        let kept = lastComponent
+            .filter { !isRemoved($0) }
+            .map { $0 == ":" ? Unicode.Scalar("-") : $0 }
+        var name = string(kept).trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.unicodeScalars.first == "." {
+            name = string(name.unicodeScalars.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let cleanExtension = sourceExtension.filter { $0.isLetter || $0.isNumber }
         if name.isEmpty {
             name = fallbackBaseName
         }
-        if splitExtension(of: name).pathExtension.isEmpty, !cleanExtension.isEmpty {
+        let cleanExtension = sourceExtension.filter { $0.isLetter || $0.isNumber }
+        if !hasSuffixAfterDot(name), !cleanExtension.isEmpty, cleanExtension != unknownTypeExtension {
             // A name that ended in a dot would otherwise get two.
-            while name.hasSuffix(".") {
-                name.removeLast()
+            while name.unicodeScalars.last == "." {
+                name = string(name.unicodeScalars.dropLast())
             }
             name += ".\(cleanExtension)"
         }
         return truncated(name)
+    }
+
+    /// The extension the download gives a file whose type it does not know
+    /// (`AttachmentPaths.fileExtension`). It says nothing about the file, so it is not added
+    /// to a name: `Makefile` stays `Makefile`.
+    static let unknownTypeExtension = AttachmentPaths.fileExtension(for: "application/octet-stream")
+
+    /// Whether a name already ends in something after a dot, so the stored file's extension is
+    /// not added to it. Looser than `splitExtension`: `main.c++` and `notes.txt~` end in
+    /// one, and the download named the stored file after it. A space ends the claim:
+    /// `report v1.2 final` has none.
+    static func hasSuffixAfterDot(_ name: String) -> Bool {
+        let scalars = Array(name.unicodeScalars)
+        guard let dot = scalars.lastIndex(of: "."), dot > 0 else { return false }
+        let suffix = scalars[(dot + 1)...]
+        return !suffix.isEmpty && !suffix.contains(where: { $0.properties.isWhitespace })
+    }
+
+    private static func string<S: Sequence>(_ scalars: S) -> String where S.Element == Unicode.Scalar {
+        var view = String.UnicodeScalarView()
+        view.append(contentsOf: scalars)
+        return String(view)
     }
 
     /// `name`, or `name` with a number before its extension, whichever is first not taken:
@@ -179,15 +204,18 @@ enum AttachmentExportPolicy {
         return base + suffix
     }
 
+    /// Cut between scalars, not `Character`s: one `Character` can be longer than the limit
+    /// (a letter with hundreds of combining marks), and a cut between `Character`s would then
+    /// keep nothing.
     private static func prefix(of string: String, fittingUTF8Count limit: Int) -> String {
-        var result = ""
+        var kept = String.UnicodeScalarView()
         var count = 0
-        for character in string {
-            let width = String(character).utf8.count
+        for scalar in string.unicodeScalars {
+            let width = UTF8.width(scalar)
             guard count + width <= limit else { break }
-            result.append(character)
+            kept.append(scalar)
             count += width
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String(kept).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

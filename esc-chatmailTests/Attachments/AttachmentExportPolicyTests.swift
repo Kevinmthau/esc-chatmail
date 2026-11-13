@@ -73,9 +73,34 @@ final class AttachmentExportPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.filename(storedFilename: "folder/", sourceExtension: "pdf"), "folder.pdf")
     }
 
-    /// Revert-check: deleting `.replacingOccurrences(of: ":", with: "-")` makes this fail.
+    /// A "/" with a combining scalar after it is one `Character` that is not "/". Found in
+    /// review of PR 406: split on `Character`s, `Library/\u{200D}evil.plist` came out whole,
+    /// and Save All wrote it into a `Library` folder inside the folder the user chose.
+    ///
+    /// Revert-check: splitting `storedFilename` itself (its `Character`s) in place of its
+    /// unicode scalars makes this fail.
+    func testFilename_aSeparatorJoinedToACombiningScalar_stillEndsTheFolder() {
+        let names = [
+            "Library/\u{200D}evil.plist",
+            "Library/\u{0301}evil.plist",
+            "Library\\\u{FE0F}evil.plist",
+            "a/\u{200D}b/\u{0301}c/\u{FE0F}evil.plist"
+        ]
+        for stored in names {
+            let name = Policy.filename(storedFilename: stored, sourceExtension: "plist")
+            XCTAssertFalse(name.unicodeScalars.contains("/"), name.debugDescription)
+            XCTAssertFalse(name.unicodeScalars.contains("\\"), name.debugDescription)
+            XCTAssertFalse(name.contains("Library"), name.debugDescription)
+            XCTAssertTrue(name.hasSuffix("evil.plist"), name.debugDescription)
+            XCTAssertEqual(URL(fileURLWithPath: "/chosen").appendingPathComponent(name).pathComponents.count, 3)
+        }
+    }
+
+    /// Revert-check: replacing the colon with `replacingOccurrences(of:with:)` on the string,
+    /// or not at all, makes this fail: the first leaves `:\u{0301}` as it is.
     func testFilename_aColon_becomesAHyphen() {
         XCTAssertEqual(Policy.filename(storedFilename: "Call 10:30.txt", sourceExtension: "txt"), "Call 10-30.txt")
+        XCTAssertEqual(Policy.filename(storedFilename: "a:\u{0301}b.txt", sourceExtension: "txt"), "a-\u{0301}b.txt")
     }
 
     /// Revert-check: deleting the `directionScalars` check from `isRemoved` makes the first
@@ -102,11 +127,16 @@ final class AttachmentExportPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.filename(storedFilename: "\(family).png", sourceExtension: "png"), "\(family).png")
     }
 
-    /// Revert-check: deleting the `while name.hasPrefix(".")` loop makes this fail. A leading
-    /// dot would hide the saved file.
+    /// Revert-check: deleting the `while name.unicodeScalars.first == "."` loop makes this
+    /// fail, and testing `name.hasPrefix(".")` in its place makes the last assertion fail: a
+    /// dot with an accent on it is not the `Character` ".", and the file's first byte is still
+    /// a dot. A leading dot would hide the saved file.
     func testFilename_leadingDots_areRemoved() {
         XCTAssertEqual(Policy.filename(storedFilename: ".hidden.txt", sourceExtension: "txt"), "hidden.txt")
         XCTAssertEqual(Policy.filename(storedFilename: ".. .zshrc", sourceExtension: "txt"), "zshrc.txt")
+        let accented = Policy.filename(storedFilename: ".\u{0301}hidden.txt", sourceExtension: "txt")
+        XCTAssertNotEqual(accented.utf8.first, UInt8(ascii: "."))
+        XCTAssertTrue(accented.hasSuffix("hidden.txt"))
     }
 
     /// Revert-check: deleting `name = fallbackBaseName` (the first) makes this fail.
@@ -129,6 +159,28 @@ final class AttachmentExportPolicyTests: XCTestCase {
         XCTAssertEqual(Policy.filename(storedFilename: "scan", sourceExtension: "p/d.f"), "scan.pdf")
     }
 
+    /// The download names the stored file after whatever follows the name's last dot, so
+    /// adding that to the name again doubles it. Found in review of PR 406.
+    ///
+    /// Revert-check: deciding with `splitExtension(of: name).pathExtension.isEmpty` in place of
+    /// `hasSuffixAfterDot` makes the first two fail (`main.c++.c`, `notes.txt~.txt`); deleting
+    /// the `unknownTypeExtension` term makes the third (`Makefile.dat`).
+    func testFilename_aNameThatEndsInSomethingAfterADot_orAFileOfNoKnownType_getsNothingAdded() {
+        XCTAssertEqual(Policy.filename(storedFilename: "main.c++", sourceExtension: "c++"), "main.c++")
+        XCTAssertEqual(Policy.filename(storedFilename: "notes.txt~", sourceExtension: "txt~"), "notes.txt~")
+        XCTAssertEqual(Policy.unknownTypeExtension, "dat")
+        XCTAssertEqual(Policy.filename(storedFilename: "Makefile", sourceExtension: "dat"), "Makefile")
+    }
+
+    func testHasSuffixAfterDot() {
+        XCTAssertTrue(Policy.hasSuffixAfterDot("a.pdf"))
+        XCTAssertTrue(Policy.hasSuffixAfterDot("main.c++"))
+        XCTAssertTrue(Policy.hasSuffixAfterDot("notes.txt~"))
+        XCTAssertFalse(Policy.hasSuffixAfterDot("scan"))
+        XCTAssertFalse(Policy.hasSuffixAfterDot("scan."))
+        XCTAssertFalse(Policy.hasSuffixAfterDot("report v1.2 final"))
+    }
+
     func testFilename_aNameWithAnExtension_keepsIt_whateverTheFileHas() {
         XCTAssertEqual(Policy.filename(storedFilename: "photo.jpeg", sourceExtension: "jpg"), "photo.jpeg")
         XCTAssertEqual(Policy.filename(storedFilename: "archive.tar.gz", sourceExtension: "bin"), "archive.tar.gz")
@@ -149,6 +201,14 @@ final class AttachmentExportPolicyTests: XCTestCase {
         XCTAssertGreaterThan(wideName.utf8.count, Policy.maximumFilenameUTF8Count - 4)
         XCTAssertTrue(wideName.hasSuffix(".pdf"))
         XCTAssertEqual(wideName.dropLast(4).filter { $0 != "語" }.count, 0)
+
+        // One `Character` longer than any name may be: a letter under 300 accents. A cut
+        // between `Character`s kept none of it and returned ".pdf", a hidden file.
+        let stacked = "a" + String(repeating: "\u{0301}", count: 300) + ".pdf"
+        let stackedName = Policy.filename(storedFilename: stacked, sourceExtension: "pdf")
+        XCTAssertLessThanOrEqual(stackedName.utf8.count, Policy.maximumFilenameUTF8Count)
+        XCTAssertEqual(stackedName.unicodeScalars.first, "a")
+        XCTAssertTrue(stackedName.hasSuffix(".pdf"))
     }
 
     func testSplitExtension_onlyLettersAndDigitsAfterTheLastDotAreAnExtension() {

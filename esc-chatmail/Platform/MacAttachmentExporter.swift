@@ -2,7 +2,7 @@
 import AppKit
 
 /// Saves a message's attachments out of the Mac app: Save Attachment… and Save All
-/// Attachments… in an attachment's menu (`AttachmentExportMenuModifier`).
+/// Attachments… in an attachment's menu (`MacAttachmentExportMenu`).
 ///
 /// The user picks the place in a save panel, which in the sandbox is what gives the app leave
 /// to write there (`ENABLE_USER_SELECTED_FILES` is `readwrite` for the Mac). The panels and the

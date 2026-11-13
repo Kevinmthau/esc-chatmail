@@ -44,6 +44,15 @@ struct AttachmentGridView: View {
                         )
                     }
                 )
+                .macAttachmentDragSource(
+                    attachment: attachment,
+                    onClick: {
+                        presentQuickLook(
+                            for: attachment,
+                            in: resolvedAttachments
+                        )
+                    }
+                )
                 .macAttachmentExportMenu(
                     attachment: attachment,
                     shownAttachments: resolvedAttachments,

@@ -140,6 +140,30 @@ final class AttachmentExportItemTests: XCTestCase {
         XCTAssertNil(item(for: attachment))
     }
 
+    /// A received attachment: its file is stored under its message's and its own identity
+    /// together, and that is the only path a reader may use for it.
+    ///
+    /// Revert-check: reading `attachment.localURL` only for `local_` attachments, or dropping
+    /// the message from `readableLocalURLValue`'s check, makes this fail.
+    func testItem_forAReceivedAttachment_isItsMessageScopedFile_underTheSendersName() throws {
+        let message = MessageBuilder().withId("message-1").build(in: context)
+        let stored = AttachmentPaths.originalPath(messageId: "message-1", attachmentId: "att-1", ext: "pdf")
+        try write(stored)
+        let attachment = AttachmentBuilder()
+            .withId("att-1")
+            .withFilename("Invoice 42.pdf")
+            .downloaded()
+            .withLocalURL(stored)
+            .forMessage(message)
+            .build(in: context)
+
+        let item = try XCTUnwrap(item(for: attachment))
+
+        XCTAssertEqual(item.sourceURL, root.appendingPathComponent(stored))
+        XCTAssertTrue(item.sourceURL.lastPathComponent.hasPrefix("remote_"))
+        XCTAssertEqual(item.filename, "Invoice 42.pdf")
+    }
+
     // MARK: - Save All
 
     /// Revert-check: appending to `missingFilenames` for every attachment without an item, in

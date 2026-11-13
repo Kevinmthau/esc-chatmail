@@ -55,8 +55,8 @@ final class AttachmentFileExportTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: item.sourceURL, encoding: .utf8), "report bytes")
     }
 
-    /// Revert-check: deleting the `removeItem` call from `save` makes this fail with a copy
-    /// error. The save panel has already asked about replacing the file.
+    /// Revert-check: copying straight to `destination` when a file is already there makes this
+    /// fail with a copy error. The save panel has already asked about replacing the file.
     func testSave_replacesAFileAlreadyThere() throws {
         let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "new bytes")
         let destination = destinationFolder.appendingPathComponent("Report.pdf")
@@ -68,8 +68,8 @@ final class AttachmentFileExportTests: XCTestCase {
     }
 
     /// Revert-check: deleting the `guard fileManager.fileExists(atPath: item.sourceURL.path)`
-    /// from `save` makes this fail: the file the user agreed to replace is removed and nothing
-    /// takes its place.
+    /// from `save` makes this fail: the error is the system's copy error, with the wrong
+    /// words for the user.
     func testSave_whenTheAttachmentsFileIsGone_reportsIt_andKeepsTheFileItWasToReplace() throws {
         let item = missingItem(filename: "Report.pdf")
         let destination = destinationFolder.appendingPathComponent("Report.pdf")
@@ -82,6 +82,29 @@ final class AttachmentFileExportTests: XCTestCase {
             )
         }
         XCTAssertEqual(try contents(of: "Report.pdf"), "old bytes")
+    }
+
+    /// Found in review of PR 406: the file being replaced was removed before the copy, so a
+    /// copy that failed (a full disk, a file a sign-out deleted meanwhile) left the user with
+    /// neither.
+    ///
+    /// Revert-check: removing `destination` before the copy and copying straight to it makes
+    /// this fail.
+    func testSave_whenTheCopyFails_keepsTheFileItWasToReplace() throws {
+        let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "new bytes")
+        let destination = destinationFolder.appendingPathComponent("Report.pdf")
+        try Data("old bytes".utf8).write(to: destination)
+
+        XCTAssertThrowsError(
+            try AttachmentFileExport.save(item, to: destination, fileManager: CopyRefusingFileManager())
+        ) { error in
+            guard case .copyFailed(let filename, _)? = error as? AttachmentFileExport.ExportError else {
+                return XCTFail("Expected a copy failure, got \(error)")
+            }
+            XCTAssertEqual(filename, "Report.pdf")
+        }
+        XCTAssertEqual(try contents(of: "Report.pdf"), "old bytes")
+        XCTAssertEqual(try savedNames(), ["Report.pdf"])
     }
 
     func testSave_whenTheCopyFails_reportsTheChosenNameAndTheSystemsReason() throws {
@@ -97,6 +120,50 @@ final class AttachmentFileExportTests: XCTestCase {
             XCTAssertEqual(filename, "Mine.pdf")
             XCTAssertFalse(reason.isEmpty)
         }
+    }
+
+    // MARK: - A dragged attachment
+
+    /// Revert-check: deleting the `copyItem` call from `writePromise` makes this fail.
+    func testWritePromise_copiesTheFileWhereItWasAskedTo() throws {
+        let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "report bytes")
+        let destination = destinationFolder.appendingPathComponent("Report.pdf")
+
+        try AttachmentFileExport.writePromise(item, to: destination)
+
+        XCTAssertEqual(try contents(of: "Report.pdf"), "report bytes")
+        XCTAssertEqual(try String(contentsOf: item.sourceURL, encoding: .utf8), "report bytes")
+    }
+
+    /// A drop asked no one about replacing anything.
+    ///
+    /// Revert-check: removing a file already at the destination before the copy, as `save`
+    /// does, makes this fail.
+    func testWritePromise_neverReplacesAFile() throws {
+        let item = try item(stored: "remote_abc.pdf", filename: "Report.pdf", bytes: "new bytes")
+        let destination = destinationFolder.appendingPathComponent("Report.pdf")
+        try Data("the user's own".utf8).write(to: destination)
+
+        XCTAssertThrowsError(try AttachmentFileExport.writePromise(item, to: destination)) { error in
+            guard case .copyFailed(let filename, _)? = error as? AttachmentFileExport.ExportError else {
+                return XCTFail("Expected a copy failure, got \(error)")
+            }
+            XCTAssertEqual(filename, "Report.pdf")
+        }
+        XCTAssertEqual(try contents(of: "Report.pdf"), "the user's own")
+    }
+
+    /// Revert-check: deleting the `guard fileManager.fileExists` from `writePromise` makes
+    /// this fail: the error is the system's copy error, with the wrong words for the user.
+    func testWritePromise_whenTheAttachmentsFileIsGone_saysSo() {
+        let item = missingItem(filename: "Report.pdf")
+
+        XCTAssertThrowsError(
+            try AttachmentFileExport.writePromise(item, to: destinationFolder.appendingPathComponent("Report.pdf"))
+        ) { error in
+            XCTAssertEqual(error as? AttachmentFileExport.ExportError, .sourceMissing(filename: "Report.pdf"))
+        }
+        XCTAssertEqual(try? savedNames(), [])
     }
 
     // MARK: - Save All Attachments…
@@ -179,5 +246,12 @@ final class AttachmentFileExportTests: XCTestCase {
             message,
             "Gone.pdf is no longer on this Mac.\nBeach.jpg could not be saved. The disk is full."
         )
+    }
+}
+
+/// A file manager whose copies fail, as on a full disk.
+private final class CopyRefusingFileManager: FileManager {
+    override func copyItem(at srcURL: URL, to dstURL: URL) throws {
+        throw CocoaError(.fileWriteOutOfSpace)
     }
 }

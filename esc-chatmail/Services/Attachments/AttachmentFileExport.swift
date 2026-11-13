@@ -23,8 +23,10 @@ enum AttachmentFileExport {
     /// Saves one attachment at `destination`, the file the save panel returned. A file already
     /// there is replaced: the panel asked.
     ///
-    /// The old file is removed only after the attachment's is known to exist, so a save whose
-    /// source is gone does not cost the user the file it was to replace.
+    /// The file being replaced is never removed first. The attachment is copied beside it, in
+    /// the directory the system gives for replacing an item on that volume, and takes its
+    /// place only once the copy is whole, so a copy that fails (a full disk, a file a sign-out
+    /// deleted meanwhile) leaves the user the file they had.
     static func save(
         _ item: AttachmentExportItem,
         to destination: URL,
@@ -34,9 +36,40 @@ enum AttachmentFileExport {
             throw ExportError.sourceMissing(filename: item.filename)
         }
         do {
-            if fileManager.fileExists(atPath: destination.path) {
-                try fileManager.removeItem(at: destination)
+            guard fileManager.fileExists(atPath: destination.path) else {
+                try fileManager.copyItem(at: item.sourceURL, to: destination)
+                return
             }
+            let holding = try fileManager.url(
+                for: .itemReplacementDirectory,
+                in: .userDomainMask,
+                appropriateFor: destination,
+                create: true
+            )
+            defer { try? fileManager.removeItem(at: holding) }
+            let staged = holding.appendingPathComponent(destination.lastPathComponent)
+            try fileManager.copyItem(at: item.sourceURL, to: staged)
+            _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
+        } catch {
+            throw ExportError.copyFailed(
+                filename: destination.lastPathComponent,
+                reason: error.localizedDescription
+            )
+        }
+    }
+
+    /// Writes an attachment dragged out of the chat at `destination`, the place the app it
+    /// was dropped on asked for (`MacAttachmentFilePromiseProvider`). Nothing is replaced: no
+    /// one was asked, and a file already there fails the copy.
+    static func writePromise(
+        _ item: AttachmentExportItem,
+        to destination: URL,
+        fileManager: FileManager = .default
+    ) throws {
+        guard fileManager.fileExists(atPath: item.sourceURL.path) else {
+            throw ExportError.sourceMissing(filename: item.filename)
+        }
+        do {
             try fileManager.copyItem(at: item.sourceURL, to: destination)
         } catch {
             throw ExportError.copyFailed(
