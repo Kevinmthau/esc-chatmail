@@ -12,14 +12,34 @@ final class DraftFileDropPolicyTests: XCTestCase {
 
     // MARK: - Whether a drop is taken
 
-    /// Revert-check: returning `allowsDraftMutation` alone from
-    /// `DraftFileDropPolicy.acceptsFiles` makes the third assertion fail; returning
-    /// `!isProcessingAttachments` alone makes the second fail.
-    func testAcceptsFiles_onlyWhileNoSendAndNoImportOwnsTheDraft() {
-        XCTAssertTrue(DraftFileDropPolicy.acceptsFiles(allowsDraftMutation: true, isProcessingAttachments: false))
-        XCTAssertFalse(DraftFileDropPolicy.acceptsFiles(allowsDraftMutation: false, isProcessingAttachments: false))
-        XCTAssertFalse(DraftFileDropPolicy.acceptsFiles(allowsDraftMutation: true, isProcessingAttachments: true))
-        XCTAssertFalse(DraftFileDropPolicy.acceptsFiles(allowsDraftMutation: false, isProcessingAttachments: true))
+    /// Revert-check: dropping any one of the three terms from
+    /// `DraftFileDropPolicy.acceptsFiles` makes the assertion that turns only that term fail.
+    func testAcceptsFiles_onlyWhileNoSendNoImportAndNoEarlierDropOwnsTheDraft() {
+        func accepts(mutation: Bool = true, processing: Bool = false, pending: Bool = false) -> Bool {
+            DraftFileDropPolicy.acceptsFiles(
+                allowsDraftMutation: mutation,
+                isProcessingAttachments: processing,
+                hasPendingDrop: pending
+            )
+        }
+
+        XCTAssertTrue(accepts())
+        XCTAssertFalse(accepts(mutation: false))
+        XCTAssertFalse(accepts(processing: true))
+        XCTAssertFalse(accepts(pending: true))
+        XCTAssertFalse(accepts(mutation: false, processing: true, pending: true))
+    }
+
+    /// A drop that was taken is imported: at once, or when the import that is running ends.
+    ///
+    /// Revert-check: returning `hasPendingDrop` alone from `DraftFileDropPolicy.startsImport`
+    /// makes the third assertion fail; returning `!isProcessingAttachments` alone makes the
+    /// second fail.
+    func testStartsImport_ofAPendingDrop_onlyWhileNoOtherImportRuns() {
+        XCTAssertTrue(DraftFileDropPolicy.startsImport(hasPendingDrop: true, isProcessingAttachments: false))
+        XCTAssertFalse(DraftFileDropPolicy.startsImport(hasPendingDrop: false, isProcessingAttachments: false))
+        XCTAssertFalse(DraftFileDropPolicy.startsImport(hasPendingDrop: true, isProcessingAttachments: true))
+        XCTAssertFalse(DraftFileDropPolicy.startsImport(hasPendingDrop: false, isProcessingAttachments: true))
     }
 
     /// Revert-check: dropping any one of the four terms from `DraftFileDropPolicy.takesDrag`
@@ -53,14 +73,31 @@ final class DraftFileDropPolicyTests: XCTestCase {
     /// `DraftFileDropPolicy.decision` makes both fail.
     func testDecision_duringAnImport_refuses() {
         XCTAssertEqual(
-            DraftFileDropPolicy.decision(droppedURLs: [pdf], allowsDraftMutation: true, isProcessingAttachments: true),
+            DraftFileDropPolicy.decision(droppedURLs: [pdf], allowsDraftMutation: true, isProcessingAttachments: true, hasPendingDrop: false),
+            .refuse
+        )
+    }
+
+    /// The composer holds one pending drop. A second would replace the first, whose files were
+    /// taken from the user and would then never be attached.
+    ///
+    /// Revert-check: passing `hasPendingDrop: false` to `acceptsFiles` in
+    /// `DraftFileDropPolicy.decision` whatever it was given makes this fail.
+    func testDecision_whileAnEarlierDropWaitsForThePicker_refuses() {
+        XCTAssertEqual(
+            DraftFileDropPolicy.decision(
+                droppedURLs: [pdf],
+                allowsDraftMutation: true,
+                isProcessingAttachments: false,
+                hasPendingDrop: true
+            ),
             .refuse
         )
     }
 
     func testDecision_duringASend_refuses() {
         XCTAssertEqual(
-            DraftFileDropPolicy.decision(droppedURLs: [pdf], allowsDraftMutation: false, isProcessingAttachments: false),
+            DraftFileDropPolicy.decision(droppedURLs: [pdf], allowsDraftMutation: false, isProcessingAttachments: false, hasPendingDrop: false),
             .refuse
         )
     }
@@ -71,11 +108,11 @@ final class DraftFileDropPolicyTests: XCTestCase {
         let link = try XCTUnwrap(URL(string: "https://example.com/Report.pdf"))
 
         XCTAssertEqual(
-            DraftFileDropPolicy.decision(droppedURLs: [], allowsDraftMutation: true, isProcessingAttachments: false),
+            DraftFileDropPolicy.decision(droppedURLs: [], allowsDraftMutation: true, isProcessingAttachments: false, hasPendingDrop: false),
             .refuse
         )
         XCTAssertEqual(
-            DraftFileDropPolicy.decision(droppedURLs: [link], allowsDraftMutation: true, isProcessingAttachments: false),
+            DraftFileDropPolicy.decision(droppedURLs: [link], allowsDraftMutation: true, isProcessingAttachments: false, hasPendingDrop: false),
             .refuse
         )
     }
@@ -88,7 +125,8 @@ final class DraftFileDropPolicyTests: XCTestCase {
         let decision = DraftFileDropPolicy.decision(
             droppedURLs: [photo, archive, pdf],
             allowsDraftMutation: true,
-            isProcessingAttachments: false
+            isProcessingAttachments: false,
+            hasPendingDrop: false
         )
 
         XCTAssertEqual(decision, .accept(fileURLs: [photo, pdf], unsupportedFilenames: ["Everything.zip"]))
@@ -101,7 +139,8 @@ final class DraftFileDropPolicyTests: XCTestCase {
         let decision = DraftFileDropPolicy.decision(
             droppedURLs: [archive],
             allowsDraftMutation: true,
-            isProcessingAttachments: false
+            isProcessingAttachments: false,
+            hasPendingDrop: false
         )
 
         XCTAssertEqual(decision, .accept(fileURLs: [], unsupportedFilenames: ["Everything.zip"]))
@@ -145,14 +184,36 @@ final class DraftFileDropPolicyTests: XCTestCase {
         XCTAssertEqual(composer.pendingFileDrop?.unsupportedFilenames, ["Everything.zip"])
     }
 
+    /// Until the picker has taken a drop the composer is the only holder of its files, so a
+    /// second drop is refused, and slides back, in place of replacing the first.
+    ///
+    /// Revert-check: passing `hasPendingDrop: false` whatever the composer holds, in
+    /// `acceptsDroppedFiles` and in `receiveDroppedFiles`, makes this fail: the second drop
+    /// is taken and the first one's files are gone.
+    func testComposer_withADropThePickerHasNotTaken_refusesAnother_andKeepsTheFirst() {
+        let composer = ChatComposerState()
+        XCTAssertTrue(composer.receiveDroppedFiles([pdf]))
+        let first = composer.pendingFileDrop
+
+        XCTAssertFalse(composer.acceptsDroppedFiles)
+        XCTAssertFalse(composer.receiveDroppedFiles([photo]))
+
+        XCTAssertEqual(composer.pendingFileDrop, first)
+        XCTAssertEqual(composer.pendingFileDrop?.fileURLs, [pdf])
+    }
+
     /// Two drops of the same files are two requests, so the picker's `onChange` sees both.
     func testComposer_twoDropsOfTheSameFile_areDifferentRequests() {
         let composer = ChatComposerState()
 
         XCTAssertTrue(composer.receiveDroppedFiles([pdf]))
         let first = composer.pendingFileDrop
+        // The picker takes the first.
+        composer.pendingFileDrop = nil
+        XCTAssertTrue(composer.acceptsDroppedFiles)
         XCTAssertTrue(composer.receiveDroppedFiles([pdf]))
 
+        XCTAssertNotNil(composer.pendingFileDrop)
         XCTAssertNotEqual(composer.pendingFileDrop, first)
     }
 

@@ -13,6 +13,11 @@ final class FakeDraggingInfo: NSObject, NSDraggingInfo {
     private let window: NSWindow?
     private let location: NSPoint
     private let sourceOperationMask: NSDragOperation
+    private let sequenceNumber: Int
+
+    /// The last sequence number handed out. Read and written on the main thread only, where
+    /// every test that makes a drag runs.
+    private static var lastSequenceNumber = 0
 
     init(
         pasteboard: NSPasteboard,
@@ -24,11 +29,26 @@ final class FakeDraggingInfo: NSObject, NSDraggingInfo {
         self.window = window
         self.location = locationInWindow
         self.sourceOperationMask = sourceOperationMask
+        Self.lastSequenceNumber += 1
+        self.sequenceNumber = Self.lastSequenceNumber
     }
 
+    /// A named pasteboard lives in the pasteboard server, not in this process, and stays
+    /// there until it is released: without this every drag a test made left one behind for
+    /// as long as the user stayed logged in. Only a pasteboard made by `pasteboard(holding:)`
+    /// is released, never one a test was handed from elsewhere.
+    deinit {
+        if pasteboard.name.rawValue.hasPrefix(Self.pasteboardNamePrefix) {
+            pasteboard.releaseGlobally()
+        }
+    }
+
+    static let pasteboardNamePrefix = "fake-drag-"
+
     /// A pasteboard of the test's own holding `objects`, never the one the user copies to.
+    /// The drag it is given to releases it.
     static func pasteboard(holding objects: [NSPasteboardWriting]) -> NSPasteboard {
-        let pasteboard = NSPasteboard(name: NSPasteboard.Name("fake-drag-\(UUID().uuidString)"))
+        let pasteboard = NSPasteboard(name: NSPasteboard.Name("\(pasteboardNamePrefix)\(UUID().uuidString)"))
         pasteboard.clearContents()
         pasteboard.writeObjects(objects)
         return pasteboard
@@ -69,7 +89,9 @@ final class FakeDraggingInfo: NSObject, NSDraggingInfo {
     var draggedImage: NSImage? { nil }
     var draggingPasteboard: NSPasteboard { pasteboard }
     var draggingSource: Any? { nil }
-    var draggingSequenceNumber: Int { 1 }
+    /// Its own for each drag, as AppKit's is: a view may keep what it learned about a drag
+    /// under this number (`MacDraftFileDropView`).
+    var draggingSequenceNumber: Int { sequenceNumber }
     var draggingFormation: NSDraggingFormation = .default
     var animatesToDestination = false
     var numberOfValidItemsForDrop = 1

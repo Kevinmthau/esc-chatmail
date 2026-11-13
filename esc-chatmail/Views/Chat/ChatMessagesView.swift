@@ -394,6 +394,10 @@ struct ChatMessagesView: View {
                     )
                     .id(row.id)
                     .contentShape(Rectangle())
+                    // An attachment in the Mac's row has a menu of its own, which a right-click
+                    // on it opens in place of this row's. It ends with these same entries
+                    // (`MacEnclosingMessageMenu`). Nothing on iOS.
+                    .macEnclosingMessageMenu { messageContextMenu(for: message) }
                     .contextMenu { messageContextMenu(for: message) } preview: {
                         MessageContextMenuPreview(message: message)
                     }

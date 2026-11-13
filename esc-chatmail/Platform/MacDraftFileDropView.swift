@@ -26,6 +26,12 @@ final class MacDraftFileDropView: NSView {
     var acceptsFiles: @MainActor () -> Bool = { false }
     /// The files that were dropped. Returns whether the drop was taken.
     var onDropFiles: @MainActor ([URL]) -> Bool = { _ in false }
+    /// Whether the drag in progress carries files, kept under the drag's sequence number.
+    /// AppKit asks about a drag at every move of the pointer, and the answer is a question to
+    /// the pasteboard server, which is another process; what a drag carries is fixed when it
+    /// starts. Kept by sequence number, not from `draggingEntered` to `draggingExited`: a view
+    /// in front hands its drags on without the exit (`MacFileDropForwarder`).
+    private var knownDrag: (sequenceNumber: Int, carriesFiles: Bool)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -62,6 +68,7 @@ final class MacDraftFileDropView: NSView {
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         // Asked again at the drop: a send or an import can have started since the drag came in.
+        // The files themselves are read from the pasteboard here, whatever was kept about it.
         guard !operation(for: sender).isEmpty else { return false }
         let urls = Self.fileURLs(on: sender.draggingPasteboard)
         guard !urls.isEmpty else { return false }
@@ -76,7 +83,7 @@ final class MacDraftFileDropView: NSView {
     private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
         let takesDrag = DraftFileDropPolicy.takesDrag(
             windowHasSheet: window?.attachedSheet != nil,
-            carriesFiles: Self.carriesFiles(sender.draggingPasteboard),
+            carriesFiles: carriesFiles(sender),
             sourceAllowsCopy: sender.draggingSourceOperationMask.contains(.copy),
             acceptsFiles: acceptsFiles()
         )
@@ -84,6 +91,17 @@ final class MacDraftFileDropView: NSView {
     }
 
     // MARK: - The dragged files
+
+    /// `carriesFiles(_:)` of the drag's pasteboard, asked once for each drag (`knownDrag`).
+    private func carriesFiles(_ sender: NSDraggingInfo) -> Bool {
+        let sequenceNumber = sender.draggingSequenceNumber
+        if let knownDrag, knownDrag.sequenceNumber == sequenceNumber {
+            return knownDrag.carriesFiles
+        }
+        let carriesFiles = Self.carriesFiles(sender.draggingPasteboard)
+        knownDrag = (sequenceNumber, carriesFiles)
+        return carriesFiles
+    }
 
     private static let fileURLReadingOptions: [NSPasteboard.ReadingOptionKey: Any] = [
         .urlReadingFileURLsOnly: true

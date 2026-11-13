@@ -59,25 +59,53 @@ final class ChatFileDropSourceTests: XCTestCase {
     }
 
     /// The picker takes a request once: it clears the request before it imports, so a view
-    /// update between the two cannot start the import again.
+    /// update between the two cannot start the import again. And it clears it only where it
+    /// goes on to import it: a request it cannot start on yet stays with the composer.
     ///
-    /// Revert-check: deleting `fileDrop.wrappedValue = nil` from the picker's `onChange`
-    /// makes this fail.
-    func testPicker_clearsTheRequestBeforeItImports() throws {
+    /// Revert-check: deleting `fileDrop.wrappedValue = nil` from
+    /// `importPendingFileDropIfIdle` makes this fail, and so does moving it above the guard.
+    func testPicker_clearsTheRequestBeforeItImports_andOnlyThen() throws {
         let source = try String(
             contentsOf: repoFile("esc-chatmail/Views/Components/AttachmentPicker.swift"),
             encoding: .utf8
         )
 
         XCTAssertTrue(source.contains(
-            "        .onChange(of: fileDrop.wrappedValue) { _, drop in\n"
-                + "            guard let drop else { return }\n"
-                + "            fileDrop.wrappedValue = nil\n"
-                + "            importDroppedFiles(drop)\n"
-                + "        }\n"
+            "        ), let drop = fileDrop.wrappedValue else { return }\n"
+                + "        fileDrop.wrappedValue = nil\n"
+                + "        importDroppedFiles(drop)\n"
+                + "    }\n"
         ))
+        XCTAssertEqual(source.components(separatedBy: "fileDrop.wrappedValue = nil").count, 2)
+        XCTAssertEqual(source.components(separatedBy: "importDroppedFiles(drop)").count, 2)
         // A dropped file has no security scope to open, so its import must not ask for one.
         XCTAssertTrue(source.contains("            securityScope: .ifOffered\n"))
+    }
+
+    /// The picker is asked about the pending drop at three moments: when a drop arrives, when
+    /// an import ends, and when the picker comes on screen. What it does at each is
+    /// `MacDraftFileDropViewTests`' to pin, in the Mac plan; this pins that the three are
+    /// there in the suite CI runs.
+    ///
+    /// Revert-check: deleting the `.onChange(of: isProcessing)` from `AttachmentPicker.body`
+    /// makes the second assertion fail (a drop held during an import is never started);
+    /// dropping `initial: true` makes the first fail.
+    func testPicker_asksAboutThePendingDrop_whenOneArrives_whenAnImportEnds_andAsItAppears() throws {
+        let source = try String(
+            contentsOf: repoFile("esc-chatmail/Views/Components/AttachmentPicker.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(source.contains(
+            "        .onChange(of: fileDrop.wrappedValue, initial: true) { _, _ in\n"
+                + "            importPendingFileDropIfIdle()\n"
+                + "        }\n"
+        ))
+        XCTAssertTrue(source.contains(
+            "        .onChange(of: isProcessing) { _, _ in\n"
+                + "            importPendingFileDropIfIdle()\n"
+                + "        }\n"
+        ))
     }
 
     private func repoFile(_ relativePath: String) -> URL {
