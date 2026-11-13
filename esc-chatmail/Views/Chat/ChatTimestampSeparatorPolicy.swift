@@ -44,12 +44,23 @@ enum ChatTimestampSeparatorPolicy {
         dayFormatter.timeZone = calendar.timeZone
         dayFormatter.locale = locale
 
+        // The date the day formatter is given: `date`, except for a relative day.
+        var dayDate = date
+
         switch dayForm(for: date, now: now, calendar: calendar) {
         case .relative:
             // "Today" and "Yesterday", in the locale's own words.
             dayFormatter.dateStyle = .medium
             dayFormatter.timeStyle = .none
             dayFormatter.doesRelativeDateFormatting = true
+            // The formatter picks the word by the system clock, not by `now`, and there is
+            // no way to hand it another one. So it is given the day that is as far behind
+            // the clock as `date` is behind `now`: the clock's own today or yesterday. Given
+            // `date` itself, a day that was today by `now` was named by the clock's today
+            // instead: the line for a `now` of 2026-11-12 read "Yesterday" on the 13th, which
+            // is how the test with that fixed `now` began to fail a day after it was written.
+            let daysAgo = daysBetween(date, and: now, calendar: calendar)
+            dayDate = calendar.date(byAdding: .day, value: -daysAgo, to: Date()) ?? date
         case .weekday:
             dayFormatter.setLocalizedDateFormatFromTemplate("EEEE")
         case .dateInThisYear:
@@ -58,7 +69,7 @@ enum ChatTimestampSeparatorPolicy {
             dayFormatter.setLocalizedDateFormatFromTemplate("MMMdy")
         }
 
-        return Label(day: dayFormatter.string(from: date), time: timeFormatter.string(from: date))
+        return Label(day: dayFormatter.string(from: dayDate), time: timeFormatter.string(from: date))
     }
 
     /// How the day part of the line names its day.
@@ -72,10 +83,7 @@ enum ChatTimestampSeparatorPolicy {
     }
 
     static func dayForm(for date: Date, now: Date, calendar: Calendar) -> DayForm {
-        let startOfDate = calendar.startOfDay(for: date)
-        let startOfNow = calendar.startOfDay(for: now)
-        let daysAgo = calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day ?? Int.max
-        switch daysAgo {
+        switch daysBetween(date, and: now, calendar: calendar) {
         case 0, 1:
             return .relative
         case 2...6:
@@ -86,5 +94,13 @@ enum ChatTimestampSeparatorPolicy {
                 ? .dateInThisYear
                 : .dateWithYear
         }
+    }
+
+    /// How many calendar days `date`'s day is before `now`'s: 0 for the same day, negative
+    /// for a day ahead of `now`.
+    private static func daysBetween(_ date: Date, and now: Date, calendar: Calendar) -> Int {
+        let startOfDate = calendar.startOfDay(for: date)
+        let startOfNow = calendar.startOfDay(for: now)
+        return calendar.dateComponents([.day], from: startOfDate, to: startOfNow).day ?? Int.max
     }
 }
