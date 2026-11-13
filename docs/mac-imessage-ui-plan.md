@@ -501,6 +501,26 @@ The second message of "Seen on the way" above, fixed on its own. None of the fix
 - With the caret in the reply field, the open conversation's row: no gray around the fill.
 - A right-click on a row that is not selected: the menu, and whether the list still draws its ring around the row. The list's own selection is now off before the first click, where it used to be on until then.
 
+### The selection guard's two bounds (2026-11-12)
+
+Two findings from the review of "The selection guard's write", fixed after it merged. Neither fault was seen: the first is what happens if a call the measurements relied on does not come, the second if a system's table behaves as none measured did. None of this has been seen in the app.
+
+**What was wrong.**
+
+- **The guard behind the list looked for its table once more and then stopped.** It finds no table when it joins the window, because the list's views join after it. It asked for one turn of the main queue and looked again. If the table was still not there, only a later `layout()` of the guard could find it, and a view with no size is owed none. The table's own selection then stayed on until the first row was selected, and the fill's guard made the write there, a turn later: the reload at the first click that the guard behind the list exists to avoid, with AppKit's warning on a list of 220 rows or more.
+- **Nothing ended the writes if a table did not keep `.none`.** Each write reloads the table. The reload builds the selected row's fill again, the guard in the new fill is laid out, finds the style set back and asks for a turn, and the turn writes: a reload of the table at every turn of the main queue for as long as a row is selected. The table kept the style through everything measured, on macOS 27.2. Nothing was run on macOS 26.
+
+**What changed** (`MacSidebarListSelectionGuardView`).
+
+- **A turn that finds no table looks again later:** after 0.05, 0.1, 0.2, 0.4, 0.8 and 1.6 seconds, about three seconds in all (`standardLaterLookDelays`), and then not until the list calls the guard again. It stops because a system that builds a list another way has no table to find, and each look searches the window's views. Any call from the list (`layout()`, joining a superview or a window, SwiftUI's update) looks at once and starts the later looks over. A guard in no window asks for none: a fill's guard is in none when it joins its superview, and every selection would otherwise start three seconds of looks.
+- **One table's style is written three times and no more** (`tableWriteLimit`), by however many guards. The first write is the one the measurements needed, and the other two are for a style something set back once or twice. After the third the table is left alone, and it draws its own selection under the fill, which is what the sidebar had before the guard. The third write logs a warning. The count is kept on the table, as an associated object: the guard in a fill is a new view after every reload, so a count kept by the guard would start again each time and end nothing.
+
+**Tests.** `MacSidebarListSelectionGuardViewTests` (Mac plan, nineteen tests, seven of them new): a table that joins after the guard's turn is found on a later look; the looks end; a call from the list starts them over; a guard in no window asks for none; a table that never keeps the style is written three times, by one guard and by a new guard each time; a style set back once is still turned off again. `Mac.xctestplan` passes in the signed, sandboxed test host: 463 tests in 46 suites, and the run's log has neither message. The iOS suite was not run here; the two Swift files changed are Mac-only.
+
+**Revert-checks.** Each of the six changes named in the new tests' `Revert-check:` comments was undone alone, and each time the test that names it failed. One test did not fail at first: in a window, the layout pass the window owes its new views came after the table had joined and found it with no later look, so the tests in a window now run that pass before the table joins. That is also the fault itself, seen in the test host: after that pass nothing laid the guard out again, and without the later looks the table was never found.
+
+**HONEST SCOPE.** The table that does not keep the style is a test's own subclass, which reads as `.regular` after every write. No real table was seen to do that, so what a real one that did would draw, and whether three reloads there log anything, is not known.
+
 ## PR 5: the composer
 
 - **Keep the structure, change the drawing.** `ChatReplyComposerOverlay` stays an overlay whose measured height feeds `ChatBottomInsetPolicy`. Do not move it to `safeAreaBar`: the transcript's bottom inset and anchor pass are built on that measurement. On the Mac it loses the divider and the opaque background.

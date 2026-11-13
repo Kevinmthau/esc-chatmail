@@ -70,6 +70,22 @@ import AppKit
 ///   is an assignment, looked at again at each `layout()` in case something does undo it, and
 ///   not an observation as in `MacSidebarCollapseGuardView`.
 ///
+/// Two bounds, for what the measurements did not show and nothing promises.
+/// - The guard behind the list finds no table when it joins the window, and none on its turn
+///   of the main queue if the list's views have still not joined by then. A second `layout()`
+///   found it in the measurements, but a view with no size is owed no second `layout()`. So a
+///   turn that finds no table looks again, a few times over about three seconds
+///   (`standardLaterLookDelays`), and then stops: a system that builds a list another way has
+///   no table to find, and each look searches the window's views. Any call from the list starts
+///   the looking over.
+/// - The table kept `.none` through everything tried. If a system's table does not keep it,
+///   each write reloads the table, the reload builds the selected row's fill again, and the
+///   guard in the new fill finds the style set back and writes again: a reload at every turn
+///   for as long as a row is selected. So one table's style is written `tableWriteLimit` times
+///   and no more, by however many guards, and after that the table draws its own selection
+///   under the fill, as it did before this view. The count is the table's, not a guard's: the
+///   guard in a fill is a new view after every reload.
+///
 /// What is left. A sidebar that opens with 220 rows or more already loaded gets AppKit's
 /// warning once as it opens, from the reload, beside the one SwiftUI's own load of those rows
 /// logs. The app's sidebar opens empty: `MacMailboxView` builds the list's view model with the
@@ -91,11 +107,34 @@ import AppKit
 /// `MacConversationSidebarSelectionGuardTests` mount real lists, so on the system the Mac tests
 /// run on, a change in how a list is built fails a test. None of it has been seen in the app.
 final class MacSidebarListSelectionGuardView: NSView {
+    /// How many times one table's style is written, by all the guards that find it. The first
+    /// write is the one the measurements needed. The others are for a style something set back
+    /// once or twice; a table that sets it back every time is left alone after them.
+    static let tableWriteLimit = 3
+
+    /// How long each look for a table waits after the one before found none, the first of them
+    /// after the guard's turn of the main queue. About three seconds in all.
+    static let standardLaterLookDelays: [TimeInterval] = [0.05, 0.1, 0.2, 0.4, 0.8, 1.6]
+
     /// The table this view found for its list, or nil while it has found none. Its own
     /// selection is off from the turn of the main queue after it was found.
     private(set) weak var guardedTableView: NSTableView?
     /// Whether a turn of the main queue is already waiting to turn the table's selection off.
     private var isTurnOffScheduled = false
+    /// `standardLaterLookDelays`, except in a test that cannot wait three seconds.
+    var laterLookDelays = MacSidebarListSelectionGuardView.standardLaterLookDelays
+    /// How many later looks have been asked for since the list last called.
+    private var laterLooksMade = 0
+    /// Whether a later look is waiting.
+    private var isLaterLookPending = false
+    /// Tells a later look that is still waiting from one that was called off.
+    private var laterLookGeneration = 0
+
+    /// Whether this view is still going to look for its table, or write to it, without another
+    /// call from the list.
+    var isLookPending: Bool {
+        isTurnOffScheduled || isLaterLookPending
+    }
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
@@ -127,7 +166,9 @@ final class MacSidebarListSelectionGuardView: NSView {
     func guardListTableView() {
         let tableView = listTableView()
         guardedTableView = tableView
-        if let tableView, tableView.selectionHighlightStyle == .none {
+        if let tableView, !Self.needsTurnOff(tableView) {
+            // Found, with nothing to write: nothing is left to look for.
+            callOffLaterLook()
             return
         }
         // Also with no table found: a list's views join the window after its background's, so
@@ -137,6 +178,10 @@ final class MacSidebarListSelectionGuardView: NSView {
 
     /// One turn of the main queue, however many calls ask for it before it runs.
     private func scheduleTurnOff() {
+        // The list called, so what a later look was waiting for may be here: the turn looks
+        // now, and the later looks start over after it.
+        callOffLaterLook()
+        laterLooksMade = 0
         guard !isTurnOffScheduled else { return }
         isTurnOffScheduled = true
         DispatchQueue.main.async { [weak self] in
@@ -147,15 +192,69 @@ final class MacSidebarListSelectionGuardView: NSView {
     }
 
     /// The write, on a turn of the main queue of its own. The table is looked for again: this
-    /// view may have left its list since the turn was asked for.
+    /// view may have left its list since the turn was asked for, or its list's table may have
+    /// joined the window.
     private func turnOffListTableViewSelection() {
         let tableView = listTableView()
         guardedTableView = tableView
+        guard let tableView else {
+            scheduleLaterLook()
+            return
+        }
         // Only a change is written: the setter reloads the table.
-        if let tableView, tableView.selectionHighlightStyle != .none {
-            tableView.selectionHighlightStyle = .none
+        guard Self.needsTurnOff(tableView) else { return }
+        // Counted before it is made. The setter builds the rows again before it returns, and a
+        // guard in one of them reads the count.
+        let writesMade = Self.writesMade(to: tableView) + 1
+        objc_setAssociatedObject(tableView, Self.writeCountKey, writesMade, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        if writesMade == Self.tableWriteLimit {
+            Log.warning(
+                "Mac sidebar: the list's table does not keep its selection style off; this write is the last",
+                category: .ui
+            )
+        }
+        tableView.selectionHighlightStyle = .none
+    }
+
+    /// Another look for the table, later, after a turn that found none.
+    ///
+    /// Not for a guard in no window, which has no list to wait for: a fill's guard is in none
+    /// when it joins its superview, and `layout()` finds its table. And not after the last of
+    /// `laterLookDelays`, until the list calls again.
+    private func scheduleLaterLook() {
+        guard window != nil, let delay = laterLookDelays.dropFirst(laterLooksMade).first else { return }
+        laterLooksMade += 1
+        laterLookGeneration += 1
+        let generation = laterLookGeneration
+        isLaterLookPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.isLaterLookPending, self.laterLookGeneration == generation else { return }
+            self.isLaterLookPending = false
+            self.turnOffListTableViewSelection()
         }
     }
+
+    private func callOffLaterLook() {
+        isLaterLookPending = false
+        laterLookGeneration += 1
+    }
+
+    /// Whether a guard still has a write to make to `tableView`: it draws a selection of its
+    /// own, and the guards have not written its style `tableWriteLimit` times already.
+    private static func needsTurnOff(_ tableView: NSTableView) -> Bool {
+        tableView.selectionHighlightStyle != .none && writesMade(to: tableView) < tableWriteLimit
+    }
+
+    /// How many times guards have written `tableView`'s style. Kept on the table, so it is
+    /// every guard's count and goes when the table does.
+    private static func writesMade(to tableView: NSTableView) -> Int {
+        (objc_getAssociatedObject(tableView, writeCountKey) as? Int) ?? 0
+    }
+
+    /// Identifies the count among a table's associated objects, by address only.
+    private static let writeCountKey = UnsafeRawPointer(
+        UnsafeMutableRawPointer.allocate(byteCount: 1, alignment: 1)
+    )
 
     /// The table of the list this view belongs to: the one it is inside, which is where a
     /// row's background is, or else the one drawn over it, which is where a list is from its
