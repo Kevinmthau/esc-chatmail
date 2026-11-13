@@ -126,11 +126,19 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
             composerTextKnownToField = composerText
             return
         }
-        if textView.hasMarkedText() {
+        let dropsComposition = textView.hasMarkedText()
+        if dropsComposition {
             // The view tells the composer nothing about a word an input method is still
             // composing, so while one is, the two differ and the composer is not wrong:
             // replacing the string then would throw the composition away on any update.
             guard composerText != composerTextKnownToField else { return }
+        }
+        // Set before the composition is discarded, not only before the text is replaced. The
+        // view reports the end of a composition as a change (measured: `unmarkText` does), and
+        // an input method that answered the discard by ending it in the view would have that
+        // report give the composer all the view still shows: after a send, the mail just sent.
+        isApplyingComposerText = true
+        if dropsComposition {
             // The composer's text was replaced from outside while a word was being composed.
             // Its text wins, and the composition goes: left in place, the view kept all it
             // showed, and the next change gave it back to the composer. After a send that was
@@ -138,7 +146,6 @@ final class MacReplyTextFieldCoordinator: NSObject, NSTextViewDelegate {
             // was that reply gone.
             textView.inputContext?.discardMarkedText()
         }
-        isApplyingComposerText = true
         textView.string = composerText
         // Marking that outlived its text: end it without telling the composer of a change.
         if textView.hasMarkedText() { textView.unmarkText() }
