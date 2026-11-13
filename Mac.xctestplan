@@ -28,6 +28,9 @@
     {
       "selectedTests" : [
         "AppLifecyclePolicyTests",
+        "AttachmentExportItemTests",
+        "AttachmentExportPolicyTests",
+        "AttachmentFileExportTests",
         "AuthSessionTests",
         "AvatarStackViewLayoutTests",
         "BackgroundActivitySchedulePolicyTests",
@@ -47,6 +50,8 @@
         "IncrementalSyncCursorTests",
         "KeychainServiceTests",
         "LayoutAwareWKWebViewTests",
+        "MacAttachmentExportMenuTests",
+        "MacAttachmentExporterTests",
         "MacChatHeaderNameBarLayoutTests",
         "MacChatReplyBarLayoutTests",
         "MacConversationSidebarRowIdentityTests",
