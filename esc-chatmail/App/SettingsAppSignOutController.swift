@@ -39,6 +39,11 @@ final class SettingsAppSignOutController: ObservableObject {
     /// unless a window says otherwise (`setAlertHost(isOnScreen:)`).
     private var alertHostIsOnScreen: @MainActor () -> Bool = { true }
 
+    /// Asked when a confirmation is answered with Sign Out, before the sign-out starts. True
+    /// refuses it, and has told the user so. Never refuses unless a window gives its own
+    /// (`init`).
+    private let refusesConfirmedSignOut: @MainActor () -> Bool
+
     /// `prompter` and `activity` default inside the body: `PlatformSettingsAppSignOutPrompter`
     /// and `SettingsAppSignOutActivity.shared` are main-actor isolated, and a default
     /// argument is evaluated in the caller's (here nonisolated) context.
@@ -47,16 +52,31 @@ final class SettingsAppSignOutController: ObservableObject {
     ///   is on screen for as long as the app runs: the mailbox's (`ContentView`). It then
     ///   shows the failure of a sign-out another window started and can no longer report
     ///   (`SettingsAppSignOutActivity.showFailureInFallbackWindow()`).
+    /// - Parameter refusesConfirmedSignOut: A last look when the user answers Sign Out, for a
+    ///   window whose confirmation does not block what the sign-out would take away. The
+    ///   Mac's Settings window gives one (`MailboxWindowSheet.refusesSignOutConfirmedElsewhere`):
+    ///   its alert is a sheet on the Settings window only, so New Message can be opened on
+    ///   the mailbox window after the question was asked and before it is answered. True
+    ///   refuses the sign-out, and the closure is what tells the user. The mailbox window
+    ///   gives none: its own alert is the sheet on it.
     init(
         preferences: SettingsAppPreferences = SettingsAppPreferences(),
         prompter: SettingsAppSignOutPrompting? = nil,
         activity: SettingsAppSignOutActivity? = nil,
-        showsFailuresOfOffScreenWindows: Bool = false
+        showsFailuresOfOffScreenWindows: Bool = false,
+        refusesConfirmedSignOut: (@MainActor () -> Bool)? = nil
     ) {
         let activity = activity ?? .shared
+        let prompter = prompter ?? PlatformSettingsAppSignOutPrompter()
         self.preferences = preferences
-        self.prompter = prompter ?? PlatformSettingsAppSignOutPrompter()
+        self.prompter = prompter
         self.activity = activity
+        self.refusesConfirmedSignOut = refusesConfirmedSignOut ?? { false }
+        // Named weakly: the activity outlives every window, and must not keep a closed
+        // window's controller, or go on asking it.
+        activity.addConfirmationSource { [weak self] in
+            self?.prompter.isConfirmationActive
+        }
         // A sign-out another window's controller runs changes `isAnySignOutRunning` here, so
         // it must redraw what observes this controller: the Sign Out… command and button.
         activityObservation = activity.objectWillChange.sink { [weak self] _ in
@@ -129,6 +149,12 @@ final class SettingsAppSignOutController: ObservableObject {
     ///
     /// A menu command is a foreground action, so this does not wait for the scene to become
     /// active. `focusedWindowHasSheet` is `SignOutMenuPolicy.choice`'s.
+    ///
+    /// It asks nothing while another window's confirmation is up
+    /// (`SettingsAppSignOutActivity.isConfirmationActiveInAnyWindow()`): two windows asking at
+    /// once left the first alert up after the second one's sign-out. `evaluate` does not look
+    /// at other windows. It judges the iOS switch, where that was never the case, and a
+    /// request it passed over would wait for the next foregrounding.
     @discardableResult
     func requestSignOut(
         account: SettingsAppSignOutAccount,
@@ -142,7 +168,7 @@ final class SettingsAppSignOutController: ObservableObject {
             decision: SettingsAppSignOutPolicy.decision(
                 isSignOutRequested: true,
                 isDurablySignedOut: isDurablySignedOut,
-                isRequestBeingHandled: isSigningOut || prompter.isConfirmationActive,
+                isRequestBeingHandled: isSigningOut || activity.isConfirmationActiveInAnyWindow(),
                 isSceneActive: true
             )
         )
@@ -191,6 +217,12 @@ final class SettingsAppSignOutController: ObservableObject {
         // while it was up); once durably signed out there is no session left
         // for this switch to end — the same verdict the policy discards on.
         guard !account.isDurablySignedOut(), !isSigningOut else { return }
+        // After the guard above, so a window is asked, and tells the user it refused, only
+        // when there was a sign-out to refuse.
+        guard !refusesConfirmedSignOut() else {
+            Log.info("A confirmed sign-out was refused by its window; the account is still signed in", category: .auth)
+            return
+        }
         isSigningOut = true
         activity.signOutDidBegin()
         Task {

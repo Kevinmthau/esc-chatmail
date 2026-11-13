@@ -22,11 +22,15 @@ import SwiftUI
 /// the overlay, until teardown replaces it with the sign-in view. Nothing sent or changed
 /// there in that time gets through: `signOut()` closes admission before its first suspension.
 ///
-/// Three things the two windows' controllers must agree on, each of which went wrong with
+/// Four things the two windows' controllers must agree on, each of which went wrong with
 /// the controllers knowing only about themselves:
 /// - Sign Out… asks nothing while the mailbox window has a sheet attached, although this
 ///   window has none (`MailboxWindowSheet`): confirmed here, the sign-out closed New Message
-///   on the mailbox window with the typed message in it.
+///   on the mailbox window with the typed message in it. This window's confirmation does not
+///   block the mailbox window, so the same is asked again when the user answers Sign Out
+///   (`refusesConfirmedSignOut`): New Message can be opened between the two.
+/// - Sign Out… asks nothing while the other window's confirmation is up
+///   (`SettingsAppSignOutActivity.isConfirmationActiveInAnyWindow()`).
 /// - Sign Out… is disabled in both windows while either one's sign-out runs
 ///   (`SettingsAppSignOutController.isAnySignOutRunning`).
 /// - This window can be closed while its sign-out runs. A failure is then shown on the
@@ -37,7 +41,9 @@ import SwiftUI
 struct MacSettingsView: View {
     @ObservedObject var authSession: AuthSession
     let version: String
-    @StateObject private var signOut = SettingsAppSignOutController()
+    @StateObject private var signOut = SettingsAppSignOutController(
+        refusesConfirmedSignOut: { MailboxWindowSheet.refusesSignOutConfirmedElsewhere() }
+    )
 
     init(
         authSession: AuthSession,

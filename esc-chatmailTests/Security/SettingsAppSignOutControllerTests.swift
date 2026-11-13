@@ -282,8 +282,8 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertNil(prompter.lastAccountEmail)
     }
 
-    /// Revert-check: dropping `prompter.isConfirmationActive` from `isRequestBeingHandled` in
-    /// `SettingsAppSignOutController.requestSignOut` makes this fail.
+    /// Revert-check: dropping `activity.isConfirmationActiveInAnyWindow()` from
+    /// `isRequestBeingHandled` in `SettingsAppSignOutController.requestSignOut` makes this fail.
     func testRequestSignOut_whileConfirmationActive_refusesWithoutStackingPrompt() {
         prompter.isConfirmationActive = true
 
@@ -495,6 +495,119 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertFalse(activity.showFailureInFallbackWindow())
     }
 
+    /// With the Settings window's confirmation up, Sign Out… chosen with the mailbox window
+    /// in front asked again. The first alert outlived the second one's sign-out, and after a
+    /// new sign-in it named the old account and signed the new one out.
+    ///
+    /// Revert-check: passing `isSigningOut || prompter.isConfirmationActive` as
+    /// `isRequestBeingHandled` in `SettingsAppSignOutController.requestSignOut` makes this
+    /// fail.
+    func testRequestSignOut_anotherWindowsConfirmationUp_refusesWithoutPrompt() {
+        let other = makeOtherWindowsController()
+        other.prompter.isConfirmationActive = true
+
+        let choice = controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        XCTAssertEqual(choice, .refuse)
+        XCTAssertEqual(prompter.confirmationCount, 0)
+
+        // Asked again each time, never kept: once the other window's alert has gone, by an
+        // answer or with neither handler run, this window can ask.
+        other.prompter.isConfirmationActive = false
+        XCTAssertEqual(controller.requestSignOut(account: account, focusedWindowHasSheet: false), .confirm)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+    }
+
+    /// A closed window's controller must not go on refusing the other window's Sign Out…,
+    /// whatever its prompter last said.
+    ///
+    /// Revert-check: capturing `self` strongly in the `addConfirmationSource` closure in
+    /// `SettingsAppSignOutController.init` makes this fail.
+    func testRequestSignOut_otherWindowsControllerReleased_itsConfirmationIsForgotten() {
+        let otherPrompter = FakePrompter()
+        otherPrompter.isConfirmationActive = true
+        weak var weakOther: SettingsAppSignOutController?
+        autoreleasepool {
+            let other = SettingsAppSignOutController(
+                preferences: preferences,
+                prompter: otherPrompter,
+                activity: activity
+            )
+            weakOther = other
+        }
+
+        XCTAssertNil(weakOther)
+        XCTAssertEqual(controller.requestSignOut(account: account, focusedWindowHasSheet: false), .confirm)
+    }
+
+    /// The iOS switch is judged without a look at other windows, as before: a request passed
+    /// over there would wait for the next foregrounding.
+    ///
+    /// Revert-check: passing `activity.isConfirmationActiveInAnyWindow()` in
+    /// `isRequestBeingHandled` in `SettingsAppSignOutController.evaluate` makes this fail.
+    func testEvaluate_anotherWindowsConfirmationUp_stillPrompts() {
+        let other = makeOtherWindowsController()
+        other.prompter.isConfirmationActive = true
+        requestSignOut()
+
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.confirmationCount, 1)
+    }
+
+    /// The Settings window's confirmation does not block the mailbox window, so New Message
+    /// can be opened there after Sign Out… was chosen. The window is asked again when the
+    /// user answers Sign Out.
+    ///
+    /// Revert-check: removing the `guard !refusesConfirmedSignOut()` from
+    /// `SettingsAppSignOutController.signOutConfirmed` makes this fail: the sign-out would
+    /// close New Message on the mailbox window with the typed message in it.
+    func testSignOutConfirmed_windowRefuses_startsNoSignOut() async throws {
+        var refuses = false
+        var askedCount = 0
+        let settings = makeSettingsWindowsController {
+            askedCount += 1
+            return refuses
+        }
+        settings.controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        XCTAssertEqual(askedCount, 0, "asked when the user answers, not when Sign Out… is chosen")
+        refuses = true
+
+        try XCTUnwrap(settings.prompter.onSignOut)()
+
+        XCTAssertEqual(askedCount, 1)
+        XCTAssertFalse(settings.controller.isSigningOut)
+        XCTAssertFalse(settings.controller.isAnySignOutRunning)
+        XCTAssertEqual(settings.prompter.failureCount, 0)
+
+        // Refused, not stuck: asked and answered again with nothing in the way, it signs out.
+        refuses = false
+        settings.controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        try XCTUnwrap(settings.prompter.onSignOut)()
+        await waitUntil { self.account.signOutCallCount == 1 }
+        XCTAssertEqual(askedCount, 2)
+    }
+
+    /// The window is asked, and beeps, only when there was a sign-out to refuse.
+    ///
+    /// Revert-check: moving the `guard !refusesConfirmedSignOut()` above the
+    /// `isDurablySignedOut()` guard in `SettingsAppSignOutController.signOutConfirmed` makes
+    /// this fail.
+    func testSignOutConfirmed_alreadyDurablySignedOut_doesNotAskTheWindow() throws {
+        var askedCount = 0
+        let settings = makeSettingsWindowsController {
+            askedCount += 1
+            return true
+        }
+        settings.controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        account.durablySignedOut = true
+
+        try XCTUnwrap(settings.prompter.onSignOut)()
+
+        XCTAssertEqual(askedCount, 0)
+        XCTAssertFalse(settings.controller.isSigningOut)
+    }
+
     // MARK: - Platform prompter
 
     /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
@@ -528,6 +641,21 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
 
     private func requestSignOut() {
         defaults.set(true, forKey: SettingsAppPreferences.signOutRequestedKey)
+    }
+
+    /// A controller that asks its window again when the user answers Sign Out, as the Mac's
+    /// Settings window's does.
+    private func makeSettingsWindowsController(
+        refusesConfirmedSignOut: @escaping @MainActor () -> Bool
+    ) -> (controller: SettingsAppSignOutController, prompter: FakePrompter) {
+        let settingsPrompter = FakePrompter()
+        let settings = SettingsAppSignOutController(
+            preferences: preferences,
+            prompter: settingsPrompter,
+            activity: activity,
+            refusesConfirmedSignOut: refusesConfirmedSignOut
+        )
+        return (settings, settingsPrompter)
     }
 
     /// A second window's controller, sharing this test's activity.
