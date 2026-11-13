@@ -93,4 +93,39 @@ final class ChatTimestampSeparatorPolicyTests: XCTestCase {
         XCTAssertEqual(label(date(2026, 11, 3, 9, 0)).day, "Tue, Nov 3")
         XCTAssertEqual(label(date(2025, 12, 31, 9, 0)).day, "Dec 31, 2025")
     }
+
+    /// "Today" and "Yesterday" are the days `now` says they are, whatever the system clock
+    /// reads. A `now` years before the clock and one years after it, so neither can ever be
+    /// the day the test runs on. The test above passed only on 2026-11-12, the day it was
+    /// written, and failed on CI from the 13th: the formatter named the days by the clock.
+    ///
+    /// Revert-check: setting `dayDate` to `date` in the `.relative` case of `label` makes
+    /// this fail, with a date in place of each word.
+    func testLabel_todayAndYesterday_areNowsNotTheClocks() {
+        let nows = [date(2020, 3, 9, 15, 0), date(2090, 7, 4, 15, 0)]
+        for now in nows {
+            let earlierToday = calendar.date(byAdding: .hour, value: -6, to: now)!
+            let yesterday = calendar.date(byAdding: .day, value: -1, to: now)!
+            let twoDaysAgo = calendar.date(byAdding: .day, value: -2, to: now)!
+            func day(_ date: Date) -> String {
+                Policy.label(for: date, now: now, calendar: calendar, locale: locale).day
+            }
+
+            XCTAssertEqual(day(earlierToday), "Today")
+            XCTAssertEqual(day(yesterday), "Yesterday")
+            // The day before is no longer a relative day, so its own date is formatted.
+            XCTAssertNotEqual(day(twoDaysAgo), "Yesterday")
+            XCTAssertNotEqual(day(twoDaysAgo), "Today")
+        }
+    }
+
+    /// The time beside a relative day is the message's own, not the stand-in day's.
+    ///
+    /// Revert-check: giving the time formatter `dayDate` in `label` makes this fail.
+    func testLabel_relativeDay_keepsTheMessagesOwnTime() {
+        let now = date(2020, 3, 9, 15, 0)
+        let label = Policy.label(for: date(2020, 3, 8, 7, 5), now: now, calendar: calendar, locale: locale)
+        XCTAssertEqual(label.day, "Yesterday")
+        XCTAssertEqual(label.time.replacingOccurrences(of: "\u{202F}", with: " "), "7:05 AM")
+    }
 }
