@@ -23,7 +23,11 @@ struct AttachmentGrid: View {
                     imagePresentation: imagePresentations[attachment.objectID] ?? .standard,
                     onTap: { onTap(attachment) }
                 )
-                // On the cell, not the grid: the menu is the clicked attachment's.
+                // On the cell, not the grid: the drag and the menu are the clicked attachment's.
+                .macAttachmentDragSource(
+                    attachment: attachment,
+                    onClick: { onTap(attachment) }
+                )
                 .macAttachmentExportMenu(
                     attachment: attachment,
                     shownAttachments: attachments,
