@@ -141,6 +141,28 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
+    /// Nothing in the app decodes this view, but `init(coder:)` is a required initializer and
+    /// must not be a trap in the release build: a decoded view is a drop view like any other.
+    ///
+    /// HONEST SCOPE: not revert-checked. Putting the `fatalError` back does not fail this
+    /// test, it stops the test host. Whether an archive carries the view's registered types
+    /// by itself was not measured, so the `registerForDraggedTypes` call in `init(coder:)` is
+    /// not pinned by this either.
+    func testDropView_decodedFromAnArchive_isRegisteredForFiles_andTakesNoClicks() throws {
+        let archive = try NSKeyedArchiver.archivedData(
+            withRootObject: MacDraftFileDropView(frame: NSRect(x: 0, y: 0, width: 40, height: 40)),
+            requiringSecureCoding: false
+        )
+        let unarchiver = try NSKeyedUnarchiver(forReadingFrom: archive)
+        unarchiver.requiresSecureCoding = false
+        let decoded = try XCTUnwrap(
+            unarchiver.decodeObject(forKey: NSKeyedArchiveRootObjectKey) as? MacDraftFileDropView
+        )
+
+        XCTAssertTrue(decoded.registeredDraggedTypes.contains(.fileURL))
+        XCTAssertNil(decoded.hitTest(NSPoint(x: 20, y: 20)))
+    }
+
     // MARK: - Found by the views in front of it
 
     /// Revert-check: returning the drop view from `dropView(under:at:)` whether or not its
