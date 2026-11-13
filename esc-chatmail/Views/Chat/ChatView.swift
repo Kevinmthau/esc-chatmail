@@ -101,6 +101,17 @@ struct ChatView: View {
             opensParticipants: headerOpensParticipants,
             onOpenParticipants: presentParticipantsList
         )
+        // A file dropped anywhere on the Mac's chat column is attached to the reply, as the
+        // Files picker would attach it (`DraftFileDropPolicy`). Nothing on iOS. The closures
+        // read the composer's state when a drag asks, so the chat does not observe it.
+        .macDraftFileDrop(
+            acceptsFiles: { [composerState = viewModel.composerState] in
+                composerState.acceptsDroppedFiles
+            },
+            onDropFiles: { [composerState = viewModel.composerState] urls in
+                composerState.receiveDroppedFiles(urls)
+            }
+        )
         .navigationTitle(navigationDisplayName)
         .inlineNavigationTitle()
         .navigationBarBackButtonHidden(!allowsNavigationExit)

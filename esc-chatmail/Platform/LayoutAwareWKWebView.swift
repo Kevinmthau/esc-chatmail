@@ -21,6 +21,14 @@ import WebKit
 /// bring the window forward cannot open a link. Returning true would let that click reach the
 /// page as `.linkActivated` (spike, 2026-11-09). Decided 2026-11-11: it stays this way
 /// (`docs/mac-app-plan.md`, decision 8).
+///
+/// On the Mac it also takes no drop. A `WKWebView` is the destination of any drag over it, with
+/// `hitTest(_:)` returning nil and its drag types unregistered alike, and it loads a dropped
+/// file in place of its page: a preview card's delegate allowed that load, which arrives as
+/// `.other`, the type of the card's own first load (measured in the sandboxed test host,
+/// 2026-11-12). So no drag reaches WebKit. A drag of files goes to the chat behind the web view,
+/// which attaches them to the reply (`MacFileDropForwarder`); every other drag, and a file drag
+/// where there is no chat (the reader's sheet), is refused.
 final class LayoutAwareWKWebView: WKWebView {
     var onLayoutChange: ((WKWebView) -> Void)?
 
@@ -72,6 +80,34 @@ final class LayoutAwareWKWebView: WKWebView {
             return nil
         }
         return super.hitTest(point)
+    }
+
+    // MARK: - Drags (none reaches WebKit)
+
+    private let fileDropForwarder = MacFileDropForwarder()
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileDropForwarder.draggingEntered(sender, in: window) ?? []
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        fileDropForwarder.draggingUpdated(sender) ?? []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
+        _ = fileDropForwarder.draggingExited()
+    }
+
+    override func prepareForDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        fileDropForwarder.prepareForDragOperation(sender) ?? false
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        fileDropForwarder.performDragOperation(sender) ?? false
+    }
+
+    override func concludeDragOperation(_ sender: NSDraggingInfo?) {
+        _ = fileDropForwarder.concludeDragOperation()
     }
     #endif
 }

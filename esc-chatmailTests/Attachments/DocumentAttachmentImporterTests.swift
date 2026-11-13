@@ -8,9 +8,11 @@ import CoreData
 /// owners rely on: processing turns on and back off, the operation is handed over for
 /// cancellation and released, and failures are reported.
 ///
-/// HONEST SCOPE: a successful import needs a security-scoped URL, which only a real document
-/// picker hands out (`startAccessingSecurityScopedResource` refuses a plain file URL), so the
-/// happy path is not covered here.
+/// HONEST SCOPE: these run on the iOS simulator, where `startAccessingSecurityScopedResource`
+/// answers true for any file that exists. So a real file imports here whatever the importer
+/// asks of its scope, and the difference between a picker's file and a dropped one
+/// (`SecurityScope`) cannot be seen: the rule is pinned as a table below, and the Mac's
+/// sandbox, where a dropped file opens no scope, in `MacDraftFileDropViewTests`.
 @MainActor
 final class DocumentAttachmentImporterTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -91,7 +93,79 @@ final class DocumentAttachmentImporterTests: XCTestCase {
         )
     }
 
-    private func makeImporter(registry: AttachmentAccountWorkRegistry) -> DocumentAttachmentImporter {
+    // MARK: - A file dropped on a chat (no security scope)
+
+    /// Revert-check: answering `didStartAccessing` for `.ifOffered` too makes the second
+    /// assertion fail; answering true for `.required` makes the fourth fail.
+    func testSecurityScope_aPickersFileNeedsItsScope_aDroppedFileDoesNot() {
+        XCTAssertTrue(DocumentAttachmentImporter.SecurityScope.ifOffered.allowsReading(didStartAccessing: true))
+        XCTAssertTrue(DocumentAttachmentImporter.SecurityScope.ifOffered.allowsReading(didStartAccessing: false))
+        XCTAssertTrue(DocumentAttachmentImporter.SecurityScope.required.allowsReading(didStartAccessing: true))
+        XCTAssertFalse(DocumentAttachmentImporter.SecurityScope.required.allowsReading(didStartAccessing: false))
+    }
+
+    /// A real file imports in full, as a dropped file does: the placeholder is finalized
+    /// with the file's bytes on disk.
+    ///
+    /// HONEST SCOPE: the simulator opens a scope for this file, so `.required` imports it
+    /// too. This covers the import a drop starts, not the scope rule.
+    ///
+    /// Revert-check: deleting the `attachment.localURL = originalPath` assignment from
+    /// `processDocuments` makes this fail.
+    func testImportDocuments_aRealFile_isFinalizedWithItsBytesOnDisk() async throws {
+        let registry = AttachmentAccountWorkRegistry()
+        let url = try plainFile(named: "Dropped.pdf", bytes: Data("%PDF-1.4 not really".utf8))
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+
+        makeImporter(registry: registry, securityScope: .ifOffered).importDocuments(at: [url])
+        let operation = try XCTUnwrap(operationChanges.first ?? nil)
+        await operation.value
+
+        XCTAssertEqual(reportedFailures, [])
+        XCTAssertEqual(processingChanges, [true, false])
+        let attachment = try XCTUnwrap(attachments.first)
+        defer {
+            AttachmentPaths.deleteFile(at: attachment.localURL)
+            AttachmentPaths.deleteFile(at: attachment.previewURL)
+        }
+        XCTAssertEqual(attachments.count, 1)
+        XCTAssertEqual(attachment.filename, "Dropped.pdf")
+        XCTAssertEqual(attachment.mimeType, "application/pdf")
+        XCTAssertEqual(attachment.byteSize, 19)
+        let saved = try XCTUnwrap(AttachmentPaths.fullURL(for: attachment.localURL))
+        XCTAssertEqual(try Data(contentsOf: saved), Data("%PDF-1.4 not really".utf8))
+    }
+
+    /// The pickers ask for a scope unless told otherwise.
+    ///
+    /// Revert-check: making `.ifOffered` the default of
+    /// `DocumentAttachmentImporter.securityScope` makes this fail.
+    func testSecurityScope_isRequiredByDefault() {
+        let importer = DocumentAttachmentImporter(
+            attachments: .constant([]),
+            viewContext: context,
+            onProcessingChanged: { _ in },
+            onOperationChanged: { _ in },
+            onImportFailures: { _ in }
+        )
+
+        XCTAssertEqual(importer.securityScope, .required)
+    }
+
+    /// A real file in a directory of its own, reached by a plain file URL.
+    private func plainFile(named name: String, bytes: Data) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DocumentAttachmentImporterTests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let url = directory.appendingPathComponent(name)
+        try bytes.write(to: url)
+        return url
+    }
+
+    private func makeImporter(
+        registry: AttachmentAccountWorkRegistry,
+        securityScope: DocumentAttachmentImporter.SecurityScope = .required
+    ) -> DocumentAttachmentImporter {
         DocumentAttachmentImporter(
             attachments: Binding(
                 get: { self.attachments },
@@ -101,7 +175,8 @@ final class DocumentAttachmentImporterTests: XCTestCase {
             onProcessingChanged: { self.processingChanges.append($0) },
             onOperationChanged: { self.operationChanges.append($0) },
             onImportFailures: { self.reportedFailures.append($0) },
-            registry: registry
+            registry: registry,
+            securityScope: securityScope
         )
     }
 

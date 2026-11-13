@@ -22,6 +22,9 @@ struct AttachmentPicker: View {
     /// How the two pickers are offered: two buttons (the iPhone's reply bar), or one "+" menu
     /// (the Mac's composer). What a picker returns is handled the same either way.
     var style: AttachmentPickerStyle = .inlineButtons
+    /// Files dropped on the chat, for this picker to import (`DraftFileDrop`). The picker takes
+    /// each request once and clears it. Nothing sets one on iOS.
+    var fileDrop: Binding<DraftFileDrop?> = .constant(nil)
     @Environment(\.managedObjectContext) private var viewContext
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
@@ -70,6 +73,11 @@ struct AttachmentPicker: View {
             onOperationChanged: { documentProcessingTask = $0 },
             onImportFailures: { importErrorMessage = DraftAttachmentImport.failureMessage($0) }
         )
+        .onChange(of: fileDrop.wrappedValue) { _, drop in
+            guard let drop else { return }
+            fileDrop.wrappedValue = nil
+            importDroppedFiles(drop)
+        }
         .alert("Some Attachments Weren’t Added", isPresented: Binding(
             get: { importErrorMessage != nil },
             set: { if !$0 { importErrorMessage = nil } }
@@ -80,6 +88,38 @@ struct AttachmentPicker: View {
         }
     }
     
+    /// Imports the files of a drop as the Files picker imports its own, and names the files
+    /// the drop could not take in the alert the import's failures use.
+    ///
+    /// A drop is decided before it gets here (`DraftFileDropPolicy.decision`), so an import
+    /// already running is not expected. It is still checked: two imports share `isProcessing`,
+    /// and the first to end would turn it off under the other.
+    private func importDroppedFiles(_ drop: DraftFileDrop) {
+        guard !isProcessing else {
+            Log.warning("A file drop arrived during an attachment import and was not imported", category: .ui)
+            return
+        }
+        let unsupported = DraftFileDropPolicy.failures(forUnsupportedFilenames: drop.unsupportedFilenames)
+        if let message = DraftAttachmentImport.failureMessage(unsupported) {
+            importErrorMessage = message
+        }
+        guard !drop.fileURLs.isEmpty else { return }
+        DocumentAttachmentImporter(
+            attachments: $attachments,
+            viewContext: viewContext,
+            onProcessingChanged: { isProcessing = $0 },
+            onOperationChanged: { documentProcessingTask = $0 },
+            onImportFailures: { failures in
+                // Added to the lines still on screen, so the alert for this drop's
+                // unsupported files is not replaced by the one for its failed imports.
+                let shown = importErrorMessage.map { [$0] } ?? []
+                importErrorMessage = DraftAttachmentImport.failureMessage(shown + failures)
+            },
+            securityScope: .ifOffered
+        )
+        .importDocuments(at: drop.fileURLs)
+    }
+
     @ViewBuilder
     private var controls: some View {
         switch style {

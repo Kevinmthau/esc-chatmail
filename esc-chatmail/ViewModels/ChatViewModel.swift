@@ -21,6 +21,9 @@ final class ChatComposerState: ObservableObject {
     private(set) var replyAnchor: Message?
     @Published var attachments: [Attachment]
     @Published var isProcessingAttachments = false
+    /// Files dropped on the chat that the composer's attachment picker has yet to take
+    /// (`receiveDroppedFiles`). The picker clears it as it starts the import.
+    @Published var pendingFileDrop: DraftFileDrop?
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
     /// True only from the send tap until the optimistic message is durable
@@ -73,6 +76,34 @@ final class ChatComposerState: ObservableObject {
     ) -> Bool {
         !replyText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
             hasAttachments
+    }
+
+    /// Whether files dragged over the chat may be dropped on it now
+    /// (`DraftFileDropPolicy.acceptsFiles`).
+    var acceptsDroppedFiles: Bool {
+        DraftFileDropPolicy.acceptsFiles(
+            allowsDraftMutation: ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending),
+            isProcessingAttachments: isProcessingAttachments
+        )
+    }
+
+    /// Files were dropped on the chat. Returns whether the drop was taken; a drop that is
+    /// taken becomes `pendingFileDrop`, which the composer's attachment picker imports.
+    func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+        switch DraftFileDropPolicy.decision(
+            droppedURLs: urls,
+            allowsDraftMutation: ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending),
+            isProcessingAttachments: isProcessingAttachments
+        ) {
+        case .refuse:
+            return false
+        case .accept(let fileURLs, let unsupportedFilenames):
+            pendingFileDrop = DraftFileDrop(
+                fileURLs: fileURLs,
+                unsupportedFilenames: unsupportedFilenames
+            )
+            return true
+        }
     }
 
     func beginSending() -> Bool {

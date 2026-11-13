@@ -16,6 +16,9 @@ struct ChatReplyBar: View {
     @Binding var isProcessingAttachments: Bool
     @Binding var unavailableReplyTargetURI: URL?
     var recoveredReplyEnvelope: StoredReplyEnvelope? = nil
+    /// Files dropped on the chat, handed to the attachment picker to import
+    /// (`ChatComposerState.pendingFileDrop`).
+    var fileDrop: Binding<DraftFileDrop?> = .constant(nil)
     @Environment(\.managedObjectContext) private var viewContext
     
     var canSend: Bool {
@@ -103,7 +106,8 @@ struct ChatReplyBar: View {
             HStack(alignment: .bottom, spacing: 8) {
                 AttachmentPicker(
                     attachments: $attachments,
-                    isProcessing: $isProcessingAttachments
+                    isProcessing: $isProcessingAttachments,
+                    fileDrop: fileDrop
                 )
                 .disabled(!allowsDraftMutation)
                 
@@ -246,7 +250,8 @@ struct ChatReplyBar: View {
                 AttachmentPicker(
                     attachments: $attachments,
                     isProcessing: $isProcessingAttachments,
-                    style: .plusMenu(diameter: metrics.controlDiameter)
+                    style: .plusMenu(diameter: metrics.controlDiameter),
+                    fileDrop: fileDrop
                 )
                 .disabled(!allowsDraftMutation)
             }

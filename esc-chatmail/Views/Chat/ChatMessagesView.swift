@@ -1123,7 +1123,8 @@ private struct ChatReplyComposerOverlay: View {
                 style: style,
                 isProcessingAttachments: $composerState.isProcessingAttachments,
                 unavailableReplyTargetURI: $composerState.unavailableReplyTargetURI,
-                recoveredReplyEnvelope: composerState.recoveredReplyEnvelope
+                recoveredReplyEnvelope: composerState.recoveredReplyEnvelope,
+                fileDrop: $composerState.pendingFileDrop
             )
         }
         .background {
