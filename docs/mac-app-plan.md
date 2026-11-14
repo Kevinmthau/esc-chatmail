@@ -422,7 +422,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 
 - Space to open Quick Look on an attachment, and Escape to leave selection.
 - A sync button in the toolbar. Sync is the Cmd-R command only.
-- A file drop on the New Message and Forward sheet.
+- Attaching a dropped file to a Forward or a new email. They have no attachment picker and refuse the drop; the New Message sheet takes one (PR 419).
 - The optional items at the end.
 
 Almost none of it has been seen in the app. Each entry has its own list of what to check there.
@@ -547,11 +547,12 @@ Almost none of it has been seen in the app. Each entry has its own list of what 
     - **Clicks:** AppKit's hit test over a field found the field, with the drop view over it (its `hitTest` is nil).
     - **With SwiftUI's hit testing turned off for the drop view** (`allowsHitTesting(false)`), file drags still went to it. That is how the sheet is built.
     - **Either protection alone keeps AppKit's hit test off the drop view.** With the view's `hitTest` made to answer and `allowsHitTesting(false)` kept, a click over a field still found the field: SwiftUI hides a view it leaves out of hit testing from AppKit's hit test too. With `allowsHitTesting(false)` removed and `hitTest` nil, the same. With both removed, the click was the drop view's. Both are kept.
-    - **Not measured: that a SwiftUI button under the drop view is still pressed.** A window that is never shown presses no SwiftUI button, with the drop view or without it, whether the events are sent to the window or handed to the hosting view.
+    - **Not measured in the test host: that a SwiftUI button under the drop view is still pressed.** A window that is never shown presses no SwiftUI button, with the drop view or without it, whether the events are sent to the window or handed to the hosting view.
+    - **Measured in a stand-in program: it is pressed** (2026-11-14, the review of PR 419, macOS 27.2). The program was built from the overlay's three files (`MacDraftFileDropView`, `MacDraftFileDropTarget`, `View+MacDraftFileDrop`) and is not the app. Its window was ordered in but invisible and not key, and a mouse-down and a mouse-up were posted to the application's event queue. With the drop view over the content and without it, the counts were the same: a plain button, a bordered button and a view with a tap gesture were each pressed once, in a window and in a SwiftUI sheet on it. The stand-in sheet's Cancel and Send (`cancellationAction`, `confirmationAction`) were pressed too, and were not under the drop view at all: the sheet drew them in a bar below the navigation stack, outside the drop view's frame. The view the click was given to was made to accept a first mouse-down, because the window was not key. No real pointer was used.
   - **How a drop is imported.** As on the chat: a drop the sheet took is the view model's `pendingFileDrop` until the input bar starts on it (`ComposeInputBar.importPendingFileDropIfIdle`), cleared only by being imported, with `SecurityScope.ifOffered`.
   - **Tests.** `DraftFileDropPolicyTests` and `ComposeViewModelTests` (both platforms); `MacComposeFileDropOverlayTests` (the Mac plan: the real modifier over real SwiftUI fields, walked front to back by AppKit's rule, and the drop view handed stand-in drags); `ComposeFileDropSourceTests` pins the wiring.
   - **Not seen: check in the signed, sandboxed app.**
-    - **Every control of the New Message and Forward sheets still works with the pointer:** the close button, the "+" button, Send, Cancel, the fields, the recipient suggestions, removing an attachment. This is the one to try first.
+    - **Every control of the New Message and Forward sheets still works with the pointer:** the close button, the "+" button, Send, Cancel, the fields, the recipient suggestions, removing an attachment. Buttons were pressed under the drop view in the stand-in program above, with posted events; with a real pointer in the app this is still the one to try first.
     - A PDF and an image dropped on New Message, on the message field with the caret in it and on empty space: each appears in the strip above the field, and nothing is typed.
     - A file dropped on the Forward sheet, on its message and on the forwarded email's preview: the pointer shows no copy badge, nothing is typed and the preview does not change.
     - A `.zip` dropped on New Message: the alert names it.
