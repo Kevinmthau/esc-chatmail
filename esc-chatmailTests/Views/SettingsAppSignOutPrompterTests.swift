@@ -73,6 +73,111 @@ final class SettingsAppSignOutPrompterTests: XCTestCase {
         XCTAssertFalse(wasAnswered)
     }
 
+    /// A confirmation whose session changed is taken down, and the one asked in the same
+    /// turn (`SettingsAppSignOutController.evaluate` asks again at once) is the alert on
+    /// screen afterwards. Shown in a real window, so this is UIKit presenting one alert
+    /// straight after dismissing another, which it does once the first is up.
+    ///
+    /// Revert-check: removing `alert.dismiss(animated: false)` from
+    /// `SettingsAppSignOutPrompter.withdrawConfirmation` makes this fail: the first alert
+    /// stays up and the second is never presented. So does removing its
+    /// `presentedAlert = nil`: the alert still has its presenter when `dismiss` returns, so
+    /// the gate reads held and the second confirmation is never asked.
+    func testWithdrawConfirmation_takesTheAlertDown_andTheNextOneIsPresented() async throws {
+        let window = try makeTestHostWindow()
+        let root = UIViewController()
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer {
+            root.dismiss(animated: false)
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        var handlerCount = 0
+        let prompter = SettingsAppSignOutPrompter(present: { alert in
+            root.present(alert, animated: false)
+            return true
+        })
+        prompter.presentConfirmation(
+            accountEmail: nil,
+            onSignOut: { handlerCount += 1 },
+            onCancel: { handlerCount += 1 }
+        )
+        // Up, and not still coming up: an alert withdrawn before that is left for the next
+        // look (the test after this one).
+        await waitUntil {
+            prompter.isConfirmationActive
+                && (root.presentedViewController as? UIAlertController)?.isBeingPresented == false
+        }
+
+        prompter.withdrawConfirmation()
+        XCTAssertFalse(prompter.isConfirmationActive, "the gate must be open when the call returns")
+        prompter.presentConfirmation(accountEmail: "restored@example.com", onSignOut: {}, onCancel: {})
+
+        await waitUntil {
+            (root.presentedViewController as? UIAlertController)?.message?.contains("restored@example.com") == true
+        }
+        XCTAssertTrue(prompter.isConfirmationActive)
+        XCTAssertEqual(handlerCount, 0)
+    }
+
+    /// UIKit puts off a dismissal asked for while the alert is still coming up, and the
+    /// confirmation asked next was then presented with the first still up, and lost. So an
+    /// alert that is still coming up is left, with the gate held, for the next look.
+    ///
+    /// The window's layer is slowed so that the alert is still coming up when the test
+    /// looks, however late it looks.
+    ///
+    /// Revert-check: dropping `!alert.isBeingPresented` from the guard in
+    /// `SettingsAppSignOutPrompter.withdrawConfirmation` makes this fail.
+    func testWithdrawConfirmation_alertStillComingUp_leavesItWithTheGateHeld() async throws {
+        let window = try makeTestHostWindow()
+        let root = UIViewController()
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        window.layer.speed = 0.02
+        defer {
+            window.layer.speed = 1
+            root.dismiss(animated: false)
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        let prompter = SettingsAppSignOutPrompter(present: { alert in
+            root.present(alert, animated: true)
+            return true
+        })
+        prompter.presentConfirmation(accountEmail: "first@example.com", onSignOut: {}, onCancel: {})
+        await waitUntil { prompter.isConfirmationActive && root.presentedViewController is UIAlertController }
+        let alert = try XCTUnwrap(root.presentedViewController as? UIAlertController)
+        XCTAssertTrue(alert.isBeingPresented, "the alert must still be coming up for this to test anything")
+
+        prompter.withdrawConfirmation()
+
+        XCTAssertTrue(prompter.isConfirmationActive)
+        XCTAssertTrue(root.presentedViewController === alert)
+        XCTAssertFalse(alert.isBeingDismissed)
+    }
+
+    /// A confirmation still waiting for a presenter has no alert on screen to take down. The
+    /// gate stays held, or a second confirmation asked now would be presented beside the
+    /// first when both found a presenter.
+    ///
+    /// Revert-check: clearing `isAwaitingPresenter` in
+    /// `SettingsAppSignOutPrompter.withdrawConfirmation` makes this fail.
+    func testWithdrawConfirmation_whileWaitingForAPresenter_keepsTheGateHeld() async {
+        let presenter = SuspendedPresenter()
+        let prompter = SettingsAppSignOutPrompter(present: presenter.present)
+        prompter.presentConfirmation(accountEmail: nil, onSignOut: {}, onCancel: {})
+        await waitUntil { presenter.hasPendingCall }
+
+        prompter.withdrawConfirmation()
+
+        XCTAssertTrue(prompter.isConfirmationActive)
+        presenter.finishPendingCall(returning: false)
+        await waitUntil { !prompter.isConfirmationActive }
+    }
+
+
     // MARK: - Helpers
 
     /// Polls `condition` until it holds or `timeout` elapses. The condition is

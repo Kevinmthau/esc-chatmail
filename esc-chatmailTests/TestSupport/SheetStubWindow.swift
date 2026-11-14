@@ -3,9 +3,15 @@ import AppKit
 
 /// A window that answers `attachedSheet` and `sheetParent` with the windows it is given.
 /// AppKit attaches a real sheet only to a window on screen, and these are never ordered in.
+///
+/// A window holds its sheet and the sheet only names its window (`stubbedSheetParent` is
+/// weak). Held both ways, neither was ever released, and a window that is never shown is
+/// still one of `NSApp.windows` for as long as it lives (measured on macOS 27.2,
+/// 2026-11-13): every stand-in made with a sheet stayed in the test host as a mailbox window
+/// with a sheet attached, for every suite that ran after it.
 final class SheetStubWindow: NSWindow {
     var stubbedSheet: NSWindow?
-    var stubbedSheetParent: NSWindow?
+    weak var stubbedSheetParent: NSWindow?
 
     override var attachedSheet: NSWindow? {
         stubbedSheet

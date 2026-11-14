@@ -50,10 +50,15 @@ extension View {
     /// it is left out of SwiftUI's hit testing (`allowsHitTesting(false)`), which does not
     /// stop a drag reaching it and, measured with the view's `hitTest` made to answer, hides
     /// it from AppKit's hit test too: a click over a field found the field with either one
-    /// in place, and the drop view only with both removed. Keep both. HONEST SCOPE: that a
-    /// SwiftUI button under it is still pressed was not measured. A window that is never
-    /// shown presses no SwiftUI button, with or without the drop view
-    /// (`docs/mac-app-plan.md`, "Files").
+    /// in place, and the drop view only with both removed. Keep both.
+    ///
+    /// A SwiftUI button under it is still pressed: measured in a stand-in program built from
+    /// this file and the drop view's two (2026-11-14), with a mouse-down and a mouse-up
+    /// posted to the application's event queue. A plain button, a bordered button and a tap
+    /// gesture were pressed with the drop view over them as without it, in a window and in
+    /// a sheet. HONEST SCOPE: not in the test host, where a window that is never shown
+    /// presses no SwiftUI button with or without the drop view, and not with a real pointer
+    /// in the app (`docs/mac-app-plan.md`, "Files").
     ///
     /// - Parameters:
     ///   - acceptsFiles: Whether the sheet can take files now. False refuses every file drag
