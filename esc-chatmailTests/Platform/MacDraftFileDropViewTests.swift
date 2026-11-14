@@ -373,6 +373,287 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
+    // MARK: - Pasted into the reply field
+
+    /// A pasteboard of the test's own for a paste, never the one the user copies to. The
+    /// test releases it: it lives in the pasteboard server.
+    private func pasteboard(
+        files: [URL] = [],
+        text: String? = nil,
+        image: (type: NSPasteboard.PasteboardType, data: Data)? = nil
+    ) -> NSPasteboard {
+        var objects: [NSPasteboardWriting] = files.map { $0 as NSURL }
+        if let text { objects.append(text as NSString) }
+        let pasteboard = FakeDraggingInfo.pasteboard(holding: objects)
+        if let image {
+            pasteboard.addTypes([image.type], owner: nil)
+            pasteboard.setData(image.data, forType: image.type)
+        }
+        return pasteboard
+    }
+
+    private func makePasteDirectory() throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("MacDraftFileDropViewTests-paste-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory
+    }
+
+    private static let pngBytes = Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x01, 0x02])
+
+    /// A text view pastes a copied file as its path. In a reply the file is attached, as one
+    /// dropped on the chat is, and the draft is left as it was.
+    ///
+    /// Revert-check: not handing the files to the chat in the `.attachFiles` case of
+    /// `MacReplyTextView.pasteAttachments` makes this fail. HONEST SCOPE: the test calls
+    /// `pasteAttachments`, never the paste command, which reads what the user has copied;
+    /// that the command asks `pasteAttachments` first is `ReplyFieldPasteSourceTests`' to pin.
+    func testPaste_ofCopiedFiles_attachesThem_andTypesNothing() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = [URL(fileURLWithPath: "/tmp/One.pdf"), URL(fileURLWithPath: "/tmp/Two.png")]
+        // A file copied in the Finder carries its name as text too.
+        let copied = pasteboard(files: files, text: "One.pdf")
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertEqual(harness.model.drops, [files])
+        XCTAssertEqual(textView.string, "Hello")
+        XCTAssertEqual(refusals.count, 0)
+        harness.close()
+    }
+
+    /// While a send owns the draft, or an import is running, the reply takes no file. The
+    /// paste is refused with a beep and is still not the text view's: it would type the path.
+    ///
+    /// Revert-check: returning false from `MacReplyTextView.pasteAttachments` where the chat
+    /// refuses the files makes this fail.
+    func testPaste_ofCopiedFiles_theChatCannotTake_isRefused_andStillTypesNothing() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        harness.model.accepts = false
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(files: [URL(fileURLWithPath: "/tmp/One.pdf")])
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertTrue(harness.model.drops.isEmpty)
+        XCTAssertEqual(textView.string, "Hello")
+        XCTAssertEqual(refusals.count, 1)
+        harness.close()
+    }
+
+    /// Revert-check: answering `nil != true` as taken (dropping the `!= true` from the
+    /// `.attachFiles` case) makes this fail: with no chat behind the field the paste would
+    /// do nothing and say nothing.
+    func testPaste_ofCopiedFiles_withNoChatBehindTheField_isRefused() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello", hasDropView: false)
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(files: [URL(fileURLWithPath: "/tmp/One.pdf")])
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertEqual(textView.string, "Hello")
+        XCTAssertEqual(refusals.count, 1)
+        harness.close()
+    }
+
+    /// Words are the text view's to paste, with a picture beside them or not: cells copied
+    /// from a spreadsheet carry both.
+    ///
+    /// Revert-check: asking about the image before the text in
+    /// `ReplyFieldPastePolicy.action` makes the second assertion fail.
+    func testPaste_ofText_isLeftToTheTextView() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let refusals = PasteRefusals()
+        let words = pasteboard(text: "Some words")
+        let wordsAndPicture = pasteboard(text: "A1\tB1", image: (.png, Self.pngBytes))
+        defer {
+            words.releaseGlobally()
+            wordsAndPicture.releaseGlobally()
+        }
+
+        let textView = try harness.replyTextView(pastingFrom: words, imageDirectory: directory, refusals: refusals)
+        XCTAssertFalse(textView.pasteAttachments())
+        textView.pasteboardForPaste = { wordsAndPicture }
+        XCTAssertFalse(textView.pasteAttachments())
+
+        XCTAssertTrue(harness.model.drops.isEmpty)
+        XCTAssertTrue(harness.model.pastedImageFiles.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        XCTAssertEqual(refusals.count, 0)
+        harness.close()
+    }
+
+    /// A screenshot taken to the clipboard is bytes with no file. They are written to a file
+    /// of the app's own, which the chat is handed and removes once it has imported it.
+    ///
+    /// Revert-check: deleting the `receivePastedImageFile` call from
+    /// `MacReplyTextView.attachPastedImage` makes this fail.
+    func testPaste_ofACopiedImage_writesItToAFile_andHandsTheChatThatFile() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(image: (.png, Self.pngBytes))
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        let file = try XCTUnwrap(harness.model.pastedImageFiles.first)
+        XCTAssertEqual(harness.model.pastedImageFiles.count, 1)
+        XCTAssertEqual(harness.model.pastedImageFileExisted, [true])
+        XCTAssertEqual(file.lastPathComponent, "Pasted Image.png")
+        XCTAssertEqual(try Data(contentsOf: file), Self.pngBytes)
+        XCTAssertTrue(file.path.hasPrefix(directory.path))
+        XCTAssertTrue(harness.model.drops.isEmpty)
+        XCTAssertEqual(textView.string, "Hello")
+        XCTAssertEqual(refusals.count, 0)
+        harness.close()
+    }
+
+    /// Asked before the bytes are written, so a refusal leaves no file.
+    ///
+    /// HONEST SCOPE: this pins the outcome, a refusal and no file left. With
+    /// `chatDropView.acceptsPastedImage` deleted from the guard in
+    /// `MacReplyTextView.attachPastedImage` it still passes, because the file is then
+    /// written, refused and removed; it does not show that nothing was written meanwhile.
+    func testPaste_ofACopiedImage_theChatCannotTake_isRefused_andLeavesNoFile() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        harness.model.accepts = false
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(image: (.tiff, Self.pngBytes))
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertTrue(harness.model.pastedImageFiles.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        XCTAssertEqual(refusals.count, 1)
+        harness.close()
+    }
+
+    /// The chat can still say no once it has the file: a second paste arrived first. The
+    /// file is then the field's to remove.
+    ///
+    /// Revert-check: deleting `PastedImageFile.remove([file])` from
+    /// `MacReplyTextView.attachPastedImage` makes this fail: the image stays in the
+    /// temporary directory with nothing left to remove it.
+    func testPaste_ofACopiedImage_theChatHandsBack_removesItsFile() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        harness.model.takesDrops = false
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(image: (.png, Self.pngBytes))
+        defer { copied.releaseGlobally() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertEqual(harness.model.pastedImageFileExisted, [true])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        XCTAssertEqual(refusals.count, 1)
+        harness.close()
+    }
+
+    /// A text view enables Paste for what it reads itself, and this one reads no images.
+    ///
+    /// Revert-check: answering false from `MacReplyTextView.enablesPasteItself` makes the
+    /// first assertion fail: with only an image copied, Paste is disabled and Command-V
+    /// never reaches the field.
+    ///
+    /// HONEST SCOPE: the field's own answer is asked (`enablesPasteItself`), not
+    /// `validateUserInterfaceItem`. Where the field has none, the text view answers from the
+    /// pasteboard the user copies to, and a test must not depend on that; that the override
+    /// asks the field first is `ReplyFieldPasteSourceTests`' to pin.
+    func testPasteCommand_isEnabledByTheFieldForACopiedImage_andLeftToTheTextViewOtherwise() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let image = pasteboard(image: (.png, Self.pngBytes))
+        let words = pasteboard(text: "Some words")
+        defer {
+            image.releaseGlobally()
+            words.releaseGlobally()
+        }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: image, imageDirectory: directory, refusals: refusals)
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let copyItem = NSMenuItem(title: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+
+        XCTAssertTrue(textView.enablesPasteItself(pasteItem))
+        XCTAssertFalse(textView.enablesPasteItself(copyItem))
+        textView.pasteboardForPaste = { words }
+        XCTAssertFalse(textView.enablesPasteItself(pasteItem))
+        harness.close()
+    }
+
+    /// What the field reads off a pasteboard, which decides both what Paste does and whether
+    /// the field answers for the command itself.
+    ///
+    /// Revert-check: dropping `.tiff` from `MacReplyTextView.pastedImageTypes` makes the
+    /// TIFF assertion fail: a selection copied in Preview would paste as nothing.
+    func testPasteAction_isReadFromWhatThePasteboardHas() {
+        let files = pasteboard(files: [URL(fileURLWithPath: "/tmp/One.pdf")], text: "One.pdf")
+        let words = pasteboard(text: "Some words")
+        let png = pasteboard(image: (.png, Self.pngBytes))
+        let tiff = pasteboard(image: (.tiff, Self.pngBytes))
+        let jpeg = pasteboard(image: (NSPasteboard.PasteboardType("public.jpeg"), Self.pngBytes))
+        let nothing = pasteboard()
+        defer { [files, words, png, tiff, jpeg, nothing].forEach { $0.releaseGlobally() } }
+
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: files), .attachFiles)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: words), .pasteAsText)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: png), .attachImage)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: tiff), .attachImage)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: jpeg), .attachImage)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: nothing), .pasteAsText)
+    }
+
+    /// Whoever imports a request removes the files the app wrote only to carry it. A request
+    /// with nothing to import has no import to end, so its files go as it is taken.
+    ///
+    /// HONEST SCOPE: as for the picker's other tests here, nothing is imported: an import
+    /// would write to this host's attachment folder, which is the real app's. That a
+    /// request's files are also removed when its import ends is `ReplyFieldPasteSourceTests`'
+    /// to pin.
+    ///
+    /// Revert-check: deleting `PastedImageFile.remove(drop.temporaryFileURLs)` from the
+    /// `guard !drop.fileURLs.isEmpty` in `AttachmentPicker.importDroppedFiles` makes this
+    /// fail.
+    func testPicker_takingARequestWithNothingToImport_removesItsTemporaryFiles() async throws {
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = try PastedImageFile.write(Self.pngBytes, fileExtension: "png", in: directory)
+        let model = PickerModel()
+        let harness = PickerHarness(window: try makeTestHostWindow(), model: model)
+        defer { harness.close() }
+
+        model.fileDrop = DraftFileDrop(fileURLs: [], unsupportedFilenames: [], temporaryFileURLs: [file])
+
+        try await harness.waitUntil { model.fileDrop == nil }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+    }
+
     // MARK: - The picker and a pending drop
 
     /// A drop the composer took is the picker's to import. One that reaches the picker while
@@ -568,11 +849,19 @@ private final class PickerHarness {
     }
 }
 
+/// How many pastes the reply field refused, where the app beeps.
+private final class PasteRefusals {
+    var count = 0
+}
+
 private final class DropModel: ObservableObject {
     var text: String
     var accepts = true
     var takesDrops = true
     var drops: [[URL]] = []
+    /// The files of pasted images the chat was handed, and whether each was on disk then.
+    var pastedImageFiles: [URL] = []
+    var pastedImageFileExisted: [Bool] = []
 
     init(text: String) {
         self.text = text
@@ -621,6 +910,11 @@ private struct ChatStandIn: View {
                 acceptsFiles: { model.accepts },
                 onDropFiles: { urls in
                     model.drops.append(urls)
+                    return model.takesDrops
+                },
+                onPasteImageFile: { file in
+                    model.pastedImageFiles.append(file)
+                    model.pastedImageFileExisted.append(FileManager.default.fileExists(atPath: file.path))
                     return model.takesDrops
                 }
             )
@@ -679,6 +973,21 @@ private final class Harness {
 
     func replyTextView() throws -> MacReplyTextView {
         try XCTUnwrap(host.first(MacReplyTextView.self), "The field's text view was not built")
+    }
+
+    /// The reply field's text view, set to paste from `pasteboard` and never from what the
+    /// user has copied, to write a pasted image under `imageDirectory`, and to count its
+    /// refusals where the app would beep.
+    func replyTextView(
+        pastingFrom pasteboard: NSPasteboard,
+        imageDirectory: URL,
+        refusals: PasteRefusals
+    ) throws -> MacReplyTextView {
+        let textView = try replyTextView()
+        textView.pasteboardForPaste = { pasteboard }
+        textView.pastedImageDirectory = { imageDirectory }
+        textView.refusePaste = { refusals.count += 1 }
+        return textView
     }
 
     func webView() throws -> LayoutAwareWKWebView {

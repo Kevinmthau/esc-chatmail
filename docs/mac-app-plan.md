@@ -511,7 +511,32 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - A drag over the chat while a sheet is up (New Message, the reader): whether AppKit offers it at all was not measured; it should be refused.
     - A photo dragged from Photos, an image from Safari, an attachment from Mail: these are file promises, not files, and are not taken. Whether the pointer shows a badge for them was not measured.
     - Scrolling the transcript and clicking its empty space are as before, with the drop view behind it.
-  - **Left out.** Paste: a file copied in the Finder and pasted into the field still types its path (measured by having the text view read a pasteboard of a file URL), and a copied image is not attached. A highlight on the chat while a file is over it. File promises.
+  - **Left out.** A highlight on the chat while a file is over it. File promises. Paste was left out too, and was built 2026-11-13 (below).
+
+  **Files and images pasted into the reply field, as built (2026-11-13).** Paste in the Mac's reply field attaches a copied file, and a copied image where nothing else was copied with it. Before this a copied file was pasted as its path (measured 2026-11-12 by having the text view read a pasteboard of a file URL) and a copied image as nothing.
+
+  - **What Paste does** (`ReplyFieldPastePolicy`, asked by `MacReplyTextView.pasteAttachments`), from what the pasteboard carries:
+    - **Files:** attached, as files dropped on the chat are. Asked about first, because a file copied in the Finder also carries its name as text.
+    - **Otherwise text:** pasted as text, as before. Cells copied from a spreadsheet, and an image copied from a web page, carry a picture and words together, and in a text field the words are what is meant.
+    - **Otherwise an image** (PNG, JPEG or TIFF): attached. A screenshot taken to the clipboard, a selection copied in Preview.
+  - **It goes where a drop goes.** The field finds the chat's drop view behind it, as it does for a dragged file, and hands the files over (`MacDraftFileDropView.receivePastedFiles`). So a paste is taken where a drop is, with the same import, the same alert for a file that is not an image or a PDF, and the same refusals: while a send owns the draft, while an import is running, and while an earlier drop or paste is waiting.
+  - **A paste the reply cannot take is refused with a beep, and is never handed to the text view.** The text view would type the path.
+  - **A pasted image has no file, so it is written to one** (`PastedImageFile`): `Pasted Image.png` (or `.jpg`, `.tiff`) in a folder of its own under `PastedImages` in the temporary directory. The import is given that file and keeps its own copy in the attachments folder, as for any file.
+    - The reply is asked whether it can take an image before the bytes are written.
+    - The file goes with the request as a temporary one (`DraftFileDrop.temporaryFileURLs`), and the picker that imports the request removes it when the import ends, whatever it ended with, or at once where nothing of the request is imported.
+    - A file whose import never ran, because its chat was closed first, is removed at the next launch (`PastedImageFile.removeAll`, in `esc_chatmailApp.init`, not in the test host).
+    - It is the user's own image, not mail, so it is not account data and nothing was wired into sign-out.
+  - **Paste is enabled for a copied image.** A text view enables Paste only for what it reads itself, and this one reads no images, so the field says so (`validateUserInterfaceItem`). Without it, with only an image copied, Command-V never reached the field. Read from AppKit's rule and pinned by a test of the field's answer; the menu has not been seen.
+  - **Tests.** `ReplyFieldPastePolicyTests` and `PastedImageFileTests` (both platforms); more in `MacDraftFileDropViewTests` (the Mac plan: the real reply field in front of the real drop view, pasting from a pasteboard of the test's own, never the user's) and in `DraftFileDropPolicyTests`; `ReplyFieldPasteSourceTests` pins that both paste commands ask first, and the cleanup.
+  - **Not seen: check in the signed, sandboxed app.** Nothing has been pasted.
+    - A PDF and an image copied in the Finder and pasted into the reply field: each appears in the strip above the field, and nothing is typed.
+    - A screenshot taken to the clipboard (Command-Control-Shift-4) and pasted: it is attached as `Pasted Image.png`.
+    - Text copied anywhere still pastes as text. So does a cell range copied from Numbers.
+    - A file from outside the app's container that was copied, not dragged, is read. If the alert says it "could not be read", the pasteboard's permission did not reach the import.
+    - With only an image copied, Edit > Paste is enabled while the caret is in the reply field.
+    - A paste while a reply is being sent beeps and adds nothing.
+    - An image copied in Safari (Copy Image): expected to paste as text, its address, if Safari puts one on the pasteboard with it. What Safari puts there was not looked at.
+  - **Left out.** Paste into the New Message sheet's fields, which are SwiftUI's own. Pasting an image that came with text. Paste on iOS, where the system's own paste is unchanged.
 
   **Files dropped on the New Message sheet, as built (2026-11-13).** A file dragged onto the New Message sheet, anywhere on it, becomes an attachment of the message. A file dragged onto the Forward sheet, or a new email, is refused.
 

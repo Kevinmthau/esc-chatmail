@@ -30,6 +30,9 @@ final class MacDraftFileDropView: NSView {
     var acceptsFiles: @MainActor () -> Bool = { false }
     /// The files that were dropped. Returns whether the drop was taken.
     var onDropFiles: @MainActor ([URL]) -> Bool = { _ in false }
+    /// The file a pasted image was written to (`PastedImageFile`), which whoever takes it
+    /// removes once it is imported. Returns whether it was taken.
+    var onPasteImageFile: @MainActor (URL) -> Bool = { _ in false }
     /// Whether the drag in progress carries files, kept under the drag's sequence number.
     /// AppKit asks about a drag at every move of the pointer, and the answer is a question to
     /// the pasteboard server, which is another process; what a drag carries is fixed when it
@@ -120,6 +123,28 @@ final class MacDraftFileDropView: NSView {
     static func fileURLs(on pasteboard: NSPasteboard) -> [URL] {
         let objects = pasteboard.readObjects(forClasses: [NSURL.self], options: fileURLReadingOptions)
         return (objects as? [URL]) ?? []
+    }
+
+    // MARK: - Pasted into the reply field
+
+    /// Files copied elsewhere and pasted into the reply field (`MacReplyTextView`): taken as
+    /// dropped files are, and where a drop would be. Returns whether they were taken.
+    func receivePastedFiles(_ urls: [URL]) -> Bool {
+        guard !urls.isEmpty, acceptsFiles() else { return false }
+        return onDropFiles(urls)
+    }
+
+    /// Whether the reply can take a pasted image now, asked before its bytes are written to
+    /// a file.
+    var acceptsPastedImage: Bool {
+        acceptsFiles()
+    }
+
+    /// A pasted image, written to `file`. Returns whether it was taken; where it was not the
+    /// file is the caller's to remove.
+    func receivePastedImageFile(_ file: URL) -> Bool {
+        guard acceptsFiles() else { return false }
+        return onPasteImageFile(file)
     }
 
     // MARK: - Found by the views in front of it
