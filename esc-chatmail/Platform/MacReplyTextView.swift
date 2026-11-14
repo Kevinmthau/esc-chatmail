@@ -47,8 +47,9 @@ final class MacReplyTextView: NSTextView {
 
     /// A copied file is attached to the reply, and so is a copied image where no text was
     /// copied with it but its own address (`ReplyFieldPastePolicy`). Left to the text view, a
-    /// copied file is pasted as its path (measured on this field, 2026-11-12), a copied image
-    /// as nothing, and an image copied in a web view as its address.
+    /// copied file is pasted as its path (measured on this field, 2026-11-12) and a copied
+    /// image as nothing. An image copied in a web view would be pasted as its address, going
+    /// by what WebKit's source writes with it; that was not measured.
     override func paste(_ sender: Any?) {
         if !pasteAttachments() {
             super.paste(sender)
