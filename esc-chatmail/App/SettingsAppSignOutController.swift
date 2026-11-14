@@ -44,6 +44,11 @@ final class SettingsAppSignOutController: ObservableObject {
     /// (`init`).
     private let refusesConfirmedSignOut: @MainActor () -> Bool
 
+    /// The session this controller's confirmation asked about, kept from when it was raised.
+    /// It means something only while that confirmation is up (`prompter.isConfirmationActive`):
+    /// an alert can leave the screen with neither handler run, and nothing clears this then.
+    private var confirmationSubject: SettingsAppSignOutSubject?
+
     /// `prompter` and `activity` default inside the body: `PlatformSettingsAppSignOutPrompter`
     /// and `SettingsAppSignOutActivity.shared` are main-actor isolated, and a default
     /// argument is evaluated in the caller's (here nonisolated) context.
@@ -114,7 +119,13 @@ final class SettingsAppSignOutController: ObservableObject {
     }
 
     /// Acts on the Settings app's Sign Out switch (`SettingsAppSignOutPolicy`).
+    ///
+    /// A confirmation that is up for a session that has since changed is taken down first
+    /// (`withdrawStaleConfirmation`). The switch is still on then, so the request is judged
+    /// again in the same look and, with the scene active, asked about again: the new
+    /// confirmation names the account that is signed in now, and its answer stands.
     func evaluate(account: SettingsAppSignOutAccount, isSceneActive: Bool) {
+        withdrawStaleConfirmation(account: account)
         let isSignOutRequested = preferences.isSignOutRequested
         let decision = SettingsAppSignOutPolicy.decision(
             isSignOutRequested: isSignOutRequested,
@@ -182,8 +193,53 @@ final class SettingsAppSignOutController: ObservableObject {
     /// at the account: when the window appears and when authentication changes
     /// (`SignOutMenuActionPublisher`). iOS never does, so it gains no keychain read. While
     /// signed in the answer is false without asking `isDurablySignedOut()`.
+    ///
+    /// It is also where a Mac window's controller hears that the session changed, so a
+    /// confirmation that asked about the session before is taken down here
+    /// (`withdrawStaleConfirmation`). Nothing asks again: the Mac stores no request, and the
+    /// user chooses Sign Out… again to be asked about the account that is signed in now.
     func refreshHeldAccount(account: SettingsAppSignOutAccount) {
+        withdrawStaleConfirmation(account: account)
         setHoldsAccountWhileSignedOut(!account.isAuthenticated && !account.isDurablySignedOut())
+    }
+
+    /// Takes this controller's confirmation off the screen when an answer to it would no
+    /// longer stand (`SettingsAppSignOutPolicy.answerStillApplies`): the session it asked
+    /// about is not the one there now. Neither handler runs and nothing is signed out.
+    ///
+    /// Left up, it went on showing the question it asked before ("This account will be
+    /// signed out", over an account held while signed out) with another session signed in,
+    /// and its Sign Out button could only be refused (`signOutConfirmed`). On the Mac a
+    /// Sign Out… chosen in the other window then also brought that confirmation to the
+    /// front (`SheetBehindFocusedWindow`), to be answered, refused, and asked for a third
+    /// time. On iOS it was the question about an account that a background task's retried
+    /// launch restore had since signed back in: the answer was refused although that account
+    /// was the one the user had asked to sign out.
+    ///
+    /// Called where the controller is told about the session: `evaluate` (every platform)
+    /// and `refreshHeldAccount` (the Mac). Not from `requestSignOut`: that would take a
+    /// confirmation down and raise another in one turn, and a SwiftUI alert that is on
+    /// screen does not change to another alert (`SettingsAppSignOutAlertModifier`).
+    ///
+    /// A prompter leaves a confirmation that is not on screen to take down yet
+    /// (`SettingsAppSignOutPrompting.withdrawConfirmation`). The kept session is therefore
+    /// not cleared here: the next call finds the same confirmation still up and asks again.
+    ///
+    /// The check when the user answers stays, for an answer given before a call took the
+    /// confirmation down.
+    private func withdrawStaleConfirmation(account: SettingsAppSignOutAccount) {
+        guard prompter.isConfirmationActive, let asked = confirmationSubject else { return }
+        guard !SettingsAppSignOutPolicy.answerStillApplies(
+            asked: asked,
+            current: SettingsAppSignOutSubject(account)
+        ) else { return }
+        prompter.withdrawConfirmation()
+        Log.info(
+            prompter.isConfirmationActive
+                ? "A sign-out confirmation asks about a session that has changed; it is not on screen to take down yet"
+                : "A sign-out confirmation was taken down: the session it asked about has changed",
+            category: .auth
+        )
     }
 
     /// Publishes only a change: both callers run on events that usually leave it as it was.
@@ -197,9 +253,12 @@ final class SettingsAppSignOutController: ObservableObject {
     /// changes nothing.
     ///
     /// The answer is for the session as it is when the question is asked, so that is kept
-    /// with it (`asked`) and compared when the user answers (`signOutConfirmed`).
+    /// with it (`asked`) and compared when the user answers (`signOutConfirmed`). The
+    /// controller keeps it too, to take the confirmation down if the session changes while
+    /// it is up (`withdrawStaleConfirmation`).
     private func presentConfirmation(account: SettingsAppSignOutAccount) {
         let asked = SettingsAppSignOutSubject(account)
+        confirmationSubject = asked
         prompter.presentConfirmation(
             accountEmail: asked.email,
             onSignOut: { [weak self] in self?.signOutConfirmed(account: account, asked: asked) },
@@ -223,11 +282,16 @@ final class SettingsAppSignOutController: ObservableObject {
         // It can outlive it the other way too: a sign-in finished while it was up, and the
         // session there is now is not the one the user was asked about. That one is not
         // signed out on this answer. The user is told as for a sign-out that never started,
-        // and asking again names the account that is signed in now.
+        // and asking again names the account that is signed in now. The confirmation is
+        // normally taken down before it can be answered (`withdrawStaleConfirmation`); this
+        // is for an answer given first.
         //
-        // HONEST SCOPE: nobody has answered a stale confirmation in the app. The failure
-        // alert is raised from inside the confirmation's own answer; if a window does not
-        // show it there, the answer signs nothing out and says nothing.
+        // The failure alert is raised from inside the confirmation's own answer. On the Mac
+        // that alert was never shown while the two alerts were one SwiftUI presentation, and
+        // is shown now that they are two (`SettingsAppSignOutAlertModifier`, measured in a
+        // stand-in program).
+        //
+        // HONEST SCOPE: nobody has answered a stale confirmation in the app.
         guard SettingsAppSignOutPolicy.answerStillApplies(
             asked: asked,
             current: SettingsAppSignOutSubject(account)

@@ -68,6 +68,30 @@ final class SheetBehindFocusedWindowTests: XCTestCase {
         )
     }
 
+    /// New Message with its "discard this message?" question up is a sheet with a sheet of
+    /// its own, so it is one of the app's windows with a sheet attached, as the mailbox
+    /// window under it is. The app's windows come in no promised order.
+    ///
+    /// Revert-check: dropping `&& $0.sheetParent == nil` from
+    /// `SheetBehindFocusedWindow.window(among:keyWindow:mainWindow:)` makes this fail: the
+    /// sheet, listed first, is the window sent to the front.
+    func testWindow_sheetWithASheetOfItsOwn_isTheWindowUnderIt() throws {
+        let settings = SheetStubWindow.make(identifier: "com_apple_SwiftUI_Settings_window", hasSheet: false)
+        let mailbox = SheetStubWindow.make(identifier: MacMainWindowPolicy.windowID, hasSheet: true)
+        let newMessage = try XCTUnwrap(mailbox.attachedSheet as? SheetStubWindow)
+        let question = SheetStubWindow.make(identifier: nil, hasSheet: false)
+        question.stubbedSheetParent = newMessage
+        newMessage.stubbedSheet = question
+
+        let found = SheetBehindFocusedWindow.window(
+            among: [newMessage, question, mailbox, settings],
+            keyWindow: settings,
+            mainWindow: settings
+        )
+
+        XCTAssertTrue(found === mailbox)
+    }
+
     /// A refusal with no sheet anywhere (no account left to sign out) raises nothing.
     ///
     /// Revert-check: returning `windows.first`, whatever it has attached, from
@@ -116,6 +140,30 @@ final class SheetBehindFocusedWindowTests: XCTestCase {
         )
 
         XCTAssertEqual(raisedCount, 0)
+    }
+
+    // MARK: - The stand-in windows
+
+    /// A window that is never shown is still one of `NSApp.windows` while it lives, and the
+    /// stand-ins are named as the app's own windows are. One that outlived its test was a
+    /// second mailbox window with a sheet attached, for every suite after it:
+    /// `MacMainWindowCloseObserverTests` counts the windows with that name.
+    ///
+    /// Revert-check: holding `stubbedSheetParent` strongly in `SheetStubWindow` makes this
+    /// fail: the window and its sheet keep each other.
+    func testStubWindow_withASheet_isReleasedWithItsTest() {
+        weak var window: NSWindow?
+        weak var sheet: NSWindow?
+        autoreleasepool {
+            let made = SheetStubWindow.make(identifier: MacMainWindowPolicy.windowID, hasSheet: true)
+            window = made
+            sheet = made.attachedSheet
+            XCTAssertNotNil(sheet)
+            XCTAssertTrue(sheet?.sheetParent === made)
+        }
+
+        XCTAssertNil(window)
+        XCTAssertNil(sheet)
     }
 }
 #endif

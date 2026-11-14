@@ -695,6 +695,163 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertEqual(prompter.failureCount, 0)
     }
 
+    // MARK: - A confirmation whose session changed while it was up
+
+    /// The iOS switch was turned on for an account held while signed out (a launch restore
+    /// that failed retryably), and the confirmation was left up. A background task then ran
+    /// the restore again and signed that account back in. The answer was refused, although
+    /// the account was the one the user had asked to sign out, and nothing asked again.
+    ///
+    /// Revert-check: removing `withdrawStaleConfirmation(account: account)` from
+    /// `SettingsAppSignOutController.evaluate` makes this fail: the old confirmation stays
+    /// up, and its answer signs nothing out.
+    func testEvaluate_heldAccountRestoredUnderTheConfirmation_asksAgainAndThatAnswerSignsOut() async throws {
+        requestSignOut()
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.evaluate(account: account, isSceneActive: true)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertNil(prompter.lastAccountEmail)
+        prompter.isConfirmationActive = true
+
+        account.isAuthenticated = true
+        account.userEmail = "user@example.com"
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.withdrawCount, 1)
+        XCTAssertEqual(prompter.confirmationCount, 2)
+        XCTAssertEqual(prompter.lastAccountEmail, "user@example.com")
+        XCTAssertTrue(preferences.isSignOutRequested, "taking the confirmation down answers nothing")
+
+        try XCTUnwrap(prompter.onSignOut)()
+
+        await waitUntil { self.account.signOutCallCount == 1 }
+        XCTAssertEqual(prompter.failureCount, 0)
+    }
+
+    /// The session can change while the app is in the background, which is where a
+    /// background task runs. The confirmation is taken down then, and the request waits, as
+    /// any request does, for the scene to be active.
+    ///
+    /// Revert-check: calling `withdrawStaleConfirmation` only when `isSceneActive`, in
+    /// `SettingsAppSignOutController.evaluate`, makes this fail.
+    func testEvaluate_staleConfirmationWhileSceneInactive_takesItDownAndAsksWhenActive() {
+        requestSignOut()
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.evaluate(account: account, isSceneActive: true)
+        prompter.isConfirmationActive = true
+
+        account.isAuthenticated = true
+        account.userEmail = "user@example.com"
+        controller.evaluate(account: account, isSceneActive: false)
+
+        XCTAssertEqual(prompter.withdrawCount, 1)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.confirmationCount, 2)
+        XCTAssertEqual(prompter.lastAccountEmail, "user@example.com")
+    }
+
+    /// A prompter leaves a confirmation it cannot take down yet (the UIKit alert while it is
+    /// still coming up). The controller asks again at its next look, and only then asks the
+    /// user again.
+    ///
+    /// Revert-check: clearing `confirmationSubject` in
+    /// `SettingsAppSignOutController.withdrawStaleConfirmation` makes this fail: the next
+    /// look no longer knows the confirmation is about another session.
+    func testEvaluate_staleConfirmationNotYetOnScreen_isTakenDownAtTheNextLook() {
+        requestSignOut()
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.evaluate(account: account, isSceneActive: true)
+        prompter.isConfirmationActive = true
+        prompter.leavesConfirmationUpWhenWithdrawn = true
+
+        account.isAuthenticated = true
+        account.userEmail = "user@example.com"
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.withdrawCount, 1)
+        XCTAssertEqual(prompter.confirmationCount, 1, "nothing is asked over a confirmation still up")
+
+        prompter.leavesConfirmationUpWhenWithdrawn = false
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.withdrawCount, 2)
+        XCTAssertEqual(prompter.confirmationCount, 2)
+        XCTAssertEqual(prompter.lastAccountEmail, "user@example.com")
+    }
+
+    /// The Mac's Settings window asked about an account held while signed out, and the user
+    /// then signed in on the mailbox window. The confirmation stayed up with its old
+    /// question, and a Sign Out… chosen on the mailbox window brought it to the front, where
+    /// its answer could only be refused.
+    ///
+    /// Revert-check: removing `withdrawStaleConfirmation(account: account)` from
+    /// `SettingsAppSignOutController.refreshHeldAccount` makes this fail.
+    func testRefreshHeldAccount_signedInUnderTheConfirmation_takesItDownAndAsksNothing() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        prompter.isConfirmationActive = true
+
+        account.isAuthenticated = true
+        account.userEmail = "new@example.com"
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertEqual(prompter.withdrawCount, 1)
+        XCTAssertEqual(prompter.confirmationCount, 1, "the Mac stores no request, so nothing asks again")
+        XCTAssertEqual(account.signOutCallCount, 0)
+
+        // Chosen again, Sign Out… asks about the account that is signed in now.
+        XCTAssertEqual(controller.requestSignOut(account: account, focusedWindowHasSheet: false), .confirm)
+        XCTAssertEqual(prompter.lastAccountEmail, "new@example.com")
+    }
+
+    /// The ordinary case: the controller is told about the session often (every focus
+    /// change on the Mac's mailbox window), and the session is the one that was asked about.
+    ///
+    /// Revert-check: dropping the `answerStillApplies` guard from
+    /// `SettingsAppSignOutController.withdrawStaleConfirmation` makes this fail: every look
+    /// would take the confirmation down, and on iOS raise it again.
+    func testEvaluateAndRefresh_sessionUnchangedUnderTheConfirmation_leaveItUp() {
+        requestSignOut()
+        controller.evaluate(account: account, isSceneActive: true)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        prompter.isConfirmationActive = true
+
+        controller.evaluate(account: account, isSceneActive: true)
+        controller.refreshHeldAccount(account: account)
+
+        XCTAssertEqual(prompter.withdrawCount, 0)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+    }
+
+    /// The kept session means something only while its confirmation is up. An alert can
+    /// leave the screen with neither handler run, and a later sign-in must not be logged,
+    /// or acted on, as a confirmation taken down.
+    ///
+    /// Revert-check: dropping `prompter.isConfirmationActive` from the guard in
+    /// `SettingsAppSignOutController.withdrawStaleConfirmation` makes this fail.
+    func testRefreshHeldAccount_confirmationAlreadyGone_withdrawsNothing() {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertFalse(prompter.isConfirmationActive)
+
+        account.isAuthenticated = true
+        account.userEmail = "new@example.com"
+        controller.refreshHeldAccount(account: account)
+        controller.evaluate(account: account, isSceneActive: true)
+
+        XCTAssertEqual(prompter.withdrawCount, 0)
+    }
+
     // MARK: - Platform prompter
 
     /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
@@ -812,6 +969,7 @@ private final class FakeAccount: SettingsAppSignOutAccount {
 private final class FakePrompter: SettingsAppSignOutPrompting {
     var isConfirmationActive = false
     private(set) var confirmationCount = 0
+    private(set) var withdrawCount = 0
     private(set) var failureCount = 0
     private(set) var lastAccountEmail: String?
     private(set) var onSignOut: (() -> Void)?
@@ -826,6 +984,15 @@ private final class FakePrompter: SettingsAppSignOutPrompting {
         lastAccountEmail = accountEmail
         self.onSignOut = onSignOut
         self.onCancel = onCancel
+    }
+
+    /// True for a confirmation that is not on screen to take down yet: the call leaves it.
+    var leavesConfirmationUpWhenWithdrawn = false
+
+    func withdrawConfirmation() {
+        withdrawCount += 1
+        guard !leavesConfirmationUpWhenWithdrawn else { return }
+        isConfirmationActive = false
     }
 
     func presentFailure() {
