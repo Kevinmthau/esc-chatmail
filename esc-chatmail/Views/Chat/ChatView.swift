@@ -111,10 +111,10 @@ struct ChatView: View {
             onDropFiles: { [composerState = viewModel.composerState] urls in
                 composerState.receiveDroppedFiles(urls)
             },
-            // An image pasted into the reply field, which the field wrote to a file of the
-            // app's own: it goes the same way, and its file is removed once it is imported.
-            onPasteImageFile: { [composerState = viewModel.composerState] file in
-                composerState.receiveDroppedFiles([file], temporaryFileURLs: [file])
+            // Pictures pasted into the reply field, which the field wrote to files of the
+            // app's own: they go the same way, and the files are removed once imported.
+            onPasteImageFiles: { [composerState = viewModel.composerState] files in
+                composerState.receivePastedImageFiles(files)
             }
         )
         .navigationTitle(navigationDisplayName)

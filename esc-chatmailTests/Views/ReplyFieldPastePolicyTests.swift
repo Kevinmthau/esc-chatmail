@@ -8,13 +8,17 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
         files: Bool = false,
         text: Bool = false,
         image: Bool = false,
-        textIsOnlyTheAddress: Bool = false
+        richText: Bool = false,
+        textIsOnlyTheAddress: Bool = false,
+        marks: ReplyFieldPastePolicy.PictureMarks = .none
     ) -> ReplyFieldPastePolicy.Action {
         ReplyFieldPastePolicy.action(
             carriesFiles: files,
             carriesText: text,
             carriesImage: image,
-            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress
+            carriesRichTextWithAttachments: richText,
+            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress,
+            pictureMarksInText: marks
         )
     }
 
@@ -28,6 +32,7 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
         XCTAssertEqual(action(files: true, text: true), .attachFiles)
         XCTAssertEqual(action(files: true, text: true, image: true), .attachFiles)
         XCTAssertEqual(action(files: true, text: true, image: true, textIsOnlyTheAddress: true), .attachFiles)
+        XCTAssertEqual(action(files: true, text: true, richText: true, marks: .only), .attachFiles)
     }
 
     /// Revert-check: attaching the image whenever there is one, whatever the text is
@@ -37,6 +42,9 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
     func testAction_text_isPastedAsText_withAPictureBesideItOrNot() {
         XCTAssertEqual(action(text: true), .pasteAsText)
         XCTAssertEqual(action(text: true, image: true), .pasteAsText)
+        // Rich text with no picture in it is words too.
+        XCTAssertEqual(action(text: true, richText: true), .pasteAsText)
+        XCTAssertEqual(action(text: true, image: true, richText: true), .pasteAsText)
     }
 
     /// Revert-check: returning `.pasteAsText` for an image alone from
@@ -44,14 +52,19 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
     /// paste as nothing.
     func testAction_anImageAlone_isAttached() {
         XCTAssertEqual(action(image: true), .attachImage)
+        // As Copy Image in a web view leaves it (measured 2026-11-14): the picture, rich
+        // text that holds its file, and no text.
+        XCTAssertEqual(action(image: true, richText: true), .attachImage)
     }
 
-    /// Copy Image in a web view writes the picture and, as text, the address it came from.
+    /// A picture whose only text is its own address. No app is known to write one: Copy
+    /// Image in a web view, which this was written for, writes no text (measured
+    /// 2026-11-14).
     ///
     /// Revert-check: returning `.pasteAsText` wherever text was copied, as before
     /// (`if carriesText { return .pasteAsText }` above the image in
-    /// `ReplyFieldPastePolicy.action`), makes the first assertion fail: an image copied in
-    /// Safari is pasted as its address.
+    /// `ReplyFieldPastePolicy.action`), makes the first assertion fail: such a picture is
+    /// pasted as its address.
     func testAction_anImageWhoseOnlyTextIsItsAddress_isAttached() {
         XCTAssertEqual(action(text: true, image: true, textIsOnlyTheAddress: true), .attachImage)
         // An address with no picture beside it is text like any other.
@@ -60,6 +73,92 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
 
     func testAction_nothingTheFieldAttaches_isLeftToTheField() {
         XCTAssertEqual(action(), .pasteAsText)
+        XCTAssertEqual(action(richText: true), .pasteAsText)
+    }
+
+    // MARK: - Pictures copied as rich text
+
+    /// A picture selected in a rich text view is copied as RTFD and, as plain text, the
+    /// mark that stands for it, with no image beside them (measured 2026-11-14). The picture
+    /// is what was copied.
+    ///
+    /// Revert-check: returning `.pasteAsText` for `.only` in
+    /// `ReplyFieldPastePolicy.action` makes this fail: the mark is typed into the reply and
+    /// no picture is attached.
+    func testAction_richTextThatIsOnlyPictures_attachesThem() {
+        XCTAssertEqual(action(text: true, richText: true, marks: .only), .attachPicturesInRichText)
+    }
+
+    /// Where the pasteboard has the picture itself as well, that one is attached, as an
+    /// image with no text is.
+    ///
+    /// Revert-check: answering `.attachPicturesInRichText` for `.only` whatever else the
+    /// pasteboard has makes this fail.
+    func testAction_anImageWhoseOnlyTextIsItsMark_isAttachedAsTheImage() {
+        XCTAssertEqual(action(text: true, image: true, richText: true, marks: .only), .attachImage)
+    }
+
+    /// Revert-check: returning `.pasteAsText` for `.amongWords` in
+    /// `ReplyFieldPastePolicy.action` makes both fail: the words are pasted with a mark
+    /// where each picture was.
+    func testAction_wordsWithPicturesAmongThem_arePastedWithoutTheMarks() {
+        XCTAssertEqual(action(text: true, richText: true, marks: .amongWords), .pasteTextWithoutPictureMarks)
+        XCTAssertEqual(
+            action(text: true, image: true, richText: true, marks: .amongWords),
+            .pasteTextWithoutPictureMarks
+        )
+    }
+
+    /// A mark in text that came with no rich text stands for nothing that can be attached,
+    /// and that text is not read to look for one.
+    ///
+    /// Revert-check: dropping the `guard carriesRichTextWithAttachments` from
+    /// `ReplyFieldPastePolicy.action` makes this fail.
+    func testAction_marksInTextCopiedWithNoRichText_areNotAskedAbout() {
+        XCTAssertEqual(action(text: true, marks: .only), .pasteAsText)
+        XCTAssertEqual(action(text: true, image: true, marks: .amongWords), .pasteAsText)
+    }
+
+    /// Revert-check: counting white space as words in `ReplyFieldPastePolicy.pictureMarks`
+    /// (dropping the `whitespacesAndNewlines` term) makes the second and third assertions of
+    /// the second group fail: two pictures on two lines would be pasted as text. Looking for
+    /// the mark among `Character`s (`text.contains(Character(pictureMark))`) makes the last
+    /// assertion fail.
+    func testPictureMarks_none_only_orAmongWords() {
+        let mark = "\u{FFFC}"
+
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: nil), .none)
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: ""), .none)
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: "Some words"), .none)
+
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: mark), .only)
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: "\(mark)\n\(mark)"), .only)
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: " \(mark)\t\n"), .only)
+
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: "before \(mark) after"), .amongWords)
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: "\(mark)x"), .amongWords)
+        // A mark with a combining accent on it is one `Character` that is not the mark.
+        XCTAssertEqual(ReplyFieldPastePolicy.pictureMarks(in: "\(mark)\u{301}"), .amongWords)
+    }
+
+    /// Revert-check: returning `text` as it came from
+    /// `ReplyFieldPastePolicy.removingPictureMarks` makes this fail.
+    func testRemovingPictureMarks_leavesEverythingElse() {
+        let mark = "\u{FFFC}"
+
+        XCTAssertEqual(ReplyFieldPastePolicy.removingPictureMarks(from: "before \(mark) after"), "before  after")
+        XCTAssertEqual(ReplyFieldPastePolicy.removingPictureMarks(from: "\(mark)a\(mark)b\(mark)"), "ab")
+        XCTAssertEqual(ReplyFieldPastePolicy.removingPictureMarks(from: "No marks"), "No marks")
+        XCTAssertEqual(ReplyFieldPastePolicy.removingPictureMarks(from: "caf\(mark)\u{301}e"), "caf\u{301}e")
+    }
+
+    // MARK: - Behind a sheet
+
+    /// Revert-check: answering true always from `ReplyFieldPastePolicy.fieldTakesPaste`
+    /// makes the second assertion fail: text is pasted into the draft behind a sheet.
+    func testFieldTakesPaste_notWhileItsWindowHasASheet() {
+        XCTAssertTrue(ReplyFieldPastePolicy.fieldTakesPaste(windowHasSheet: false))
+        XCTAssertFalse(ReplyFieldPastePolicy.fieldTakesPaste(windowHasSheet: true))
     }
 
     /// The Edit menu's validation asks this, with no paste asked for, so it is decided from
@@ -102,49 +201,95 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
                     carriesImage: image
                 ) {
                     for isAddress in [false, true] {
-                        XCTAssertNotEqual(
-                            ReplyFieldPastePolicy.action(
-                                carriesFiles: files,
-                                carriesText: text,
-                                carriesImage: image,
-                                textIsOnlyTheCopiedAddress: isAddress
-                            ),
-                            .pasteAsText,
-                            "files \(files), text \(text), image \(image), address \(isAddress)"
-                        )
+                        for richText in [false, true] {
+                            for marks in [ReplyFieldPastePolicy.PictureMarks.none, .only, .amongWords] {
+                                let action = ReplyFieldPastePolicy.action(
+                                    carriesFiles: files,
+                                    carriesText: text,
+                                    carriesImage: image,
+                                    carriesRichTextWithAttachments: richText,
+                                    textIsOnlyTheCopiedAddress: isAddress,
+                                    pictureMarksInText: marks
+                                )
+                                XCTAssertTrue(
+                                    action == .attachFiles || action == .attachImage,
+                                    "files \(files), text \(text), image \(image), address \(isAddress), "
+                                        + "rich text \(richText), marks \(marks): \(action)"
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
     }
 
-    /// Whether the text is the address is found by reading the text, which can be long. It
-    /// is asked only where the answer decides anything: a picture and text together, and no
-    /// file.
+    /// Whether the text is the address, and what marks it has, are found by reading the
+    /// text, which can be long. Each is asked only where the answer decides anything: the
+    /// address of a picture and text together, the marks of text and rich text together, and
+    /// neither where a file was copied.
     ///
-    /// Revert-check: asking `textIsOnlyTheCopiedAddress` at the top of
+    /// Revert-check: asking `textIsOnlyTheCopiedAddress()` at the top of
     /// `ReplyFieldPastePolicy.action`, before the files, the image and the text are asked
-    /// about, makes the count fail: 8, not 1.
-    func testAction_asksWhatTheTextIs_onlyOfAPictureAndTextCopiedTogether() {
-        var asked = 0
+    /// about, makes the first count fail; asking `pictureMarksInText()` there makes the
+    /// second fail.
+    func testAction_asksWhatTheTextIs_onlyWhereTheAnswerDecides() {
+        var askedForAddress = 0
+        var askedForMarks = 0
         func isAddress() -> Bool {
-            asked += 1
-            return true
+            askedForAddress += 1
+            return false
+        }
+        func marks() -> ReplyFieldPastePolicy.PictureMarks {
+            askedForMarks += 1
+            return .none
         }
         for files in [false, true] {
             for text in [false, true] {
                 for image in [false, true] {
-                    _ = ReplyFieldPastePolicy.action(
-                        carriesFiles: files,
-                        carriesText: text,
-                        carriesImage: image,
-                        textIsOnlyTheCopiedAddress: isAddress()
-                    )
+                    for richText in [false, true] {
+                        _ = ReplyFieldPastePolicy.action(
+                            carriesFiles: files,
+                            carriesText: text,
+                            carriesImage: image,
+                            carriesRichTextWithAttachments: richText,
+                            textIsOnlyTheCopiedAddress: isAddress(),
+                            pictureMarksInText: marks()
+                        )
+                    }
                 }
             }
         }
 
-        XCTAssertEqual(asked, 1)
+        // A picture and text, with rich text or without.
+        XCTAssertEqual(askedForAddress, 2)
+        // Text and rich text, with a picture or without.
+        XCTAssertEqual(askedForMarks, 2)
+    }
+
+    /// A picture whose text is its own address is attached without the marks being asked
+    /// about: the text has been read once already and decided it.
+    ///
+    /// Revert-check: asking `pictureMarksInText()` before `textIsOnlyTheCopiedAddress()` in
+    /// `ReplyFieldPastePolicy.action` makes this fail.
+    func testAction_aPictureWithItsAddress_isDecidedBeforeTheMarksAreAsked() {
+        var askedForMarks = 0
+        func marks() -> ReplyFieldPastePolicy.PictureMarks {
+            askedForMarks += 1
+            return .none
+        }
+
+        let action = ReplyFieldPastePolicy.action(
+            carriesFiles: false,
+            carriesText: true,
+            carriesImage: true,
+            carriesRichTextWithAttachments: true,
+            textIsOnlyTheCopiedAddress: true,
+            pictureMarksInText: marks()
+        )
+
+        XCTAssertEqual(action, .attachImage)
+        XCTAssertEqual(askedForMarks, 0)
     }
 
     // MARK: - Text that is only the picture's address

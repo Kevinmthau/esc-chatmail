@@ -10,19 +10,19 @@ extension View {
     ///     chat and again at the drop.
     ///   - onDropFiles: The dropped files, or files pasted into the reply field. Returns
     ///     whether they were taken.
-    ///   - onPasteImageFile: The file an image pasted into the reply field was written to
-    ///     (`PastedImageFile`). Returns whether it was taken.
+    ///   - onPasteImageFiles: The files that pictures pasted into the reply field were
+    ///     written to (`PastedImageFile`). Returns whether they were taken.
     func macDraftFileDrop(
         acceptsFiles: @escaping @MainActor () -> Bool,
         onDropFiles: @escaping @MainActor ([URL]) -> Bool,
-        onPasteImageFile: @escaping @MainActor (URL) -> Bool = { _ in false }
+        onPasteImageFiles: @escaping @MainActor ([PastedImageFile]) -> Bool = { _ in false }
     ) -> some View {
         #if os(macOS)
         background {
             MacDraftFileDropTarget(
                 acceptsFiles: acceptsFiles,
                 onDropFiles: onDropFiles,
-                onPasteImageFile: onPasteImageFile
+                onPasteImageFiles: onPasteImageFiles
             )
             .accessibilityHidden(true)
         }
