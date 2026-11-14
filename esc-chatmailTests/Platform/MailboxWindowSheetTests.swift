@@ -84,25 +84,7 @@ final class MailboxWindowSheetTests: XCTestCase {
     }
 
     private func makeWindow(identifier: String?, hasSheet: Bool) -> NSWindow {
-        let window = SheetStubWindow(
-            contentRect: NSRect(x: -30_000, y: -30_000, width: 100, height: 100),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: true
-        )
-        window.isReleasedWhenClosed = false
-        window.identifier = identifier.map { NSUserInterfaceItemIdentifier($0) }
-        window.stubbedSheet = hasSheet ? NSWindow() : nil
-        return window
-    }
-}
-
-/// A window that answers `attachedSheet` with the window it is given.
-private final class SheetStubWindow: NSWindow {
-    var stubbedSheet: NSWindow?
-
-    override var attachedSheet: NSWindow? {
-        stubbedSheet
+        SheetStubWindow.make(identifier: identifier, hasSheet: hasSheet)
     }
 }
 #endif

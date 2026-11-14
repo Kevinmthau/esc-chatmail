@@ -92,4 +92,73 @@ final class SettingsAppSignOutPolicyTests: XCTestCase {
     func testDecision_requestWhileSceneInactive_returnsNone() {
         XCTAssertEqual(decision(isSceneActive: false), .none)
     }
+
+    // MARK: - An answer for the session it asked about
+
+    /// The ordinary answer: the account that was named is the one signed in.
+    ///
+    /// Revert-check: returning false from `SettingsAppSignOutPolicy.answerStillApplies`
+    /// makes this fail: no confirmed sign-out would ever start.
+    func testAnswerStillApplies_sameAccountSignedIn_stands() {
+        XCTAssertTrue(answerStillApplies(asked: signedIn("user@example.com"), current: signedIn("user@example.com")))
+    }
+
+    /// The Mac's Settings window asked about an account held while signed out, and the user
+    /// then signed in on the mailbox window with the confirmation still up.
+    ///
+    /// Revert-check: removing `guard asked.isAuthenticated else { return false }` from
+    /// `SettingsAppSignOutPolicy.answerStillApplies` makes this fail: the old confirmation
+    /// would sign the new session out.
+    func testAnswerStillApplies_signedInAfterTheQuestion_doesNotStand() {
+        XCTAssertFalse(answerStillApplies(asked: signedOut, current: signedIn("new@example.com")))
+        XCTAssertFalse(answerStillApplies(asked: signedOut, current: signedIn(nil)))
+    }
+
+    /// Revert-check: returning true where both addresses are known, in
+    /// `SettingsAppSignOutPolicy.answerStillApplies`, makes this fail.
+    func testAnswerStillApplies_anotherAccountSignedIn_doesNotStand() {
+        XCTAssertFalse(answerStillApplies(asked: signedIn("old@example.com"), current: signedIn("new@example.com")))
+    }
+
+    /// Revert-check: comparing the addresses with `==` in
+    /// `SettingsAppSignOutPolicy.answerStillApplies` makes this fail.
+    func testAnswerStillApplies_sameAddressInAnotherCase_stands() {
+        XCTAssertTrue(answerStillApplies(asked: signedIn("User@Example.com"), current: signedIn("user@example.com")))
+    }
+
+    /// An address that is not known is not a different one.
+    ///
+    /// Revert-check: comparing the optional addresses with `==`, in place of the
+    /// `guard let` in `SettingsAppSignOutPolicy.answerStillApplies`, makes this fail.
+    func testAnswerStillApplies_signedInWithAnAddressUnknown_stands() {
+        XCTAssertTrue(answerStillApplies(asked: signedIn(nil), current: signedIn("user@example.com")))
+        XCTAssertTrue(answerStillApplies(asked: signedIn("user@example.com"), current: signedIn(nil)))
+        XCTAssertTrue(answerStillApplies(asked: signedIn(nil), current: signedIn(nil)))
+    }
+
+    /// The account asked about is still held with nobody signed in: asked over the sign-in
+    /// view and answered there, or signed in when asked and not any more.
+    ///
+    /// Revert-check: removing `guard current.isAuthenticated else { return true }` from
+    /// `SettingsAppSignOutPolicy.answerStillApplies` makes this fail: an account held while
+    /// signed out could never be signed out.
+    func testAnswerStillApplies_nobodySignedInNow_stands() {
+        XCTAssertTrue(answerStillApplies(asked: signedOut, current: signedOut))
+        XCTAssertTrue(answerStillApplies(asked: signedIn("user@example.com"), current: signedOut))
+    }
+
+    private var signedOut: SettingsAppSignOutSubject {
+        SettingsAppSignOutSubject(isAuthenticated: false, email: nil)
+    }
+
+    private func signedIn(_ email: String?) -> SettingsAppSignOutSubject {
+        SettingsAppSignOutSubject(isAuthenticated: true, email: email)
+    }
+
+    private func answerStillApplies(
+        asked: SettingsAppSignOutSubject,
+        current: SettingsAppSignOutSubject
+    ) -> Bool {
+        SettingsAppSignOutPolicy.answerStillApplies(asked: asked, current: current)
+    }
 }
