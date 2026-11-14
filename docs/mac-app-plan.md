@@ -1,6 +1,6 @@
 # Plan: replace the web app with a Mac app
 
-Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status (2026-11-10): Phase 0 is applied, and every Phase 1 PR is merged.** The Mac app was first launched on 2026-11-10, signed and sandboxed. Sign-in, initial sync and opening a chat worked; the rest of Phase 1's check is still to walk (see "First launch"). Phase 2 is partly built: each of its entries says what is (2026-11-12). Phases 3 and 4 have not started. The error counts in this plan were measured before Phase 1, by test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
+Written 2026-11-09 against `main` at `dce09d42`. **Decided 2026-11-09: SwiftUI on AppKit.** macOS becomes a second destination of the existing `esc-chatmail` target, instead of a Mac Catalyst build (see "Considered: Mac Catalyst"). **Status (2026-11-13): Phase 0 is applied, every Phase 1 PR is merged, and Phase 2 is built and merged except for what its entries mark "Not built" or "Left out".** The Mac app was first launched on 2026-11-10, signed and sandboxed. Sign-in, initial sync and opening a chat worked; the rest of Phase 1's check is not recorded as walked (see "First launch"). Phase 2's newest PR is 416 (2026-11-13). Most of Phase 2 has not been seen in the app: each entry lists what to check there. Xcode Cloud archives the Mac app on pushes to `main`, and the copy in `/Applications` on this Mac is a native TestFlight build (decision 3). Phases 3 and 4 have not started. The error counts in this plan were measured before Phase 1, by test-compiling throwaway copies of the app outside the repo (Appendix B). Those builds were never launched, and they have been deleted.
 
 ## Summary
 
@@ -63,7 +63,7 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
    - At 26 those calls compile unchanged, and SwiftUI's own `WebView`/`WebPage` (macOS 26 and later) becomes an option for the WebKit work.
    - This Mac runs macOS 27.
 2. **The bundle ID stays `com.esc.inboxchat`. Decided and applied.** The Mac build is signed under it, with its own Mac profile (see "Not checked in Phase 0, checked 2026-11-10"). A target that builds for several platforms shares one bundle ID by default. Google's docs say macOS apps use an iOS-type OAuth client keyed by bundle ID; the Mac plist takes the same `GOOGLE_*` build settings as the iOS one, and sign-in worked at the first launch.
-3. **Distribution: TestFlight for Mac. Decided 2026-11-11.** The app updates itself, and the Mac build goes on the App Store Connect record the iOS app already has, because the two share a bundle ID. The alternative was a Developer ID-signed, notarized `.app` updated by hand. Nothing has been uploaded yet.
+3. **Distribution: TestFlight for Mac. Decided 2026-11-11.** The app updates itself, and the Mac build goes on the App Store Connect record the iOS app already has, because the two share a bundle ID. The alternative was a Developer ID-signed, notarized `.app` updated by hand. Xcode Cloud has archived Mac builds since 2026-11-11, and a native TestFlight build is installed on this Mac (see "Mac builds, seen 2026-11-13" below).
    - **In place:**
      - The App Sandbox and the hardened runtime on the target.
      - In `Info-macOS.plist`: the category (`public.app-category.productivity`), `ITSAppUsesNonExemptEncryption` and the MushMail display name.
@@ -75,7 +75,7 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
      - It has the icon: both icon keys in `Info.plist`, and in the first archive `AppIcon.icns`, `Assets.car` and `PrivacyInfo.xcprivacy` were listed in its resources.
      - Its version is 1.0 (1), from the project.
      - `Scripts/verify-mac-test-host.sh` passes on it, which is that script reading the renamed bundle, not a test run.
-   - **Missing for an upload, on this Mac:** an Apple Distribution certificate, a Mac installer certificate and a Mac App Store profile for `com.esc.inboxchat`. The keychain has one signing identity, Apple Development, and the only Mac profile for the app is the development one. Nobody exported or uploaded the archive, so whether App Store Connect accepts the build has not been tried.
+   - **Missing for an upload, on this Mac:** an Apple Distribution certificate, a Mac installer certificate and a Mac App Store profile for `com.esc.inboxchat`. The keychain has one signing identity, Apple Development, and the only Mac profile for the app is the development one. Nobody exported or uploaded that archive. The builds that go up are Xcode Cloud's (below).
    - **How iOS builds are numbered and uploaded: Xcode Cloud does it.** That is Kevin's answer (2026-11-11). What the repository and GitHub show agrees with it:
      - The project says `CURRENT_PROJECT_VERSION = 1`, the installed iOS TestFlight build is 1.0 (513), and the repo has no upload tooling. So the project's number is not the one that ships.
      - An Xcode Cloud workflow named Default runs an "Archive - iOS" action on pushes to `main`: its check run is on four of the six merge commits on `main` from PR 376's to PR 381's (2026-11-09 to 2026-11-11), PR 381's merge among them. The checks PR 381 had before it merged include no Xcode Cloud run, which suggests the workflow does not run on pull requests. This Mac has no Xcode archive of any app.
@@ -86,10 +86,14 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
      - **"Archive - macOS":** platform macOS, scheme `esc-chatmail`, built for Any Mac, distribution preparation "TestFlight (Internal Testing Only)". Apart from the platform these are the settings of "Archive - iOS", which is unchanged.
      - **"TestFlight Internal Testing - macOS":** it delivers the macOS archive to the Team group, the one group the iOS post-action delivers to.
      - **Unchanged:** the start condition (any file change on `main`, with a newer push cancelling a running build) and the environment (the latest release of Xcode and of macOS, which was Xcode 27.2 on macOS 27.2 that day).
-     - **Not seen yet: a Mac build.** The first one starts with the next push to `main`. Still to be seen: that Xcode Cloud's signing covers the Mac entitlements, `keychain-access-groups` among them; that App Store Connect accepts the build; and what build number it gets.
+     - **Mac builds, seen 2026-11-13.** Read from GitHub's check runs and from the installed app's bundle and signature. The app was not launched for this.
+       - **The archive succeeds.** The first "Archive - macOS" check is on PR 383's merge (`b52b7f3d`, 2026-11-11), and it succeeded; the four merges before it have only the iOS check. Of the 32 merge commits on `main` from that one to PR 416's (`bd0c6225`), the Mac archive succeeded on 24, was cancelled on 5 and is not among the checks of 3. It has not failed.
+       - **TestFlight delivers it.** `/Applications/MushMail.app` on this Mac is a native build, 1.0 (546): its `DTPlatformName` is `macosx`, its executable is `MushMail`, it has a `_MASReceipt`, and it has no `Wrapper` folder. Build 528 was the first native build installed (2026-11-12; `docs/mac-imessage-ui-plan.md`, "Found in the app").
+       - **Xcode Cloud's signing covers the Mac entitlements.** The installed build is signed "TestFlight Beta Distribution", with the hardened runtime. Its entitlements are the App Sandbox, the network client, the address book, user-selected files read-write, and `keychain-access-groups` with the team-prefixed `com.esc.inboxchat`. It has no `get-task-allow`.
+       - **The build number is Xcode Cloud's,** not the project's 1. Which merge build 546 was archived from was not looked up.
+       - **A merge to `main` therefore ships a Mac build as well as an iOS one.**
      - The other way, not taken: archive in Xcode for Any Mac and use Distribute App, which would have Xcode create the profile and the two certificates above.
-   - **Kevin's steps left:** install the Mac build from TestFlight once one is there, and say what should happen to the copy described next.
-   - **To settle:** what happens to `/Applications/MushMail.app` on this Mac. It is the iOS TestFlight build, running as an iPhone app, under the same bundle ID and in the same container. Since the rename the native build has the same file name too. Whether TestFlight replaces it with the native build has not been seen.
+   - **Settled: TestFlight replaced the iOS copy with the native build.** `/Applications/MushMail.app` on this Mac was the iOS TestFlight build, running as an iPhone app, under the same bundle ID and in the same container. Since the rename the native build has the same file name, and it is now the native build that is there (read 2026-11-13, above). Local Mac builds and the Mac test host still share its bundle ID, its keychain group and its container.
 4. **When to delete `web/`.** Recommended: after Phase 3. Stop adding web features now, and fix the web app only if it breaks.
 5. **The From: alias picker: not built. Decided 2026-11-11.** Kevin asked for whichever option was simpler, and that is no picker on either platform.
    - The Mac sends as iOS does today. A new message goes out from the signed-in Gmail address. A reply goes out from the send-as alias the mail was addressed to (`ReplyFromAddressResolver`).
@@ -414,13 +418,22 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 
 ## Phase 2: make it a Mac app
 
+**Status (2026-11-13).** Every entry below is built and merged unless it says otherwise; the newest PR is 416. Not built:
+
+- Space to open Quick Look on an attachment, and Escape to leave selection.
+- A sync button in the toolbar. Sync is the Cmd-R command only.
+- A file drop on the New Message and Forward sheet.
+- The optional items at the end.
+
+Almost none of it has been seen in the app. Each entry has its own list of what to check there.
+
 - **Windows.** Show the main UI in a single window. Use either a `Window` scene, or a `WindowGroup` where `CommandGroup(replacing: .newItem)` turns File → New Window into New Message (Cmd-N).
   - **Built 2026-11-10** as a `Window` scene, with Cmd-N as New Message (`docs/mac-imessage-ui-plan.md`, PR 1). Compiled and unit-tested; not yet seen in the app.
   - Why one window: `ChatReplyComposerDirectory` lets only the most recently shown composer write a conversation's draft, so two windows on the same chat would fight over its draft.
   - Revisit multiple windows after reviewing that rule.
 - **Layout.** On the Mac, use a `NavigationSplitView`: the conversation list (search and filters) in the sidebar, the chat in the detail column. Branch at the root view.
   - **Built 2026-11-10** (`MailboxRootView`, `MacMailboxView`). The detailed plan, and the restyle to match Messages that follows it, are in `docs/mac-imessage-ui-plan.md`.
-  - **Used with real mail 2026-11-12 (build 528):** the sidebar drew the wrong rows after the first sync, because its rows were identified by `NSManagedObjectID`. Fixed with `MacSidebarRowID` (`docs/mac-imessage-ui-plan.md`, "Found in the app"), and a Debug build with the fix was used on the real mailbox the same day with every row right. Not yet seen in a TestFlight build.
+  - **Used with real mail 2026-11-12 (build 528):** the sidebar drew the wrong rows after the first sync, because its rows were identified by `NSManagedObjectID`. Fixed with `MacSidebarRowID` (PR 399, merged 2026-11-12; `docs/mac-imessage-ui-plan.md`, "Found in the app"), and a Debug build with the fix was used on the real mailbox the same day with every row right. Nobody has recorded checking the rows in a TestFlight build.
   - Keep the iPhone's `NavigationStack` as it is. The transcript's anchoring and reveal logic was tuned inside it.
 - **Settings.** A `Settings` scene replaces `Settings.bundle`, which has three rows: account email, a Sign Out toggle, and the version.
   - Sign Out calls the existing `AuthSession.signOut`. Don't add a seventh AuthSession path.
@@ -634,11 +647,15 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
 
 ## Phase 3: parity, then daily use
 
+**Status (2026-11-13): not started.** Phase 2 built some of the desktop input behaviors ahead of it: Return sends in the reply field, and rows, bubbles and attachments have right-click menus.
+
 - **Close the parity gaps:** the desktop input behaviors. The From: alias picker is not built (decision 5).
 - **Re-rank the iOS items in `docs/scalability-review.md`.** They now apply to the Mac too, and a desktop app that stays open all day runs the 60 s sync loop for hours.
 - **Use the Mac app as your only desktop mail client for about two weeks.** Leave the web app online but unused.
 
 ## Phase 4: retire the web app
+
+**Status (2026-11-13): not started.** `web/`, `.github/workflows/web.yml` and `.claude/launch.json` are still in the repository, and decision 4 is open. The Netlify site, the DNS record and the OAuth client were not looked at.
 
 Do these steps in order. Everything before the DNS and OAuth deletions can be undone.
 
