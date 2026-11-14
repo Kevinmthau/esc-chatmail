@@ -58,6 +58,83 @@ final class PastedImageFileTests: XCTestCase {
         XCTAssertEqual(folders(), [])
     }
 
+    // MARK: - What `remove` leaves alone
+
+    /// A file in `folderName` under the test's directory, with `others` beside it.
+    private func makeFile(named name: String, inFolder folderName: String, beside others: [String] = []) throws -> URL {
+        let folder = directory.appendingPathComponent(folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        for other in others {
+            try Data("other".utf8).write(to: folder.appendingPathComponent(other))
+        }
+        let file = folder.appendingPathComponent(name, isDirectory: false)
+        try Data("kept".utf8).write(to: file)
+        return file
+    }
+
+    /// `remove` takes the folder a file is in, so it must be a folder `write` made. A file of
+    /// the user's own that reached it would take the user's folder with it, and one written
+    /// straight into the temporary directory would take everything the app keeps there.
+    ///
+    /// Revert-check: dropping the `UUID(uuidString:)` term from
+    /// `PastedImageFile.isAloneInAFolderOfItsOwn` makes this fail: the folder is removed.
+    func testRemove_aFileInAFolderNotNamedByAUUID_isLeftWithItsFolder() throws {
+        let file = try makeFile(named: "Pasted Image.png", inFolder: "Screenshots")
+
+        PastedImageFile.remove([file])
+
+        XCTAssertEqual(try Data(contentsOf: file), Data("kept".utf8))
+        XCTAssertEqual(folders(), ["Screenshots"])
+    }
+
+    /// Revert-check: dropping the `== baseName` term from
+    /// `PastedImageFile.isAloneInAFolderOfItsOwn` makes the first file fail, and dropping
+    /// the `pathExtension.isEmpty` term makes the second fail: each is removed with its folder.
+    func testRemove_aFileWithAnotherName_isLeftWithItsFolder() throws {
+        let renamed = try makeFile(named: "Report.pdf", inFolder: UUID().uuidString)
+        let bare = try makeFile(named: "Pasted Image", inFolder: UUID().uuidString)
+
+        PastedImageFile.remove([renamed, bare])
+
+        XCTAssertEqual(try Data(contentsOf: renamed), Data("kept".utf8))
+        XCTAssertEqual(try Data(contentsOf: bare), Data("kept".utf8))
+        XCTAssertEqual(folders().count, 2)
+    }
+
+    /// `write` puts each file in a folder of its own, so a folder that holds anything else is
+    /// not one of its.
+    ///
+    /// Revert-check: answering true from `PastedImageFile.isAloneInAFolderOfItsOwn` whatever
+    /// the folder holds (`return contents.contains(file.lastPathComponent)`) makes this fail:
+    /// the other file goes with the folder.
+    func testRemove_aFileThatIsNotAloneInItsFolder_isLeftWithItsFolder() throws {
+        let folder = UUID().uuidString
+        let file = try makeFile(named: "Pasted Image.png", inFolder: folder, beside: ["Notes.txt"])
+
+        PastedImageFile.remove([file])
+
+        XCTAssertEqual(try Data(contentsOf: file), Data("kept".utf8))
+        XCTAssertEqual(
+            try FileManager.default.contentsOfDirectory(atPath: file.deletingLastPathComponent().path).sorted(),
+            ["Notes.txt", "Pasted Image.png"]
+        )
+    }
+
+    /// One refused file does not stop the others of a request being removed.
+    ///
+    /// Revert-check: leaving `PastedImageFile.remove` at the first file it passes over
+    /// (`guard isAloneInAFolderOfItsOwn(…) else { return }` in place of the `where`) makes
+    /// this fail: the written file stays.
+    func testRemove_passesOverWhatItDidNotWrite_andStillTakesWhatItDid() throws {
+        let kept = try makeFile(named: "Pasted Image.png", inFolder: "Screenshots")
+        let written = try PastedImageFile.write(Data("one".utf8), fileExtension: "png", in: directory)
+
+        PastedImageFile.remove([kept, written])
+
+        XCTAssertEqual(folders(), ["Screenshots"])
+        XCTAssertEqual(try Data(contentsOf: kept), Data("kept".utf8))
+    }
+
     /// Revert-check: deleting the `removeItem` call from `PastedImageFile.removeAll` makes
     /// this fail.
     func testRemoveAll_takesEveryPastedImage() throws {

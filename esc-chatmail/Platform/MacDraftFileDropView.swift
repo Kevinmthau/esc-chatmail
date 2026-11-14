@@ -127,23 +127,33 @@ final class MacDraftFileDropView: NSView {
 
     // MARK: - Pasted into the reply field
 
+    /// Whether a paste into the reply field is taken now (`DraftFileDropPolicy.takesPaste`):
+    /// where a drop would be, so not while the chat's window has a sheet attached. All three
+    /// of a paste's ways in ask this and nothing else.
+    private var takesPaste: Bool {
+        DraftFileDropPolicy.takesPaste(
+            windowHasSheet: window?.attachedSheet != nil,
+            acceptsFiles: acceptsFiles()
+        )
+    }
+
     /// Files copied elsewhere and pasted into the reply field (`MacReplyTextView`): taken as
     /// dropped files are, and where a drop would be. Returns whether they were taken.
     func receivePastedFiles(_ urls: [URL]) -> Bool {
-        guard !urls.isEmpty, acceptsFiles() else { return false }
+        guard !urls.isEmpty, takesPaste else { return false }
         return onDropFiles(urls)
     }
 
     /// Whether the reply can take a pasted image now, asked before its bytes are written to
     /// a file.
     var acceptsPastedImage: Bool {
-        acceptsFiles()
+        takesPaste
     }
 
     /// A pasted image, written to `file`. Returns whether it was taken; where it was not the
     /// file is the caller's to remove.
     func receivePastedImageFile(_ file: URL) -> Bool {
-        guard acceptsFiles() else { return false }
+        guard takesPaste else { return false }
         return onPasteImageFile(file)
     }
 

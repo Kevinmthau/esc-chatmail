@@ -17,9 +17,11 @@ import XCTest
 /// file is dragged and no test asks AppKit which view it would choose: that was measured once,
 /// through AppKit's private hit test, and is written down in `docs/mac-app-plan.md` ("Files").
 /// So these pin what each view does with a drag it is given, not that it is given it, and
-/// nothing here has been seen in the app. One term of the drop view's answer is not run here
-/// either: that its window has a sheet attached, which would mean presenting one. The rule
-/// for it is `DraftFileDropPolicyTests`'; that the view reads `attachedSheet` is not pinned.
+/// nothing here has been seen in the app. No sheet is presented either: AppKit attaches a real
+/// one only to a window on screen, so "the chat's window has a sheet attached" is a window
+/// that answers so (`SheetStubWindow`). That pins that the drop view asks its window about a
+/// sheet, for a drag and for a paste; whether AppKit offers a drag, or sends Command-V, to a
+/// window under a real sheet was not measured.
 @MainActor
 final class MacDraftFileDropViewTests: XCTestCase {
     // MARK: - The drop view
@@ -147,6 +149,30 @@ final class MacDraftFileDropViewTests: XCTestCase {
         XCTAssertNotEqual(text.draggingSequenceNumber, drag.draggingSequenceNumber)
         XCTAssertEqual(harness.dropView.draggingEntered(text), [])
         harness.close()
+    }
+
+    /// The chat is behind the sheet then, and an alert about the drop would wait unseen
+    /// behind it too.
+    ///
+    /// Revert-check: passing `windowHasSheet: false` in `MacDraftFileDropView.operation(for:)`
+    /// whatever the window answers makes this fail: the drag is a copy and the drop is taken
+    /// with the sheet up.
+    func testFileDrag_whileTheChatsWindowHasASheet_isRefused_andTakenOnceTheSheetIsGone() throws {
+        let window = SheetStubWindow.make(identifier: nil, hasSheet: true)
+        let harness = try Harness(window: window)
+        defer { harness.close() }
+        let drag = FakeDraggingInfo.files([URL(fileURLWithPath: "/tmp/One.pdf")], in: harness.window)
+
+        XCTAssertEqual(harness.dropView.draggingEntered(drag), [])
+        XCTAssertFalse(harness.dropView.prepareForDragOperation(drag))
+        XCTAssertFalse(harness.dropView.performDragOperation(drag))
+        XCTAssertTrue(harness.model.drops.isEmpty)
+
+        // The premise: nothing but the sheet was in the way.
+        window.stubbedSheet = nil
+        XCTAssertEqual(harness.dropView.draggingUpdated(drag), .copy)
+        XCTAssertTrue(harness.dropView.performDragOperation(drag))
+        XCTAssertEqual(harness.model.drops.count, 1)
     }
 
     /// The drop view is behind the whole chat and must take no click from it.
@@ -378,10 +404,13 @@ final class MacDraftFileDropViewTests: XCTestCase {
 
     /// A pasteboard of the test's own for a paste, never the one the user copies to. The
     /// test releases it: it lives in the pasteboard server.
+    ///
+    /// - Parameter address: A URL the pasteboard carries as `public.url`, as a string.
     private func pasteboard(
         files: [URL] = [],
         text: String? = nil,
-        image: (type: NSPasteboard.PasteboardType, data: Data)? = nil
+        image: (type: NSPasteboard.PasteboardType, data: Data)? = nil,
+        address: String? = nil
     ) -> NSPasteboard {
         var objects: [NSPasteboardWriting] = files.map { $0 as NSURL }
         if let text { objects.append(text as NSString) }
@@ -390,8 +419,15 @@ final class MacDraftFileDropViewTests: XCTestCase {
             pasteboard.addTypes([image.type], owner: nil)
             pasteboard.setData(image.data, forType: image.type)
         }
+        if let address {
+            pasteboard.addTypes([.URL], owner: nil)
+            pasteboard.setString(address, forType: .URL)
+        }
         return pasteboard
     }
+
+    /// The address of a picture on a web page, for a pasteboard as Copy Image leaves it.
+    private static let pictureAddress = "https://example.com/pictures/cat.png"
 
     private func makePasteDirectory() throws -> URL {
         let directory = FileManager.default.temporaryDirectory
@@ -497,6 +533,94 @@ final class MacDraftFileDropViewTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
         XCTAssertEqual(refusals.count, 0)
         harness.close()
+    }
+
+    /// Copy Image in a web view writes the picture and, as the pasteboard's text and its URL
+    /// alike, the address it came from. The picture is what was copied: it is attached, and
+    /// the address is not typed.
+    ///
+    /// HONEST SCOPE: the pasteboard is the test's own, filled with what WebKit's source says
+    /// Copy Image writes (a TIFF, `public.url` and a string that are the same address).
+    /// Nothing was copied in Safari, whose pasteboard has not been looked at.
+    ///
+    /// Revert-check: passing `textIsOnlyTheCopiedAddress: false` in
+    /// `MacReplyTextView.pasteAction` makes this fail: the paste is left to the text view.
+    func testPaste_ofAnImageCopiedWithItsAddress_attachesTheImage_andTypesNothing() throws {
+        let tiff = try TestImageData.encoded(as: .tiff, pixelSizes: [CGSize(width: 24, height: 16)])
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(text: Self.pictureAddress, image: (.tiff, tiff), address: Self.pictureAddress)
+        defer { copied.releaseGlobally() }
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        defer { harness.close() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        let file = try XCTUnwrap(harness.model.pastedImageFiles.first)
+        XCTAssertEqual(file.lastPathComponent, "Pasted Image.png")
+        XCTAssertEqual(harness.model.pastedImageFiles.count, 1)
+        XCTAssertTrue(harness.model.drops.isEmpty)
+        XCTAssertEqual(textView.string, "Hello")
+        XCTAssertEqual(refusals.count, 0)
+    }
+
+    /// A paste is taken where a drop is, so not while the chat's window has a sheet attached.
+    /// The sheet does not keep Command-V from the field behind it: an alert has no paste of
+    /// its own, and the command goes on to the main window's first responder.
+    ///
+    /// The drop view's three ways in for a paste are asked one by one, then the field, which
+    /// beeps and types nothing.
+    ///
+    /// Revert-check: asking `acceptsFiles()` in place of `takesPaste` in
+    /// `MacDraftFileDropView.receivePastedFiles`, in `acceptsPastedImage` or in
+    /// `receivePastedImageFile` makes the assertion on that one fail, and passing
+    /// `windowHasSheet: false` in `takesPaste` makes all of them fail.
+    func testPaste_whileTheChatsWindowHasASheet_isRefused_andTakenOnceTheSheetIsGone() throws {
+        let window = SheetStubWindow.make(identifier: nil, hasSheet: true)
+        let harness = try Harness(window: window, text: "Hello")
+        defer { harness.close() }
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = [URL(fileURLWithPath: "/tmp/One.pdf")]
+        let copiedFiles = pasteboard(files: files)
+        let copiedImage = pasteboard(image: (.png, Self.pngBytes))
+        defer {
+            copiedFiles.releaseGlobally()
+            copiedImage.releaseGlobally()
+        }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(
+            pastingFrom: copiedFiles,
+            imageDirectory: directory,
+            refusals: refusals
+        )
+        let imageFile = directory.appendingPathComponent("Handed over.png")
+
+        XCTAssertFalse(harness.dropView.receivePastedFiles(files))
+        XCTAssertFalse(harness.dropView.acceptsPastedImage)
+        XCTAssertFalse(harness.dropView.receivePastedImageFile(imageFile))
+        XCTAssertTrue(textView.pasteAttachments())
+        textView.pasteboardForPaste = { copiedImage }
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertTrue(harness.model.drops.isEmpty)
+        XCTAssertTrue(harness.model.pastedImageFiles.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        XCTAssertEqual(refusals.count, 2)
+        XCTAssertEqual(textView.string, "Hello")
+
+        // The premise: nothing but the sheet was in the way.
+        window.stubbedSheet = nil
+        XCTAssertTrue(harness.dropView.acceptsPastedImage)
+        XCTAssertTrue(textView.pasteAttachments())
+        textView.pasteboardForPaste = { copiedFiles }
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertEqual(harness.model.pastedImageFiles.count, 1)
+        XCTAssertEqual(harness.model.drops, [files])
+        XCTAssertEqual(refusals.count, 2)
     }
 
     /// A screenshot taken to the clipboard is bytes with no file. They are written to a file
@@ -701,11 +825,18 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
-    /// What the field reads off a pasteboard, which decides both what Paste does and whether
-    /// the field answers for the command itself.
+    /// What the field makes of a pasteboard: what Paste does with it (`pasteAction(for:)`),
+    /// and whether the field answers for the command itself (`fieldEnablesPaste(for:)`),
+    /// which it does only where the kinds alone say Paste attaches something.
     ///
     /// Revert-check: dropping `.tiff` from `MacReplyTextView.pastedImageTypes` makes the
-    /// TIFF assertion fail: a selection copied in Preview would paste as nothing.
+    /// TIFF assertions fail: a selection copied in Preview would paste as nothing. Passing
+    /// `textIsOnlyTheCopiedAddress: false` in `MacReplyTextView.pasteAction` makes the
+    /// picture copied with its address fail, and comparing the text with itself in
+    /// `textIsOnlyTheAddress(on:)` (`address: pasteboard.string(forType: .string)`) makes
+    /// the words copied with a picture and a link fail. Answering `carries.files` alone
+    /// from `MacReplyTextView.fieldEnablesPaste(for:)` makes its three picture assertions
+    /// fail: with only an image copied, Paste is disabled.
     func testPasteAction_isReadFromWhatThePasteboardHas() {
         let files = pasteboard(files: [URL(fileURLWithPath: "/tmp/One.pdf")], text: "One.pdf")
         let words = pasteboard(text: "Some words")
@@ -713,7 +844,26 @@ final class MacDraftFileDropViewTests: XCTestCase {
         let tiff = pasteboard(image: (.tiff, Self.pngBytes))
         let jpeg = pasteboard(image: (NSPasteboard.PasteboardType("public.jpeg"), Self.pngBytes))
         let nothing = pasteboard()
-        defer { [files, words, png, tiff, jpeg, nothing].forEach { $0.releaseGlobally() } }
+        // Copy Image in a web view: the picture, and its address as the text and the URL.
+        let pictureWithItsAddress = pasteboard(
+            text: Self.pictureAddress,
+            image: (.tiff, Self.pngBytes),
+            address: Self.pictureAddress
+        )
+        let wordsWithAPictureAndALink = pasteboard(
+            text: "A cat",
+            image: (.tiff, Self.pngBytes),
+            address: Self.pictureAddress
+        )
+        // Text that reads as an address on a pasteboard that carries no URL is words.
+        let addressAsWordsWithAPicture = pasteboard(text: Self.pictureAddress, image: (.png, Self.pngBytes))
+        let addressAlone = pasteboard(text: Self.pictureAddress, address: Self.pictureAddress)
+        defer {
+            [
+                files, words, png, tiff, jpeg, nothing,
+                pictureWithItsAddress, wordsWithAPictureAndALink, addressAsWordsWithAPicture, addressAlone
+            ].forEach { $0.releaseGlobally() }
+        }
 
         XCTAssertEqual(MacReplyTextView.pasteAction(for: files), .attachFiles)
         XCTAssertEqual(MacReplyTextView.pasteAction(for: words), .pasteAsText)
@@ -721,6 +871,131 @@ final class MacDraftFileDropViewTests: XCTestCase {
         XCTAssertEqual(MacReplyTextView.pasteAction(for: tiff), .attachImage)
         XCTAssertEqual(MacReplyTextView.pasteAction(for: jpeg), .attachImage)
         XCTAssertEqual(MacReplyTextView.pasteAction(for: nothing), .pasteAsText)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: pictureWithItsAddress), .attachImage)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: wordsWithAPictureAndALink), .pasteAsText)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: addressAsWordsWithAPicture), .pasteAsText)
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: addressAlone), .pasteAsText)
+
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: files))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: png))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: tiff))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: jpeg))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: words))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: nothing))
+        // Text beside the picture: the text view's to answer, whatever the text turns out
+        // to be when a paste reads it.
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: pictureWithItsAddress))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: wordsWithAPictureAndALink))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: addressAlone))
+    }
+
+    /// The Edit menu is validated with no paste asked for, so validating Paste reads nothing
+    /// off the pasteboard: not the picture, and not the text and the URL beside it, which is
+    /// what a paste reads to tell a picture's address from words. The pasteboards here give
+    /// their data when it is asked for, which is how a read shows.
+    ///
+    /// A picture copied with its address is then the text view's to enable Paste for, and it
+    /// does: such a pasteboard carries kinds this text view reads.
+    ///
+    /// HONEST SCOPE: the text view's own validation is not run, because it reads the
+    /// pasteboard the user copies to. What is asked is whether it has a kind to read among
+    /// those such a pasteboard says it has (`preferredPasteboardType`, given the pasteboard's
+    /// own `types`: the text view knows plain text by its older name, which a pasteboard
+    /// lists beside the newer one and `.string` alone does not). Whether macOS 27 shows its
+    /// alert for a read like the one this keeps out of validation was not measured.
+    ///
+    /// Revert-check: asking `Self.pasteAction(for: pasteboardForPaste()) != .pasteAsText` in
+    /// `MacReplyTextView.enablesPasteItself`, as it first did, makes the assertions on the
+    /// picture copied with its address fail: the field answers for the command, having read
+    /// the text and the URL.
+    func testPasteValidation_readsNothingOffThePasteboard_andLeavesAPictureWithTextToTheTextView() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        defer { harness.close() }
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Copy Image in a web view: the picture, and its address as the text and the URL.
+        let picture = LazyPasteboardOwner([
+            .tiff: Self.pngBytes,
+            .URL: Data(Self.pictureAddress.utf8),
+            .string: Data(Self.pictureAddress.utf8)
+        ])
+        let pictureBoard = picture.makePasteboard()
+        let pictureAlone = LazyPasteboardOwner([.tiff: Self.pngBytes])
+        let pictureAloneBoard = pictureAlone.makePasteboard()
+        defer {
+            pictureBoard.releaseGlobally()
+            pictureAloneBoard.releaseGlobally()
+        }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(
+            pastingFrom: pictureBoard,
+            imageDirectory: directory,
+            refusals: refusals
+        )
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let matchStyleItem = NSMenuItem(
+            title: "Paste and Match Style",
+            action: #selector(NSTextView.pasteAsPlainText(_:)),
+            keyEquivalent: "V"
+        )
+
+        XCTAssertFalse(textView.enablesPasteItself(pasteItem))
+        XCTAssertFalse(textView.enablesPasteItself(matchStyleItem))
+        XCTAssertEqual(picture.provided, [])
+        // Left to the text view, which has something to read beside the picture, and so
+        // enables Paste. A picture alone it does not read: that one is the field's to enable.
+        XCTAssertNotNil(
+            textView.preferredPasteboardType(from: pictureBoard.types ?? [], restrictedToTypesFrom: nil)
+        )
+        XCTAssertNil(
+            textView.preferredPasteboardType(from: pictureAloneBoard.types ?? [], restrictedToTypesFrom: nil)
+        )
+
+        textView.pasteboardForPaste = { pictureAloneBoard }
+        XCTAssertTrue(textView.enablesPasteItself(pasteItem))
+        XCTAssertEqual(picture.provided, [])
+        XCTAssertEqual(pictureAlone.provided, [])
+
+        // The premise: a read does show here, and a paste is what makes it.
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: pictureBoard), .attachImage)
+        XCTAssertTrue(picture.provided.contains(.string))
+        XCTAssertTrue(picture.provided.contains(.URL))
+    }
+
+    /// What Paste would do is decided before the chat is asked whether it can take a
+    /// picture, so deciding it reads no picture, and it reads the text only off a pasteboard
+    /// that carries a picture, text and a URL together: cells copied from a spreadsheet can
+    /// be long. The pasteboards here give their data when it is asked for, which is how a
+    /// read shows.
+    ///
+    /// Revert-check: reading the image in `MacReplyTextView.carriedKinds(on:)`
+    /// (`image: imageData(on: pasteboard) != nil`) makes the cells' assertion and the
+    /// picture's TIFF assertion fail: each pasteboard was asked for its TIFF.
+    /// Dropping the `availableType(from: [.URL])` guard from `textIsOnlyTheAddress(on:)`
+    /// makes the cells' assertion fail: their text is read.
+    func testPasteAction_readsNoPicture_andTheTextOnlyBesideAPictureAndAURL() {
+        let cells = LazyPasteboardOwner([.string: Data("A1\tB1".utf8), .tiff: Self.pngBytes])
+        let cellsBoard = cells.makePasteboard()
+        let picture = LazyPasteboardOwner([
+            .tiff: Self.pngBytes,
+            .URL: Data(Self.pictureAddress.utf8),
+            .string: Data(Self.pictureAddress.utf8)
+        ])
+        let pictureBoard = picture.makePasteboard()
+        defer {
+            cellsBoard.releaseGlobally()
+            pictureBoard.releaseGlobally()
+        }
+
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: cellsBoard), .pasteAsText)
+        XCTAssertEqual(cells.provided, [])
+
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: pictureBoard), .attachImage)
+        XCTAssertFalse(picture.provided.contains(.tiff))
+        // The premise: a read does show here.
+        XCTAssertTrue(picture.provided.contains(.string))
+        XCTAssertEqual(cellsBoard.data(forType: .tiff), Self.pngBytes)
+        XCTAssertEqual(cells.provided, [.tiff])
     }
 
     /// Whoever imports a request removes the files the app wrote only to carry it. A request
@@ -947,6 +1222,32 @@ private final class PickerHarness {
 /// How many pastes the reply field refused, where the app beeps.
 private final class PasteRefusals {
     var count = 0
+}
+
+/// Owns a pasteboard of the test's own whose data is given only when it is asked for, and
+/// keeps what was asked for: how a test sees which kinds a piece of code read.
+private final class LazyPasteboardOwner: NSObject, NSPasteboardTypeOwner {
+    private let data: [NSPasteboard.PasteboardType: Data]
+    private(set) var provided: [NSPasteboard.PasteboardType] = []
+
+    init(_ data: [NSPasteboard.PasteboardType: Data]) {
+        self.data = data
+    }
+
+    /// A pasteboard that says it has every kind this owner holds, and has been given none.
+    /// The test releases it, and keeps this owner alive while it reads.
+    func makePasteboard() -> NSPasteboard {
+        let pasteboard = FakeDraggingInfo.pasteboard(holding: [])
+        pasteboard.declareTypes(Array(data.keys), owner: self)
+        return pasteboard
+    }
+
+    func pasteboard(_ sender: NSPasteboard, provideDataForType type: NSPasteboard.PasteboardType) {
+        provided.append(type)
+        if let bytes = data[type] {
+            sender.setData(bytes, forType: type)
+        }
+    }
 }
 
 private final class DropModel: ObservableObject {

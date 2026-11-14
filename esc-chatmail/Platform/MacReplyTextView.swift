@@ -45,9 +45,11 @@ final class MacReplyTextView: NSTextView {
     /// Says that a paste was refused, so it does not look ignored. The tests record it.
     var refusePaste: () -> Void = { NSSound.beep() }
 
-    /// A copied file is attached to the reply, and so is a copied image where nothing else
-    /// was copied with it (`ReplyFieldPastePolicy`). Left to the text view, a copied file is
-    /// pasted as its path (measured on this field, 2026-11-12) and a copied image as nothing.
+    /// A copied file is attached to the reply, and so is a copied image where no text was
+    /// copied with it but its own address (`ReplyFieldPastePolicy`). Left to the text view, a
+    /// copied file is pasted as its path (measured on this field, 2026-11-12) and a copied
+    /// image as nothing. An image copied in a web view would be pasted as its address, going
+    /// by what WebKit's source writes with it; that was not measured.
     override func paste(_ sender: Any?) {
         if !pasteAttachments() {
             super.paste(sender)
@@ -86,14 +88,60 @@ final class MacReplyTextView: NSTextView {
         }
     }
 
-    /// What Paste would do with `pasteboard` (`ReplyFieldPastePolicy`). Asks what kinds the
-    /// pasteboard has and reads none of them: this is asked each time the Edit menu is
-    /// validated, and a copied image can be large.
+    /// What Paste would do with `pasteboard` (`ReplyFieldPastePolicy`). Asked by a paste and
+    /// by nothing else: the Edit menu's validation asks `fieldEnablesPaste(for:)`, which
+    /// reads nothing.
+    ///
+    /// Asks what kinds the pasteboard has and never reads an image, which can be large and
+    /// is read only once the chat says it can take one. The one thing it can read is the
+    /// text (`textIsOnlyTheAddress(on:)`), and only where a picture and text were copied
+    /// together.
     static func pasteAction(for pasteboard: NSPasteboard) -> ReplyFieldPastePolicy.Action {
-        ReplyFieldPastePolicy.action(
-            carriesFiles: MacDraftFileDropView.carriesFiles(pasteboard),
-            carriesText: pasteboard.availableType(from: [.string]) != nil,
-            carriesImage: pasteboard.availableType(from: pastedImageTypes.map(\.type)) != nil
+        let carries = carriedKinds(on: pasteboard)
+        return ReplyFieldPastePolicy.action(
+            carriesFiles: carries.files,
+            carriesText: carries.text,
+            carriesImage: carries.image,
+            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress(on: pasteboard)
+        )
+    }
+
+    /// Whether the field enables Paste for `pasteboard` by its own rule
+    /// (`ReplyFieldPastePolicy.fieldEnablesPaste`): files, or a picture copied with no text.
+    ///
+    /// Decided from the kinds the pasteboard says it has, with nothing on it read. This is
+    /// asked each time the Edit menu is validated, which is not a paste: the text and the
+    /// URL are a paste's to read (`pasteAction(for:)`).
+    static func fieldEnablesPaste(for pasteboard: NSPasteboard) -> Bool {
+        let carries = carriedKinds(on: pasteboard)
+        return ReplyFieldPastePolicy.fieldEnablesPaste(
+            carriesFiles: carries.files,
+            carriesText: carries.text,
+            carriesImage: carries.image
+        )
+    }
+
+    /// The kinds of thing `pasteboard` says it has. Its types are asked about and nothing on
+    /// it is read, so this costs the same whatever was copied.
+    private static func carriedKinds(on pasteboard: NSPasteboard) -> (files: Bool, text: Bool, image: Bool) {
+        (
+            files: MacDraftFileDropView.carriesFiles(pasteboard),
+            text: pasteboard.availableType(from: [.string]) != nil,
+            image: pasteboard.availableType(from: pastedImageTypes.map(\.type)) != nil
+        )
+    }
+
+    /// Whether the text on `pasteboard` is only the address of the picture beside it, as
+    /// Copy Image in a web view leaves it (`ReplyFieldPastePolicy.textIsOnlyTheAddress`).
+    ///
+    /// The text is read only from a pasteboard that says it carries a URL (`public.url`),
+    /// which cells copied from a spreadsheet do not: their text, which can be long, is still
+    /// never read here.
+    private static func textIsOnlyTheAddress(on pasteboard: NSPasteboard) -> Bool {
+        guard pasteboard.availableType(from: [.URL]) != nil else { return false }
+        return ReplyFieldPastePolicy.textIsOnlyTheAddress(
+            text: pasteboard.string(forType: .string),
+            address: pasteboard.string(forType: .URL)
         )
     }
 
@@ -108,9 +156,14 @@ final class MacReplyTextView: NSTextView {
     /// or image to attach. False for every other command, and for a paste of text, which
     /// are the text view's to answer. Apart from the override so a test can ask it: the text
     /// view's answer is read from the pasteboard the user copies to.
+    ///
+    /// It reads nothing off the pasteboard (`fieldEnablesPaste(for:)`), and must not come to
+    /// ask `pasteAction(for:)`, which can read the text: this runs whenever the Edit menu is
+    /// validated, with no paste asked for. A picture copied with its address is left to the
+    /// text view here, which enables Paste for the text beside it.
     func enablesPasteItself(_ item: NSValidatedUserInterfaceItem) -> Bool {
         let isPaste = item.action == #selector(paste(_:)) || item.action == #selector(pasteAsPlainText(_:))
-        return isPaste && isEditable && Self.pasteAction(for: pasteboardForPaste()) != .pasteAsText
+        return isPaste && isEditable && Self.fieldEnablesPaste(for: pasteboardForPaste())
     }
 
     /// Writes the image on `pasteboard` to a file of the app's own and hands it to the chat,
