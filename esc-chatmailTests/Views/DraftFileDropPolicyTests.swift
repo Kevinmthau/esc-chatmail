@@ -86,6 +86,18 @@ final class DraftFileDropPolicyTests: XCTestCase {
         XCTAssertFalse(takes(accepts: false))
     }
 
+    /// A paste into the reply field is taken where a drop is. A sheet on the chat's window
+    /// does not keep Command-V from the field behind it, so the sheet is asked about here.
+    ///
+    /// Revert-check: dropping either term from `DraftFileDropPolicy.takesPaste` makes the
+    /// assertion that turns only that term fail.
+    func testTakesPaste_onlyIntoAReplyThatCanTakeIt_withNoSheetUp() {
+        XCTAssertTrue(DraftFileDropPolicy.takesPaste(windowHasSheet: false, acceptsFiles: true))
+        XCTAssertFalse(DraftFileDropPolicy.takesPaste(windowHasSheet: true, acceptsFiles: true))
+        XCTAssertFalse(DraftFileDropPolicy.takesPaste(windowHasSheet: false, acceptsFiles: false))
+        XCTAssertFalse(DraftFileDropPolicy.takesPaste(windowHasSheet: true, acceptsFiles: false))
+    }
+
     /// A second import would share the composer's one "processing" flag with the first, and
     /// the first to end would enable Send over the other's placeholder.
     ///

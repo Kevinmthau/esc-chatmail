@@ -76,6 +76,22 @@ enum DraftFileDropPolicy {
         !windowHasSheet && carriesFiles && sourceAllowsCopy && acceptsFiles
     }
 
+    /// Whether files or an image pasted into the reply field are taken
+    /// (`MacDraftFileDropView.receivePastedFiles`, `acceptsPastedImage`,
+    /// `receivePastedImageFile`). A paste is taken where a drop is.
+    ///
+    /// - Parameters:
+    ///   - windowHasSheet: The chat's window has a sheet attached, as for `takesDrag`. A sheet
+    ///     does not keep Paste from the field behind it: an alert has no `paste:` of its own,
+    ///     so Command-V goes on to the main window's first responder, which is the reply field
+    ///     (read from AppKit's rule for where a command goes, not measured). The attachment
+    ///     would be added behind the sheet, and its alert would wait unseen there (review of
+    ///     PR 421, 2026-11-14).
+    ///   - acceptsFiles: `acceptsFiles(allowsDraftMutation:isProcessingAttachments:hasPendingDrop:)`.
+    static func takesPaste(windowHasSheet: Bool, acceptsFiles: Bool) -> Bool {
+        !windowHasSheet && acceptsFiles
+    }
+
     static func decision(
         droppedURLs: [URL],
         allowsDraftMutation: Bool,

@@ -46,11 +46,33 @@ enum PastedImageFile {
     }
 
     /// Removes files `write` made, each with the folder it is alone in. A file that is
-    /// already gone is passed over.
+    /// already gone is passed over, and so is anything `write` did not make
+    /// (`isAloneInAFolderOfItsOwn`).
     static func remove(_ files: [URL], fileManager: FileManager = .default) {
-        for file in files {
+        for file in files where isAloneInAFolderOfItsOwn(file, fileManager: fileManager) {
             try? fileManager.removeItem(at: file.deletingLastPathComponent())
         }
+    }
+
+    /// Whether `file` is where `write` puts one: named `Pasted Image.<extension>`, in a folder
+    /// named by a UUID, with nothing else in that folder.
+    ///
+    /// `remove` takes the whole folder, and it is handed whatever a request carries as its
+    /// temporary files (`DraftFileDrop.temporaryFileURLs`). Only a comment kept a user's own
+    /// file from being put among them, and for one that was, or for a file written straight
+    /// into the temporary directory, the folder removed would be the user's, or everything the
+    /// app keeps there (review of PR 421, 2026-11-14). The shape is asked about, not the
+    /// `PastedImages` path, because `write` is given its directory.
+    static func isAloneInAFolderOfItsOwn(_ file: URL, fileManager: FileManager = .default) -> Bool {
+        let folder = file.deletingLastPathComponent()
+        guard file.isFileURL,
+              !file.pathExtension.isEmpty,
+              file.deletingPathExtension().lastPathComponent == baseName,
+              UUID(uuidString: folder.lastPathComponent) != nil,
+              let contents = try? fileManager.contentsOfDirectory(atPath: folder.path) else {
+            return false
+        }
+        return contents == [file.lastPathComponent]
     }
 
     /// Removes every pasted image's file. At launch, when no import can be reading one.

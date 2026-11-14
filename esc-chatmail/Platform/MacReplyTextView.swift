@@ -45,9 +45,10 @@ final class MacReplyTextView: NSTextView {
     /// Says that a paste was refused, so it does not look ignored. The tests record it.
     var refusePaste: () -> Void = { NSSound.beep() }
 
-    /// A copied file is attached to the reply, and so is a copied image where nothing else
-    /// was copied with it (`ReplyFieldPastePolicy`). Left to the text view, a copied file is
-    /// pasted as its path (measured on this field, 2026-11-12) and a copied image as nothing.
+    /// A copied file is attached to the reply, and so is a copied image where no text was
+    /// copied with it but its own address (`ReplyFieldPastePolicy`). Left to the text view, a
+    /// copied file is pasted as its path (measured on this field, 2026-11-12), a copied image
+    /// as nothing, and an image copied in a web view as its address.
     override func paste(_ sender: Any?) {
         if !pasteAttachments() {
             super.paste(sender)
@@ -87,13 +88,29 @@ final class MacReplyTextView: NSTextView {
     }
 
     /// What Paste would do with `pasteboard` (`ReplyFieldPastePolicy`). Asks what kinds the
-    /// pasteboard has and reads none of them: this is asked each time the Edit menu is
-    /// validated, and a copied image can be large.
+    /// pasteboard has and never reads an image: this is asked each time the Edit menu is
+    /// validated, and a copied image can be large. The one thing it can read is the text
+    /// (`textIsOnlyTheAddress(on:)`), and only where a picture and text were copied together.
     static func pasteAction(for pasteboard: NSPasteboard) -> ReplyFieldPastePolicy.Action {
         ReplyFieldPastePolicy.action(
             carriesFiles: MacDraftFileDropView.carriesFiles(pasteboard),
             carriesText: pasteboard.availableType(from: [.string]) != nil,
-            carriesImage: pasteboard.availableType(from: pastedImageTypes.map(\.type)) != nil
+            carriesImage: pasteboard.availableType(from: pastedImageTypes.map(\.type)) != nil,
+            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress(on: pasteboard)
+        )
+    }
+
+    /// Whether the text on `pasteboard` is only the address of the picture beside it, as
+    /// Copy Image in a web view leaves it (`ReplyFieldPastePolicy.textIsOnlyTheAddress`).
+    ///
+    /// The text is read only from a pasteboard that says it carries a URL (`public.url`),
+    /// which cells copied from a spreadsheet do not: their text, which can be long, is still
+    /// never read here.
+    private static func textIsOnlyTheAddress(on pasteboard: NSPasteboard) -> Bool {
+        guard pasteboard.availableType(from: [.URL]) != nil else { return false }
+        return ReplyFieldPastePolicy.textIsOnlyTheAddress(
+            text: pasteboard.string(forType: .string),
+            address: pasteboard.string(forType: .URL)
         )
     }
 
