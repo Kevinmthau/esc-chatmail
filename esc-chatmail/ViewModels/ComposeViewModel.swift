@@ -31,6 +31,10 @@ final class ComposeViewModel: ObservableObject {
     @Published var body = ""
     @Published var isSending = false
     @Published var errorAlert: ComposeErrorAlert?
+    /// Files dropped on the sheet (the Mac), on their way to the draft's attachments. The
+    /// input bar imports a request once and clears it as it starts on it
+    /// (`ComposeInputBar`); until then the sheet takes no other drop. Nothing sets one on iOS.
+    @Published var pendingFileDrop: DraftFileDrop?
     @Published var skippedForwardAttachmentCount = 0
     @Published private(set) var forwardedPreviewHTML: String?
     private(set) var lastSentConversationReference: ConversationReference?
@@ -296,6 +300,51 @@ final class ComposeViewModel: ObservableObject {
 
     func setAttachmentImportInProgress(_ isInProgress: Bool, id: UUID) {
         attachmentManager.setImportInProgress(isInProgress, id: id)
+    }
+
+    // MARK: - Dropped files (the Mac)
+
+    /// Whether this sheet's draft can be given a dropped file at all
+    /// (`DraftFileDropPolicy.composeSheetAllowsDrop`).
+    private var allowsDroppedFiles: Bool {
+        DraftFileDropPolicy.composeSheetAllowsDrop(
+            // The input bar, which has the pickers, is drawn where there is no subject field.
+            showsAttachmentControls: !showSubjectField,
+            isSending: isSending,
+            hasDiscarded: hasDiscarded
+        )
+    }
+
+    /// Whether files dragged over the sheet may be dropped on it now
+    /// (`DraftFileDropPolicy.acceptsFiles`). False in Forward and in a new email for good,
+    /// which is also what keeps a dropped file's path out of their text.
+    var acceptsDroppedFiles: Bool {
+        DraftFileDropPolicy.acceptsFiles(
+            allowsDraftMutation: allowsDroppedFiles,
+            isProcessingAttachments: isImportingAttachments,
+            hasPendingDrop: pendingFileDrop != nil
+        )
+    }
+
+    /// Files were dropped on the sheet. Returns whether the drop was taken; a drop that is
+    /// taken becomes `pendingFileDrop`, which the input bar imports as the Files picker
+    /// imports its own.
+    func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+        switch DraftFileDropPolicy.decision(
+            droppedURLs: urls,
+            allowsDraftMutation: allowsDroppedFiles,
+            isProcessingAttachments: isImportingAttachments,
+            hasPendingDrop: pendingFileDrop != nil
+        ) {
+        case .refuse:
+            return false
+        case .accept(let fileURLs, let unsupportedFilenames):
+            pendingFileDrop = DraftFileDrop(
+                fileURLs: fileURLs,
+                unsupportedFilenames: unsupportedFilenames
+            )
+            return true
+        }
     }
 
     // MARK: - Send Message

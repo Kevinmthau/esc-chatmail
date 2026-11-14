@@ -62,6 +62,8 @@
         "MacChatReplyBarLayoutTests",
         "MacConversationSidebarRowIdentityTests",
         "MacConversationSidebarSelectionGuardTests",
+        "ComposeFileDropSourceTests",
+        "MacComposeFileDropOverlayTests",
         "MacDraftFileDropViewTests",
         "MacReplyTextFieldTests",
         "MacMainWindowCloseObserverTests",

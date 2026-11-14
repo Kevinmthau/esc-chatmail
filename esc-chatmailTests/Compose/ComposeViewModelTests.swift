@@ -657,6 +657,85 @@ final class ComposeViewModelTests: XCTestCase {
         XCTAssertTrue(recipientRemoved.hasUserEdits)
     }
 
+    // MARK: - Dropped files (the Mac's New Message sheet)
+
+    private let droppedPDF = URL(fileURLWithPath: "/tmp/Report.pdf")
+    private let droppedArchive = URL(fileURLWithPath: "/tmp/Everything.zip")
+
+    /// Revert-check: returning false from `ComposeViewModel.receiveDroppedFiles` for every
+    /// drop makes this fail.
+    func testDroppedFiles_onNewMessage_becomeAPendingRequestForTheInputBar() throws {
+        let viewModel = makeNewMessageViewModel()
+        XCTAssertTrue(viewModel.acceptsDroppedFiles)
+
+        XCTAssertTrue(viewModel.receiveDroppedFiles([droppedPDF, droppedArchive]))
+
+        let drop = try XCTUnwrap(viewModel.pendingFileDrop)
+        XCTAssertEqual(drop.fileURLs, [droppedPDF])
+        XCTAssertEqual(drop.unsupportedFilenames, ["Everything.zip"])
+    }
+
+    /// Forward has no attachment picker, so it takes no drop. Refusing it is also what keeps
+    /// the file's path from being typed into the message.
+    ///
+    /// Revert-check: passing `showsAttachmentControls: true` in
+    /// `ComposeViewModel.allowsDroppedFiles` makes this fail.
+    func testDroppedFiles_onForward_areRefused() {
+        let viewModel = makePrefilledForwardViewModel()
+        viewModel.setupForMode()
+
+        XCTAssertFalse(viewModel.acceptsDroppedFiles)
+        XCTAssertFalse(viewModel.receiveDroppedFiles([droppedPDF]))
+        XCTAssertNil(viewModel.pendingFileDrop)
+    }
+
+    /// The sheet holds one request, and a second would replace it: the first drop's files
+    /// were taken from the user and then never attached.
+    ///
+    /// Revert-check: passing `hasPendingDrop: false` in `ComposeViewModel.receiveDroppedFiles`
+    /// makes this fail.
+    func testDroppedFiles_whileAnEarlierDropWaits_areRefused_andTheFirstIsKept() throws {
+        let viewModel = makeNewMessageViewModel()
+        XCTAssertTrue(viewModel.receiveDroppedFiles([droppedPDF]))
+        let first = try XCTUnwrap(viewModel.pendingFileDrop)
+
+        XCTAssertFalse(viewModel.acceptsDroppedFiles)
+        XCTAssertFalse(viewModel.receiveDroppedFiles([URL(fileURLWithPath: "/tmp/Other.pdf")]))
+
+        XCTAssertEqual(viewModel.pendingFileDrop, first)
+    }
+
+    /// Revert-check: passing `isProcessingAttachments: false` in
+    /// `ComposeViewModel.receiveDroppedFiles` makes the first refusal fail; passing
+    /// `isSending: false` in `ComposeViewModel.allowsDroppedFiles` makes the second fail.
+    func testDroppedFiles_duringAnImportOrASend_areRefused() {
+        let importing = makeNewMessageViewModel()
+        let importID = UUID()
+        importing.setAttachmentImportInProgress(true, id: importID)
+        XCTAssertFalse(importing.acceptsDroppedFiles)
+        XCTAssertFalse(importing.receiveDroppedFiles([droppedPDF]))
+        importing.setAttachmentImportInProgress(false, id: importID)
+        XCTAssertTrue(importing.acceptsDroppedFiles)
+
+        let sending = makeNewMessageViewModel()
+        sending.isSending = true
+        XCTAssertFalse(sending.acceptsDroppedFiles)
+        XCTAssertFalse(sending.receiveDroppedFiles([droppedPDF]))
+        XCTAssertNil(sending.pendingFileDrop)
+    }
+
+    /// Revert-check: passing `hasDiscarded: false` in `ComposeViewModel.allowsDroppedFiles`
+    /// makes this fail: a file let go over a sheet that is closing would be imported into a
+    /// draft that has been thrown away.
+    func testDroppedFiles_afterTheSheetWasDiscarded_areRefused() {
+        let viewModel = makeNewMessageViewModel()
+        viewModel.discard()
+
+        XCTAssertFalse(viewModel.acceptsDroppedFiles)
+        XCTAssertFalse(viewModel.receiveDroppedFiles([droppedPDF]))
+        XCTAssertNil(viewModel.pendingFileDrop)
+    }
+
     private func makeNewMessageViewModel() -> ComposeViewModel {
         let deps = makeDependencies(authSession: makeTestAuthSession())
         return ComposeViewModel(mode: .newMessage, dependencies: deps.makeComposeDependencies())

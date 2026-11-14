@@ -158,6 +158,15 @@ struct ComposeInputBar: View {
                 }
             }
         )
+        // A file dropped on the Mac's sheet is imported when it arrives, or, where an import
+        // is running then, when that one ends (`importPendingFileDropIfIdle`). `initial`, for
+        // a drop taken before this bar was on screen to hear of it.
+        .onChange(of: viewModel.pendingFileDrop, initial: true) { _, _ in
+            importPendingFileDropIfIdle()
+        }
+        .onChange(of: viewModel.isImportingAttachments) { _, _ in
+            importPendingFileDropIfIdle()
+        }
         .confirmationDialog("Add Attachment", isPresented: $showAttachmentOptions) {
             Button("Photo Library") {
                 showPhotoPicker = true
@@ -167,6 +176,54 @@ struct ComposeInputBar: View {
             }
             Button("Cancel", role: .cancel) { }
         }
+    }
+
+    /// Starts on the sheet's pending drop unless an import is running
+    /// (`DraftFileDropPolicy.startsImport`), and is asked again when that import ends. The
+    /// chat's picker does the same (`AttachmentPicker`), for the same reason: the sheet told
+    /// AppKit the drop was taken, so the files did not slide back, and a request cleared
+    /// without being imported is files that were taken and never attached.
+    ///
+    /// The request is cleared before the import starts, so a view update between the two
+    /// cannot start it again.
+    private func importPendingFileDropIfIdle() {
+        guard DraftFileDropPolicy.startsImport(
+            hasPendingDrop: viewModel.pendingFileDrop != nil,
+            isProcessingAttachments: viewModel.isImportingAttachments
+        ), let drop = viewModel.pendingFileDrop else { return }
+        viewModel.pendingFileDrop = nil
+        importDroppedFiles(drop)
+    }
+
+    /// Imports the files of a drop as the Files picker imports its own, and names the files
+    /// the drop could not take in the sheet's alert.
+    private func importDroppedFiles(_ drop: DraftFileDrop) {
+        let unsupported = DraftFileDropPolicy.failures(forUnsupportedFilenames: drop.unsupportedFilenames)
+        if let message = DraftAttachmentImport.failureMessage(unsupported) {
+            viewModel.errorAlert = ComposeErrorAlert(message: message)
+        }
+        guard !drop.fileURLs.isEmpty else { return }
+        DocumentAttachmentImporter(
+            attachments: Binding(
+                get: { viewModel.attachmentManager.attachments },
+                set: { viewModel.attachmentManager.attachments = $0 }
+            ),
+            viewContext: viewContext,
+            onProcessingChanged: { isProcessing in
+                viewModel.setAttachmentImportInProgress(isProcessing, id: documentProcessingID)
+            },
+            onOperationChanged: { documentProcessingTask = $0 },
+            onImportFailures: { failures in
+                // With the lines for this drop's unsupported files, so the alert that names
+                // them is not replaced by one that names only its failed imports.
+                if let message = DraftAttachmentImport.failureMessage(unsupported + failures) {
+                    viewModel.errorAlert = ComposeErrorAlert(message: message)
+                }
+            },
+            // A dropped file opens no security scope in the sandbox; the pickers' files do.
+            securityScope: .ifOffered
+        )
+        .importDocuments(at: drop.fileURLs)
     }
 
     @ViewBuilder

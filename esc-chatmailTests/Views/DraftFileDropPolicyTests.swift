@@ -12,6 +12,26 @@ final class DraftFileDropPolicyTests: XCTestCase {
 
     // MARK: - Whether a drop is taken
 
+    /// A compose sheet takes a drop where it offers the Files picker, which is New Message.
+    ///
+    /// Revert-check: dropping any one of the three terms from
+    /// `DraftFileDropPolicy.composeSheetAllowsDrop` makes the assertion that turns only that
+    /// term fail.
+    func testComposeSheetAllowsDrop_onlyWithItsAttachmentControls_noSend_andNotDiscarded() {
+        func allows(controls: Bool = true, sending: Bool = false, discarded: Bool = false) -> Bool {
+            DraftFileDropPolicy.composeSheetAllowsDrop(
+                showsAttachmentControls: controls,
+                isSending: sending,
+                hasDiscarded: discarded
+            )
+        }
+
+        XCTAssertTrue(allows())
+        XCTAssertFalse(allows(controls: false))
+        XCTAssertFalse(allows(sending: true))
+        XCTAssertFalse(allows(discarded: true))
+    }
+
     /// Revert-check: dropping any one of the three terms from
     /// `DraftFileDropPolicy.acceptsFiles` makes the assertion that turns only that term fail.
     func testAcceptsFiles_onlyWhileNoSendNoImportAndNoEarlierDropOwnsTheDraft() {

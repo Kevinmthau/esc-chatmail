@@ -21,6 +21,10 @@ import AppKit
 /// It sits behind the chat's SwiftUI content and takes no clicks (`hitTest` is nil). A view the
 /// drag hit test passes over, because it is not registered for files, leaves the drag to this
 /// one behind it.
+///
+/// The New Message and Forward sheet has the same view over its content, not behind it
+/// (`View.macDraftFileDropOverlay`): its fields are SwiftUI's own and cannot hand a drag on,
+/// and in front this view is given every file drag over the sheet before they are.
 final class MacDraftFileDropView: NSView {
     /// Whether the reply can take files now (`ChatComposerState.acceptsDroppedFiles`).
     var acceptsFiles: @MainActor () -> Bool = { false }
@@ -122,7 +126,7 @@ final class MacDraftFileDropView: NSView {
 
     /// The drop view of `window` under a drag at `locationInWindow`, for a view in front of it
     /// that was given the drag (`MacFileDropForwarder`). Nil where there is none: a window
-    /// with no chat open, or a sheet, which is a window of its own.
+    /// with no chat open, or a sheet without one, which is a window of its own.
     static func dropView(in window: NSWindow?, at locationInWindow: NSPoint) -> MacDraftFileDropView? {
         guard let contentView = window?.contentView else { return nil }
         return dropView(under: contentView, at: locationInWindow)
