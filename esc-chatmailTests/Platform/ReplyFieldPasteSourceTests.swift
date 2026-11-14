@@ -43,6 +43,24 @@ final class ReplyFieldPasteSourceTests: XCTestCase {
         ))
     }
 
+    /// The Edit menu is validated with no paste asked for, so the validation asks about the
+    /// kinds the pasteboard has and reads nothing. What Paste would do can read the
+    /// pasteboard's text, and is asked by a paste and nowhere else. CI runs no Mac test, so
+    /// this is what CI has for it (`MacDraftFileDropViewTests` sees that nothing is read).
+    ///
+    /// Revert-check: asking `Self.pasteAction(for: pasteboardForPaste()) != .pasteAsText` in
+    /// `MacReplyTextView.enablesPasteItself`, as it first did, makes the first two assertions
+    /// fail.
+    func testPasteValidation_asksAboutTheKindsAlone_andOnlyAPasteAsksWhatItWouldDo() throws {
+        let source = try source("esc-chatmail/Platform/MacReplyTextView.swift")
+
+        XCTAssertTrue(source.contains(
+            "        return isPaste && isEditable && Self.fieldEnablesPaste(for: pasteboardForPaste())\n"
+        ))
+        XCTAssertEqual(source.components(separatedBy: "Self.pasteAction(for: ").count - 1, 1)
+        XCTAssertTrue(source.contains("        switch Self.pasteAction(for: pasteboard) {\n"))
+    }
+
     /// Revert-check: passing no `temporaryFileURLs` in `ChatView`'s `onPasteImageFile` makes
     /// this fail: a pasted image's file is never removed.
     func testChat_handsAPastedImagesFileOnAsATemporaryOne() throws {

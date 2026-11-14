@@ -825,15 +825,18 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
-    /// What the field reads off a pasteboard, which decides both what Paste does and whether
-    /// the field answers for the command itself.
+    /// What the field makes of a pasteboard: what Paste does with it (`pasteAction(for:)`),
+    /// and whether the field answers for the command itself (`fieldEnablesPaste(for:)`),
+    /// which it does only where the kinds alone say Paste attaches something.
     ///
     /// Revert-check: dropping `.tiff` from `MacReplyTextView.pastedImageTypes` makes the
-    /// TIFF assertion fail: a selection copied in Preview would paste as nothing. Passing
+    /// TIFF assertions fail: a selection copied in Preview would paste as nothing. Passing
     /// `textIsOnlyTheCopiedAddress: false` in `MacReplyTextView.pasteAction` makes the
     /// picture copied with its address fail, and comparing the text with itself in
     /// `textIsOnlyTheAddress(on:)` (`address: pasteboard.string(forType: .string)`) makes
-    /// the words copied with a picture and a link fail.
+    /// the words copied with a picture and a link fail. Answering `carries.files` alone
+    /// from `MacReplyTextView.fieldEnablesPaste(for:)` makes its three picture assertions
+    /// fail: with only an image copied, Paste is disabled.
     func testPasteAction_isReadFromWhatThePasteboardHas() {
         let files = pasteboard(files: [URL(fileURLWithPath: "/tmp/One.pdf")], text: "One.pdf")
         let words = pasteboard(text: "Some words")
@@ -872,15 +875,101 @@ final class MacDraftFileDropViewTests: XCTestCase {
         XCTAssertEqual(MacReplyTextView.pasteAction(for: wordsWithAPictureAndALink), .pasteAsText)
         XCTAssertEqual(MacReplyTextView.pasteAction(for: addressAsWordsWithAPicture), .pasteAsText)
         XCTAssertEqual(MacReplyTextView.pasteAction(for: addressAlone), .pasteAsText)
+
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: files))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: png))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: tiff))
+        XCTAssertTrue(MacReplyTextView.fieldEnablesPaste(for: jpeg))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: words))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: nothing))
+        // Text beside the picture: the text view's to answer, whatever the text turns out
+        // to be when a paste reads it.
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: pictureWithItsAddress))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: wordsWithAPictureAndALink))
+        XCTAssertFalse(MacReplyTextView.fieldEnablesPaste(for: addressAlone))
     }
 
-    /// What Paste would do is asked at every validation of the Edit menu, so it reads no
-    /// picture, and reads the text only off a pasteboard that carries a picture, text and a
-    /// URL together. The pasteboards here give their data when it is asked for, which is how
-    /// a read shows.
+    /// The Edit menu is validated with no paste asked for, so validating Paste reads nothing
+    /// off the pasteboard: not the picture, and not the text and the URL beside it, which is
+    /// what a paste reads to tell a picture's address from words. The pasteboards here give
+    /// their data when it is asked for, which is how a read shows.
     ///
-    /// Revert-check: reading the image in `MacReplyTextView.pasteAction`
-    /// (`carriesImage: imageData(on: pasteboard) != nil`) makes the cells' assertion and the
+    /// A picture copied with its address is then the text view's to enable Paste for, and it
+    /// does: such a pasteboard carries kinds this text view reads.
+    ///
+    /// HONEST SCOPE: the text view's own validation is not run, because it reads the
+    /// pasteboard the user copies to. What is asked is whether it has a kind to read among
+    /// those such a pasteboard says it has (`preferredPasteboardType`, given the pasteboard's
+    /// own `types`: the text view knows plain text by its older name, which a pasteboard
+    /// lists beside the newer one and `.string` alone does not). Whether macOS 27 shows its
+    /// alert for a read like the one this keeps out of validation was not measured.
+    ///
+    /// Revert-check: asking `Self.pasteAction(for: pasteboardForPaste()) != .pasteAsText` in
+    /// `MacReplyTextView.enablesPasteItself`, as it first did, makes the assertions on the
+    /// picture copied with its address fail: the field answers for the command, having read
+    /// the text and the URL.
+    func testPasteValidation_readsNothingOffThePasteboard_andLeavesAPictureWithTextToTheTextView() throws {
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        defer { harness.close() }
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        // Copy Image in a web view: the picture, and its address as the text and the URL.
+        let picture = LazyPasteboardOwner([
+            .tiff: Self.pngBytes,
+            .URL: Data(Self.pictureAddress.utf8),
+            .string: Data(Self.pictureAddress.utf8)
+        ])
+        let pictureBoard = picture.makePasteboard()
+        let pictureAlone = LazyPasteboardOwner([.tiff: Self.pngBytes])
+        let pictureAloneBoard = pictureAlone.makePasteboard()
+        defer {
+            pictureBoard.releaseGlobally()
+            pictureAloneBoard.releaseGlobally()
+        }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(
+            pastingFrom: pictureBoard,
+            imageDirectory: directory,
+            refusals: refusals
+        )
+        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        let matchStyleItem = NSMenuItem(
+            title: "Paste and Match Style",
+            action: #selector(NSTextView.pasteAsPlainText(_:)),
+            keyEquivalent: "V"
+        )
+
+        XCTAssertFalse(textView.enablesPasteItself(pasteItem))
+        XCTAssertFalse(textView.enablesPasteItself(matchStyleItem))
+        XCTAssertEqual(picture.provided, [])
+        // Left to the text view, which has something to read beside the picture, and so
+        // enables Paste. A picture alone it does not read: that one is the field's to enable.
+        XCTAssertNotNil(
+            textView.preferredPasteboardType(from: pictureBoard.types ?? [], restrictedToTypesFrom: nil)
+        )
+        XCTAssertNil(
+            textView.preferredPasteboardType(from: pictureAloneBoard.types ?? [], restrictedToTypesFrom: nil)
+        )
+
+        textView.pasteboardForPaste = { pictureAloneBoard }
+        XCTAssertTrue(textView.enablesPasteItself(pasteItem))
+        XCTAssertEqual(picture.provided, [])
+        XCTAssertEqual(pictureAlone.provided, [])
+
+        // The premise: a read does show here, and a paste is what makes it.
+        XCTAssertEqual(MacReplyTextView.pasteAction(for: pictureBoard), .attachImage)
+        XCTAssertTrue(picture.provided.contains(.string))
+        XCTAssertTrue(picture.provided.contains(.URL))
+    }
+
+    /// What Paste would do is decided before the chat is asked whether it can take a
+    /// picture, so deciding it reads no picture, and it reads the text only off a pasteboard
+    /// that carries a picture, text and a URL together: cells copied from a spreadsheet can
+    /// be long. The pasteboards here give their data when it is asked for, which is how a
+    /// read shows.
+    ///
+    /// Revert-check: reading the image in `MacReplyTextView.carriedKinds(on:)`
+    /// (`image: imageData(on: pasteboard) != nil`) makes the cells' assertion and the
     /// picture's TIFF assertion fail: each pasteboard was asked for its TIFF.
     /// Dropping the `availableType(from: [.URL])` guard from `textIsOnlyTheAddress(on:)`
     /// makes the cells' assertion fail: their text is read.

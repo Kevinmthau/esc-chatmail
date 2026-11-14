@@ -62,9 +62,65 @@ final class ReplyFieldPastePolicyTests: XCTestCase {
         XCTAssertEqual(action(), .pasteAsText)
     }
 
-    /// Whether the text is the address is found by reading the text, and Paste is decided at
-    /// every validation of the Edit menu. It is asked only where the answer decides anything:
-    /// a picture and text together, and no file.
+    /// The Edit menu's validation asks this, with no paste asked for, so it is decided from
+    /// the kinds alone: the field answers for files and for a picture with no text, and
+    /// leaves the rest to the text view, a picture copied with text included. The text view
+    /// enables Paste for the text, so what the text is need not be read to enable it.
+    ///
+    /// Revert-check: answering `carriesFiles` alone from
+    /// `ReplyFieldPastePolicy.fieldEnablesPaste` makes the picture's assertion fail: with
+    /// only an image copied Paste is disabled, and Command-V never reaches the field.
+    /// Answering `carriesFiles || carriesImage` makes the assertion on a picture with text
+    /// fail.
+    func testFieldEnablesPaste_forFilesAndAPictureWithNoText_fromTheKindsAlone() {
+        func enables(files: Bool = false, text: Bool = false, image: Bool = false) -> Bool {
+            ReplyFieldPastePolicy.fieldEnablesPaste(carriesFiles: files, carriesText: text, carriesImage: image)
+        }
+
+        XCTAssertTrue(enables(files: true))
+        XCTAssertTrue(enables(files: true, text: true))
+        XCTAssertTrue(enables(files: true, text: true, image: true))
+        XCTAssertTrue(enables(image: true))
+
+        XCTAssertFalse(enables(text: true, image: true))
+        XCTAssertFalse(enables(text: true))
+        XCTAssertFalse(enables())
+    }
+
+    /// The field never answers for a paste it would leave to the text view, whatever the
+    /// text turns out to be: where `fieldEnablesPaste` says yes, `action` attaches.
+    ///
+    /// Revert-check: answering `carriesFiles || carriesImage` from
+    /// `ReplyFieldPastePolicy.fieldEnablesPaste` makes this fail for a picture copied with
+    /// words: the field would enable Paste for a paste that is the text view's.
+    func testFieldEnablesPaste_onlyWhereAPasteAttaches_whateverTheTextIs() {
+        for files in [false, true] {
+            for text in [false, true] {
+                for image in [false, true] where ReplyFieldPastePolicy.fieldEnablesPaste(
+                    carriesFiles: files,
+                    carriesText: text,
+                    carriesImage: image
+                ) {
+                    for isAddress in [false, true] {
+                        XCTAssertNotEqual(
+                            ReplyFieldPastePolicy.action(
+                                carriesFiles: files,
+                                carriesText: text,
+                                carriesImage: image,
+                                textIsOnlyTheCopiedAddress: isAddress
+                            ),
+                            .pasteAsText,
+                            "files \(files), text \(text), image \(image), address \(isAddress)"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /// Whether the text is the address is found by reading the text, which can be long. It
+    /// is asked only where the answer decides anything: a picture and text together, and no
+    /// file.
     ///
     /// Revert-check: asking `textIsOnlyTheCopiedAddress` at the top of
     /// `ReplyFieldPastePolicy.action`, before the files, the image and the text are asked

@@ -27,8 +27,9 @@ enum ReplyFieldPastePolicy {
     ///
     /// - Parameter textIsOnlyTheCopiedAddress: `textIsOnlyTheAddress` of the pasteboard's
     ///   text and URL. Asked only where a picture and text were copied together and no file:
-    ///   answering it reads the text, and this is decided at every validation of the Edit
-    ///   menu, where nothing should be read that need not be.
+    ///   answering it reads the text, which can be long, and nothing is read that need not
+    ///   be. It is a paste that asks this; the Edit menu's validation never does
+    ///   (`fieldEnablesPaste`).
     static func action(
         carriesFiles: Bool,
         carriesText: Bool,
@@ -39,6 +40,28 @@ enum ReplyFieldPastePolicy {
         guard carriesImage else { return .pasteAsText }
         guard carriesText else { return .attachImage }
         return textIsOnlyTheCopiedAddress() ? .attachImage : .pasteAsText
+    }
+
+    /// Whether the field enables Paste by its own rule (`MacReplyTextView.enablesPasteItself`):
+    /// for files, and for a picture copied with no text. Everything else is the text view's
+    /// own to answer.
+    ///
+    /// Decided from the kinds the pasteboard has, and never from its text. This is asked at
+    /// every validation of the Edit menu, which is not a paste, and what the text is can
+    /// only be found by reading it. The answer does not need it: with text on the pasteboard
+    /// the text view enables Paste itself, whatever Paste then does, so a picture copied
+    /// with its address is enabled either way. As first written the validation read the text
+    /// and the URL (review of PR 422, 2026-11-14): megabytes of them for a picture with a
+    /// `data:` address, at every validation, and a read of the general pasteboard that no
+    /// paste asked for. Apple's notes for AppKit say macOS alerts the user to such a read;
+    /// whether macOS 27 does was not measured.
+    static func fieldEnablesPaste(carriesFiles: Bool, carriesText: Bool, carriesImage: Bool) -> Bool {
+        action(
+            carriesFiles: carriesFiles,
+            carriesText: carriesText,
+            carriesImage: carriesImage,
+            textIsOnlyTheCopiedAddress: false
+        ) != .pasteAsText
     }
 
     /// Whether a pasteboard's text is the URL the pasteboard carries and nothing more, which
