@@ -14,18 +14,19 @@ struct DraftFileDrop: Equatable, Identifiable {
     /// Files the app wrote only to carry this request: a pasted image, which has no file of
     /// its own (`PastedImageFile`). Whoever imports the request removes them when the import
     /// ends, whatever it ended with. Empty for a drop and for pasted files, which are the
-    /// user's own and are never removed.
-    let temporaryFileURLs: [URL]
+    /// user's own and are never removed: none of them can be put here, because only
+    /// `PastedImageFile.write` makes a value of this type.
+    let temporaryFiles: [PastedImageFile]
 
     init(
         id: UUID = UUID(),
         fileURLs: [URL],
         unsupportedFilenames: [String],
-        temporaryFileURLs: [URL] = []
+        temporaryFiles: [PastedImageFile] = []
     ) {
         self.id = id
         self.fileURLs = fileURLs
         self.unsupportedFilenames = unsupportedFilenames
-        self.temporaryFileURLs = temporaryFileURLs
+        self.temporaryFiles = temporaryFiles
     }
 }

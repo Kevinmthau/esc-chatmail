@@ -45,35 +45,47 @@ final class MacReplyTextView: NSTextView {
     /// Says that a paste was refused, so it does not look ignored. The tests record it.
     var refusePaste: () -> Void = { NSSound.beep() }
 
-    /// A copied file is attached to the reply, and so is a copied image where no text was
-    /// copied with it but its own address (`ReplyFieldPastePolicy`). Left to the text view, a
-    /// copied file is pasted as its path (measured on this field, 2026-11-12) and a copied
-    /// image as nothing. An image copied in a web view would be pasted as its address, going
-    /// by what WebKit's source writes with it; that was not measured.
+    /// A copied file is attached to the reply, and so is a copied picture where no words
+    /// were copied with it (`ReplyFieldPastePolicy`). Left to the text view, a copied file is
+    /// pasted as its path (measured on this field, 2026-11-12), a copied image as nothing,
+    /// and a picture copied from rich text as the character that stands for it.
     override func paste(_ sender: Any?) {
-        if !pasteAttachments() {
+        if !answerPaste() {
             super.paste(sender)
         }
     }
 
     /// Paste and Match Style is the same command for a field with one style.
     override func pasteAsPlainText(_ sender: Any?) {
-        if !pasteAttachments() {
+        if !answerPaste() {
             super.pasteAsPlainText(sender)
         }
     }
 
-    /// Attaches what was copied, where it is files or an image. Returns false for anything
-    /// else, which is then the text view's to paste.
+    /// Does what the field itself does with a paste, and returns false for the one paste
+    /// that is the text view's to make: text with no picture in it, into a window with no
+    /// sheet attached. Both paste commands ask this before `super`.
     ///
-    /// A paste the chat cannot take now (a send owns the draft, an import is running) is
-    /// refused with a beep and is still answered here: the text view must never be given a
-    /// copied file to paste, or it types the path.
-    func pasteAttachments() -> Bool {
+    /// - Behind a sheet nothing is pasted, text included
+    ///   (`ReplyFieldPastePolicy.fieldTakesPaste`).
+    /// - Files and pictures are attached. A paste the chat cannot take now (a send owns the
+    ///   draft, an import is running) is refused with a beep and is still answered here: the
+    ///   text view must never be given a copied file to paste, or it types the path. The
+    ///   same paste a moment later is taken, which is why nothing is typed in its place.
+    /// - Words copied with pictures among them are pasted without the pictures' marks.
+    func answerPaste() -> Bool {
+        guard ReplyFieldPastePolicy.fieldTakesPaste(windowHasSheet: window?.attachedSheet != nil) else {
+            refusePaste()
+            return true
+        }
         let pasteboard = pasteboardForPaste()
         switch Self.pasteAction(for: pasteboard) {
         case .pasteAsText:
             return false
+        case .pasteTextWithoutPictureMarks:
+            let text = pasteboard.string(forType: .string) ?? ""
+            insertText(ReplyFieldPastePolicy.removingPictureMarks(from: text), replacementRange: selectedRange())
+            return true
         case .attachFiles:
             let files = MacDraftFileDropView.fileURLs(on: pasteboard)
             if chatDropView?.receivePastedFiles(files) != true {
@@ -81,7 +93,12 @@ final class MacReplyTextView: NSTextView {
             }
             return true
         case .attachImage:
-            if !attachPastedImage(from: pasteboard) {
+            if !attachPastedPictures({ Self.image(on: pasteboard).map { [$0] } ?? [] }) {
+                refusePaste()
+            }
+            return true
+        case .attachPicturesInRichText:
+            if !attachPastedPictures({ MacPastedRichText.pictures(on: pasteboard) }) {
                 refusePaste()
             }
             return true
@@ -92,17 +109,20 @@ final class MacReplyTextView: NSTextView {
     /// by nothing else: the Edit menu's validation asks `fieldEnablesPaste(for:)`, which
     /// reads nothing.
     ///
-    /// Asks what kinds the pasteboard has and never reads an image, which can be large and
+    /// Asks what kinds the pasteboard has and never reads a picture, which can be large and
     /// is read only once the chat says it can take one. The one thing it can read is the
-    /// text (`textIsOnlyTheAddress(on:)`), and only where a picture and text were copied
-    /// together.
+    /// text, and only where it was copied with a picture and a URL
+    /// (`textIsOnlyTheAddress(on:)`) or with rich text that can hold pictures
+    /// (`ReplyFieldPastePolicy.pictureMarks`).
     static func pasteAction(for pasteboard: NSPasteboard) -> ReplyFieldPastePolicy.Action {
         let carries = carriedKinds(on: pasteboard)
         return ReplyFieldPastePolicy.action(
             carriesFiles: carries.files,
             carriesText: carries.text,
             carriesImage: carries.image,
-            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress(on: pasteboard)
+            carriesRichTextWithAttachments: pasteboard.availableType(from: [.rtfd]) != nil,
+            textIsOnlyTheCopiedAddress: textIsOnlyTheAddress(on: pasteboard),
+            pictureMarksInText: ReplyFieldPastePolicy.pictureMarks(in: pasteboard.string(forType: .string))
         )
     }
 
@@ -127,12 +147,12 @@ final class MacReplyTextView: NSTextView {
         (
             files: MacDraftFileDropView.carriesFiles(pasteboard),
             text: pasteboard.availableType(from: [.string]) != nil,
-            image: pasteboard.availableType(from: pastedImageTypes.map(\.type)) != nil
+            image: pasteboard.availableType(from: pastedImageTypes) != nil
         )
     }
 
-    /// Whether the text on `pasteboard` is only the address of the picture beside it, as
-    /// Copy Image in a web view leaves it (`ReplyFieldPastePolicy.textIsOnlyTheAddress`).
+    /// Whether the text on `pasteboard` is only the address of the picture beside it
+    /// (`ReplyFieldPastePolicy.textIsOnlyTheAddress`).
     ///
     /// The text is read only from a pasteboard that says it carries a URL (`public.url`),
     /// which cells copied from a spreadsheet do not: their text, which can be long, is still
@@ -145,11 +165,21 @@ final class MacReplyTextView: NSTextView {
         )
     }
 
-    /// Paste is enabled for a copied image too. A text view enables it only for what it can
-    /// read itself, and this one reads no images (`importsGraphics` is off), so with only an
-    /// image copied the command, and Command-V with it, never reached `paste(_:)`.
+    /// Paste is enabled for a copied image too, and for nothing while the window has a
+    /// sheet attached. A text view enables it only for what it can read itself, and this
+    /// one reads no images (`importsGraphics` is off), so with only an image copied the
+    /// command, and Command-V with it, never reached `paste(_:)`.
     override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        enablesPasteItself(item) ? true : super.validateUserInterfaceItem(item)
+        if disablesPaste(item) { return false }
+        return enablesPasteItself(item) ? true : super.validateUserInterfaceItem(item)
+    }
+
+    /// Whether `item` is a paste command asked about while the field's window has a sheet
+    /// attached, where the field takes no paste (`ReplyFieldPastePolicy.fieldTakesPaste`).
+    /// Asked before anything else of the command, and it reads nothing off the pasteboard.
+    func disablesPaste(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        Self.isPasteCommand(item)
+            && !ReplyFieldPastePolicy.fieldTakesPaste(windowHasSheet: window?.attachedSheet != nil)
     }
 
     /// Whether `item` is a paste command this field enables by its own rule: a copied file
@@ -159,29 +189,43 @@ final class MacReplyTextView: NSTextView {
     ///
     /// It reads nothing off the pasteboard (`fieldEnablesPaste(for:)`), and must not come to
     /// ask `pasteAction(for:)`, which can read the text: this runs whenever the Edit menu is
-    /// validated, with no paste asked for. A picture copied with its address is left to the
-    /// text view here, which enables Paste for the text beside it.
+    /// validated, with no paste asked for. A picture copied with text of any kind is left to
+    /// the text view here, which enables Paste for the text beside it.
     func enablesPasteItself(_ item: NSValidatedUserInterfaceItem) -> Bool {
-        let isPaste = item.action == #selector(paste(_:)) || item.action == #selector(pasteAsPlainText(_:))
+        let isPaste = Self.isPasteCommand(item)
         return isPaste && isEditable && Self.fieldEnablesPaste(for: pasteboardForPaste())
     }
 
-    /// Writes the image on `pasteboard` to a file of the app's own and hands it to the chat,
-    /// which removes the file once it is imported. Returns whether the chat took it.
-    private func attachPastedImage(from pasteboard: NSPasteboard) -> Bool {
-        // Asked before the image is read, so a refusal costs nothing and leaves nothing
-        // behind: the read can be tens of megabytes, and a TIFF is re-encoded.
-        guard let chatDropView, chatDropView.acceptsPastedImage,
-              let image = Self.imageData(on: pasteboard),
-              let file = try? PastedImageFile.write(
-                  image.data,
-                  fileExtension: image.fileExtension,
-                  in: pastedImageDirectory()
-              ) else {
-            return false
+    private static func isPasteCommand(_ item: NSValidatedUserInterfaceItem) -> Bool {
+        item.action == #selector(paste(_:)) || item.action == #selector(pasteAsPlainText(_:))
+    }
+
+    /// Writes pasted pictures to files of the app's own and hands them to the chat, which
+    /// removes the files once they are imported. Returns whether the chat took them; where
+    /// it did not, nothing is left behind.
+    ///
+    /// - Parameter pictures: Reads the pictures off the pasteboard. Called only once the
+    ///   chat has said it can take them, so a refusal costs nothing: the read can be tens of
+    ///   megabytes, and a TIFF is written again.
+    private func attachPastedPictures(_ pictures: () -> [PastedImageEncoder.Attachable]) -> Bool {
+        guard let chatDropView, chatDropView.takesPaste else { return false }
+        let pictures = pictures()
+        guard !pictures.isEmpty else { return false }
+        var files: [PastedImageFile] = []
+        for picture in pictures {
+            guard let file = try? PastedImageFile.write(
+                picture.data,
+                fileExtension: picture.fileExtension,
+                in: pastedImageDirectory()
+            ) else {
+                // All of what was copied, or none of it.
+                PastedImageFile.remove(files)
+                return false
+            }
+            files.append(file)
         }
-        guard chatDropView.receivePastedImageFile(file) else {
-            PastedImageFile.remove([file])
+        guard chatDropView.receivePastedImageFiles(files) else {
+            PastedImageFile.remove(files)
             return false
         }
         return true
@@ -203,28 +247,43 @@ final class MacReplyTextView: NSTextView {
         )
     }
 
-    /// The forms a copied image is taken in, in the order they are asked for, each with the
-    /// extension of the file it is written to. PNG and JPEG are written as they came, and the
-    /// import takes either as an image (`DocumentAttachmentImporter`). TIFF is written as PNG
-    /// (`PastedImagePNGEncoder`): the import does not take a `.tiff` as an image.
-    private static let pastedImageTypes: [(type: NSPasteboard.PasteboardType, fileExtension: String)] = [
+    /// The forms a copied image is written to its file in as it came, in the order they are
+    /// asked for, each with the extension of that file. The import takes either as an image
+    /// (`DocumentAttachmentImporter`).
+    private static let imageTypesWrittenAsTheyCame: [(type: NSPasteboard.PasteboardType, fileExtension: String)] = [
         (.png, "png"),
-        (NSPasteboard.PasteboardType("public.jpeg"), "jpg"),
-        (.tiff, "png")
+        (NSPasteboard.PasteboardType("public.jpeg"), "jpg")
     ]
 
-    /// The image on a pasteboard, in the first of `pastedImageTypes` it has that can be
-    /// used, with the extension of the file it is written to. Nil where it has none: a TIFF
-    /// that cannot be read is no image.
-    static func imageData(on pasteboard: NSPasteboard) -> (data: Data, fileExtension: String)? {
-        for (type, fileExtension) in pastedImageTypes {
-            guard let data = pasteboard.data(forType: type), !data.isEmpty else { continue }
-            guard type == .tiff else { return (data, fileExtension) }
-            if let png = PastedImagePNGEncoder.pngData(from: data) {
-                return (png, fileExtension)
+    /// Every kind that makes a pasteboard one that carries an image. TIFF is the last one
+    /// asked for (`image(on:)`), and the only one an app that copies an `NSImage` writes.
+    private static let pastedImageTypes = imageTypesWrittenAsTheyCame.map(\.type) + [.tiff]
+
+    /// The image on a pasteboard, in a form the draft's import takes as an image, with the
+    /// extension of the file it is written to. Nil where it has none that can be used: a
+    /// TIFF that cannot be read is no image.
+    ///
+    /// - PNG or JPEG, as it came.
+    /// - Otherwise the picture's own file, where the pasteboard has it as rich text holding
+    ///   that one file (`MacPastedRichText.solePicture`). Copy Image in a web view writes a
+    ///   TIFF and, in RTFD, the file the page served (measured 2026-11-14). Taken from
+    ///   there, a photograph is the page's JPEG and nothing is encoded. Written again from
+    ///   the TIFF, as it was at first, it was a PNG several times the size, made on the main
+    ///   thread (review of PR 422, 2026-11-14).
+    /// - Otherwise the TIFF, written again as PNG or JPEG (`PastedImageEncoder.reencoded`):
+    ///   the import does not take a `.tiff` as an image.
+    static func image(on pasteboard: NSPasteboard) -> PastedImageEncoder.Attachable? {
+        for (type, fileExtension) in imageTypesWrittenAsTheyCame {
+            if let data = pasteboard.data(forType: type), !data.isEmpty {
+                return PastedImageEncoder.Attachable(data: data, fileExtension: fileExtension)
             }
         }
-        return nil
+        if pasteboard.availableType(from: [.rtfd]) != nil,
+           let picture = MacPastedRichText.solePicture(on: pasteboard) {
+            return picture
+        }
+        guard let tiff = pasteboard.data(forType: .tiff), !tiff.isEmpty else { return nil }
+        return PastedImageEncoder.reencoded(from: tiff)
     }
 
     // MARK: - Dragged files

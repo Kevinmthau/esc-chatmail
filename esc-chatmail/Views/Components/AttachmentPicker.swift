@@ -119,7 +119,7 @@ struct AttachmentPicker: View {
         }
         guard !drop.fileURLs.isEmpty else {
             // Nothing of the request is imported, so nothing will end and remove these.
-            PastedImageFile.remove(drop.temporaryFileURLs)
+            PastedImageFile.remove(drop.temporaryFiles)
             return
         }
         DocumentAttachmentImporter(
@@ -128,9 +128,9 @@ struct AttachmentPicker: View {
             onProcessingChanged: { isProcessing in
                 self.isProcessing = isProcessing
                 // The import has its own copy by now, or has failed: a pasted image's file
-                // was only ever for this (`DraftFileDrop.temporaryFileURLs`).
+                // was only ever for this (`DraftFileDrop.temporaryFiles`).
                 if !isProcessing {
-                    PastedImageFile.remove(drop.temporaryFileURLs)
+                    PastedImageFile.remove(drop.temporaryFiles)
                 }
             },
             onOperationChanged: { documentProcessingTask = $0 },

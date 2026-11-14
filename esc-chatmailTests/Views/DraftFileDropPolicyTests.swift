@@ -62,28 +62,17 @@ final class DraftFileDropPolicyTests: XCTestCase {
         XCTAssertFalse(DraftFileDropPolicy.startsImport(hasPendingDrop: false, isProcessingAttachments: true))
     }
 
-    /// Revert-check: dropping any one of the four terms from `DraftFileDropPolicy.takesDrag`
+    /// Revert-check: dropping any one of the three terms from `DraftFileDropPolicy.takesDrag`
     /// makes the assertion that turns only that term fail.
-    func testTakesDrag_onlyAFileDragThatMayBeCopied_ontoAReplyThatCanTakeIt_withNoSheetUp() {
-        func takes(
-            sheet: Bool = false,
-            files: Bool = true,
-            copy: Bool = true,
-            accepts: Bool = true
-        ) -> Bool {
-            DraftFileDropPolicy.takesDrag(
-                windowHasSheet: sheet,
-                carriesFiles: files,
-                sourceAllowsCopy: copy,
-                acceptsFiles: accepts
-            )
+    func testTakesDrag_onlyAFileDragThatMayBeCopied_whereAPasteWouldBeTaken() {
+        func takes(files: Bool = true, copy: Bool = true, paste: Bool = true) -> Bool {
+            DraftFileDropPolicy.takesDrag(carriesFiles: files, sourceAllowsCopy: copy, takesPaste: paste)
         }
 
         XCTAssertTrue(takes())
-        XCTAssertFalse(takes(sheet: true))
         XCTAssertFalse(takes(files: false))
         XCTAssertFalse(takes(copy: false))
-        XCTAssertFalse(takes(accepts: false))
+        XCTAssertFalse(takes(paste: false))
     }
 
     /// A paste into the reply field is taken where a drop is. A sheet on the chat's window
@@ -220,19 +209,22 @@ final class DraftFileDropPolicyTests: XCTestCase {
     /// it so that whoever imports the request removes it. A dropped file is the user's and
     /// is never among them.
     ///
-    /// Revert-check: dropping `temporaryFileURLs` from the `DraftFileDrop` made in
-    /// `ChatComposerState.receiveDroppedFiles` makes the first assertion fail: the file stays
-    /// in the temporary directory.
-    func testComposer_takesAPastedImagesFile_asATemporaryOne_andADropAsNone() {
-        let pasted = URL(fileURLWithPath: "/tmp/PastedImages/1/Pasted Image.png")
+    /// Revert-check: dropping `temporaryFiles` from the `DraftFileDrop` made in
+    /// `ChatComposerState.receiveDroppedFiles` makes the second assertion fail: the file
+    /// stays in the temporary directory.
+    func testComposer_takesPastedPicturesFiles_asTemporaryOnes_andADropAsNone() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DraftFileDropPolicyTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pasted = try PastedImageFile.write(Data("one".utf8), fileExtension: "png", in: directory)
         let pasting = ChatComposerState()
-        XCTAssertTrue(pasting.receiveDroppedFiles([pasted], temporaryFileURLs: [pasted]))
-        XCTAssertEqual(pasting.pendingFileDrop?.fileURLs, [pasted])
-        XCTAssertEqual(pasting.pendingFileDrop?.temporaryFileURLs, [pasted])
+        XCTAssertTrue(pasting.receivePastedImageFiles([pasted]))
+        XCTAssertEqual(pasting.pendingFileDrop?.fileURLs, [pasted.url])
+        XCTAssertEqual(pasting.pendingFileDrop?.temporaryFiles, [pasted])
 
         let dropping = ChatComposerState()
         XCTAssertTrue(dropping.receiveDroppedFiles([pdf]))
-        XCTAssertEqual(dropping.pendingFileDrop?.temporaryFileURLs, [])
+        XCTAssertEqual(dropping.pendingFileDrop?.temporaryFiles, [])
     }
 
     /// Until the picker has taken a drop the composer is the only holder of its files, so a

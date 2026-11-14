@@ -6,9 +6,9 @@ import SwiftUI
 struct MacDraftFileDropTarget: NSViewRepresentable {
     let acceptsFiles: @MainActor () -> Bool
     let onDropFiles: @MainActor ([URL]) -> Bool
-    /// A pasted image's file, from the reply field in front of a chat's drop view. A sheet
+    /// Pasted pictures' files, from the reply field in front of a chat's drop view. A sheet
     /// has no such field and takes none.
-    var onPasteImageFile: @MainActor (URL) -> Bool = { _ in false }
+    var onPasteImageFiles: @MainActor ([PastedImageFile]) -> Bool = { _ in false }
 
     func makeNSView(context: Context) -> MacDraftFileDropView {
         let view = MacDraftFileDropView(frame: .zero)
@@ -23,7 +23,7 @@ struct MacDraftFileDropTarget: NSViewRepresentable {
     private func apply(to view: MacDraftFileDropView) {
         view.acceptsFiles = acceptsFiles
         view.onDropFiles = onDropFiles
-        view.onPasteImageFile = onPasteImageFile
+        view.onPasteImageFiles = onPasteImageFiles
     }
 }
 #endif

@@ -2,45 +2,72 @@ import XCTest
 @testable import esc_chatmail
 
 /// The wiring of Paste in the Mac's reply field that only source shows: the two paste
-/// commands ask about attachments first, the chat hands a pasted image's file on as a
-/// temporary one, and the picker removes it when its import ends.
+/// commands ask the field first, the command is disabled behind a sheet before anything
+/// else is asked of it, the chat hands pasted pictures' files on as temporary ones, and the
+/// picker removes them when its import ends.
 ///
 /// HONEST SCOPE: this reads source text, so it runs in the iOS suite and in CI although the
 /// field is the Mac's, and it matches the spelling of the source. What each link does is
 /// `ReplyFieldPastePolicyTests`', `PastedImageFileTests`' and `MacDraftFileDropViewTests`' to
 /// pin. Nothing has been pasted in the app.
 final class ReplyFieldPasteSourceTests: XCTestCase {
-    /// The tests call `pasteAttachments` and never the commands, which read the user's own
+    /// The tests call `answerPaste` and never the commands, which read the user's own
     /// pasteboard where no other is given.
     ///
     /// Revert-check: deleting either override from `MacReplyTextView`, or calling `super`
     /// first in one, makes this fail: a copied file is pasted as its path again.
-    func testBothPasteCommands_askAboutAttachmentsBeforeTheTextView() throws {
+    func testBothPasteCommands_askTheFieldBeforeTheTextView() throws {
         let source = try source("esc-chatmail/Platform/MacReplyTextView.swift")
 
         XCTAssertTrue(source.contains(
             "    override func paste(_ sender: Any?) {\n"
-                + "        if !pasteAttachments() {\n"
+                + "        if !answerPaste() {\n"
                 + "            super.paste(sender)\n"
         ))
         XCTAssertTrue(source.contains(
             "    override func pasteAsPlainText(_ sender: Any?) {\n"
-                + "        if !pasteAttachments() {\n"
+                + "        if !answerPaste() {\n"
                 + "            super.pasteAsPlainText(sender)\n"
         ))
     }
 
-    /// A text view enables Paste only for what it reads itself, which is no image.
+    /// A text view enables Paste only for what it reads itself, which is no image, and it
+    /// enables it behind a sheet as anywhere else. So the field answers first: no paste
+    /// while its window has a sheet attached, then its own rule, then the text view's.
     ///
     /// Revert-check: deleting the `validateUserInterfaceItem` override from
-    /// `MacReplyTextView` makes this fail.
+    /// `MacReplyTextView` makes this fail, and so does deleting its
+    /// `if disablesPaste(item) { return false }` or moving it below the other line: Paste
+    /// is then enabled behind a sheet.
     func testPasteCommand_isValidatedByTheFieldBeforeTheTextView() throws {
         let source = try source("esc-chatmail/Platform/MacReplyTextView.swift")
 
         XCTAssertTrue(source.contains(
             "    override func validateUserInterfaceItem(_ item: NSValidatedUserInterfaceItem) -> Bool {\n"
-                + "        enablesPasteItself(item) ? true : super.validateUserInterfaceItem(item)\n"
+                + "        if disablesPaste(item) { return false }\n"
+                + "        return enablesPasteItself(item) ? true : super.validateUserInterfaceItem(item)\n"
         ))
+    }
+
+    /// Behind a sheet nothing is pasted, and that is asked before the pasteboard is: a
+    /// paste that arrives there reads nothing of what was copied.
+    ///
+    /// Revert-check: moving the `fieldTakesPaste` guard below
+    /// `let pasteboard = pasteboardForPaste()` in `MacReplyTextView.answerPaste` makes this
+    /// fail.
+    func testPaste_asksAboutASheet_beforeItAsksForThePasteboard() throws {
+        let source = try source("esc-chatmail/Platform/MacReplyTextView.swift")
+        let start = try XCTUnwrap(source.range(of: "    func answerPaste() -> Bool {\n"))
+        let sheet = try XCTUnwrap(source.range(
+            of: "        guard ReplyFieldPastePolicy.fieldTakesPaste(windowHasSheet: window?.attachedSheet != nil) else {\n",
+            range: start.upperBound..<source.endIndex
+        ))
+        let pasteboard = try XCTUnwrap(source.range(
+            of: "        let pasteboard = pasteboardForPaste()\n",
+            range: start.upperBound..<source.endIndex
+        ))
+
+        XCTAssertLessThan(sheet.lowerBound, pasteboard.lowerBound)
     }
 
     /// The Edit menu is validated with no paste asked for, so the validation asks about the
@@ -55,20 +82,28 @@ final class ReplyFieldPasteSourceTests: XCTestCase {
         let source = try source("esc-chatmail/Platform/MacReplyTextView.swift")
 
         XCTAssertTrue(source.contains(
-            "        return isPaste && isEditable && Self.fieldEnablesPaste(for: pasteboardForPaste())\n"
+            "        let isPaste = Self.isPasteCommand(item)\n"
+                + "        return isPaste && isEditable && Self.fieldEnablesPaste(for: pasteboardForPaste())\n"
         ))
         XCTAssertEqual(source.components(separatedBy: "Self.pasteAction(for: ").count - 1, 1)
         XCTAssertTrue(source.contains("        switch Self.pasteAction(for: pasteboard) {\n"))
     }
 
-    /// Revert-check: passing no `temporaryFileURLs` in `ChatView`'s `onPasteImageFile` makes
-    /// this fail: a pasted image's file is never removed.
-    func testChat_handsAPastedImagesFileOnAsATemporaryOne() throws {
-        let source = try source("esc-chatmail/Views/Chat/ChatView.swift")
+    /// Revert-check: handing the files on as dropped ones in `ChatView`'s
+    /// `onPasteImageFiles` (`receiveDroppedFiles(files.map(\\.url))`), or passing no
+    /// `temporaryFiles` in `ChatComposerState.receivePastedImageFiles`, makes this fail: a
+    /// pasted image's file is never removed.
+    func testChat_handsPastedPicturesFilesOnAsTemporaryOnes() throws {
+        let chat = try source("esc-chatmail/Views/Chat/ChatView.swift")
+        let composer = try source("esc-chatmail/ViewModels/ChatViewModel.swift")
 
-        XCTAssertTrue(source.contains(
-            "            onPasteImageFile: { [composerState = viewModel.composerState] file in\n"
-                + "                composerState.receiveDroppedFiles([file], temporaryFileURLs: [file])\n"
+        XCTAssertTrue(chat.contains(
+            "            onPasteImageFiles: { [composerState = viewModel.composerState] files in\n"
+                + "                composerState.receivePastedImageFiles(files)\n"
+        ))
+        XCTAssertTrue(composer.contains(
+            "    func receivePastedImageFiles(_ files: [PastedImageFile]) -> Bool {\n"
+                + "        receiveDroppedFiles(files.map(\\.url), temporaryFiles: files)\n"
         ))
     }
 
@@ -85,7 +120,7 @@ final class ReplyFieldPasteSourceTests: XCTestCase {
 
         XCTAssertTrue(function.contains(
             "                if !isProcessing {\n"
-                + "                    PastedImageFile.remove(drop.temporaryFileURLs)\n"
+                + "                    PastedImageFile.remove(drop.temporaryFiles)\n"
         ), function)
     }
 

@@ -30,9 +30,9 @@ final class MacDraftFileDropView: NSView {
     var acceptsFiles: @MainActor () -> Bool = { false }
     /// The files that were dropped. Returns whether the drop was taken.
     var onDropFiles: @MainActor ([URL]) -> Bool = { _ in false }
-    /// The file a pasted image was written to (`PastedImageFile`), which whoever takes it
-    /// removes once it is imported. Returns whether it was taken.
-    var onPasteImageFile: @MainActor (URL) -> Bool = { _ in false }
+    /// The files pasted pictures were written to (`PastedImageFile`), which whoever takes
+    /// them removes once they are imported. Returns whether they were taken.
+    var onPasteImageFiles: @MainActor ([PastedImageFile]) -> Bool = { _ in false }
     /// Whether the drag in progress carries files, kept under the drag's sequence number.
     /// AppKit asks about a drag at every move of the pointer, and the answer is a question to
     /// the pasteboard server, which is another process; what a drag carries is fixed when it
@@ -89,10 +89,9 @@ final class MacDraftFileDropView: NSView {
     /// sheet is asked about either way.
     private func operation(for sender: NSDraggingInfo) -> NSDragOperation {
         let takesDrag = DraftFileDropPolicy.takesDrag(
-            windowHasSheet: window?.attachedSheet != nil,
             carriesFiles: carriesFiles(sender),
             sourceAllowsCopy: sender.draggingSourceOperationMask.contains(.copy),
-            acceptsFiles: acceptsFiles()
+            takesPaste: takesPaste
         )
         return takesDrag ? .copy : []
     }
@@ -129,8 +128,10 @@ final class MacDraftFileDropView: NSView {
 
     /// Whether a paste into the reply field is taken now (`DraftFileDropPolicy.takesPaste`):
     /// where a drop would be, so not while the chat's window has a sheet attached. All three
-    /// of a paste's ways in ask this and nothing else.
-    private var takesPaste: Bool {
+    /// of a paste's ways in ask this and nothing else: the two below, and the reply field
+    /// before it reads a picture or writes it to a file, so that a refusal costs nothing and
+    /// leaves nothing behind.
+    var takesPaste: Bool {
         DraftFileDropPolicy.takesPaste(
             windowHasSheet: window?.attachedSheet != nil,
             acceptsFiles: acceptsFiles()
@@ -144,17 +145,11 @@ final class MacDraftFileDropView: NSView {
         return onDropFiles(urls)
     }
 
-    /// Whether the reply can take a pasted image now, asked before its bytes are written to
-    /// a file.
-    var acceptsPastedImage: Bool {
-        takesPaste
-    }
-
-    /// A pasted image, written to `file`. Returns whether it was taken; where it was not the
-    /// file is the caller's to remove.
-    func receivePastedImageFile(_ file: URL) -> Bool {
-        guard takesPaste else { return false }
-        return onPasteImageFile(file)
+    /// Pasted pictures, written to `files`. Returns whether they were taken; where they were
+    /// not the files are the caller's to remove.
+    func receivePastedImageFiles(_ files: [PastedImageFile]) -> Bool {
+        guard !files.isEmpty, takesPaste else { return false }
+        return onPasteImageFiles(files)
     }
 
     // MARK: - Found by the views in front of it

@@ -95,7 +95,7 @@ struct DocumentAttachmentImporter {
             }
 
             let filename = url.lastPathComponent
-            var mimeType = mimeType(for: url.pathExtension)
+            var mimeType = Self.mimeType(forPathExtension: url.pathExtension)
             let localId = "local_\(UUID().uuidString)"
             var ext = url.pathExtension.isEmpty ? "dat" : url.pathExtension
             var finalizedFilename = filename
@@ -261,7 +261,11 @@ struct DocumentAttachmentImporter {
         viewContext.delete(attachment)
     }
 
-    private func mimeType(for pathExtension: String) -> String {
+    /// The MIME type the import gives a file with this extension. An `image/` type is a file
+    /// it takes as an image: re-encoded within the size limits, with a thumbnail and a size.
+    /// Anything it does not know is `application/octet-stream`, a plain file, which is why a
+    /// pasted picture is put in one of these forms first (`PastedImageEncoder.attachable`).
+    static func mimeType(forPathExtension pathExtension: String) -> String {
         switch pathExtension.lowercased() {
         case "pdf": return "application/pdf"
         case "jpg", "jpeg": return "image/jpeg"

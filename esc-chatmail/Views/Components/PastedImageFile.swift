@@ -6,7 +6,7 @@ import Foundation
 /// A copied image is bytes on the pasteboard with no file behind them, and the draft's import
 /// reads files (`DocumentAttachmentImporter`). So the bytes are written to a file of the
 /// app's own, the import is given that file, and the file is removed when the import ends
-/// (`DraftFileDrop.temporaryFileURLs`). The import keeps its own copy in the attachments
+/// (`DraftFileDrop.temporaryFiles`). The import keeps its own copy in the attachments
 /// folder, as it does for any file.
 ///
 /// The file is in the temporary directory, each in a folder of its own, so the name the
@@ -14,12 +14,27 @@ import Foundation
 /// user's own image, not mail, so it is not account data; it is still removed promptly, and a
 /// file whose import never ran (the chat was closed first) goes at the next launch
 /// (`removeAll`).
-enum PastedImageFile {
+///
+/// A value of this type is a file `write` made, and nothing else can make one: the
+/// initializer is private. `remove` takes the folder a file is in, so what it is handed must
+/// be a file whose folder is the app's to remove. While a request carried its temporary files
+/// as plain URLs, only a comment kept a user's own file from being put among them, and then
+/// only the shape of its path kept `remove` from taking the user's folder (reviews of PR 421
+/// and PR 422, 2026-11-14). Now a user's file cannot be handed to `remove` at all.
+struct PastedImageFile: Equatable {
     /// The folder in the temporary directory the files are in.
     static let folderName = "PastedImages"
 
     /// The attachment's name, before its extension.
     static let baseName = "Pasted Image"
+
+    /// Where the file is.
+    let url: URL
+
+    /// Private, so that `write` is the only source of a value (the type's comment).
+    private init(url: URL) {
+        self.url = url
+    }
 
     static func directory(fileManager: FileManager = .default) -> URL {
         fileManager.temporaryDirectory.appendingPathComponent(folderName, isDirectory: true)
@@ -32,7 +47,7 @@ enum PastedImageFile {
         fileExtension: String,
         in directory: URL,
         fileManager: FileManager = .default
-    ) throws -> URL {
+    ) throws -> PastedImageFile {
         let folder = directory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
         let file = folder.appendingPathComponent("\(baseName).\(fileExtension)", isDirectory: false)
@@ -42,37 +57,29 @@ enum PastedImageFile {
             try? fileManager.removeItem(at: folder)
             throw error
         }
-        return file
+        return PastedImageFile(url: file)
     }
 
-    /// Removes files `write` made, each with the folder it is alone in. A file that is
-    /// already gone is passed over, and so is anything `write` did not make
-    /// (`isAloneInAFolderOfItsOwn`).
-    static func remove(_ files: [URL], fileManager: FileManager = .default) {
-        for file in files where isAloneInAFolderOfItsOwn(file, fileManager: fileManager) {
-            try? fileManager.removeItem(at: file.deletingLastPathComponent())
-        }
-    }
-
-    /// Whether `file` is where `write` puts one: named `Pasted Image.<extension>`, in a folder
-    /// named by a UUID, with nothing else in that folder.
+    /// Removes each file with the folder `write` made for it.
     ///
-    /// `remove` takes the whole folder, and it is handed whatever a request carries as its
-    /// temporary files (`DraftFileDrop.temporaryFileURLs`). Only a comment kept a user's own
-    /// file from being put among them, and for one that was, or for a file written straight
-    /// into the temporary directory, the folder removed would be the user's, or everything the
-    /// app keeps there (review of PR 421, 2026-11-14). The shape is asked about, not the
-    /// `PastedImages` path, because `write` is given its directory.
-    static func isAloneInAFolderOfItsOwn(_ file: URL, fileManager: FileManager = .default) -> Bool {
-        let folder = file.deletingLastPathComponent()
-        guard file.isFileURL,
-              !file.pathExtension.isEmpty,
-              file.deletingPathExtension().lastPathComponent == baseName,
-              UUID(uuidString: folder.lastPathComponent) != nil,
-              let contents = try? fileManager.contentsOfDirectory(atPath: folder.path) else {
-            return false
+    /// The folder goes where it holds the file and nothing else, and where it holds nothing:
+    /// the file is already gone, and its folder was only ever for it. As first guarded, an
+    /// empty folder was passed over and stayed until the next launch (review of PR 422,
+    /// 2026-11-14). A folder that holds anything else is not as `write` left it, and is left.
+    static func remove(_ files: [PastedImageFile], fileManager: FileManager = .default) {
+        for file in files {
+            let folder = file.url.deletingLastPathComponent()
+            guard let contents = try? fileManager.contentsOfDirectory(atPath: folder.path) else {
+                continue
+            }
+            if contents == [file.url.lastPathComponent] {
+                try? fileManager.removeItem(at: folder)
+            } else if contents.isEmpty {
+                // `rmdir` removes a folder only while it is empty, so nothing that arrived
+                // since it was listed can go with it.
+                _ = rmdir(folder.path)
+            }
         }
-        return contents == [file.lastPathComponent]
     }
 
     /// Removes every pasted image's file. At launch, when no import can be reading one.

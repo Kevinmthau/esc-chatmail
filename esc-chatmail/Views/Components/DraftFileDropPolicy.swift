@@ -60,33 +60,31 @@ enum DraftFileDropPolicy {
     /// copy badge (`MacDraftFileDropView`). Asked on every move of a drag and again at the
     /// drop.
     ///
-    /// - Parameters:
-    ///   - windowHasSheet: The chat's window has a sheet attached. The chat is behind the
-    ///     sheet then, and an alert about the drop would wait unseen behind it too, as a menu
-    ///     command's would (`MailboxMenuPolicy`).
-    ///   - carriesFiles: The drag holds files, not a link or a run of text.
-    ///   - sourceAllowsCopy: Where the drag came from lets its files be copied.
-    ///   - acceptsFiles: `acceptsFiles(allowsDraftMutation:isProcessingAttachments:hasPendingDrop:)`.
-    static func takesDrag(
-        windowHasSheet: Bool,
-        carriesFiles: Bool,
-        sourceAllowsCopy: Bool,
-        acceptsFiles: Bool
-    ) -> Bool {
-        !windowHasSheet && carriesFiles && sourceAllowsCopy && acceptsFiles
-    }
-
-    /// Whether files or an image pasted into the reply field are taken
-    /// (`MacDraftFileDropView.receivePastedFiles`, `acceptsPastedImage`,
-    /// `receivePastedImageFile`). A paste is taken where a drop is.
+    /// A drag is taken where a paste is, which is one rule and not two that agree: what is
+    /// asked of the chat (`takesPaste`) is passed in, and only what a drag adds is asked here.
+    /// As two lists of terms, one added to the drag's had to be added to the paste's by hand
+    /// (review of PR 422, 2026-11-14).
     ///
     /// - Parameters:
-    ///   - windowHasSheet: The chat's window has a sheet attached, as for `takesDrag`. A sheet
-    ///     does not keep Paste from the field behind it: an alert has no `paste:` of its own,
-    ///     so Command-V goes on to the main window's first responder, which is the reply field
-    ///     (read from AppKit's rule for where a command goes, not measured). The attachment
-    ///     would be added behind the sheet, and its alert would wait unseen there (review of
-    ///     PR 421, 2026-11-14).
+    ///   - carriesFiles: The drag holds files, not a link or a run of text.
+    ///   - sourceAllowsCopy: Where the drag came from lets its files be copied.
+    ///   - takesPaste: `takesPaste(windowHasSheet:acceptsFiles:)` of the chat now.
+    static func takesDrag(carriesFiles: Bool, sourceAllowsCopy: Bool, takesPaste: Bool) -> Bool {
+        carriesFiles && sourceAllowsCopy && takesPaste
+    }
+
+    /// Whether the chat takes files or pictures handed to it now: pasted into the reply
+    /// field (`MacDraftFileDropView.takesPaste`, `receivePastedFiles`,
+    /// `receivePastedImageFiles`), or dragged over it (`takesDrag`).
+    ///
+    /// - Parameters:
+    ///   - windowHasSheet: The chat's window has a sheet attached. The chat is behind the
+    ///     sheet then, and an alert about the attachment would wait unseen behind it too, as
+    ///     a menu command's would (`MailboxMenuPolicy`). A sheet does not keep Paste from the
+    ///     field behind it: an alert has no `paste:` of its own, so Command-V goes on to the
+    ///     main window's first responder, which is the reply field (read from AppKit's rule
+    ///     for where a command goes, not measured; review of PR 421, 2026-11-14). The field
+    ///     refuses a paste of text there too (`ReplyFieldPastePolicy.fieldTakesPaste`).
     ///   - acceptsFiles: `acceptsFiles(allowsDraftMutation:isProcessingAttachments:hasPendingDrop:)`.
     static func takesPaste(windowHasSheet: Bool, acceptsFiles: Bool) -> Bool {
         !windowHasSheet && acceptsFiles
