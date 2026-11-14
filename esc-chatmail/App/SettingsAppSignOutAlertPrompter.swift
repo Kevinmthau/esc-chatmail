@@ -36,6 +36,12 @@ final class SettingsAppSignOutAlertPrompter: ObservableObject, SettingsAppSignOu
         fileprivate let onSignOut: () -> Void
         fileprivate let onCancel: () -> Void
 
+        /// Which of the two presentations shows it (`SettingsAppSignOutAlertModifier`).
+        var isConfirmation: Bool {
+            guard case .confirmation = kind else { return false }
+            return true
+        }
+
         var title: String {
             switch kind {
             case .confirmation: return "Sign Out of MushMail?"
@@ -58,8 +64,7 @@ final class SettingsAppSignOutAlertPrompter: ObservableObject, SettingsAppSignOu
     @Published private(set) var alert: Alert?
 
     var isConfirmationActive: Bool {
-        guard case .confirmation = alert?.kind else { return false }
-        return true
+        alert?.isConfirmation ?? false
     }
 
     func presentConfirmation(
@@ -69,6 +74,14 @@ final class SettingsAppSignOutAlertPrompter: ObservableObject, SettingsAppSignOu
     ) {
         guard !isConfirmationActive else { return }
         alert = Alert(kind: .confirmation(accountEmail: accountEmail), onSignOut: onSignOut, onCancel: onCancel)
+    }
+
+    /// Clearing the published alert is what closes it: SwiftUI takes the sheet off the window
+    /// (measured in a stand-in program built from this file and its modifier, macOS 27.2,
+    /// 2026-11-13). A failure alert is left up: it asks nothing.
+    func withdrawConfirmation() {
+        guard isConfirmationActive else { return }
+        alert = nil
     }
 
     func presentFailure() {

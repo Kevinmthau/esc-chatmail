@@ -72,6 +72,30 @@ final class SettingsAppSignOutPrompter: SettingsAppSignOutPrompting {
         }
     }
 
+    /// Dismisses the confirmation without an animation, so the presenter is free for the
+    /// confirmation that may be asked next in the same turn
+    /// (`SettingsAppSignOutController.evaluate`). The alert is forgotten here and not when
+    /// UIKit has finished with it (it still has its presenter when `dismiss` returns), so
+    /// the gate is open when this returns.
+    ///
+    /// Two confirmations are left alone, with the gate still held, for the controller's next
+    /// look to take down:
+    /// - One still waiting for a presenter (`isAwaitingPresenter`, at most the second
+    ///   `TopPresentableViewController.present` retries for): no alert is on screen yet.
+    /// - One still coming up (`isBeingPresented`, for about a third of a second).
+    ///   UIKit puts a dismissal asked for then off until the alert is up, and the
+    ///   confirmation asked next was presented while the first still had the presenter, and
+    ///   lost: in the simulator (iOS 27.0, 2026-11-13) that was 8 runs of 30, every one of
+    ///   them with the first alert still being presented, and none of the 22 where it was up.
+    ///
+    /// An answer given to either meanwhile is still judged when it is given
+    /// (`SettingsAppSignOutPolicy.answerStillApplies`).
+    func withdrawConfirmation() {
+        guard let alert = presentedAlert, !alert.isBeingPresented else { return }
+        presentedAlert = nil
+        alert.dismiss(animated: false)
+    }
+
     /// Tells the user a confirmed sign-out never started (its reset marker
     /// could not be saved), so the app is still signed in.
     func presentFailure() {

@@ -73,6 +73,7 @@
         "MacWindowVisibilityProbeTests",
         "MailboxWindowSheetTests",
         "SheetBehindFocusedWindowTests",
+        "FocusedWindowSheetTests",
         "MacSidebarFilterBadgePolicyTests",
         "MacSidebarListSelectionGuardViewTests",
         "MacSidebarRowIDTests",

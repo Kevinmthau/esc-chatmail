@@ -119,17 +119,33 @@ final class MacSettingsSceneSourceTests: XCTestCase {
     /// A refused Sign Out… can be waiting on a sheet on the window that is not in front,
     /// the other window's confirmation included. The beep alone said nothing of that.
     ///
+    /// Read to the closing brace of the refusal's own block, which has no other brace in
+    /// it: read to the end of the function, this passed with the call made on every choice.
+    ///
     /// Revert-check: dropping `SheetBehindFocusedWindow.reveal()` from
-    /// `SignOutMenuAction.perform` makes this fail.
+    /// `SignOutMenuAction.perform` makes this fail, and so does moving it below the `if`.
     func testSignOutAction_refused_bringsForwardTheWindowWhoseSheetIsInTheWay() throws {
         let action = try source("esc-chatmail/Platform/SignOutMenuAction.swift")
         let refusal = try XCTUnwrap(action.range(of: "if choice == .refuse {"))
-        let end = try XCTUnwrap(action.range(of: "static func ==", range: refusal.upperBound..<action.endIndex))
+        let end = try XCTUnwrap(action.range(of: "}", range: refusal.upperBound..<action.endIndex))
+        let block = action[refusal.upperBound..<end.lowerBound]
 
-        XCTAssertTrue(
-            action[refusal.upperBound..<end.lowerBound].contains("SheetBehindFocusedWindow.reveal()"),
-            action
-        )
+        XCTAssertTrue(block.contains("SheetBehindFocusedWindow.reveal()"), String(block))
+        XCTAssertEqual(action.components(separatedBy: "SheetBehindFocusedWindow.reveal()").count - 1, 1, action)
+    }
+
+    /// The confirmation and the failure are two presentations. As one, the failure raised
+    /// while the confirmation was leaving the screen was cleared by the confirmation's
+    /// dismissal and never shown (measured in a stand-in program built from the modifier).
+    ///
+    /// Revert-check: giving `SettingsAppSignOutAlertModifier.body` one `alert(presented, on:
+    /// content)` for both kinds makes this fail.
+    func testSignOutAlerts_confirmationAndFailureAreTwoPresentations() throws {
+        let modifier = try source("esc-chatmail/App/SettingsAppSignOutAlertModifier.swift")
+
+        XCTAssertTrue(modifier.contains("let confirmation = presented.flatMap { $0.isConfirmation ? $0 : nil }"), modifier)
+        XCTAssertTrue(modifier.contains("let failure = presented.flatMap { $0.isConfirmation ? nil : $0 }"), modifier)
+        XCTAssertTrue(modifier.contains("return alert(failure, on: alert(confirmation, on: content))"), modifier)
     }
 
     /// One rule for whether Sign Out… can be chosen, read by the menu command and by the
