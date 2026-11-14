@@ -2,6 +2,7 @@
 import AppKit
 import CoreData
 import SwiftUI
+import UniformTypeIdentifiers
 import WebKit
 import XCTest
 @testable import esc_chatmail
@@ -526,18 +527,22 @@ final class MacDraftFileDropViewTests: XCTestCase {
         harness.close()
     }
 
-    /// Asked before the bytes are written, so a refusal leaves no file.
+    /// Asked before the image is read or written, so a refusal leaves no file.
+    ///
+    /// The image is one the field can read. With bytes that are no image the paste is
+    /// refused for that, whatever the chat says, and this would pin nothing about the chat.
     ///
     /// HONEST SCOPE: this pins the outcome, a refusal and no file left. With
     /// `chatDropView.acceptsPastedImage` deleted from the guard in
     /// `MacReplyTextView.attachPastedImage` it still passes, because the file is then
     /// written, refused and removed; it does not show that nothing was written meanwhile.
     func testPaste_ofACopiedImage_theChatCannotTake_isRefused_andLeavesNoFile() throws {
+        let tiff = try TestImageData.encoded(as: .tiff, pixelSizes: [CGSize(width: 8, height: 8)])
         let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
         harness.model.accepts = false
         let directory = try makePasteDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
-        let copied = pasteboard(image: (.tiff, Self.pngBytes))
+        let copied = pasteboard(image: (.tiff, tiff))
         defer { copied.releaseGlobally() }
         let refusals = PasteRefusals()
         let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
@@ -572,6 +577,96 @@ final class MacDraftFileDropViewTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
         XCTAssertEqual(refusals.count, 1)
         harness.close()
+    }
+
+    /// An app that copies an `NSImage` puts only TIFF on the pasteboard, and the draft's
+    /// import does not take a `.tiff` as an image: written as it came, the picture was
+    /// attached as a plain file, uncompressed. The field writes it as PNG.
+    ///
+    /// Revert-check: returning the TIFF as it came from `MacReplyTextView.imageData`, without
+    /// the `PastedImagePNGEncoder` step, makes the type assertion fail; with `(.tiff, "tiff")`
+    /// back in `pastedImageTypes` the name fails too.
+    func testPaste_ofAnImageCopiedAsTIFF_writesItAsAPNG() throws {
+        let size = CGSize(width: 24, height: 16)
+        let tiff = try TestImageData.encoded(as: .tiff, pixelSizes: [size])
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(image: (.tiff, tiff))
+        defer { copied.releaseGlobally() }
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        defer { harness.close() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        let file = try XCTUnwrap(harness.model.pastedImageFiles.first)
+        XCTAssertEqual(file.lastPathComponent, "Pasted Image.png")
+        let written = try Data(contentsOf: file)
+        XCTAssertEqual(TestImageData.typeIdentifier(of: written), UTType.png.identifier)
+        XCTAssertEqual(TestImageData.pixelSizes(of: written), [size])
+        XCTAssertEqual(refusals.count, 0)
+    }
+
+    /// Bytes on the pasteboard under TIFF's name that are no picture: nothing is written and
+    /// nothing is handed to the chat, whose import would name a file it "could not read".
+    ///
+    /// Revert-check: falling back to the bytes as they came in `MacReplyTextView.imageData`,
+    /// where `PastedImagePNGEncoder.pngData` answers nil, makes this fail.
+    func testPaste_ofATIFFThatIsNoImage_isRefused_andLeavesNoFile() throws {
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let copied = pasteboard(image: (.tiff, Self.pngBytes))
+        defer { copied.releaseGlobally() }
+        let harness = try Harness(window: try makeTestHostWindow(), text: "Hello")
+        defer { harness.close() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertTrue(harness.model.pastedImageFiles.isEmpty)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+        XCTAssertEqual(refusals.count, 1)
+    }
+
+    /// The field shows a few lines of a long draft, and its text view is as tall as all of
+    /// it. The chat is looked for under the part on screen: the middle of the whole text is
+    /// outside the window, where there is no chat, and the paste was refused.
+    ///
+    /// Revert-check: taking the middle of `bounds`, in place of `visibleRect`, in
+    /// `MacReplyTextView.chatDropView` makes the last two assertions fail.
+    func testPaste_intoALongDraftScrolledToItsStart_stillFindsTheChat() throws {
+        let draft = Array(repeating: "A line of a long reply", count: 80).joined(separator: "\n")
+        let directory = try makePasteDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = [URL(fileURLWithPath: "/tmp/One.pdf")]
+        let copied = pasteboard(files: files)
+        defer { copied.releaseGlobally() }
+        let harness = try Harness(window: try makeTestHostWindow(), text: draft)
+        defer { harness.close() }
+        let refusals = PasteRefusals()
+        let textView = try harness.replyTextView(pastingFrom: copied, imageDirectory: directory, refusals: refusals)
+        let container = try XCTUnwrap(textView.textContainer)
+        textView.layoutManager?.ensureLayout(for: container)
+        textView.sizeToFit()
+        textView.scroll(.zero)
+
+        // The premise: the field shows some of the text, the text is far taller than that,
+        // and its middle is not over the chat.
+        XCTAssertGreaterThan(textView.visibleRect.height, 0)
+        XCTAssertGreaterThan(textView.bounds.height, textView.visibleRect.height * 4)
+        let middleOfTheText = textView.convert(
+            NSPoint(x: textView.bounds.midX, y: textView.bounds.midY),
+            to: nil
+        )
+        let chat = harness.dropView.convert(harness.dropView.bounds, to: nil)
+        XCTAssertFalse(chat.contains(middleOfTheText))
+
+        XCTAssertTrue(textView.pasteAttachments())
+
+        XCTAssertEqual(harness.model.drops, [files])
+        XCTAssertEqual(refusals.count, 0)
     }
 
     /// A text view enables Paste for what it reads itself, and this one reads no images.

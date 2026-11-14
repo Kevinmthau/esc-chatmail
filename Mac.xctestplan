@@ -94,6 +94,7 @@
         "MessageTextWidthCapLayoutTests",
         "OutboundSendTerminationWaitTests",
         "PastedImageFileTests",
+        "PastedImagePNGEncoderTests",
         "ReplyFieldFocusBridgeTests",
         "ReplyFieldPastePolicyTests",
         "ReplyFieldPasteSourceTests",

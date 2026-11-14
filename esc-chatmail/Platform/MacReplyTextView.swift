@@ -79,9 +79,8 @@ final class MacReplyTextView: NSTextView {
             }
             return true
         case .attachImage:
-            guard let image = Self.imageData(on: pasteboard), attachPastedImage(image) else {
+            if !attachPastedImage(from: pasteboard) {
                 refusePaste()
-                return true
             }
             return true
         }
@@ -114,11 +113,13 @@ final class MacReplyTextView: NSTextView {
         return isPaste && isEditable && Self.pasteAction(for: pasteboardForPaste()) != .pasteAsText
     }
 
-    /// Writes the image to a file of the app's own and hands it to the chat, which removes
-    /// the file once it is imported. Returns whether the chat took it.
-    private func attachPastedImage(_ image: (data: Data, fileExtension: String)) -> Bool {
-        // Asked before the file is written, so a refusal leaves nothing behind.
+    /// Writes the image on `pasteboard` to a file of the app's own and hands it to the chat,
+    /// which removes the file once it is imported. Returns whether the chat took it.
+    private func attachPastedImage(from pasteboard: NSPasteboard) -> Bool {
+        // Asked before the image is read, so a refusal costs nothing and leaves nothing
+        // behind: the read can be tens of megabytes, and a TIFF is re-encoded.
         guard let chatDropView, chatDropView.acceptsPastedImage,
+              let image = Self.imageData(on: pasteboard),
               let file = try? PastedImageFile.write(
                   image.data,
                   fileExtension: image.fileExtension,
@@ -135,23 +136,39 @@ final class MacReplyTextView: NSTextView {
 
     /// The chat's drop view behind this field, which takes pasted files as it takes dropped
     /// ones. Nil where the field has no chat behind it.
+    ///
+    /// Looked for under the middle of the part of the field that is on screen
+    /// (`visibleRect`), not of its `bounds`. The view is its scroll view's document, as tall
+    /// as its text, and the field shows a few lines of it: the middle of a long draft can be
+    /// outside the window, where there is no chat, and every paste of a file or an image
+    /// into such a draft was refused.
     private var chatDropView: MacDraftFileDropView? {
-        MacDraftFileDropView.dropView(in: window, at: convert(NSPoint(x: bounds.midX, y: bounds.midY), to: nil))
+        let onScreen = visibleRect
+        return MacDraftFileDropView.dropView(
+            in: window,
+            at: convert(NSPoint(x: onScreen.midX, y: onScreen.midY), to: nil)
+        )
     }
 
-    /// The image on a pasteboard, in the first of these forms it has, with the extension of
-    /// the file it is written to. The import re-encodes it either way
-    /// (`DraftAttachmentImport.prepareImage`).
+    /// The forms a copied image is taken in, in the order they are asked for, each with the
+    /// extension of the file it is written to. PNG and JPEG are written as they came, and the
+    /// import takes either as an image (`DocumentAttachmentImporter`). TIFF is written as PNG
+    /// (`PastedImagePNGEncoder`): the import does not take a `.tiff` as an image.
     private static let pastedImageTypes: [(type: NSPasteboard.PasteboardType, fileExtension: String)] = [
         (.png, "png"),
         (NSPasteboard.PasteboardType("public.jpeg"), "jpg"),
-        (.tiff, "tiff")
+        (.tiff, "png")
     ]
 
+    /// The image on a pasteboard, in the first of `pastedImageTypes` it has that can be
+    /// used, with the extension of the file it is written to. Nil where it has none: a TIFF
+    /// that cannot be read is no image.
     static func imageData(on pasteboard: NSPasteboard) -> (data: Data, fileExtension: String)? {
         for (type, fileExtension) in pastedImageTypes {
-            if let data = pasteboard.data(forType: type), !data.isEmpty {
-                return (data, fileExtension)
+            guard let data = pasteboard.data(forType: type), !data.isEmpty else { continue }
+            guard type == .tiff else { return (data, fileExtension) }
+            if let png = PastedImagePNGEncoder.pngData(from: data) {
+                return (png, fileExtension)
             }
         }
         return nil
