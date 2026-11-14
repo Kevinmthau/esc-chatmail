@@ -195,13 +195,14 @@ final class SettingsAppSignOutController: ObservableObject {
     /// Asks the user to confirm signing out `account`. Both answers clear the Settings-app
     /// request; after the Mac's menu command there is none stored, and clearing an absent key
     /// changes nothing.
+    ///
+    /// The answer is for the session as it is when the question is asked, so that is kept
+    /// with it (`asked`) and compared when the user answers (`signOutConfirmed`).
     private func presentConfirmation(account: SettingsAppSignOutAccount) {
+        let asked = SettingsAppSignOutSubject(account)
         prompter.presentConfirmation(
-            accountEmail: SettingsAppPreferences.displayedAccountEmail(
-                isAuthenticated: account.isAuthenticated,
-                userEmail: account.userEmail
-            ),
-            onSignOut: { [weak self] in self?.signOutConfirmed(account: account) },
+            accountEmail: asked.email,
+            onSignOut: { [weak self] in self?.signOutConfirmed(account: account, asked: asked) },
             onCancel: { [weak self] in self?.preferences.clearSignOutRequest() }
         )
     }
@@ -210,14 +211,35 @@ final class SettingsAppSignOutController: ObservableObject {
     /// `AuthSession.signOut()` the old in-app Settings screen called. It starts
     /// from UI, never from inside another auth transition (the auth gate is
     /// not reentrant).
-    private func signOutConfirmed(account: SettingsAppSignOutAccount) {
+    ///
+    /// - Parameter asked: The session as it was when the confirmation was raised.
+    private func signOutConfirmed(account: SettingsAppSignOutAccount, asked: SettingsAppSignOutSubject) {
         preferences.clearSignOutRequest()
         // The alert can outlive the session it was raised for (a sign-out from
         // elsewhere, or a restore whose credentials were rejected, finished
         // while it was up); once durably signed out there is no session left
         // for this switch to end — the same verdict the policy discards on.
         guard !account.isDurablySignedOut(), !isSigningOut else { return }
-        // After the guard above, so a window is asked, and tells the user it refused, only
+        // It can outlive it the other way too: a sign-in finished while it was up, and the
+        // session there is now is not the one the user was asked about. That one is not
+        // signed out on this answer. The user is told as for a sign-out that never started,
+        // and asking again names the account that is signed in now.
+        //
+        // HONEST SCOPE: nobody has answered a stale confirmation in the app. The failure
+        // alert is raised from inside the confirmation's own answer; if a window does not
+        // show it there, the answer signs nothing out and says nothing.
+        guard SettingsAppSignOutPolicy.answerStillApplies(
+            asked: asked,
+            current: SettingsAppSignOutSubject(account)
+        ) else {
+            Log.warning(
+                "A sign-out confirmation was answered after the session it asked about had changed; nothing was signed out",
+                category: .auth
+            )
+            presentFailure()
+            return
+        }
+        // After the guards above, so a window is asked, and tells the user it refused, only
         // when there was a sign-out to refuse.
         guard !refusesConfirmedSignOut() else {
             Log.info("A confirmed sign-out was refused by its window; the account is still signed in", category: .auth)

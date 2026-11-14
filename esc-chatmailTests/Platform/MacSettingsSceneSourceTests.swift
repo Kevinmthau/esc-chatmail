@@ -116,6 +116,22 @@ final class MacSettingsSceneSourceTests: XCTestCase {
         )
     }
 
+    /// A refused Sign Out… can be waiting on a sheet on the window that is not in front,
+    /// the other window's confirmation included. The beep alone said nothing of that.
+    ///
+    /// Revert-check: dropping `SheetBehindFocusedWindow.reveal()` from
+    /// `SignOutMenuAction.perform` makes this fail.
+    func testSignOutAction_refused_bringsForwardTheWindowWhoseSheetIsInTheWay() throws {
+        let action = try source("esc-chatmail/Platform/SignOutMenuAction.swift")
+        let refusal = try XCTUnwrap(action.range(of: "if choice == .refuse {"))
+        let end = try XCTUnwrap(action.range(of: "static func ==", range: refusal.upperBound..<action.endIndex))
+
+        XCTAssertTrue(
+            action[refusal.upperBound..<end.lowerBound].contains("SheetBehindFocusedWindow.reveal()"),
+            action
+        )
+    }
+
     /// One rule for whether Sign Out… can be chosen, read by the menu command and by the
     /// Settings window's button, and it counts a sign-out running in the other window.
     ///

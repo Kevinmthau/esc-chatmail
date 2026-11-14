@@ -608,6 +608,93 @@ final class SettingsAppSignOutControllerTests: XCTestCase {
         XCTAssertFalse(settings.controller.isSigningOut)
     }
 
+    /// The Mac's Settings window asks about an account held while signed out. Its
+    /// confirmation is a sheet on that window only, so the user can sign in on the mailbox
+    /// window with it still up, and its Sign Out button then signed that new session out.
+    ///
+    /// Revert-check: removing the `guard SettingsAppSignOutPolicy.answerStillApplies` from
+    /// `SettingsAppSignOutController.signOutConfirmed` makes this fail.
+    func testSignOutConfirmed_signedInAfterTheQuestion_signsNothingOutAndSaysSo() throws {
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        XCTAssertEqual(prompter.confirmationCount, 1)
+        XCTAssertNil(prompter.lastAccountEmail)
+
+        account.isAuthenticated = true
+        account.userEmail = "new@example.com"
+        try XCTUnwrap(prompter.onSignOut)()
+
+        XCTAssertFalse(controller.isSigningOut)
+        XCTAssertFalse(controller.isAnySignOutRunning)
+        XCTAssertEqual(prompter.failureCount, 1, "the answer must not look ignored")
+
+        // Refused, not stuck: asked again, the confirmation names the account signed in
+        // now, and its answer signs that one out.
+        XCTAssertEqual(controller.requestSignOut(account: account, focusedWindowHasSheet: false), .confirm)
+        XCTAssertEqual(prompter.lastAccountEmail, "new@example.com")
+        try XCTUnwrap(prompter.onSignOut)()
+        XCTAssertTrue(controller.isSigningOut)
+    }
+
+    /// The session is compared as it was when the question was asked, not as it is when the
+    /// handler is made or run.
+    ///
+    /// Revert-check: taking `asked` inside the `onSignOut` closure, in
+    /// `SettingsAppSignOutController.presentConfirmation`, makes this fail: it would be the
+    /// session at the answer, and always equal to itself.
+    func testSignOutConfirmed_anotherAccountSignedInSinceTheQuestion_signsNothingOut() throws {
+        account.userEmail = "old@example.com"
+        controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+        XCTAssertEqual(prompter.lastAccountEmail, "old@example.com")
+
+        account.userEmail = "new@example.com"
+        try XCTUnwrap(prompter.onSignOut)()
+
+        XCTAssertFalse(controller.isSigningOut)
+        XCTAssertEqual(prompter.failureCount, 1)
+    }
+
+    /// A stale answer is the controller's to refuse. The window is asked, and beeps, only
+    /// when there was a sign-out to refuse.
+    ///
+    /// Revert-check: moving the `guard !refusesConfirmedSignOut()` above the
+    /// `answerStillApplies` guard in `SettingsAppSignOutController.signOutConfirmed` makes
+    /// this fail.
+    func testSignOutConfirmed_staleAnswer_doesNotAskTheWindow() throws {
+        var askedCount = 0
+        let settings = makeSettingsWindowsController {
+            askedCount += 1
+            return true
+        }
+        account.userEmail = "old@example.com"
+        settings.controller.requestSignOut(account: account, focusedWindowHasSheet: false)
+
+        account.userEmail = "new@example.com"
+        try XCTUnwrap(settings.prompter.onSignOut)()
+
+        XCTAssertEqual(askedCount, 0)
+        XCTAssertEqual(settings.prompter.failureCount, 1)
+    }
+
+    /// The iOS switch's confirmation can be raised over the sign-in view, for an account
+    /// held while signed out, and answered there: nothing changed, so it signs that account
+    /// out as before.
+    ///
+    /// Revert-check: refusing whenever `asked.isAuthenticated` is false, in
+    /// `SettingsAppSignOutPolicy.answerStillApplies`, makes this fail.
+    func testSignOutConfirmed_heldAccountStillHeld_signsOut() async throws {
+        requestSignOut()
+        account.isAuthenticated = false
+        account.userEmail = nil
+        controller.evaluate(account: account, isSceneActive: true)
+
+        try XCTUnwrap(prompter.onSignOut)()
+
+        await waitUntil { self.account.signOutCallCount == 1 }
+        XCTAssertEqual(prompter.failureCount, 0)
+    }
+
     // MARK: - Platform prompter
 
     /// iOS keeps the UIKit prompter, which presents over any sheet; a SwiftUI alert on the root
