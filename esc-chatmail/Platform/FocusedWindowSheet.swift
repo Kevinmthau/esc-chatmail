@@ -13,9 +13,14 @@ import AppKit
 enum FocusedWindowSheet {
     static var isAttached: Bool {
         let application = NSApplication.shared
-        return application.keyWindow?.sheetParent != nil
-            || application.keyWindow?.attachedSheet != nil
-            || application.mainWindow?.attachedSheet != nil
+        return isAttached(keyWindow: application.keyWindow, mainWindow: application.mainWindow)
+    }
+
+    /// `keyWindow` and `mainWindow` are the app's; the tests give their own.
+    static func isAttached(keyWindow: NSWindow?, mainWindow: NSWindow?) -> Bool {
+        keyWindow?.sheetParent != nil
+            || keyWindow?.attachedSheet != nil
+            || mainWindow?.attachedSheet != nil
     }
 }
 #endif
