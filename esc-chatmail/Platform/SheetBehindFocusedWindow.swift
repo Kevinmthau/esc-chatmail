@@ -50,9 +50,14 @@ enum SheetBehindFocusedWindow {
 
     /// A window with a sheet attached that is not the focused window, or nil when the focused
     /// window has a sheet itself or no window has one.
+    ///
+    /// Never a sheet. A sheet can have a sheet of its own (New Message with its "discard this
+    /// message?" question up), and it is then one of `windows` with a sheet attached, as the
+    /// window under it is. `windows` is in no promised order, so the sheet could be the one
+    /// found and sent to the front in place of its window.
     static func window(among windows: [NSWindow], keyWindow: NSWindow?, mainWindow: NSWindow?) -> NSWindow? {
         guard !FocusedWindowSheet.isAttached(keyWindow: keyWindow, mainWindow: mainWindow) else { return nil }
-        return windows.first { $0.attachedSheet != nil }
+        return windows.first { $0.attachedSheet != nil && $0.sheetParent == nil }
     }
 }
 #endif
