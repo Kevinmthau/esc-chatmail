@@ -171,6 +171,20 @@ struct ComposeView: View {
                 }
             }
         }
+        // A file dropped anywhere on the Mac's New Message sheet is attached, as the Files
+        // picker would attach it; Forward and a new email, which have no picker, refuse it.
+        // The drop view is over the sheet, not behind it as the chat's is: behind, a field
+        // with the caret and the Forward sheet's text editor took a dropped file themselves
+        // and typed its path (`View.macDraftFileDropOverlay`). Nothing on iOS. The closures
+        // read the view model when a drag asks.
+        .macDraftFileDropOverlay(
+            acceptsFiles: { [viewModel] in
+                viewModel.acceptsDroppedFiles
+            },
+            onDropFiles: { [viewModel] urls in
+                viewModel.receiveDroppedFiles(urls)
+            }
+        )
         // On the Mac always: Escape would otherwise close the sheet by itself and discard the
         // draft unasked (`ComposeCancelPolicy`).
         .interactiveDismissDisabled(

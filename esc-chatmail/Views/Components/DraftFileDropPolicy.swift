@@ -32,6 +32,22 @@ enum DraftFileDropPolicy {
         allowsDraftMutation && !isProcessingAttachments && !hasPendingDrop
     }
 
+    /// Whether a compose sheet's draft can be given a dropped file at all, which is
+    /// `allowsDraftMutation` for the New Message and Forward sheet (`ComposeViewModel`).
+    ///
+    /// - The sheet shows its attachment controls. A drop goes through the Files picker's
+    ///   import, so it is taken where that picker is offered: New Message. Forward and a new
+    ///   email have no picker, and a file dropped on one is refused, where before it was
+    ///   typed into the message as a path.
+    /// - No send owns the draft, and the sheet has not been discarded.
+    static func composeSheetAllowsDrop(
+        showsAttachmentControls: Bool,
+        isSending: Bool,
+        hasDiscarded: Bool
+    ) -> Bool {
+        showsAttachmentControls && !isSending && !hasDiscarded
+    }
+
     /// Whether the picker starts on the composer's pending drop now. It waits while another
     /// import runs, for `acceptsFiles`' reason, and starts when that one ends: a drop that
     /// was taken is always imported. The composer refuses a drop during an import, so the
