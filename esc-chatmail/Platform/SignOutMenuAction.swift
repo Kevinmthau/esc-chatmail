@@ -36,6 +36,10 @@ struct SignOutMenuAction: Equatable {
     /// The command was chosen. Beeps when nothing is asked (`SignOutMenuPolicy.choice`), so a
     /// choice made under an open sheet does not look ignored. The sheet may be on the focused
     /// window or on the mailbox window behind the Settings window (`MailboxWindowSheet`).
+    ///
+    /// A sheet on a window that is not the focused one can be out of sight, the other
+    /// window's confirmation included, so a refusal also brings that window to the front
+    /// (`SheetBehindFocusedWindow`): the beep alone said nothing of what was in the way.
     @MainActor
     func perform() {
         let choice = controller.requestSignOut(
@@ -44,6 +48,7 @@ struct SignOutMenuAction: Equatable {
         )
         if choice == .refuse {
             NSSound.beep()
+            SheetBehindFocusedWindow.reveal()
         }
     }
 

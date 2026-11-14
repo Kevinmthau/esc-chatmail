@@ -74,6 +74,7 @@
         "MacSidebarCollapseGuardViewTests",
         "MacWindowVisibilityProbeTests",
         "MailboxWindowSheetTests",
+        "SheetBehindFocusedWindowTests",
         "MacSidebarFilterBadgePolicyTests",
         "MacSidebarListSelectionGuardViewTests",
         "MacSidebarRowIDTests",

@@ -52,4 +52,37 @@ enum SettingsAppSignOutPolicy {
         guard !isRequestBeingHandled, isSceneActive else { return .none }
         return .confirm
     }
+
+    /// Whether a confirmation answered with Sign Out still stands for the session as it is
+    /// now. `asked` is what the confirmation was raised about, `current` what the sign-out
+    /// would end.
+    ///
+    /// A confirmation can outlive what it asked about. The Mac's Settings window shows its
+    /// confirmation as a sheet on that window only, so the mailbox window still takes clicks
+    /// while it is up: raised over an account held while signed out (a launch restore that
+    /// failed retryably), it stayed up while the user signed in on the mailbox window, and
+    /// its Sign Out button then signed that new session out.
+    ///
+    /// - Nobody is signed in now → it stands. What is left is the account it asked about,
+    ///   still held, and the caller has already dropped the case where nothing is left
+    ///   (`isDurablySignedOut()`). A signed-in session that now needs reauthentication is
+    ///   still signed in here, so it never reaches this line as another account.
+    /// - Signed in now but not when asked → it does not. Only `AuthSession.signIn` gets there
+    ///   once the app has started (the launch restore runs before any window can ask), so a
+    ///   sign-in finished after the question, as the same account or another.
+    /// - Signed in both times → it stands unless both addresses are known and differ. They
+    ///   are compared without case, as addresses are. One of them unknown is not a
+    ///   difference: refusing there would refuse a sign-out nothing shows to be wrong.
+    ///
+    /// The same address signed out and in again between the question and the answer is not
+    /// seen. The confirmation then names the account it signs out.
+    static func answerStillApplies(
+        asked: SettingsAppSignOutSubject,
+        current: SettingsAppSignOutSubject
+    ) -> Bool {
+        guard current.isAuthenticated else { return true }
+        guard asked.isAuthenticated else { return false }
+        guard let askedEmail = asked.email, let currentEmail = current.email else { return true }
+        return askedEmail.caseInsensitiveCompare(currentEmail) == .orderedSame
+    }
 }
