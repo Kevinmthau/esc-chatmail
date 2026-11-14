@@ -4,18 +4,16 @@ import Foundation
 /// the address the confirmation shows for it. `SettingsAppSignOutController` takes one when
 /// it asks and another when the user answers, and `SettingsAppSignOutPolicy.answerStillApplies`
 /// compares the two.
-struct SettingsAppSignOutSubject: Equatable {
+struct SettingsAppSignOutSubject {
     let isAuthenticated: Bool
     /// `SettingsAppPreferences.displayedAccountEmail`: nil while nobody is signed in, and
     /// for a signed-in account with no address.
     let email: String?
+}
 
-    init(isAuthenticated: Bool, email: String?) {
-        self.isAuthenticated = isAuthenticated
-        self.email = email
-    }
-
-    /// `account` as it is now.
+extension SettingsAppSignOutSubject {
+    /// `account` as it is now. In an extension, so the struct keeps the initializer Swift
+    /// writes for its two fields.
     @MainActor
     init(_ account: SettingsAppSignOutAccount) {
         let isAuthenticated = account.isAuthenticated

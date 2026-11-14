@@ -9,7 +9,9 @@ import XCTest
 ///
 /// HONEST SCOPE: the SwiftUI alert itself (`SettingsAppSignOutAlertModifier`) only mounts in a
 /// Mac window, which the iOS-only test target cannot host; these drive the calls its buttons and
-/// binding make.
+/// binding make. What SwiftUI does with them (a failure raised while the confirmation is
+/// leaving, a confirmation taken down) was measured in a stand-in program built from the
+/// prompter and the modifier, and is recorded on the modifier.
 @MainActor
 final class SettingsAppSignOutAlertPrompterTests: XCTestCase {
     /// Revert-check: removing `guard !isConfirmationActive` from
@@ -123,6 +125,55 @@ final class SettingsAppSignOutAlertPrompterTests: XCTestCase {
 
         XCTAssertEqual(prompter.alert?.id, current.id)
         XCTAssertTrue(prompter.isConfirmationActive)
+    }
+
+    /// A confirmation taken down because its session changed is not an answer.
+    ///
+    /// Revert-check: removing `alert = nil` from
+    /// `SettingsAppSignOutAlertPrompter.withdrawConfirmation` makes this fail.
+    func testWithdrawConfirmation_runsNoHandlerAndReleasesGate() {
+        let prompter = SettingsAppSignOutAlertPrompter()
+        var handlerCount = 0
+        prompter.presentConfirmation(
+            accountEmail: nil,
+            onSignOut: { handlerCount += 1 },
+            onCancel: { handlerCount += 1 }
+        )
+
+        prompter.withdrawConfirmation()
+
+        XCTAssertNil(prompter.alert)
+        XCTAssertFalse(prompter.isConfirmationActive)
+        XCTAssertEqual(handlerCount, 0)
+    }
+
+    /// The failure alert asks nothing, so a change of session does not take it down.
+    ///
+    /// Revert-check: removing `guard isConfirmationActive` from
+    /// `SettingsAppSignOutAlertPrompter.withdrawConfirmation` makes this fail.
+    func testWithdrawConfirmation_failureAlertUp_leavesIt() {
+        let prompter = SettingsAppSignOutAlertPrompter()
+        prompter.presentFailure()
+
+        prompter.withdrawConfirmation()
+
+        XCTAssertEqual(prompter.alert?.kind, .failure)
+    }
+
+    /// Which of the modifier's two presentations shows an alert.
+    ///
+    /// Revert-check: returning true from `SettingsAppSignOutAlertPrompter.Alert.isConfirmation`
+    /// makes this fail: the failure would go to the confirmation's presentation, whose
+    /// dismissal clears it.
+    func testIsConfirmation_tellsTheTwoKindsApart() {
+        let prompter = SettingsAppSignOutAlertPrompter()
+
+        prompter.presentConfirmation(accountEmail: nil, onSignOut: {}, onCancel: {})
+        XCTAssertEqual(prompter.alert?.isConfirmation, true)
+
+        prompter.withdrawConfirmation()
+        prompter.presentFailure()
+        XCTAssertEqual(prompter.alert?.isConfirmation, false)
     }
 
     /// The failure alert is not a confirmation, so it never holds a later request back.

@@ -55,7 +55,9 @@ enum SettingsAppSignOutPolicy {
 
     /// Whether a confirmation answered with Sign Out still stands for the session as it is
     /// now. `asked` is what the confirmation was raised about, `current` what the sign-out
-    /// would end.
+    /// would end. The controller asks when the user answers, and before that whenever it is
+    /// told about the session, to take down a confirmation whose answer would not stand
+    /// (`SettingsAppSignOutController.withdrawStaleConfirmation`).
     ///
     /// A confirmation can outlive what it asked about. The Mac's Settings window shows its
     /// confirmation as a sheet on that window only, so the mailbox window still takes clicks
@@ -67,9 +69,15 @@ enum SettingsAppSignOutPolicy {
     ///   still held, and the caller has already dropped the case where nothing is left
     ///   (`isDurablySignedOut()`). A signed-in session that now needs reauthentication is
     ///   still signed in here, so it never reaches this line as another account.
-    /// - Signed in now but not when asked → it does not. Only `AuthSession.signIn` gets there
-    ///   once the app has started (the launch restore runs before any window can ask), so a
-    ///   sign-in finished after the question, as the same account or another.
+    /// - Signed in now but not when asked → it does not. Two things get there once the app
+    ///   has started. A sign-in finished after the question, as the same account or another.
+    ///   Or the launch restore that failed was run again and brought the held account back:
+    ///   an iOS background task does that, because `AppStartupBootstrap` runs a restore
+    ///   again until one is complete. The two are not told apart here, so the question is
+    ///   not answered as it was asked in either. Where the request is stored (the iOS
+    ///   switch) the controller asks again, naming the account that is signed in, and that
+    ///   answer stands. Before it did, the restored account's own sign-out was refused,
+    ///   with the switch turned off and nothing asked again.
     /// - Signed in both times → it stands unless both addresses are known and differ. They
     ///   are compared without case, as addresses are. One of them unknown is not a
     ///   difference: refusing there would refuse a sign-out nothing shows to be wrong.

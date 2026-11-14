@@ -37,7 +37,9 @@ import SwiftUI
 /// - This window's confirmation does not block the mailbox window's sign-in view either, so
 ///   an answer is for the session the question was asked about
 ///   (`SettingsAppSignOutPolicy.answerStillApplies`): asked over an account held while
-///   signed out and answered after a sign-in, it signs nothing out.
+///   signed out and answered after a sign-in, it signs nothing out. The confirmation is
+///   taken down when that sign-in is published, before it can be answered
+///   (`SettingsAppSignOutController.withdrawStaleConfirmation`).
 /// - Sign Out… is disabled in both windows while either one's sign-out runs
 ///   (`SettingsAppSignOutController.isAnySignOutRunning`).
 /// - This window can be closed while its sign-out runs. A failure is then shown on the
