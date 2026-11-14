@@ -202,7 +202,10 @@ struct ComposeInputBar: View {
         if let message = DraftAttachmentImport.failureMessage(unsupported) {
             viewModel.errorAlert = ComposeErrorAlert(message: message)
         }
-        guard !drop.fileURLs.isEmpty else { return }
+        guard !drop.fileURLs.isEmpty else {
+            PastedImageFile.remove(drop.temporaryFileURLs)
+            return
+        }
         DocumentAttachmentImporter(
             attachments: Binding(
                 get: { viewModel.attachmentManager.attachments },
@@ -211,6 +214,11 @@ struct ComposeInputBar: View {
             viewContext: viewContext,
             onProcessingChanged: { isProcessing in
                 viewModel.setAttachmentImportInProgress(isProcessing, id: documentProcessingID)
+                // Whoever imports a request removes the files written only to carry it
+                // (`DraftFileDrop.temporaryFileURLs`). The sheet is given none today.
+                if !isProcessing {
+                    PastedImageFile.remove(drop.temporaryFileURLs)
+                }
             },
             onOperationChanged: { documentProcessingTask = $0 },
             onImportFailures: { failures in

@@ -204,6 +204,25 @@ final class DraftFileDropPolicyTests: XCTestCase {
         XCTAssertEqual(composer.pendingFileDrop?.unsupportedFilenames, ["Everything.zip"])
     }
 
+    /// A pasted image's file is the app's own, written to carry the request, and goes with
+    /// it so that whoever imports the request removes it. A dropped file is the user's and
+    /// is never among them.
+    ///
+    /// Revert-check: dropping `temporaryFileURLs` from the `DraftFileDrop` made in
+    /// `ChatComposerState.receiveDroppedFiles` makes the first assertion fail: the file stays
+    /// in the temporary directory.
+    func testComposer_takesAPastedImagesFile_asATemporaryOne_andADropAsNone() {
+        let pasted = URL(fileURLWithPath: "/tmp/PastedImages/1/Pasted Image.png")
+        let pasting = ChatComposerState()
+        XCTAssertTrue(pasting.receiveDroppedFiles([pasted], temporaryFileURLs: [pasted]))
+        XCTAssertEqual(pasting.pendingFileDrop?.fileURLs, [pasted])
+        XCTAssertEqual(pasting.pendingFileDrop?.temporaryFileURLs, [pasted])
+
+        let dropping = ChatComposerState()
+        XCTAssertTrue(dropping.receiveDroppedFiles([pdf]))
+        XCTAssertEqual(dropping.pendingFileDrop?.temporaryFileURLs, [])
+    }
+
     /// Until the picker has taken a drop the composer is the only holder of its files, so a
     /// second drop is refused, and slides back, in place of replacing the first.
     ///

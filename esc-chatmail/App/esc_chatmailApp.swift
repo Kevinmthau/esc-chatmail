@@ -68,6 +68,12 @@ struct esc_chatmailApp: App {
         // host app's real defaults.
         if !isRunningUnitTests {
             SettingsAppAccountPublisher.shared.start(observing: AuthSession.shared)
+            #if os(macOS)
+            // The file of an image pasted into a reply is removed when its import ends. One
+            // whose import never ran, because its chat was closed first, goes here, where no
+            // import can be reading it.
+            PastedImageFile.removeAll()
+            #endif
         }
 
         // NOTE: Fresh install check and auth restoration moved to initializeApp()

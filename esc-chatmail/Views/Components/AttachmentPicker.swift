@@ -117,11 +117,22 @@ struct AttachmentPicker: View {
         if let message = DraftAttachmentImport.failureMessage(unsupported) {
             importErrorMessage = message
         }
-        guard !drop.fileURLs.isEmpty else { return }
+        guard !drop.fileURLs.isEmpty else {
+            // Nothing of the request is imported, so nothing will end and remove these.
+            PastedImageFile.remove(drop.temporaryFileURLs)
+            return
+        }
         DocumentAttachmentImporter(
             attachments: $attachments,
             viewContext: viewContext,
-            onProcessingChanged: { isProcessing = $0 },
+            onProcessingChanged: { isProcessing in
+                self.isProcessing = isProcessing
+                // The import has its own copy by now, or has failed: a pasted image's file
+                // was only ever for this (`DraftFileDrop.temporaryFileURLs`).
+                if !isProcessing {
+                    PastedImageFile.remove(drop.temporaryFileURLs)
+                }
+            },
             onOperationChanged: { documentProcessingTask = $0 },
             onImportFailures: { failures in
                 // Added to the lines still on screen, so the alert for this drop's

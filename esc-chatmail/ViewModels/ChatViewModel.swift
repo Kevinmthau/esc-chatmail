@@ -89,9 +89,15 @@ final class ChatComposerState: ObservableObject {
         )
     }
 
-    /// Files were dropped on the chat. Returns whether the drop was taken; a drop that is
-    /// taken becomes `pendingFileDrop`, which the composer's attachment picker imports.
-    func receiveDroppedFiles(_ urls: [URL]) -> Bool {
+    /// Files were dropped on the chat, or pasted into its reply field. Returns whether they
+    /// were taken; what is taken becomes `pendingFileDrop`, which the composer's attachment
+    /// picker imports.
+    ///
+    /// - Parameter temporaryFileURLs: Those of `urls` the app wrote only for this request, a
+    ///   pasted image's file. They go with the request, and whoever imports it removes them
+    ///   (`DraftFileDrop.temporaryFileURLs`). Where the request is refused they are the
+    ///   caller's to remove.
+    func receiveDroppedFiles(_ urls: [URL], temporaryFileURLs: [URL] = []) -> Bool {
         switch DraftFileDropPolicy.decision(
             droppedURLs: urls,
             allowsDraftMutation: ChatReplyBarControlPolicy.allowsDraftMutation(isSending: isSending),
@@ -103,7 +109,8 @@ final class ChatComposerState: ObservableObject {
         case .accept(let fileURLs, let unsupportedFilenames):
             pendingFileDrop = DraftFileDrop(
                 fileURLs: fileURLs,
-                unsupportedFilenames: unsupportedFilenames
+                unsupportedFilenames: unsupportedFilenames,
+                temporaryFileURLs: temporaryFileURLs
             )
             return true
         }
