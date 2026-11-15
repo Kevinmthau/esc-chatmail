@@ -323,11 +323,13 @@ final class ContactUnificationCleanupTests: XCTestCase {
 
     // MARK: - Protected conversations
 
-    // Revert-check: `needsRepair(of:)` setting
-    // `isBlockedByProtectedConversation` in
-    // `fixAndMergeIncorrectParticipantHashes`. Reported as completed, the
-    // links are recorded as applied and the chat a send anchors to is never
-    // looked at again once the send is done.
+    /// The shape a send in flight really gives: the anchored chat is one of
+    /// the two that are to become one.
+    ///
+    /// HONEST SCOPE: this fails only with both of the checks that report a
+    /// blocked pass removed. The anchored chat needs a new hash, and the
+    /// other chat comes to share it, so either check alone still reports the
+    /// pass as blocked. Each check has a test of its own below.
     func testUnify_chatAnchoringAPendingSend_isLeftAloneAndMergedOnceReleased() async throws {
         let workChat = try seedChat(
             with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
@@ -362,6 +364,37 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(states.count, 1)
         XCTAssertEqual(states.first?.messageIDs, ["work-1", "home-1", "home-2"])
         XCTAssertEqual(states.first?.participantHash, Self.hashHome)
+        XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
+    }
+
+    // Revert-check: `needsRepair(of:)` setting
+    // `isBlockedByProtectedConversation` in
+    // `fixAndMergeIncorrectParticipantHashes`. Reported as completed, the
+    // links are recorded as applied, and the chat a send anchored to keeps
+    // the hash of its own address once the send is done: the next mail from
+    // the person's other address opens a second chat.
+    func testUnify_anchoredChatAloneNeedsTheSharedHash_isNotRecordedAsAppliedUntilReleased() async throws {
+        let workChat = try seedChat(
+            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
+        )
+        let record = context.insertTestObject(OutboundSendMutationRecord.self)
+        record.id = UUID().uuidString
+        record.createdAt = Date()
+        record.conversationId = workChat.id
+        try context.save()
+        let contacts = makeContacts(cards: [[Self.work, Self.home]])
+        let service = makeService(contacts: contacts)
+
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        XCTAssertEqual(try fetchConversationStates().first?.participantHash, Self.hashWork)
+        XCTAssertTrue(contacts.appliedToConversations().isEmpty)
+
+        context.delete(record)
+        try context.save()
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        XCTAssertEqual(try fetchConversationStates().first?.participantHash, Self.hashHome)
         XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
     }
 
