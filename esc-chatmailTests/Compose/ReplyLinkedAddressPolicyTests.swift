@@ -88,4 +88,70 @@ final class ReplyLinkedAddressPolicyTests: XCTestCase {
             ["partner.work@x.example"]
         )
     }
+
+    // MARK: - Whether the rows can answer for a message
+
+    private static let alex = "alex@example.com"
+    private static let sam = "sam@example.com"
+
+    private func rowsCanAnswer(
+        rows: [String],
+        message: [String],
+        author: String?,
+        links: ContactLinkedAddresses = .none
+    ) -> Bool {
+        ReplyLinkedAddressPolicy.rowsCanAnswer(
+            conversationRecipients: rows,
+            messageParticipants: message,
+            messageAuthor: author,
+            contactLinks: links,
+            userAddresses: Self.me
+        )
+    }
+
+    func testRowsCanAnswer_messageOfTheRowsPeople_isAnswered() {
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: [Self.alex], author: Self.alex))
+        XCTAssertTrue(
+            rowsCanAnswer(rows: [Self.carol, Self.alex], message: ["Alex@Example.com", Self.carol], author: Self.carol)
+        )
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: [Self.alex], author: "me@example.com"))
+    }
+
+    // Revert-check: the `rows.isSubset(of:)` guard in
+    // `ReplyLinkedAddressPolicy.rowsCanAnswer`. The author is one of the rows
+    // here, or the user, so only that guard sees that a row's person was
+    // never on the message.
+    func testRowsCanAnswer_rowNamesSomeoneWhoIsNotOnTheMessage_isNotAnswered() {
+        XCTAssertFalse(
+            rowsCanAnswer(rows: [Self.alex, Self.carol], message: [Self.sam, Self.carol], author: Self.carol)
+        )
+        XCTAssertFalse(rowsCanAnswer(rows: [Self.alex], message: [Self.sam], author: "me@example.com"))
+        XCTAssertFalse(rowsCanAnswer(rows: [Self.alex], message: [Self.sam], author: nil))
+    }
+
+    // Revert-check: the author test that ends
+    // `ReplyLinkedAddressPolicy.rowsCanAnswer`. Every row is on the message
+    // here, so only that test sees that the person being answered has no row.
+    func testRowsCanAnswer_authorIsNobodysRow_isNotAnswered() {
+        XCTAssertFalse(rowsCanAnswer(rows: [Self.alex], message: [Self.alex, Self.sam], author: Self.sam))
+    }
+
+    /// Rows that leave out someone who did not write the message keep both
+    /// promises: the reply goes to the rows and adds nobody.
+    func testRowsCanAnswer_rowsLeaveOutSomeoneWhoDidNotWriteIt_isAnswered() {
+        let message = [Self.alex, Self.sam]
+
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: message, author: Self.alex))
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: message, author: "me@example.com"))
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: message, author: nil))
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.alex], message: message, author: "  "))
+    }
+
+    /// Two addresses are one person only while a card links them. That is
+    /// the whole case: the same rows and message, before and after the card
+    /// stops listing both.
+    func testRowsCanAnswer_twoAddressesOfOneCard_areOnePersonOnlyWhileLinked() {
+        XCTAssertTrue(rowsCanAnswer(rows: [Self.work], message: [Self.home], author: Self.home, links: Self.oneCard))
+        XCTAssertFalse(rowsCanAnswer(rows: [Self.work], message: [Self.home], author: Self.home, links: .none))
+    }
 }

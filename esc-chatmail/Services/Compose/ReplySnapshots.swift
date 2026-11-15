@@ -6,6 +6,14 @@ struct ReplyParticipantEvidence: Sendable {
     let hasAddressableRecipientRow: Bool
     let isComplete: Bool
 
+    /// Whether the message's own rows can be taken as everyone on it: every
+    /// row is usable, its sender is known, and it has a recipient row. A row
+    /// set that holds only a sender (older persistence) says nothing about To
+    /// and Cc, so it is no ground for overruling a conversation's rows.
+    var namesEveryParticipant: Bool {
+        isComplete && hasAddressableRecipientRow
+    }
+
     func confirmsSelfOnly(in userAddresses: Set<String>) -> Bool {
         let normalizedEmails = Set(
             emails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }

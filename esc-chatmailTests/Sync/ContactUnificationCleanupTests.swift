@@ -1,4 +1,5 @@
 import XCTest
+import Contacts
 import CoreData
 @testable import esc_chatmail
 
@@ -616,6 +617,40 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertTrue(contacts.snapshot().isEmpty)
     }
 
+    /// Contacts access the user turns off unlinks as an edited card does, and
+    /// with no change in Contacts to report it: the next cleanup gives the
+    /// chat its own hash back and nothing of the links is kept, applied map
+    /// included.
+    ///
+    /// Revert-check: the `access == .withdrawn` branch at the top of
+    /// `ContactLinkedAddressStore.refreshIfNeeded`. Without it the pass sees
+    /// the adopted links unchanged and returns at its first comparison.
+    func testUnify_contactsAccessWithdrawn_returnsTheChatToItsOwnHashAndKeepsNoLinks() async throws {
+        let workChat = try seedChat(
+            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1", "work-2"], startingAt: 100
+        )
+        let workChatID = workChat.id
+        try seedChat(with: Self.home, hash: Self.hashHome, messageIDs: ["home-1"], startingAt: 300)
+        try context.save()
+        let addressBook = AddressBookStub(cards: [[Self.work, Self.home]])
+        let contacts = makeContacts(addressBook: addressBook)
+        let service = makeService(contacts: contacts)
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+        XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
+
+        addressBook.authorization = .denied
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        let states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1)
+        XCTAssertEqual(states.first?.id, workChatID)
+        XCTAssertEqual(states.first?.participantHash, Self.hashWork)
+        XCTAssertEqual(states.first?.messageIDs, ["work-1", "work-2", "home-1"], "What was merged stays merged")
+        XCTAssertTrue(contacts.snapshot().isEmpty)
+        XCTAssertTrue(contacts.appliedToConversations().isEmpty)
+        XCTAssertEqual(addressBook.readCount, 1, "Nothing is read without access")
+    }
+
     // MARK: - Maintenance
 
     /// The 6-hour hash repair hashes with the adopted links as well, so it
@@ -654,11 +689,12 @@ final class ContactUnificationCleanupTests: XCTestCase {
     }
 
     /// A store of the test's own: no defaults, a notification center nothing
-    /// else posts to, and the stub for an address book.
+    /// else posts to, and the stub for an address book and its authorization.
     private func makeContacts(addressBook: AddressBookStub) -> ContactLinkedAddressStore {
         ContactLinkedAddressStore(
             defaults: nil,
             notificationCenter: NotificationCenter(),
+            contactsAuthorizationStatus: { addressBook.authorization },
             loadContactAddressLists: { addressBook.read() }
         )
     }
@@ -797,34 +833,6 @@ final class ContactUnificationCleanupTests: XCTestCase {
                     hidden: conversation.hidden
                 )
             }
-        }
-    }
-}
-
-/// Stands in for the address book: the cards it holds, nil while it cannot be
-/// read, and how often it was read.
-private final class AddressBookStub: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedCards: [[String]]?
-    private var storedReadCount = 0
-
-    init(cards: [[String]]?) {
-        storedCards = cards
-    }
-
-    var cards: [[String]]? {
-        get { lock.withLock { storedCards } }
-        set { lock.withLock { storedCards = newValue } }
-    }
-
-    var readCount: Int {
-        lock.withLock { storedReadCount }
-    }
-
-    func read() -> [[String]]? {
-        lock.withLock {
-            storedReadCount += 1
-            return storedCards
         }
     }
 }

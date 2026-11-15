@@ -74,6 +74,22 @@ struct ReplyMetadataBuilder {
             // Note-to-self conversations keep a self participant for identity.
             // Missing or inconsistent message evidence must fail closed instead.
             recipients = [currentUserEmail]
+        } else if let messageRecipients = recipientsOverrulingRows(
+            conversation: conversation,
+            target: target,
+            conversationRecipients: conversationRecipients,
+            replyTargetRecipients: replyTargetRecipients,
+            usableRecipients: usableRecipients,
+            contactLinks: contactLinks,
+            userAddresses: userAddresses
+        ) {
+            // The rows do not describe the message being replied to: a chat
+            // merged while a contact card linked two addresses keeps both
+            // people's mail after the card stops linking them. Addressed from
+            // the rows, the reply (and the message it quotes) would go to
+            // someone who was never on that message, or miss the person who
+            // wrote it. The message itself says who it was between.
+            recipients = messageRecipients
         } else {
             // The rows hold one address for each person. Someone whose
             // contact card links several is answered at the ones the message
@@ -120,5 +136,52 @@ struct ReplyMetadataBuilder {
             references: references,
             originalMessage: originalMessage
         )
+    }
+
+    /// The people on the message being replied to, when a reply addressed
+    /// from the conversation's rows would break a promise to that message
+    /// (`ReplyLinkedAddressPolicy.rowsCanAnswer`); nil where the rows answer.
+    ///
+    /// Asked only of a participant chat that has rows to overrule, and only
+    /// where the message's own rows are known to name everyone on it
+    /// (`ReplyParticipantEvidence.namesEveryParticipant`). A row set that is
+    /// incomplete, or holds only a sender, is no ground for overruling the
+    /// conversation: there the rows are the better record. And a conversation
+    /// with no usable row keeps failing closed, as the note-to-self case
+    /// above requires: this never supplies recipients where there were none.
+    private func recipientsOverrulingRows(
+        conversation: ReplyConversationSnapshot,
+        target: ReplyTargetSnapshot?,
+        conversationRecipients: [String],
+        replyTargetRecipients: [String],
+        usableRecipients: ([String]) -> [String],
+        contactLinks: ContactLinkedAddresses,
+        userAddresses: Set<String>
+    ) -> [String]? {
+        guard !conversation.isListConversation,
+              !conversationRecipients.isEmpty,
+              let target,
+              let evidence = target.participantEvidence,
+              evidence.namesEveryParticipant else {
+            return nil
+        }
+
+        // The message's rows in their reply order, then any address only the
+        // evidence holds (a sender kept beside a row set with no From row).
+        var seen = Set(replyTargetRecipients.map(EmailNormalizer.normalize))
+        let messageRecipients = replyTargetRecipients + usableRecipients(evidence.emails).filter {
+            seen.insert(EmailNormalizer.normalize($0)).inserted
+        }
+        guard !messageRecipients.isEmpty,
+              !ReplyLinkedAddressPolicy.rowsCanAnswer(
+                  conversationRecipients: conversationRecipients,
+                  messageParticipants: messageRecipients,
+                  messageAuthor: target.originalMessage.senderEmail,
+                  contactLinks: contactLinks,
+                  userAddresses: userAddresses
+              ) else {
+            return nil
+        }
+        return messageRecipients
     }
 }
