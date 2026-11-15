@@ -4,6 +4,7 @@ struct ForwardedMessageCard: View {
     let content: ForwardedMessageDisplayContent
     let subjectFallback: String?
     let isFromMe: Bool
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -12,7 +13,7 @@ struct ForwardedMessageCard: View {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 if let senderLine {
                     Text(senderLine)
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.subtitleSize, .semibold))
                         .foregroundStyle(primaryTextColor)
                         .lineLimit(1)
                 }
@@ -21,7 +22,7 @@ struct ForwardedMessageCard: View {
 
                 if let timestamp = content.timestampText {
                     Text(timestamp)
-                        .font(.system(size: 11, weight: .medium, design: .default))
+                        .font(metrics.font(\.labelSize, .medium))
                         .foregroundStyle(secondaryTextColor)
                         .lineLimit(1)
                 }
@@ -29,21 +30,21 @@ struct ForwardedMessageCard: View {
 
             if let subjectLine {
                 Text(subjectLine)
-                    .font(.system(size: 13, weight: .medium, design: .default))
+                    .font(metrics.font(\.detailSize, .medium))
                     .foregroundStyle(primaryTextColor.opacity(isFromMe ? 0.92 : 0.95))
                     .lineLimit(2)
             }
 
             if let recipientLine = content.recipientSummary {
                 Text("To: \(recipientLine)")
-                    .font(.system(size: 11, weight: .medium, design: .default))
+                    .font(metrics.font(\.labelSize, .medium))
                     .foregroundStyle(tertiaryTextColor)
                     .lineLimit(1)
             }
 
             if let previewLine = content.previewSnippet {
                 Text(previewLine)
-                    .font(.system(size: 13, weight: .regular, design: .default))
+                    .font(metrics.font(\.detailSize))
                     .foregroundStyle(secondaryTextColor.opacity(isFromMe ? 1 : 0.92))
                     .lineLimit(3)
                     .fixedSize(horizontal: false, vertical: true)
@@ -80,7 +81,7 @@ struct ForwardedMessageCard: View {
                 .foregroundStyle(secondaryTextColor)
 
             Text("Forwarded message")
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(metrics.font(\.labelSize, .semibold))
                 .foregroundStyle(secondaryTextColor)
                 .lineLimit(1)
 

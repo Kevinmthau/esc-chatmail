@@ -56,6 +56,7 @@ struct EmailContentPlaceholder: View {
 struct EmailContentFallback: View {
     let subject: String?
     let onTap: () -> Void
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         Button(action: onTap) {
@@ -66,7 +67,7 @@ struct EmailContentFallback: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Open original email")
-                        .font(.system(size: 14, weight: .medium))
+                        .font(metrics.font(\.subtitleSize, .medium))
                         .foregroundColor(.primary)
 
                     Text("Preview unavailable")

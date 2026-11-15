@@ -5,6 +5,7 @@ import UIKit
 
 struct NewsletterPreviewCard: View {
     let model: NewsletterPreviewModel
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -21,24 +22,24 @@ struct NewsletterPreviewCard: View {
                 header
 
                 Text(model.title)
-                    .font(.system(size: 17, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.titleSize, .semibold))
                     .foregroundStyle(.primary)
                     .lineLimit(model.heroImageURL == nil ? 3 : 2)
 
                 if let subtitle = model.subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .font(metrics.font(\.detailSize, .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
                 }
 
                 Text(model.snippet)
-                    .font(.system(size: 14, weight: .regular, design: .default))
+                    .font(metrics.font(\.subtitleSize))
                     .foregroundStyle(.secondary)
                     .lineLimit(model.heroImageURL == nil ? 4 : 3)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(14)
+            .padding(metrics.cardPadding)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .emailPreviewCardChrome()
@@ -49,13 +50,13 @@ struct NewsletterPreviewCard: View {
         if let sourceLine = sourceLine {
             HStack(spacing: 8) {
                 Text(sourceLine)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(Color.accentColor)
                     .lineLimit(1)
 
                 if let sourceDomain = model.sourceDomain, sourceDomain != sourceLine {
                     Text(sourceDomain)
-                        .font(.system(size: 11, weight: .medium, design: .default))
+                        .font(metrics.font(\.labelSize, .medium))
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }

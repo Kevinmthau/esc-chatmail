@@ -6,6 +6,7 @@ import SwiftUI
 /// route, so the two read as one family; a cancelled booking strikes its time through.
 struct ReservationSummaryPreviewCard: View {
     let model: ReservationSummaryPreviewModel
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     private var isCancelled: Bool {
         model.status == .cancelled
@@ -29,7 +30,7 @@ struct ReservationSummaryPreviewCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.title)
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.titleSize, .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
@@ -56,8 +57,8 @@ struct ReservationSummaryPreviewCard: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 144, alignment: .leading)
+        .padding(metrics.cardPadding)
+        .frame(maxWidth: .infinity, minHeight: metrics.dateCardMinHeight, alignment: .leading)
         .emailPreviewCardChrome()
     }
 
@@ -80,7 +81,7 @@ struct ReservationSummaryPreviewCard: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(model.sourceLabel ?? "Reservation")
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(metrics.font(\.labelSize, .semibold))
                 .foregroundStyle(accentColor)
                 .lineLimit(1)
 
@@ -88,7 +89,7 @@ struct ReservationSummaryPreviewCard: View {
 
             if let status = Self.statusText(model.status) {
                 Text(status)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(statusColor)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -109,12 +110,12 @@ struct ReservationSummaryPreviewCard: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 7) {
             Image(systemName: systemName)
-                .font(.system(size: 12, weight: .semibold))
+                .font(metrics.font(\.secondaryDetailSize, .semibold))
                 .foregroundStyle(isSecondary ? Color.secondary : accentColor)
                 .frame(width: 14, alignment: .center)
 
             Text(text)
-                .font(.system(size: isSecondary ? 12 : 13, weight: isSecondary ? .regular : weight))
+                .font(metrics.font(isSecondary ? \.secondaryDetailSize : \.detailSize, isSecondary ? .regular : weight))
                 .foregroundStyle(isSecondary ? Color.secondary : Color.primary)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)

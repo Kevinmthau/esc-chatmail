@@ -47,6 +47,7 @@
         "ContactsAppLinkTests",
         "ConversationRowMetricsTests",
         "DraftFileDropPolicyTests",
+        "EmailPreviewCardMetricsTests",
         "ExternalURLOpenerTests",
         "FullEmailReaderWarmWidthSourceTests",
         "HTMLContentAccountBoundaryTests",

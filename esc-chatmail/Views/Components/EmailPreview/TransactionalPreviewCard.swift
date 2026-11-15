@@ -5,6 +5,7 @@ import UIKit
 
 struct TransactionalPreviewCard: View {
     let model: TransactionalPreviewModel
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -20,27 +21,27 @@ struct TransactionalPreviewCard: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(model.title)
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.titleSize, .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
                     if let subtitle = model.subtitle, !subtitle.isEmpty {
                         Text(subtitle)
-                            .font(.system(size: 14, weight: .medium, design: .default))
+                            .font(metrics.font(\.subtitleSize, .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(2)
                     }
 
                     if let detailLine = model.detailLine, !detailLine.isEmpty {
                         Text(detailLine)
-                            .font(.system(size: 12, weight: .medium, design: .default))
+                            .font(metrics.font(\.secondaryDetailSize, .medium))
                             .foregroundStyle(.tertiary)
                             .lineLimit(2)
                     }
 
                     if let actionLabel = model.actionLabel, !actionLabel.isEmpty {
                         Text(actionLabel)
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(metrics.font(\.labelSize, .semibold))
                             .foregroundStyle(Color.accentColor)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 6)
@@ -56,7 +57,7 @@ struct TransactionalPreviewCard: View {
 
                 if let amount = model.amount, !amount.isEmpty {
                     Text(amount)
-                        .font(.system(size: 28, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.amountSize, .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
                         .minimumScaleFactor(0.75)
@@ -64,8 +65,8 @@ struct TransactionalPreviewCard: View {
                 }
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 148, alignment: .leading)
+        .padding(metrics.cardPadding)
+        .frame(maxWidth: .infinity, minHeight: metrics.transactionalCardMinHeight, alignment: .leading)
         .emailPreviewCardChrome()
     }
 
@@ -74,7 +75,7 @@ struct TransactionalPreviewCard: View {
         HStack(alignment: .center, spacing: 8) {
             if let sourceLine {
                 Text(sourceLine)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(Color.accentColor)
                     .lineLimit(1)
             }
@@ -82,7 +83,7 @@ struct TransactionalPreviewCard: View {
             if let sourceDomain = model.sourceDomain,
                sourceDomain != sourceLine {
                 Text(sourceDomain)
-                    .font(.system(size: 11, weight: .medium, design: .default))
+                    .font(metrics.font(\.labelSize, .medium))
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
@@ -91,7 +92,7 @@ struct TransactionalPreviewCard: View {
 
             if let status = model.status, !status.isEmpty {
                 Text(status)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)

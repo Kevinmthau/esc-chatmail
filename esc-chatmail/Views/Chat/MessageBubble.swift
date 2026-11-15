@@ -276,6 +276,10 @@ struct MessageBubble: View {
                     ),
                     textMaxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth)
                 )
+                // The cards under this content (preview cards, the forwarded card, shared
+                // files) take their text sizes from the style: without this they draw at the
+                // iPhone's sizes in the Mac's chat column.
+                .environment(\.emailPreviewCardMetrics, style.previewCardMetrics)
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
                 metadataLine(statusLine: statusLine, sendStatus: sendStatus)

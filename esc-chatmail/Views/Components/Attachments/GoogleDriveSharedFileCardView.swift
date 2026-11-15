@@ -67,6 +67,7 @@ struct GoogleDriveSharedFileCardContent: View {
     let link: SharedDocumentLink
     let metadata: GoogleDriveSharedFileMetadata?
     let isLoadingMetadata: Bool
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -81,7 +82,7 @@ struct GoogleDriveSharedFileCardContent: View {
                 titleBlock
 
                 Text(link.sourceLabel)
-                    .font(.system(size: 15, weight: .regular))
+                    .font(metrics.font(\.linkSourceSize))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
@@ -113,12 +114,13 @@ struct GoogleDriveSharedFileCardContent: View {
     /// metadata resolved to a one-line title (the usual case, and always for the
     /// `link.kind.title` fallback) and by 1pt for a longer one.
     ///
-    /// The title font is a fixed 18pt and does not follow Dynamic Type; the reserved height
-    /// comes from the text itself, so it would hold if that changed.
+    /// The title font is a fixed size (`EmailPreviewCardMetrics.linkTitleSize`, 18pt on the
+    /// iPhone) and does not follow Dynamic Type; the reserved height comes from the text
+    /// itself, so it would hold if that changed.
     private var titleBlock: some View {
         // The blank stand-in draws nothing; it only reserves the two lines.
         Text(resolvedTitle ?? " ")
-            .font(.system(size: 18, weight: .semibold))
+            .font(metrics.font(\.linkTitleSize, .semibold))
             .foregroundStyle(.primary)
             .lineLimit(2, reservesSpace: true)
             .multilineTextAlignment(.leading)
@@ -131,11 +133,14 @@ struct GoogleDriveSharedFileCardContent: View {
     }
 
     /// One bar per reserved title line, pinned to the top and bottom of the reserved area.
+    /// A bar is as tall as the title's font size, so two of them fit the two reserved lines at
+    /// every size the title is drawn at: at a fixed 18pt they overlapped under the Mac's
+    /// 13pt title.
     private var titleSkeleton: some View {
         VStack(alignment: .leading, spacing: 0) {
-            skeletonLine(width: 196, height: 18)
+            skeletonLine(width: 196, height: metrics.linkTitleSize)
             Spacer(minLength: 0)
-            skeletonLine(width: 142, height: 18)
+            skeletonLine(width: 142, height: metrics.linkTitleSize)
         }
         .accessibilityHidden(true)
     }
@@ -161,6 +166,7 @@ private struct GoogleDriveSharedFilePreview: View {
     let thumbnailURL: String?
     let isLoadingMetadata: Bool
 
+    @Environment(\.emailPreviewCardMetrics) private var metrics
     @State private var loadedImage: PlatformImage?
     @State private var isLoadingImage = false
     @State private var activeThumbnailURL: String?
@@ -262,7 +268,7 @@ private struct GoogleDriveSharedFilePreview: View {
                 .foregroundStyle(accentColor.opacity(0.9))
 
             Text(fallbackKindLabel)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .font(metrics.font(\.secondaryDetailSize, .bold))
                 .foregroundStyle(.secondary)
                 .tracking(1.1)
         }

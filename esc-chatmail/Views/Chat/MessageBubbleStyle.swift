@@ -71,6 +71,16 @@ enum MessageBubbleStyle {
         }
     }
 
+    /// The text sizes of the cards a row can hold (`EmailPreviewCardMetrics`): the iPhone's
+    /// beside its 17-point bubble text, smaller ones beside the Mac's 13 points. A card's
+    /// width is `maxBubbleWidth` in every style; only what is drawn inside it differs.
+    var previewCardMetrics: EmailPreviewCardMetrics {
+        switch self {
+        case .standard, .compact: return .iOS
+        case .mac: return .mac
+        }
+    }
+
     // MARK: - Styling
 
     var bubbleCornerRadius: CGFloat {
