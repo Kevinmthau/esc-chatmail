@@ -16,6 +16,9 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
     private var aliasLoader: AliasLoaderStub!
+    /// The suite's own: production posts `.syncCompleted` on the default
+    /// center, where a post would also reach the app's own observers.
+    private var notificationCenter: NotificationCenter!
     private var conversation: Conversation!
     private var fromAlex: Message!
     private var fromSam: Message!
@@ -25,6 +28,7 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
         stack = TestCoreDataStack()
         context = stack.makeMainQueueViewContext()
         aliasLoader = AliasLoaderStub()
+        notificationCenter = NotificationCenter()
 
         conversation = ConversationBuilder()
             .withDisplayName("Alex")
@@ -48,6 +52,7 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
         fromAlex = nil
         conversation = nil
         aliasLoader = nil
+        notificationCenter = nil
         context = nil
         stack = nil
         super.tearDown()
@@ -148,6 +153,73 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
         }
     }
 
+    /// A reply follows a Reply-To header to an address the chat's row does
+    /// not hold: the chat is titled Alex and the reply goes to the assistant.
+    func testAnnouncedReplyRecipients_replyToAddressTheRowsDoNotHold_isNamed() async {
+        fromAlex.replyTo = "Alex's assistant <assistant@example.com>"
+        let viewModel = makeViewModel()
+
+        viewModel.setReplyingTo(fromAlex)
+
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == ["assistant@example.com"] }
+    }
+
+    // Revert-check: the `.syncCompleted` subscription in `ChatViewModel.init`.
+    // Who a reply goes to is also read from the conversation's rows, the
+    // adopted contact links and the user's aliases, which a sync changes with
+    // no change of target. Without the subscription the row goes on naming
+    // Sam above a reply the send now addresses to the chat's own people.
+    //
+    // The rows stand in for all three here: the shared link store holds
+    // nothing under unit tests, and each of them is read by the same refresh.
+    func testAnnouncedReplyRecipients_syncCompleted_asksAgainWithNoChangeOfTarget() async throws {
+        let viewModel = makeViewModel()
+        viewModel.initializeReplyingTo(lastMessage: fromSam)
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == ["sam@example.com"] }
+
+        // A sync's cleanup leaves the chat's row naming Sam.
+        let row = try XCTUnwrap(conversation.participants?.first)
+        row.person = person("sam@example.com")
+        try context.save()
+        XCTAssertEqual(viewModel.replyingTo, fromSam)
+        XCTAssertEqual(
+            viewModel.composerState.announcedReplyRecipients, ["sam@example.com"],
+            "Nothing has told the composer yet, or this is not the case under test"
+        )
+
+        notificationCenter.post(name: .syncCompleted, object: nil)
+
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == nil }
+
+        // And the other way: the row is Alex's again, and Sam is named again.
+        row.person = person("alex@example.com")
+        try context.save()
+        notificationCenter.post(name: .syncCompleted, object: nil)
+
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == ["sam@example.com"] }
+    }
+
+    // Revert-check: the `hasInitializedReplyTarget` guard in the
+    // `.syncCompleted` sink of `ChatViewModel.init`. Without it every sync
+    // reads the conversation, and here loads aliases, for a view model whose
+    // chat was never shown.
+    //
+    // HONEST SCOPE: a refresh that was not made leaves nothing to observe, so
+    // this watches for a quarter of a second after the post. One that took
+    // longer than that to start would pass.
+    func testAnnouncedReplyRecipients_syncCompletedBeforeTheChatLoads_readsNothing() async {
+        let viewModel = makeViewModel()
+
+        notificationCenter.post(name: .syncCompleted, object: nil)
+
+        let deadline = Date().addingTimeInterval(0.25)
+        while Date() < deadline {
+            XCTAssertEqual(aliasLoader.loadCount, 0)
+            XCTAssertNil(viewModel.composerState.announcedReplyRecipients)
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
     // MARK: - Helpers
 
     private func makeViewModel(
@@ -205,7 +277,8 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
                 ),
                 fullEmailOpener: base.fullEmailOpener
             ),
-            composerDirectory: composerDirectory
+            composerDirectory: composerDirectory,
+            notificationCenter: notificationCenter
         )
     }
 

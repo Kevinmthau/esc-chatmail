@@ -62,6 +62,35 @@ enum ReplyLinkedAddressPolicy {
         return rows.contains(person(author))
     }
 
+    /// Whether a reply's recipients are the people the conversation's rows
+    /// name, no one more and no one less.
+    ///
+    /// It is asked of what a reply was addressed to, whichever rule
+    /// addressed it, so the composer can name the recipients where they are
+    /// not the chat's own people (`ReplyAddressing.differsFromConversationPeople`).
+    /// People, not addresses: a linked participant answered at another of
+    /// their addresses is still that participant.
+    ///
+    /// - Parameters:
+    ///   - recipients: The reply's recipients, the user's own addresses
+    ///     already removed.
+    ///   - conversationRecipients: The conversation's participant rows, the
+    ///     user's own addresses already removed.
+    ///   - userAddresses: The user's normalized addresses.
+    static func recipientsAreConversationPeople(
+        recipients: [String],
+        conversationRecipients: [String],
+        contactLinks: ContactLinkedAddresses,
+        userAddresses: Set<String>
+    ) -> Bool {
+        func people(_ addresses: [String]) -> Set<String> {
+            Set(addresses.map(EmailNormalizer.normalize).filter { !$0.isEmpty }.map {
+                contactLinks.canonicalAddress(for: $0, excluding: userAddresses)
+            })
+        }
+        return people(recipients) == people(conversationRecipients)
+    }
+
     /// - Parameters:
     ///   - conversationRecipients: The conversation's participant rows, the
     ///     user's own addresses already removed.

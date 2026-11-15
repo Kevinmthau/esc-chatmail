@@ -30,7 +30,9 @@ enum ReplyIndicatorPolicy {
     ///   nil where they are. A chat merged while a contact card linked two
     ///   addresses keeps both people's mail after the card stops linking them,
     ///   and a reply to the other person's message goes to that person: the
-    ///   chat's title names someone else, so the row has to name them. With a
+    ///   chat's title names someone else, so the row has to name them. So
+    ///   does a reply that follows a Reply-To header to an address the
+    ///   conversation's rows do not hold. With a
     ///   quote row they go into its label; without one (the quote was
     ///   dropped, which keeps the destination) they get a row of their own.
     static func header(

@@ -42,7 +42,7 @@ struct OutboundReplyContextBuilder {
     func buildReplyMetadata(
         _ context: OutboundMessageRequest.ReplyContext
     ) async throws -> OutboundMessageRequest.ReplyMetadata {
-        let reply = try await resolveReply(context)
+        let reply = try await resolveReply(context, resolvesReplyAddressHint: true)
         return try replyMetadataBuilder.buildReplyMetadata(
             conversation: reply.conversation,
             replyingTo: reply.replyingTo,
@@ -60,10 +60,17 @@ struct OutboundReplyContextBuilder {
     /// are not the chat's own people. Nil where the send would refuse the
     /// reply (a conversation or a target that is gone): there is then nothing
     /// to announce, and the send says why.
+    ///
+    /// It leaves out the one thing of the send's reading that addressing does
+    /// not use, the search for an address to reply from: that can page through
+    /// the whole conversation, and this runs as a chat opens and after every
+    /// sync.
     func replyAddressing(
         _ context: OutboundMessageRequest.ReplyContext
     ) async -> ReplyAddressing? {
-        guard let reply = try? await resolveReply(context) else { return nil }
+        guard let reply = try? await resolveReply(context, resolvesReplyAddressHint: false) else {
+            return nil
+        }
         return replyMetadataBuilder.replyAddressing(
             conversation: reply.conversation,
             replyingTo: reply.replyingTo,
@@ -76,9 +83,11 @@ struct OutboundReplyContextBuilder {
     /// message) may go to other people than the conversation's own, told in
     /// this turn and without loading aliases
     /// (`ReplyMetadataBuilder.rowsCertainlyAnswer`). False is certain: the
-    /// rows answer, or the conversation or the message is gone and the send
-    /// would refuse the reply. True means only that `replyAddressing` has to
-    /// be asked.
+    /// reply goes to the rows' people, or the conversation or the message is
+    /// gone and the send would refuse the reply. True means only that
+    /// `replyAddressing` has to be asked. Despite its name it covers every
+    /// rule that addresses a reply away from the rows' people, a Reply-To
+    /// header's as well as the overruling one.
     ///
     /// It takes the objects the chat already holds and reads the
     /// conversation's rows and the one message, not the whole
@@ -106,7 +115,12 @@ struct OutboundReplyContextBuilder {
         return !replyMetadataBuilder.rowsCertainlyAnswer(
             conversationRowEmails: ReplyConversationSnapshot.participantRowEmails(of: conversation),
             isListConversation: false,
-            target: target
+            target: target,
+            // The stored send-as addresses, which the send counts among the
+            // user's own too. One fetch of the account row, made only for a
+            // Reply-To target: mail delivered to one of them would otherwise
+            // never be settled in this turn.
+            knownUserAddresses: { loadSendAsAliases().map(\.emailAddress) }
         )
     }
 
@@ -120,8 +134,12 @@ struct OutboundReplyContextBuilder {
         let userAliases: Set<String>
     }
 
+    /// - Parameter resolvesReplyAddressHint: Whether to look through the
+    ///   conversation for an address to reply from where the target names
+    ///   none. A send needs it; who the reply goes to does not depend on it.
     private func resolveReply(
-        _ context: OutboundMessageRequest.ReplyContext
+        _ context: OutboundMessageRequest.ReplyContext,
+        resolvesReplyAddressHint: Bool
     ) async throws -> ResolvedReply {
         guard fetchConversation(objectID: context.conversationObjectID) != nil else {
             throw GmailSendService.SendError.conversationNotFound
@@ -155,7 +173,8 @@ struct OutboundReplyContextBuilder {
             conversation: ReplyConversationSnapshot(
                 conversation: conversation,
                 replyingTo: replyingTo,
-                sendAsAliases: sendAsAliases
+                sendAsAliases: sendAsAliases,
+                resolvesReplyAddressHint: resolvesReplyAddressHint
             ),
             replyingTo: replyingTo,
             sendAsAliases: sendAsAliases,

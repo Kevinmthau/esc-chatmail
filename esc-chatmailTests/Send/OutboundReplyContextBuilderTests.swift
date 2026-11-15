@@ -344,6 +344,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             let sent = try await builder.buildReplyMetadata(context)
 
             XCTAssertEqual(addressing?.overrulesConversationRows, true)
+            XCTAssertEqual(addressing?.differsFromConversationPeople, true)
             XCTAssertEqual(addressing?.recipients, sent.recipientEmails)
             XCTAssertEqual(addressing?.recipientsToAnnounce, ["sam@example.com"])
         }
@@ -362,9 +363,63 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
 
         XCTAssertEqual(
             addressing,
-            ReplyAddressing(recipients: ["alex@example.com"], overrulesConversationRows: false)
+            ReplyAddressing(
+                recipients: ["alex@example.com"],
+                overrulesConversationRows: false,
+                differsFromConversationPeople: false
+            )
         )
         XCTAssertNil(addressing?.recipientsToAnnounce)
+    }
+
+    /// A reply follows the message's Reply-To header, whoever the chat's rows
+    /// name. Where the header names an address the rows do not hold, the
+    /// reply goes to someone the chat's title does not name, and the composer
+    /// is told so, as it is of a reply that overrules the rows.
+    ///
+    /// Revert-check: the `differsFromConversationPeople` value worked out at
+    /// the end of `ReplyMetadataBuilder.replyAddressing` (pass it with
+    /// `&& overrulesConversationRows`). The reply still goes to the
+    /// assistant and the composer is told nothing. And the Reply-To branch of
+    /// `ReplyMetadataBuilder.rowsCertainlyAnswer` (return true there): the
+    /// screen then calls the message settled and the composer never asks.
+    func testReplyAddressing_replyToAddressTheRowsDoNotHold_isAnnounced() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        chat.fromAlex.replyTo = "Alex's assistant <assistant@example.com>"
+        let builder = makeBuilder()
+        let context = OutboundMessageRequest.ReplyContext(
+            conversationObjectID: chat.conversation.objectID,
+            replyingToMessageObjectID: chat.fromAlex.objectID,
+            optimisticConversation: nil
+        )
+
+        let addressing = await builder.replyAddressing(context)
+        let sent = try await builder.buildReplyMetadata(context)
+
+        XCTAssertEqual(sent.recipientEmails, ["assistant@example.com"])
+        XCTAssertEqual(addressing?.recipients, sent.recipientEmails)
+        XCTAssertEqual(addressing?.overrulesConversationRows, false, "The Reply-To rule addressed it, not the overruling one")
+        XCTAssertEqual(addressing?.recipientsToAnnounce, ["assistant@example.com"])
+        XCTAssertTrue(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromAlex))
+    }
+
+    /// Most Reply-To headers repeat the sender. That reply goes to the chat's
+    /// own person: nothing is announced, and the screen settles it without
+    /// loading aliases.
+    func testReplyAddressing_replyToTheRowsOwnAddress_announcesNothing() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        chat.fromAlex.replyTo = "Alex <alex@example.com>"
+        let builder = makeBuilder()
+
+        let addressing = await builder.replyAddressing(.init(
+            conversationObjectID: chat.conversation.objectID,
+            replyingToMessageObjectID: chat.fromAlex.objectID,
+            optimisticConversation: nil
+        ))
+
+        XCTAssertEqual(addressing?.recipients, ["alex@example.com"])
+        XCTAssertNil(addressing?.recipientsToAnnounce)
+        XCTAssertFalse(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromAlex))
     }
 
     /// A reply the send would refuse has nothing to announce.
@@ -428,7 +483,10 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     /// Revert-check: the `rows.isSubset(of:)` guard in
     /// `ReplyMetadataBuilder.rowsCertainlyAnswer`, and the author term that
     /// ends it, each by itself: a message the user sent to Sam alone, and a
-    /// message Sam sent to the user and Alex, are then called settled.
+    /// message Sam sent to the user and Alex, are then called settled. And
+    /// the Reply-To comparison there, turned into a subset test either way:
+    /// a Reply-To that adds the assistant, or one that leaves Carol out, is
+    /// then called settled.
     func testRowsCertainlyAnswer_isNeverTrueWhereTheSendOverrulesTheRows() {
         let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let alex = "alex@example.com", alexHome = "alex@home.example", sam = "sam@example.com"
@@ -483,12 +541,95 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
                     )
                     if addressing.overrulesConversationRows { overruled += 1 }
                     XCTAssertFalse(
-                        certain && addressing.overrulesConversationRows,
+                        certain && addressing.recipientsToAnnounce != nil,
+                        "rows \(shape.rows), message \(shape.message) from \(shape.from), aliases \(userAliases), links \(links.groups)"
+                    )
+                    // What PR 427 announced is still announced: the rows are
+                    // overruled only for people who are not theirs.
+                    XCTAssertTrue(
+                        !addressing.overrulesConversationRows || addressing.recipientsToAnnounce != nil,
                         "rows \(shape.rows), message \(shape.message) from \(shape.from), aliases \(userAliases), links \(links.groups)"
                     )
                 }
             }
         }
+
+        // A Reply-To target: `recipients` is what the reply would go to, the
+        // header's addresses and the message's other recipients. The screen
+        // is asked with what it may know of the user's addresses without
+        // loading aliases: nothing, a send-as address, and (only where the
+        // send knows it too) the alias.
+        let assistant = "assistant@example.com", sendAs = "alias@example.com"
+        let replyToShapes: [(rows: [String], recipients: [String], from: String)] = [
+            ([alex], [alex, me], alex),
+            ([alex], [assistant, me], alex),
+            ([alex], [assistant, alex, me], alex),
+            ([alex, carol], [alex, me], alex),
+            ([alex, carol], [alex, carol, me], carol),
+            ([alex], [alexHome, me], alexHome),
+            ([alex], [alex, alias], alex),
+            ([alex], [alex, sendAs], alex),
+            ([alex, me], [alex, sendAs], alex),
+            ([alex], [sam, me], sam),
+            ([me], [sam, me], sam),
+            ([alias], [alias, me], alias),
+            ([alex], [me], alex)
+        ]
+        var settledReplyTo = 0
+        var announcedReplyTo = 0
+        for shape in replyToShapes {
+            let conversation = ReplyConversationSnapshot(participantEmails: shape.rows, latestThreadId: "thread")
+            let target = makeReplyTarget(
+                participants: shape.recipients,
+                sender: shape.from,
+                evidence: ReplyParticipantEvidence(
+                    emails: shape.recipients + [shape.from], hasAddressableRecipientRow: true, isComplete: true
+                ),
+                usesReplyTo: true
+            )
+            for userAliases in userAliasSets {
+                var knownSets: [[String]] = [[], [sendAs]]
+                if userAliases.contains(alias) { knownSets.append([sendAs, alias]) }
+                for known in knownSets {
+                    let certain = builder.rowsCertainlyAnswer(
+                        conversationRowEmails: shape.rows,
+                        isListConversation: false,
+                        target: target,
+                        knownUserAddresses: { known }
+                    )
+                    if certain { settledReplyTo += 1 }
+                    for links in linkSets {
+                        let addressing = builder.replyAddressing(
+                            conversation: conversation,
+                            replyingTo: target,
+                            sendAsAliases: sendAsAliases,
+                            userAliases: userAliases,
+                            contactLinks: links
+                        )
+                        if addressing.recipientsToAnnounce != nil { announcedReplyTo += 1 }
+                        XCTAssertFalse(
+                            certain && addressing.recipientsToAnnounce != nil,
+                            "Reply-To: rows \(shape.rows), recipients \(shape.recipients), aliases \(userAliases), known \(known), links \(links.groups)"
+                        )
+                    }
+                }
+            }
+        }
+        XCTAssertGreaterThan(settledReplyTo, 0)
+        XCTAssertGreaterThan(announcedReplyTo, 0)
+        // Mail delivered to a send-as address, with a Reply-To that repeats
+        // its sender, is settled without loading aliases.
+        XCTAssertTrue(builder.rowsCertainlyAnswer(
+            conversationRowEmails: [alex, me],
+            isListConversation: false,
+            target: makeReplyTarget(
+                participants: [alex, sendAs],
+                sender: alex,
+                evidence: nil,
+                usesReplyTo: true
+            ),
+            knownUserAddresses: { [sendAs] }
+        ))
 
         // The table is not all one kind: some shapes are settled at once,
         // and some are overruled by the send.
@@ -540,7 +681,8 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     private func makeReplyTarget(
         participants: [String],
         sender: String,
-        evidence: ReplyParticipantEvidence?
+        evidence: ReplyParticipantEvidence?,
+        usesReplyTo: Bool = false
     ) -> ReplyTargetSnapshot {
         ReplyTargetSnapshot(
             participantEmails: participants,
@@ -551,7 +693,8 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
             deliveredToAddress: nil,
             replyFromAddress: nil,
             originalMessage: QuotedMessage(senderName: nil, senderEmail: sender, date: .distantPast, body: nil),
-            participantEvidence: evidence
+            participantEvidence: evidence,
+            usesReplyTo: usesReplyTo
         )
     }
 
