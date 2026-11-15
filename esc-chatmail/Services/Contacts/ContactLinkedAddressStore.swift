@@ -20,10 +20,17 @@ import Contacts
 /// adopt from anywhere else: a map adopted while mail is being routed routes
 /// it by hashes no stored conversation carries yet.
 ///
-/// A map that cannot be read is never an empty map. Without Contacts access,
-/// or when the read fails, the adopted map stays as it is; unlinking every
-/// chat because the address book was unreadable for one launch would split
-/// conversations that the next launch merges again.
+/// A map that cannot be read is never an empty map. While Contacts access has
+/// not been decided, or when the read fails, the adopted map stays as it is;
+/// unlinking every chat because the address book was unreadable for one launch
+/// would split conversations that the next launch merges again.
+///
+/// Access the user has denied, or the device restricts, is not that case. It
+/// is an answer: the app may no longer use what Contacts said. The adopted map
+/// is then dropped, here and in defaults, where it is a copy of the cards'
+/// addresses; the cleanup pass that adopted nothing gives the stored
+/// conversations their own hashes back and its record of the applied map goes
+/// the same way. What was merged stays merged, as with any unlinking.
 ///
 /// The store also keeps the map the stored conversations were last brought in
 /// line with (`appliedToConversations()`), which that cleanup pass compares
@@ -46,15 +53,45 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     /// map hashes exactly as before links existed. A suite that tests links
     /// passes a map, or builds a store of its own.
     static let shared: ContactLinkedAddressStore = RuntimeEnvironment.isRunningUnitTests
-        ? ContactLinkedAddressStore(defaults: nil, loadContactAddressLists: { nil })
+        ? ContactLinkedAddressStore(
+            defaults: nil,
+            contactsAuthorizationStatus: { .notDetermined },
+            loadContactAddressLists: { nil }
+        )
         : ContactLinkedAddressStore()
 
     static let adoptedLinksDefaultsKey = "contactLinkedAddresses.adopted.v1"
     static let appliedLinksDefaultsKey = "contactLinkedAddresses.appliedToConversations.v1"
 
+    /// What a Contacts authorization status lets the store do.
+    enum ContactsAccess: Equatable, Sendable {
+        /// The cards may be read: authorized, or limited to the cards the
+        /// user chose.
+        case readable
+        /// Not decided yet. Nothing can be read and nothing was withdrawn:
+        /// it is the status of a first launch, where nothing is adopted
+        /// either way, and a map adopted earlier stays until the question is
+        /// answered.
+        case undecided
+        /// Denied by the user, or restricted on the device. Nothing Contacts
+        /// said may be used any more: the adopted map goes.
+        case withdrawn
+
+        init(_ status: CNAuthorizationStatus) {
+            if status == .authorized || status.isLimitedAccess {
+                self = .readable
+            } else if status == .denied || status == .restricted {
+                self = .withdrawn
+            } else {
+                self = .undecided
+            }
+        }
+    }
+
     private let lock = NSLock()
     private let defaults: UserDefaults?
     private let notificationCenter: NotificationCenter
+    private let contactsAuthorizationStatus: @Sendable () -> CNAuthorizationStatus
     private let loadContactAddressLists: @Sendable () -> [[String]]?
     private var contactsDidChangeObserver: NSObjectProtocol?
     private var adopted: ContactLinkedAddresses
@@ -68,16 +105,23 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     ///   - defaults: Where the adopted and the applied map are kept between
     ///     launches. Nil keeps them in memory only.
     ///   - notificationCenter: Source of `CNContactStoreDidChange`.
+    ///   - contactsAuthorizationStatus: The app's Contacts authorization now.
+    ///     Asked at every `refreshIfNeeded()`; it is one status check.
     ///   - loadContactAddressLists: The addresses of each contact card, or nil
-    ///     when Contacts cannot be read (no access, or the read failed). Tests
-    ///     pass their own; nothing in a test reads the real address book.
+    ///     when the read failed. Called only while the cards may be read
+    ///     (`ContactsAccess.readable`). Tests pass their own of both; nothing
+    ///     in a test reads the real address book or its authorization.
     init(
         defaults: UserDefaults? = .standard,
         notificationCenter: NotificationCenter = .default,
+        contactsAuthorizationStatus: @escaping @Sendable () -> CNAuthorizationStatus = {
+            CNContactStore.authorizationStatus(for: .contacts)
+        },
         loadContactAddressLists: @escaping @Sendable () -> [[String]]? = ContactLinkedAddressStore.makeAddressBookLoader()
     ) {
         self.defaults = defaults
         self.notificationCenter = notificationCenter
+        self.contactsAuthorizationStatus = contactsAuthorizationStatus
         self.loadContactAddressLists = loadContactAddressLists
         self.adopted = ContactLinkedAddresses(
             encoded: defaults?.string(forKey: Self.adoptedLinksDefaultsKey)
@@ -115,16 +159,26 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     /// not read yet.
     @discardableResult
     func refreshIfNeeded() -> ContactLinkedAddresses {
+        // Asked at every call, before the question of whether Contacts
+        // changed: access taken away is reported by no change in Contacts,
+        // and on the Mac the app can go on running after it.
+        let access = ContactsAccess(contactsAuthorizationStatus())
+        if access == .withdrawn {
+            return dropAdoptedLinks()
+        }
+
         // Taken before the read: a change reported while the address book is
         // being walked moves the generation past this one, so the next call
         // reads again.
         let (generation, current, isCurrent) = lock.withLock {
             (contactsGeneration, adopted, generationOfAdoptedRead == contactsGeneration)
         }
-        guard !isCurrent else { return current }
-        guard let contactAddressLists = loadContactAddressLists() else {
-            // Unreadable: keep the map and leave the generation unread, so a
-            // later call tries again (access granted since, or a failed read).
+        guard !isCurrent,
+              access == .readable,
+              let contactAddressLists = loadContactAddressLists() else {
+            // Current, undecided or unreadable: keep the map. The last two
+            // leave the generation unread, so a later call tries again
+            // (access granted since, or a failed read).
             return current
         }
 
@@ -143,6 +197,27 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
             )
         }
         return loaded
+    }
+
+    /// Contacts access was withdrawn: nothing is linked any more, and the
+    /// stored copy of the cards' addresses goes with the map.
+    private func dropAdoptedLinks() -> ContactLinkedAddresses {
+        let didChange = lock.withLock { () -> Bool in
+            // No read stands any more. Access given back is reported by no
+            // change in Contacts either, so the next readable call must read.
+            generationOfAdoptedRead = 0
+            guard !adopted.isEmpty else { return false }
+            adopted = .none
+            return true
+        }
+        if didChange {
+            store(.none, forKey: Self.adoptedLinksDefaultsKey)
+            Log.info(
+                "Dropped contact-linked addresses: Contacts access was withdrawn",
+                category: .conversation
+            )
+        }
+        return .none
     }
 
     /// The address book changed, so the next `refreshIfNeeded()` reads it.
@@ -178,8 +253,9 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     // MARK: - Address book
 
     /// The production reader: every contact card that has more than one email
-    /// address, with unified contacts as one card. Nil without Contacts
-    /// access, limited access counting as access, or when the read fails.
+    /// address, with unified contacts as one card. Nil when the read fails.
+    /// The store calls it only while the cards may be read
+    /// (`ContactsAccess.readable`, limited access counting as access).
     static func makeAddressBookLoader() -> @Sendable () -> [[String]]? {
         let addressBook = AddressBook()
         return { addressBook.contactAddressLists() }
@@ -193,9 +269,6 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
         private let contactStore = CNContactStore()
 
         func contactAddressLists() -> [[String]]? {
-            let status = CNContactStore.authorizationStatus(for: .contacts)
-            guard status == .authorized || status.isLimitedAccess else { return nil }
-
             let request = CNContactFetchRequest(
                 keysToFetch: [CNContactEmailAddressesKey as CNKeyDescriptor]
             )

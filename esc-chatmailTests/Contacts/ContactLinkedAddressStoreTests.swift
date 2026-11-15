@@ -108,8 +108,8 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         XCTAssertEqual(later.groups, [["k2@x.example", "k@x.example"]])
     }
 
-    /// Without Contacts access from the start, every call asks again (the ask
-    /// is one status check) and nothing is linked.
+    /// A read that fails every time is tried again at every call, and
+    /// nothing is linked.
     func testRefreshIfNeeded_neverReadable_staysEmptyAndKeepsAsking() {
         addressBook.cards = nil
         let store = makeStore()
@@ -156,6 +156,90 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         XCTAssertNil(defaults.string(forKey: ContactLinkedAddressStore.appliedLinksDefaultsKey))
     }
 
+    // MARK: - Contacts access
+
+    // Revert-check: the `access == .withdrawn` branch at the top of
+    // `ContactLinkedAddressStore.refreshIfNeeded`, in either of two ways.
+    // Taken out, access the user turned off reads as "unreadable": the links
+    // stay in use and the cards' addresses stay in defaults for good. Moved
+    // below the `isCurrent` guard, it is asked only once Contacts report a
+    // change, and turning access off reports none.
+    func testRefreshIfNeeded_contactsAccessWithdrawn_dropsTheLinksAndTheirStoredCopy() {
+        for status in [CNAuthorizationStatus.denied, .restricted] {
+            addressBook.authorization = .authorized
+            let store = makeStore()
+            XCTAssertFalse(store.refreshIfNeeded().isEmpty)
+            XCTAssertNotNil(defaults.string(forKey: ContactLinkedAddressStore.adoptedLinksDefaultsKey))
+            let readsBefore = addressBook.readCount
+
+            // No change in Contacts is reported: the app only lost its access.
+            addressBook.authorization = status
+            let adopted = store.refreshIfNeeded()
+
+            XCTAssertTrue(adopted.isEmpty, "\(status.rawValue)")
+            XCTAssertTrue(store.snapshot().isEmpty, "\(status.rawValue)")
+            XCTAssertNil(
+                defaults.string(forKey: ContactLinkedAddressStore.adoptedLinksDefaultsKey),
+                "The stored map is a copy of the cards' addresses"
+            )
+            XCTAssertTrue(makeStore().snapshot().isEmpty, "The next launch starts with nothing linked")
+            XCTAssertEqual(addressBook.readCount, readsBefore, "Nothing is read without access")
+        }
+    }
+
+    // Revert-check: `generationOfAdoptedRead = 0` in
+    // `ContactLinkedAddressStore.dropAdoptedLinks`. Without it the read made
+    // before access was taken away still counts as current, so access given
+    // back links nothing until a card is edited or the app is launched again.
+    func testRefreshIfNeeded_accessGivenBackAfterWithdrawal_readsAgainWithNoChangeInContacts() {
+        let store = makeStore()
+        let linked = store.refreshIfNeeded()
+        addressBook.authorization = .denied
+        XCTAssertTrue(store.refreshIfNeeded().isEmpty)
+        let readsBefore = addressBook.readCount
+
+        addressBook.authorization = .authorized
+        let adopted = store.refreshIfNeeded()
+
+        XCTAssertEqual(adopted, linked)
+        XCTAssertEqual(addressBook.readCount, readsBefore + 1)
+    }
+
+    // Revert-check: `ContactsAccess.undecided` standing apart from
+    // `.withdrawn` (`ContactsAccess.init`), and the `access == .readable`
+    // guard before the read in `refreshIfNeeded`. A question nobody has
+    // answered is not a refusal: read as one, a privacy reset would unlink
+    // every chat before the user is asked again.
+    func testRefreshIfNeeded_accessNotYetDecided_keepsTheAdoptedLinksAndReadsNothing() {
+        let adopted = makeStore().refreshIfNeeded()
+        let nextLaunchAddressBook = AddressBookStub(cards: [], authorization: .notDetermined)
+        let nextLaunch = makeStore(addressBook: nextLaunchAddressBook)
+
+        XCTAssertEqual(nextLaunch.refreshIfNeeded(), adopted)
+        XCTAssertEqual(nextLaunch.snapshot(), adopted)
+        XCTAssertNotNil(defaults.string(forKey: ContactLinkedAddressStore.adoptedLinksDefaultsKey))
+        XCTAssertEqual(nextLaunchAddressBook.readCount, 0)
+
+        // Answered with a yes: the same store reads at its next call.
+        nextLaunchAddressBook.authorization = .authorized
+        XCTAssertTrue(nextLaunch.refreshIfNeeded().isEmpty, "These Contacts link nothing")
+        XCTAssertEqual(nextLaunchAddressBook.readCount, 1)
+    }
+
+    func testContactsAccess_authorizationStatus_saysWhatTheStoreMayDo() {
+        typealias Access = ContactLinkedAddressStore.ContactsAccess
+
+        XCTAssertEqual(Access(.authorized), .readable)
+        XCTAssertEqual(Access(.notDetermined), .undecided)
+        XCTAssertEqual(Access(.denied), .withdrawn)
+        XCTAssertEqual(Access(.restricted), .withdrawn)
+        #if os(iOS)
+        if #available(iOS 18.0, *) {
+            XCTAssertEqual(Access(.limited), .readable, "The cards the user chose may be read")
+        }
+        #endif
+    }
+
     // MARK: - Helpers
 
     private func makeStore(addressBook: AddressBookStub? = nil) -> ContactLinkedAddressStore {
@@ -163,35 +247,8 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         return ContactLinkedAddressStore(
             defaults: defaults,
             notificationCenter: notificationCenter,
+            contactsAuthorizationStatus: { addressBook.authorization },
             loadContactAddressLists: { addressBook.read() }
         )
-    }
-}
-
-/// Stands in for the address book: the cards it holds, nil while it cannot be
-/// read, and how often it was read.
-private final class AddressBookStub: @unchecked Sendable {
-    private let lock = NSLock()
-    private var storedCards: [[String]]?
-    private var storedReadCount = 0
-
-    init(cards: [[String]]?) {
-        storedCards = cards
-    }
-
-    var cards: [[String]]? {
-        get { lock.withLock { storedCards } }
-        set { lock.withLock { storedCards = newValue } }
-    }
-
-    var readCount: Int {
-        lock.withLock { storedReadCount }
-    }
-
-    func read() -> [[String]]? {
-        lock.withLock {
-            storedReadCount += 1
-            return storedCards
-        }
     }
 }
