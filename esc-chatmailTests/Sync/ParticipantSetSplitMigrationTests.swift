@@ -552,6 +552,10 @@ final class ParticipantSetSplitMigrationTests: XCTestCase {
         XCTAssertEqual(states.first?.participantEmails, [])
     }
 
+    // Revert-check: `ParticipantHashRepairScope.givesAnchoredConversationsTheirHash`
+    // answering false for `.activeConversations`. Answering true, maintenance
+    // gives this shell the note-to-self hash its one relay row reduces to,
+    // while a send still anchors it.
     func testMaintenanceLeavesPendingSendConversationCompletelyUntouched() async throws {
         let relay = "relay@icloud.com"
         let staleHash = calculateParticipantHash(from: [relay])

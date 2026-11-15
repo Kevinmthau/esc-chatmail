@@ -69,7 +69,11 @@ extension DataCleanupService {
     ///   run. `.conversationsNaming` for a change in linked addresses, which
     ///   also covers archived conversations: those take the new hash, so the
     ///   router finds them again, but are never merged, as two archived
-    ///   conversations of one participant set never are.
+    ///   conversations of one participant set never are. It is also the one
+    ///   scope in which a conversation a pending send or a saved reply draft
+    ///   anchors takes its correct hash in place
+    ///   (`givesAnchoredConversationsTheirHash`); its rows, type and messages
+    ///   wait for the anchor's release in either scope.
     /// - Returns: `.completed` only when every conversation in scope carries
     ///   its correct hash and was merged where it had to be. Maintenance
     ///   ignores the result; a caller that records the pass as done must not.
@@ -147,25 +151,48 @@ extension DataCleanupService {
 
                 // An in-flight optimistic send can reference this conversation
                 // while its message exists only in the view context. Leave the
-                // shell completely untouched until reconciliation finishes;
-                // deleting its final excluded participant here would make the
-                // following empty-conversation sweep delete the send's anchor.
+                // shell's rows, type and messages untouched until
+                // reconciliation finishes, and never merge it; deleting its
+                // final excluded participant here would make the following
+                // empty-conversation sweep delete the send's anchor.
                 //
                 // A deferred chat-preview retry finds this conversation's rows
                 // by its ID, or by its recorded hash once a merge deletes it.
                 // Rehashing it or merging it into a different hash strands
                 // those rows on the old preview; this pass retries next run.
-                if pendingSendConversationIds.contains(conv.id) || chatPreviewRetryAnchors.anchors(conv) {
-                    // Nothing is written, but the pass is not done for a
-                    // conversation it would have changed.
+                let isAnchoredByChatPreviewRetry = chatPreviewRetryAnchors.anchors(conv)
+                if pendingSendConversationIds.contains(conv.id) || isAnchoredByChatPreviewRetry {
                     if let rowIdentity {
+                        let correctHash = rowIdentity.identity.participantHash
+                        // The one write an anchored conversation takes, and
+                        // only for a change in linked addresses. The router
+                        // hashes with the adopted map from the moment it is
+                        // adopted, so an anchor left on the hash of its own
+                        // address stops receiving that person's mail, which
+                        // opens a second chat beside it, and a saved reply
+                        // draft anchors its chat for as long as it is kept,
+                        // which can be weeks. The hash is not what the anchor
+                        // protects: a send's echo is routed by the router's
+                        // hash wherever the optimistic row sits, and a draft
+                        // is found by conversation ID. Still left alone: a
+                        // conversation a chat-preview retry anchors, which is
+                        // found again through its recorded hash.
+                        if scope.givesAnchoredConversationsTheirHash,
+                           !isAnchoredByChatPreviewRetry,
+                           conv.participantHash != correctHash {
+                            conv.participantHash = correctHash
+                        }
+                        // Nothing else is written, but the pass is not done
+                        // for a conversation it would still change: rows to
+                        // fold, a type to set, or a hash it could not give.
                         if rowIdentity.needsRepair(of: conv) {
                             isBlockedByProtectedConversation = true
                         }
-                        if conv.archivedAt == nil {
-                            correctHashesOfProtectedActiveConversations.insert(
-                                rowIdentity.identity.participantHash
-                            )
+                        // Nor for two anchors that share a hash: neither can
+                        // be merged into the other while both are anchored.
+                        if conv.archivedAt == nil,
+                           !correctHashesOfProtectedActiveConversations.insert(correctHash).inserted {
+                            isBlockedByProtectedConversation = true
                         }
                     }
                     continue

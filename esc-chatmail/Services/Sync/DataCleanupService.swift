@@ -54,6 +54,21 @@ struct DataCleanupService: Sendable {
         /// for one of these normalized addresses: a change in the addresses a
         /// contact card links, which touches nobody else's conversations.
         case conversationsNaming(Set<String>)
+
+        /// Whether a conversation a pending send or a saved reply draft
+        /// anchors takes its correct hash in place, with nothing else about
+        /// it written. True for a change in linked addresses: the router is
+        /// already hashing with the new map, so an anchor left on its old
+        /// hash loses its mail to a second chat for as long as it is anchored.
+        /// False for maintenance, which repairs hashes that were stored wrong
+        /// under a map that did not change, and leaves an anchor untouched as
+        /// it always has.
+        var givesAnchoredConversationsTheirHash: Bool {
+            switch self {
+            case .activeConversations: false
+            case .conversationsNaming: true
+            }
+        }
     }
 
     /// How `fixAndMergeIncorrectParticipantHashes` ended.
@@ -61,10 +76,13 @@ struct DataCleanupService: Sendable {
         /// Every conversation in scope carries its correct hash, and those
         /// that came to share one were merged.
         case completed
-        /// A conversation in scope was left as it was because a pending send,
-        /// a saved reply draft or a deferred chat-preview retry anchors to it.
-        /// The rest of the scope was repaired and saved; the pass is due again
-        /// once the anchor is released.
+        /// The pass could not finish a conversation in scope because a
+        /// pending send, a saved reply draft or a deferred chat-preview retry
+        /// anchors to it: its rows were not folded, it was not merged with the
+        /// conversation that came to share its hash, or (a chat-preview retry,
+        /// or any anchor in maintenance) it kept a wrong hash. The rest of the
+        /// scope was repaired and saved; the pass is due again once the anchor
+        /// is released.
         case blockedByProtectedConversation
         /// Nothing was committed: the account's aliases are not known yet, or
         /// a fetch or the save failed.

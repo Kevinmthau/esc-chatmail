@@ -324,13 +324,15 @@ final class ContactUnificationCleanupTests: XCTestCase {
     // MARK: - Protected conversations
 
     /// The shape a send in flight really gives: the anchored chat is one of
-    /// the two that are to become one.
+    /// the two that are to become one. It takes the shared hash where it is,
+    /// so the send's echo and the person's next mail still find a chat that
+    /// carries the router's hash, and it keeps its messages and is merged
+    /// with nothing until the send is done.
     ///
-    /// HONEST SCOPE: this fails only with both of the checks that report a
-    /// blocked pass removed. The anchored chat needs a new hash, and the
-    /// other chat comes to share it, so either check alone still reports the
-    /// pass as blocked. Each check has a test of its own below.
-    func testUnify_chatAnchoringAPendingSend_isLeftAloneAndMergedOnceReleased() async throws {
+    /// Revert-check: the `correctHashesOfProtectedActiveConversations` test
+    /// after the loop in `fixAndMergeIncorrectParticipantHashes`. Without it
+    /// the pass is recorded as applied with the two chats still apart.
+    func testUnify_chatAnchoringAPendingSend_takesTheHashAndIsMergedOnceReleased() async throws {
         let workChat = try seedChat(
             with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
         )
@@ -349,8 +351,9 @@ final class ContactUnificationCleanupTests: XCTestCase {
         var states = try fetchConversationStates()
         XCTAssertEqual(states.count, 2)
         let anchored = try XCTUnwrap(states.first { $0.id == workChatID })
-        XCTAssertEqual(anchored.participantHash, Self.hashWork, "A send's anchor keeps its hash and its messages")
-        XCTAssertEqual(anchored.messageIDs, ["work-1"])
+        XCTAssertEqual(anchored.participantHash, Self.hashHome, "A send's anchor takes the shared hash in place")
+        XCTAssertEqual(anchored.messageIDs, ["work-1"], "and keeps its messages: it is merged with nothing")
+        XCTAssertEqual(anchored.participantEmails, [Self.work])
         XCTAssertTrue(
             contacts.appliedToConversations().isEmpty,
             "Not applied yet: the next cleanup has to come back to this chat"
@@ -367,21 +370,76 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
     }
 
-    // Revert-check: `needsRepair(of:)` setting
-    // `isBlockedByProtectedConversation` in
-    // `fixAndMergeIncorrectParticipantHashes`. Reported as completed, the
-    // links are recorded as applied, and the chat a send anchored to keeps
-    // the hash of its own address once the send is done: the next mail from
-    // the person's other address opens a second chat.
-    func testUnify_anchoredChatAloneNeedsTheSharedHash_isNotRecordedAsAppliedUntilReleased() async throws {
-        let workChat = try seedChat(
-            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
+    /// An anchored chat that holds both of the person's addresses takes the
+    /// shared hash, and nothing else about it is written: a send in flight
+    /// keeps the rows it was addressed from.
+    ///
+    /// Revert-check: `needsRepair(of:)` setting
+    /// `isBlockedByProtectedConversation` in
+    /// `fixAndMergeIncorrectParticipantHashes`. Reported as completed, the
+    /// links are recorded as applied, the pass does not come back once the
+    /// send is done, and the chat goes on showing the person once for each
+    /// address.
+    func testUnify_anchoredChatHoldingBothAddresses_keepsItsRowsUntilReleased() async throws {
+        let chat = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [Self.work, Self.home]))
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        chat.conversationType = .group
+        addConversationParticipant(email: Self.work, to: chat)
+        addConversationParticipant(email: Self.home, to: chat)
+        try addMessage(
+            id: "both-1", date: Date(timeIntervalSince1970: 100),
+            from: Self.work, to: [Self.me], cc: [Self.home], in: chat
         )
         let record = context.insertTestObject(OutboundSendMutationRecord.self)
         record.id = UUID().uuidString
         record.createdAt = Date()
-        record.conversationId = workChat.id
+        record.conversationId = chat.id
         try context.save()
+        let contacts = makeContacts(cards: [[Self.work, Self.home]])
+        let service = makeService(contacts: contacts)
+
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        var state = try XCTUnwrap(try fetchConversationStates().first)
+        XCTAssertEqual(state.participantHash, Self.hashHome)
+        XCTAssertEqual(state.participantEmails, [Self.work, Self.home])
+        XCTAssertEqual(state.typeRaw, ConversationType.group.rawValue)
+        XCTAssertTrue(contacts.appliedToConversations().isEmpty)
+
+        context.delete(record)
+        try context.save()
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        state = try XCTUnwrap(try fetchConversationStates().first)
+        XCTAssertEqual(state.participantHash, Self.hashHome)
+        XCTAssertEqual(state.participantEmails, [Self.home])
+        XCTAssertEqual(state.typeRaw, ConversationType.oneToOne.rawValue)
+        XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
+    }
+
+    /// A deferred chat-preview retry finds its conversation again through
+    /// the hash it recorded, so this is the one anchor that keeps its old
+    /// hash, as it does in maintenance.
+    ///
+    /// Revert-check: the `!isAnchoredByChatPreviewRetry` condition on the
+    /// in-place write in `fixAndMergeIncorrectParticipantHashes`. Given the
+    /// shared hash, a conversation merged away before its retry leaves the
+    /// retry looking for rows under a hash nothing carries.
+    func testUnify_chatAnchoredByAChatPreviewRetry_keepsItsHashUntilTheRetryHasRun() async throws {
+        let workChat = try seedChat(
+            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
+        )
+        try context.save()
+        let checkpointKey = ConversationLaunchRepairCoordinator.chatPreviewRepairCheckpointKey
+        migrationFlags.setString(
+            ChatPreviewRepair.Checkpoint(
+                deferredConversations: [ChatPreviewRepair.DeferredConversation(workChat)]
+            ).encoded,
+            forKey: checkpointKey
+        )
         let contacts = makeContacts(cards: [[Self.work, Self.home]])
         let service = makeService(contacts: contacts)
 
@@ -390,11 +448,51 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(try fetchConversationStates().first?.participantHash, Self.hashWork)
         XCTAssertTrue(contacts.appliedToConversations().isEmpty)
 
-        context.delete(record)
-        try context.save()
+        migrationFlags.setString(nil, forKey: checkpointKey)
         await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
 
         XCTAssertEqual(try fetchConversationStates().first?.participantHash, Self.hashHome)
+        XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
+    }
+
+    /// Two anchored chats that come to share a hash both take it, and neither
+    /// can be merged into the other while both are anchored.
+    ///
+    /// Revert-check: the `insert(correctHash).inserted` test for an anchored
+    /// conversation in `fixAndMergeIncorrectParticipantHashes`. Each chat
+    /// alone has nothing left to write, so without it the links are recorded
+    /// as applied and the pass never comes back to merge the two.
+    func testUnify_twoAnchoredChatsOfOnePerson_areMergedOnceReleased() async throws {
+        let workChat = try seedChat(
+            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
+        )
+        let homeChat = try seedChat(
+            with: Self.home, hash: Self.hashHome, messageIDs: ["home-1"], startingAt: 300
+        )
+        let drafts = [workChat, homeChat].map { chat -> ChatReplyDraft in
+            let draft = context.insertTestObject(ChatReplyDraft.self)
+            draft.conversationId = chat.id
+            return draft
+        }
+        try context.save()
+        let contacts = makeContacts(cards: [[Self.work, Self.home]])
+        let service = makeService(contacts: contacts)
+
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        var states = try fetchConversationStates()
+        XCTAssertEqual(states.map(\.participantHash), [Self.hashHome, Self.hashHome])
+        XCTAssertTrue(contacts.appliedToConversations().isEmpty)
+
+        for draft in drafts {
+            context.delete(draft)
+        }
+        try context.save()
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        states = try fetchConversationStates()
+        XCTAssertEqual(states.count, 1)
+        XCTAssertEqual(states.first?.messageIDs, ["work-1", "home-1"])
         XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
     }
 
@@ -433,6 +531,57 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(states.count, 1)
         XCTAssertEqual(states.first?.messageIDs, ["work-1", "home-1"])
         XCTAssertEqual(contacts.appliedToConversations(), Self.oneCard)
+    }
+
+    /// A saved reply draft anchors its chat for as long as the draft is kept,
+    /// which can be weeks. The router hashes with the adopted links from the
+    /// moment they are adopted, so an anchored chat left on the hash of its
+    /// own address stops receiving the person's mail: the next message from
+    /// that very address opens a second chat beside it.
+    ///
+    /// Revert-check: the `conv.participantHash = correctHash` write for an
+    /// anchored conversation in `fixAndMergeIncorrectParticipantHashes`.
+    /// Without it the chat keeps `hashWork`, the router asks for `hashHome`,
+    /// and a second chat is made.
+    func testUnify_chatHoldingASavedReplyDraft_takesTheSharedHashInPlaceSoItsMailStillFindsIt() async throws {
+        let workChat = try seedChat(
+            with: Self.work, hash: Self.hashWork, messageIDs: ["work-1"], startingAt: 100
+        )
+        let draft = context.insertTestObject(ChatReplyDraft.self)
+        draft.conversationId = workChat.id
+        try context.save()
+        let workChatObjectID = workChat.objectID
+        let contacts = makeContacts(cards: [[Self.work, Self.home]])
+
+        await makeService(contacts: contacts)
+            .unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        let anchored = try XCTUnwrap(try fetchConversationStates().first)
+        XCTAssertEqual(anchored.participantHash, Self.hashHome)
+        XCTAssertEqual(anchored.participantEmails, [Self.work], "Its rows are not touched while it is anchored")
+        XCTAssertEqual(anchored.messageIDs, ["work-1"])
+        XCTAssertEqual(
+            contacts.appliedToConversations(), Self.oneCard,
+            "Nothing is left to do for it: no row to fold and no chat to merge"
+        )
+
+        let manager = ConversationManager(currentUserEmail: { Self.me })
+        for sender in [Self.work, Self.home] {
+            let identity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: "From", value: sender),
+                    MessageHeader(name: "To", value: Self.me)
+                ],
+                myAliases: [Self.me],
+                contactLinks: contacts.snapshot()
+            )
+            let routed = try await manager.findOrCreateConversationObjectID(
+                for: identity,
+                in: coreDataStack.newBackgroundContext()
+            )
+            XCTAssertEqual(routed, workChatObjectID, sender)
+        }
+        XCTAssertEqual(try fetchConversationStates().count, 1, "No second chat was opened beside the draft's")
     }
 
     // MARK: - Unlinking

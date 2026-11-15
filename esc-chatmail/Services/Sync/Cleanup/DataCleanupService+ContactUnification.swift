@@ -27,12 +27,19 @@ extension DataCleanupService {
     /// (`ContactLinkedAddressStore.appliedToConversations`), because the pass
     /// needs to know which addresses changed: it reads only the conversations
     /// that name one. It is recorded only when the pass completed. A fetch or
-    /// save that failed, aliases not yet known, or a conversation a pending
-    /// send or a saved reply draft anchors to all leave it as it was, so the
-    /// next sync's cleanup tries again; the same pass run twice changes
-    /// nothing the second time. Meanwhile new mail is already routed by the
-    /// adopted map, and maintenance's own run of the hash repair covers the
-    /// active conversations.
+    /// save that failed, aliases not yet known, or an anchored conversation
+    /// the pass could not finish all leave it as it was, so the next sync's
+    /// cleanup tries again; the same pass run twice changes nothing the
+    /// second time.
+    ///
+    /// Meanwhile new mail is already routed by the adopted map, so a
+    /// conversation left on its old hash loses its mail to a second chat.
+    /// That is why a conversation a pending send or a saved reply draft
+    /// anchors still takes its new hash here, in place: a draft can anchor
+    /// its chat for weeks. Only its rows and the merge with the chat that
+    /// came to share its hash wait for the anchor's release. A conversation a
+    /// chat-preview retry anchors keeps its old hash until that retry has run,
+    /// because the retry finds it through the hash it recorded.
     ///
     /// Unlinking is half of what linking is. When a card stops listing an
     /// address, mail from it opens a chat of its own again, but the messages
