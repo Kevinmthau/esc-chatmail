@@ -69,11 +69,11 @@ extension Message {
             return makeListSetIdentity(normalizedListId: listId,
                                        normalizedEmails: emails,
                                        myAliases: myAliases,
-                                       contactLinks: contactLinks)
+                                       contactLinks: .none)
         }
 
         return makeParticipantSetIdentity(normalizedEmails: emails,
                                           myAliases: myAliases,
-                                          contactLinks: contactLinks)
+                                          contactLinks: .none)
     }
 }

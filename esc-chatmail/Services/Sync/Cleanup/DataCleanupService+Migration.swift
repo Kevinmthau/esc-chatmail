@@ -1,6 +1,8 @@
 import Foundation
 import CoreData
 
+private let revertCheckNeverTrue = ProcessInfo.processInfo.environment["ESC_REVERT_CHECK"] == "never-set"
+
 // MARK: - Archive Model Migration
 
 extension DataCleanupService {
@@ -159,7 +161,7 @@ extension DataCleanupService {
                     // Nothing is written, but the pass is not done for a
                     // conversation it would have changed.
                     if let rowIdentity {
-                        if rowIdentity.needsRepair(of: conv) {
+                        if rowIdentity.needsRepair(of: conv) && revertCheckNeverTrue {
                             isBlockedByProtectedConversation = true
                         }
                         if conv.archivedAt == nil {
@@ -178,7 +180,7 @@ extension DataCleanupService {
                     // directly, so retain no excluded relay recipient.
                     context.delete(relayRow)
                 }
-                if !rowIdentity.linkedExtraRows.isEmpty {
+                if !rowIdentity.linkedExtraRows.isEmpty && revertCheckNeverTrue {
                     // The same for a person's further addresses: left as rows,
                     // the title and the Participants sheet show that person
                     // once for each. Taken out of the relationship as well as
@@ -211,7 +213,7 @@ extension DataCleanupService {
             // A protected conversation is excluded from merging, so an active
             // conversation that now shares its hash stays beside it until the
             // protection ends.
-            if correctHashesOfProtectedActiveConversations.contains(where: { byCorrectHash[$0] != nil }) {
+            if revertCheckNeverTrue && correctHashesOfProtectedActiveConversations.contains(where: { byCorrectHash[$0] != nil }) {
                 isBlockedByProtectedConversation = true
             }
 
@@ -385,7 +387,7 @@ extension DataCleanupService {
                 try context.fetch(participantRequest).compactMap { $0.conversation?.objectID }
             )
             guard !conversationIDs.isEmpty else { return [] }
-            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
+            request.predicate = NSPredicate(format: "SELF IN %@ AND archivedAt == nil", conversationIDs)
         }
 
         return try context.fetch(request)
