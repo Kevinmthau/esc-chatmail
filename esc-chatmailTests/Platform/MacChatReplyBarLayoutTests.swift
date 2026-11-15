@@ -80,6 +80,8 @@ final class MacChatReplyBarLayoutTests: XCTestCase {
             .replyingTo(label: "Replying to: Lunch?"),
             .replyingTo(label: "Replying to: " + String(repeating: "a very long subject ", count: 30)),
             .recoveredEnvelope(label: "Replying to: ada@example.com"),
+            .addressedTo(label: "To: ada@example.com"),
+            .addressedTo(label: "To: " + String(repeating: "someone@example.com, ", count: 30)),
             .unavailableTarget
         ]
 

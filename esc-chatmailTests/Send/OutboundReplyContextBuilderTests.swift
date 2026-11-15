@@ -190,7 +190,7 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
     /// person, read here from the managed objects a sync leaves.
     ///
     /// Revert-check: the `recipientsOverrulingRows` branch in
-    /// `ReplyMetadataBuilder.buildReplyMetadata`. Without it the reply, and
+    /// `ReplyMetadataBuilder.replyAddressing`. Without it the reply, and
     /// the message it quotes, go to the row's person, who was never on it.
     func testBuildReplyMetadata_messageOfSomeoneTheRowsDoNotName_repliesToThePeopleOnTheMessage() async throws {
         let conversation = makeReplyConversation(in: viewContext, friendEmail: "alex@example.com")
@@ -319,6 +319,222 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         )
 
         XCTAssertEqual(metadata.recipientEmails, [])
+    }
+
+    // MARK: - What the composer is told before a send
+
+    /// The composer names a reply's recipients where they are not the chat's
+    /// own people, and it learns them from the send's own decision: what
+    /// `replyAddressing` reports is what `buildReplyMetadata` addresses.
+    ///
+    /// Revert-check: `overrulesConversationRows = true` in
+    /// `ReplyMetadataBuilder.replyAddressing`. Without it the reply to Sam's
+    /// message still goes to Sam and the composer is told nothing.
+    func testReplyAddressing_messageOfSomeoneTheRowsDoNotName_reportsTheSendsRecipients() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        let builder = makeBuilder()
+
+        for target in [nil, chat.fromSam.objectID] {
+            let context = OutboundMessageRequest.ReplyContext(
+                conversationObjectID: chat.conversation.objectID,
+                replyingToMessageObjectID: target,
+                optimisticConversation: nil
+            )
+            let addressing = await builder.replyAddressing(context)
+            let sent = try await builder.buildReplyMetadata(context)
+
+            XCTAssertEqual(addressing?.overrulesConversationRows, true)
+            XCTAssertEqual(addressing?.recipients, sent.recipientEmails)
+            XCTAssertEqual(addressing?.recipientsToAnnounce, ["sam@example.com"])
+        }
+    }
+
+    /// In the ordinary case there is nothing to name: the reply goes to the
+    /// people the chat's title names.
+    func testReplyAddressing_messageOfTheRowsPerson_announcesNothing() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+
+        let addressing = await makeBuilder().replyAddressing(.init(
+            conversationObjectID: chat.conversation.objectID,
+            replyingToMessageObjectID: chat.fromAlex.objectID,
+            optimisticConversation: nil
+        ))
+
+        XCTAssertEqual(
+            addressing,
+            ReplyAddressing(recipients: ["alex@example.com"], overrulesConversationRows: false)
+        )
+        XCTAssertNil(addressing?.recipientsToAnnounce)
+    }
+
+    /// A reply the send would refuse has nothing to announce.
+    func testReplyAddressing_targetOfAnotherConversation_isNil() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        let elsewhere = MessageBuilder()
+            .withId("elsewhere")
+            .withThreadId("other-thread")
+            .inConversation(makeReplyConversation(in: viewContext, friendEmail: "other@example.com"))
+            .build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [elsewhere])
+
+        let addressing = await makeBuilder().replyAddressing(.init(
+            conversationObjectID: chat.conversation.objectID,
+            replyingToMessageObjectID: elsewhere.objectID,
+            optimisticConversation: nil
+        ))
+
+        XCTAssertNil(addressing)
+    }
+
+    /// The composer asks `replyMayOverruleConversationRows` first, in the turn
+    /// its target changes, and loads aliases only where it says the rows may
+    /// be overruled. Here it is asked of the stored objects.
+    ///
+    /// Revert-check: returning true from
+    /// `ReplyMetadataBuilder.rowsCertainlyAnswer` whatever the rows. The
+    /// screen then calls Sam's message settled and the composer never asks
+    /// who the reply goes to.
+    func testReplyMayOverruleConversationRows_onlyWhereTheMessageIsNotTheRowsPeoples() throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        let builder = makeBuilder()
+
+        XCTAssertTrue(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromSam))
+        XCTAssertTrue(
+            builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: nil),
+            "With no chosen message the reply answers the newest, which is Sam's"
+        )
+        XCTAssertFalse(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromAlex))
+
+        // A message whose own rows are not known to name everyone on it is
+        // never ground for overruling the rows.
+        let senderOnly = MessageBuilder()
+            .withId("sender-only")
+            .withThreadId("sam-thread")
+            .withSender(email: "sam@example.com", name: "Sam")
+            .inConversation(chat.conversation)
+            .build(in: viewContext)
+        XCTAssertFalse(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: senderOnly))
+
+        // A list reply is addressed from its post, with no rows to overrule.
+        chat.conversation.conversationType = .list
+        XCTAssertFalse(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromSam))
+    }
+
+    /// The screen may send the composer to ask where the rows do answer, but
+    /// it must never call a reply settled that the send then addresses to
+    /// other people: the composer would name nobody. Every shape here is
+    /// asked both ways, with and without aliases and a linked card.
+    ///
+    /// Revert-check: the `rows.isSubset(of:)` guard in
+    /// `ReplyMetadataBuilder.rowsCertainlyAnswer`, and the author term that
+    /// ends it, each by itself: a message the user sent to Sam alone, and a
+    /// message Sam sent to the user and Alex, are then called settled.
+    func testRowsCertainlyAnswer_isNeverTrueWhereTheSendOverrulesTheRows() {
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let alex = "alex@example.com", alexHome = "alex@home.example", sam = "sam@example.com"
+        let carol = "carol@example.com", me = "me@example.com", alias = "me@work.example"
+        let shapes: [(rows: [String], message: [String], from: String)] = [
+            ([alex], [alex, me], alex),
+            ([alex], [me, alex], me),
+            ([alex], [sam, me], sam),
+            ([alex], [me, sam], me),
+            ([alex], [sam, me, alex], sam),
+            ([alex], [alex, me, sam], alex),
+            ([alex, carol], [carol, me, sam], carol),
+            ([alex, carol], [alex, carol, me], carol),
+            ([alex], [alexHome, me], alexHome),
+            ([alex], [alias, alex], alias),
+            ([alex, alias], [alex, alias], alex),
+            ([alias], [alias, me], alias),
+            ([me], [sam, me], sam)
+        ]
+        let userAliasSets: [Set<String>] = [[], [alias]]
+        let linkSets: [ContactLinkedAddresses] = [
+            .none,
+            ContactLinkedAddresses(contactAddressLists: [[alex, alexHome]]),
+            ContactLinkedAddresses(contactAddressLists: [[alex, alias]])
+        ]
+        var settled = 0
+        var overruled = 0
+
+        for shape in shapes {
+            let conversation = ReplyConversationSnapshot(participantEmails: shape.rows, latestThreadId: "thread")
+            let target = makeReplyTarget(
+                participants: shape.message,
+                sender: shape.from,
+                evidence: ReplyParticipantEvidence(
+                    emails: shape.message, hasAddressableRecipientRow: true, isComplete: true
+                )
+            )
+            let certain = builder.rowsCertainlyAnswer(
+                conversationRowEmails: shape.rows,
+                isListConversation: false,
+                target: target
+            )
+            if certain { settled += 1 }
+            for userAliases in userAliasSets {
+                for links in linkSets {
+                    let addressing = builder.replyAddressing(
+                        conversation: conversation,
+                        replyingTo: target,
+                        sendAsAliases: sendAsAliases,
+                        userAliases: userAliases,
+                        contactLinks: links
+                    )
+                    if addressing.overrulesConversationRows { overruled += 1 }
+                    XCTAssertFalse(
+                        certain && addressing.overrulesConversationRows,
+                        "rows \(shape.rows), message \(shape.message) from \(shape.from), aliases \(userAliases), links \(links.groups)"
+                    )
+                }
+            }
+        }
+
+        // The table is not all one kind: some shapes are settled at once,
+        // and some are overruled by the send.
+        XCTAssertGreaterThan(settled, 0)
+        XCTAssertGreaterThan(overruled, 0)
+        // The ordinary chat is settled without asking, both ways round.
+        XCTAssertTrue(builder.rowsCertainlyAnswer(
+            conversationRowEmails: [alex],
+            isListConversation: false,
+            target: makeReplyTarget(
+                participants: [alex, me],
+                sender: alex,
+                evidence: ReplyParticipantEvidence(
+                    emails: [alex, me], hasAddressableRecipientRow: true, isComplete: true
+                )
+            )
+        ))
+    }
+
+    /// A chat whose one row is Alex and which still holds Sam's mail, as a
+    /// merge leaves it once a contact card stops linking the two. Sam's
+    /// message is the newest.
+    private func makeChatHoldingAnotherPersonsMail() throws -> (
+        conversation: Conversation, fromAlex: Message, fromSam: Message
+    ) {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: "alex@example.com")
+        let fromAlex = MessageBuilder()
+            .withId("from-alex")
+            .withThreadId("alex-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "alex@example.com", name: "Alex")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        addMessageParticipant(email: "alex@example.com", kind: .from, to: fromAlex)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: fromAlex)
+        let fromSam = MessageBuilder()
+            .withId("from-sam")
+            .withThreadId("sam-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "sam@example.com", name: "Sam")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        addMessageParticipant(email: "sam@example.com", kind: .from, to: fromSam)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: fromSam)
+        try viewContext.obtainPermanentIDs(for: [conversation, fromAlex, fromSam])
+        return (conversation, fromAlex, fromSam)
     }
 
     private func makeReplyTarget(

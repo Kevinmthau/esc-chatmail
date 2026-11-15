@@ -69,11 +69,8 @@ struct ReplyConversationSnapshot: Sendable {
         }
         // Keep the email anchor even when the user dismisses the quote indicator.
         // An unresolved new send deliberately blocks older thread metadata.
-        let latestReplyTarget = latestMessage.flatMap { message -> ReplyTargetSnapshot? in
-            guard !message.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
-            }
-            return ReplyTargetSnapshot(message: message, sendAsAliases: sendAsAliases)
+        let latestReplyTarget = latestMessage.flatMap {
+            Self.replyTarget(for: $0, sendAsAliases: sendAsAliases)
         }
         let effectiveTarget = replyingTo ?? latestReplyTarget
         let needsAddressHint = effectiveTarget?.deliveredToAddress == nil ||
@@ -85,14 +82,7 @@ struct ReplyConversationSnapshot: Sendable {
         if isListConversation {
             self.participantEmails = effectiveTarget?.participantEmails ?? []
         } else {
-            self.participantEmails = Array(conversation.participants ?? [])
-                .compactMap { participant in
-                    guard let person = participant.person,
-                          !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
-                        return nil
-                    }
-                    return person.email
-                }
+            self.participantEmails = Self.participantRowEmails(of: conversation)
         }
         self.isListConversation = isListConversation
         self.latestThreadId = effectiveTarget?.threadId
@@ -100,6 +90,44 @@ struct ReplyConversationSnapshot: Sendable {
         self.replyFromAddress = effectiveTarget?.replyFromAddress ?? latestReplyAddressHint?.replyFromAddress
         self.latestThreadParticipantEvidence = latestMessage.map { ReplyParticipantSnapshot.evidence(from: $0) }
         self.latestReplyTarget = latestReplyTarget
+    }
+
+    /// The addresses of a participant conversation's rows, as a reply reads
+    /// them: Hide-My-Email relay rows left out.
+    @MainActor
+    static func participantRowEmails(of conversation: Conversation) -> [String] {
+        Array(conversation.participants ?? [])
+            .compactMap { participant in
+                guard let person = participant.person,
+                      !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) else {
+                    return nil
+                }
+                return person.email
+            }
+    }
+
+    /// The message a reply with no chosen target answers in a participant
+    /// conversation, as the snapshot's `latestReplyTarget` has it. For a
+    /// caller that needs only that and not the whole snapshot, which also
+    /// looks through the conversation for a reply-address hint.
+    @MainActor
+    static func latestNonListReplyTarget(in conversation: Conversation) -> ReplyTargetSnapshot? {
+        latestNonListReplyMessage(in: conversation).flatMap {
+            replyTarget(for: $0, sendAsAliases: [])
+        }
+    }
+
+    /// Keep the email anchor only for a message that has a thread to answer
+    /// in: an unresolved new send deliberately blocks older thread metadata.
+    @MainActor
+    private static func replyTarget(
+        for message: Message,
+        sendAsAliases: [SendAsAlias]
+    ) -> ReplyTargetSnapshot? {
+        guard !message.gmThreadId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return ReplyTargetSnapshot(message: message, sendAsAliases: sendAsAliases)
     }
 
     @MainActor

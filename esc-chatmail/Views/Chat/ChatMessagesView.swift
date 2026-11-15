@@ -1127,6 +1127,7 @@ private struct ChatReplyComposerOverlay: View {
                 style: style,
                 isProcessingAttachments: $composerState.isProcessingAttachments,
                 unavailableReplyTargetURI: $composerState.unavailableReplyTargetURI,
+                announcedReplyRecipients: composerState.announcedReplyRecipients,
                 recoveredReplyEnvelope: composerState.recoveredReplyEnvelope,
                 fileDrop: $composerState.pendingFileDrop
             )

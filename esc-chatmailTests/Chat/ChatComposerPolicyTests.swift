@@ -101,14 +101,16 @@ final class ChatComposerPolicyTests: XCTestCase {
         )
     }
 
-    /// A recovered envelope has no dismiss button, an unavailable target is cleared by a
-    /// button that says so, and with no row there is nothing to drop.
+    /// A recovered envelope has no dismiss button, nor has the row that names a reply's
+    /// recipients; an unavailable target is cleared by a button that says so, and with no row
+    /// there is nothing to drop.
     ///
     /// Revert-check: returning `allowsDraftMutation` whatever the header makes this fail.
     func testEscape_dropsNothingForTheRowsThatHaveNoX() {
         for header in [
             ReplyIndicatorPolicy.Header.none,
             .recoveredEnvelope(label: "Replying to: ada@example.com"),
+            .addressedTo(label: "To: ada@example.com"),
             .unavailableTarget
         ] {
             XCTAssertFalse(
