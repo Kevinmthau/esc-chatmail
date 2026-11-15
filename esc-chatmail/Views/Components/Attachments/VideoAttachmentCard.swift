@@ -4,6 +4,7 @@ struct VideoAttachmentCard: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     /// Poster-frame loading routes through the shared loader seam: request
     /// identity, cancel-keeps-image on disappear (no re-decode churn on
@@ -26,7 +27,7 @@ struct VideoAttachmentCard: View {
 
                 VStack(alignment: .leading, spacing: 4) {
                     Text(attachment.filename)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(metrics.font(\.subtitleSize, .medium))
                         .lineLimit(1)
                         .truncationMode(.middle)
 

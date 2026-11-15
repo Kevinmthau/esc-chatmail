@@ -7,7 +7,9 @@ import XCTest
 ///
 /// The sizes were literals in each card until the Mac's chat column needed smaller ones. The
 /// first test holds the iPhone's to those literals, written out again here, so tuning the
-/// Mac's cannot move the iPhone's.
+/// Mac's cannot move the iPhone's. The Mac's are held only to what is claimed of them: nothing
+/// in them is larger than the iPhone's, and no line of text is larger than the Mac's bubble
+/// text.
 ///
 /// HONEST SCOPE: these pin the values and which style names which, not that each card reads
 /// the field its literal became, and not what a card then looks like. The cards were drawn
@@ -43,33 +45,42 @@ final class EmailPreviewCardMetricsTests: XCTestCase {
         )
     }
 
-    /// Revert-check: changing any field of `EmailPreviewCardMetrics.mac` makes this fail.
-    func testMacMetrics_areTheCardsAtTheMacsTextSizes() {
-        XCTAssertEqual(
-            EmailPreviewCardMetrics.mac,
-            EmailPreviewCardMetrics(
-                titleSize: 13,
-                subtitleSize: 12,
-                detailSize: 12,
-                secondaryDetailSize: 11,
-                labelSize: 11,
-                amountSize: 20,
-                linkTitleSize: 13,
-                linkSourceSize: 11,
-                dateTile: EmailPreviewCardMetrics.DateTile(
-                    size: CGSize(width: 54, height: 72),
-                    cornerRadius: 12,
-                    spacing: 2,
-                    monthSize: 10,
-                    daySize: 22,
-                    weekdaySize: 10
-                ),
-                cardPadding: 12,
-                dateCardMinHeight: 116,
-                transactionalCardMinHeight: 118,
-                deployCardMinHeight: 104
-            )
-        )
+    /// The Mac's cards are the iPhone's brought down to the Mac's text sizes: no size, tile
+    /// dimension, padding or least height of theirs is larger than the iPhone's. The Mac's
+    /// numbers are a first pass and are not written out again here, so tuning one is one edit.
+    ///
+    /// Revert-check: `titleSize: 18` or `cardPadding: 16` in `EmailPreviewCardMetrics.mac`
+    /// makes this fail.
+    func testMacMetrics_noValueIsLargerThanTheIPhones() {
+        let mac = EmailPreviewCardMetrics.mac
+        let iOS = EmailPreviewCardMetrics.iOS
+        let values: [(name: String, value: KeyPath<EmailPreviewCardMetrics, CGFloat>)] = [
+            ("titleSize", \.titleSize),
+            ("subtitleSize", \.subtitleSize),
+            ("detailSize", \.detailSize),
+            ("secondaryDetailSize", \.secondaryDetailSize),
+            ("labelSize", \.labelSize),
+            ("amountSize", \.amountSize),
+            ("linkTitleSize", \.linkTitleSize),
+            ("linkSourceSize", \.linkSourceSize),
+            ("dateTile.size.width", \.dateTile.size.width),
+            ("dateTile.size.height", \.dateTile.size.height),
+            ("dateTile.cornerRadius", \.dateTile.cornerRadius),
+            ("dateTile.spacing", \.dateTile.spacing),
+            ("dateTile.monthSize", \.dateTile.monthSize),
+            ("dateTile.daySize", \.dateTile.daySize),
+            ("dateTile.weekdaySize", \.dateTile.weekdaySize),
+            ("cardPadding", \.cardPadding),
+            ("dateCardMinHeight", \.dateCardMinHeight),
+            ("transactionalCardMinHeight", \.transactionalCardMinHeight),
+            ("deployCardMinHeight", \.deployCardMinHeight)
+        ]
+
+        for (name, value) in values {
+            XCTAssertGreaterThan(mac[keyPath: value], 0, name)
+            XCTAssertLessThanOrEqual(mac[keyPath: value], iOS[keyPath: value], name)
+        }
+        XCTAssertNotEqual(mac, iOS)
     }
 
     /// The Mac's bubble text is 13 points. A card title above that is the oversized card the
@@ -109,24 +120,42 @@ final class EmailPreviewCardMetricsTests: XCTestCase {
 
     /// The cards' text is SF Pro, the default design, at the metrics' size.
     ///
-    /// Revert-check: `design: .rounded` in `EmailPreviewCardMetrics.font(size:weight:)` makes
-    /// this fail.
+    /// Revert-check: `design: .rounded` in `EmailPreviewCardMetrics.font(_:_:)` makes this
+    /// fail.
     func testFont_isTheDefaultDesignAtTheNamedSize() {
         XCTAssertEqual(
             EmailPreviewCardMetrics.iOS.font(\.titleSize, .semibold),
             Font.system(size: 17, weight: .semibold, design: .default)
         )
+        let mac = EmailPreviewCardMetrics.mac
         XCTAssertEqual(
-            EmailPreviewCardMetrics.mac.font(\.titleSize, .semibold),
-            Font.system(size: 13, weight: .semibold, design: .default)
+            mac.font(\.titleSize, .semibold),
+            Font.system(size: mac.titleSize, weight: .semibold, design: .default)
         )
         XCTAssertEqual(
-            EmailPreviewCardMetrics.mac.font(\.detailSize),
-            Font.system(size: 12, weight: .regular, design: .default)
+            mac.font(\.detailSize),
+            Font.system(size: mac.detailSize, weight: .regular, design: .default)
         )
         XCTAssertNotEqual(
             EmailPreviewCardMetrics.iOS.font(\.titleSize, .semibold),
             Font.system(size: 17, weight: .semibold, design: .rounded)
+        )
+    }
+
+    /// The date tile's sizes are a level down in the value and are reached through the same
+    /// key path, so the tile's three lines are made by the one function every card uses.
+    func testFont_reachesTheDateTilesSizes() {
+        XCTAssertEqual(
+            EmailPreviewCardMetrics.iOS.font(\.dateTile.daySize, .bold),
+            Font.system(size: 30, weight: .bold, design: .default)
+        )
+        XCTAssertEqual(
+            EmailPreviewCardMetrics.mac.font(\.dateTile.monthSize, .semibold),
+            Font.system(
+                size: EmailPreviewCardMetrics.mac.dateTile.monthSize,
+                weight: .semibold,
+                design: .default
+            )
         )
     }
 }

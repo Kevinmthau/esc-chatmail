@@ -2,15 +2,16 @@ import SwiftUI
 
 /// The text sizes, the date tile and the padding of the chat's cards, as a value: the email
 /// preview cards (calendar invite, reservation, newsletter, transactional, deploy), the
-/// forwarded-message card, the shared-document cards and the "Open original email" fallback.
+/// forwarded-message card, the shared-document cards, the "Open original email" fallback and
+/// the attachment cards (document, PDF, video).
 ///
 /// The sizes were literals in each card, tuned to the iPhone, whose bubble text is 17 points.
 /// The Mac's chat column draws the same cards beside 13-point bubble text, where a 17-point
 /// title and a 30-point day number stood over every message around them. What differs between
 /// the two is in here, so no card checks the platform: the bubble's style names the metrics
 /// (`MessageBubbleStyle.previewCardMetrics`) and `MessageBubble` puts them in the environment
-/// (`EnvironmentValues.emailPreviewCardMetrics`), because a card is several views below the
-/// bubble that knows the style.
+/// of its whole row (`EnvironmentValues.emailPreviewCardMetrics`), because a card is several
+/// views below the bubble that knows the style.
 ///
 /// Every card's text is SF Pro, the system's default design (`font(_:_:)`). The cards were
 /// set in SF Rounded until 2026-11-15; `EmailPreviewCardSourceTests` keeps the rounded
@@ -25,16 +26,24 @@ import SwiftUI
 /// - `mac` is the same scale brought down to the Mac's text sizes, drawn off screen in the
 ///   test host and not yet seen in the app.
 struct EmailPreviewCardMetrics: Equatable {
-    /// A card's title.
+    /// The title of a preview card (calendar invite, reservation, newsletter, transactional,
+    /// deploy).
     let titleSize: CGFloat
-    /// The line under a title, a newsletter's snippet, and a forwarded message's sender.
+    /// The size under a preview card's title, and the title of a card that is one row: a
+    /// transactional card's subtitle, a newsletter's snippet, a forwarded message's sender,
+    /// and the title of an attachment card, of the plain shared-link card and of the "Open
+    /// original email" fallback.
     let subtitleSize: CGFloat
-    /// A row of a card's details (when, where, who) and a forwarded message's subject and
-    /// preview.
+    /// A row of a card's details (when, where, who), a newsletter's subtitle, and a forwarded
+    /// message's subject and preview.
     let detailSize: CGFloat
-    /// A lesser detail row, an action's link ("Open invite"), and the icon beside a detail.
+    /// A lesser detail row, an action's link ("Open invite"), the icon beside a detail, a
+    /// deploy's repository and commit, a transactional card's detail line, the plain
+    /// shared-link card's host, a document attachment's size, and the kind label on a
+    /// shared-file card with no thumbnail.
     let secondaryDetailSize: CGFloat
-    /// The source line in a card's header, a status or action capsule, and a timestamp.
+    /// The source line in a card's header, a status or action capsule, a timestamp, a
+    /// forwarded message's recipients, and the plain shared-link card's address.
     let labelSize: CGFloat
     /// The amount on a transactional card.
     let amountSize: CGFloat
@@ -61,13 +70,11 @@ struct EmailPreviewCardMetrics: Equatable {
         let weekdaySize: CGFloat
     }
 
-    /// A card's font at one of these sizes: SF Pro, never the rounded design.
+    /// A card's font at one of these sizes: SF Pro, never the rounded design. The one way a
+    /// card makes a font from the metrics; the date tile's sizes are reached through the same
+    /// key path (`\.dateTile.daySize`).
     func font(_ size: KeyPath<EmailPreviewCardMetrics, CGFloat>, _ weight: Font.Weight = .regular) -> Font {
-        Self.font(size: self[keyPath: size], weight: weight)
-    }
-
-    static func font(size: CGFloat, weight: Font.Weight) -> Font {
-        .system(size: size, weight: weight, design: .default)
+        .system(size: self[keyPath: size], weight: weight, design: .default)
     }
 }
 

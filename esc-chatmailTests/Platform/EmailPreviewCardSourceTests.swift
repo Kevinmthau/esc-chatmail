@@ -13,25 +13,41 @@ import XCTest
 /// spelling. It does not see what a card draws, and a font built some way these patterns do
 /// not spell (a `UIFontDescriptor` with a rounded design) would pass.
 final class EmailPreviewCardSourceTests: XCTestCase {
+    /// The value is set on the row, not on one view inside it: the attachment cards are in
+    /// the row beside the message's content, and a card mounted outside the view that had the
+    /// value took the iPhone's default.
+    ///
     /// Revert-check: deleting `.environment(\.emailPreviewCardMetrics, style.previewCardMetrics)`
-    /// from `MessageBubble.body` makes this fail.
-    func testBubble_handsItsContentTheStylesCardMetrics() throws {
+    /// from `MessageBubble.body` makes this fail, and so does moving it back inside the row,
+    /// onto `MessageContentView`.
+    func testBubble_handsItsWholeRowTheStylesCardMetrics() throws {
         let bubble = try String(
             contentsOf: repoRoot().appendingPathComponent("esc-chatmail/Views/Chat/MessageBubble.swift"),
             encoding: .utf8
         )
 
+        // The row's `HStack` closes at eight spaces, and the modifier is the first thing on it.
         XCTAssertTrue(bubble.contains(
-            "                )\n"
-                + "                // The cards under this content (preview cards, the forwarded card, shared\n"
-                + "                // files) take their text sizes from the style: without this they draw at the\n"
-                + "                // iPhone's sizes in the Mac's chat column.\n"
-                + "                .environment(\\.emailPreviewCardMetrics, style.previewCardMetrics)\n"
+            "            if !message.isFromMe {\n"
+                + "                Spacer()\n"
+                + "            }\n"
+                + "        }\n"
+                + "        // Every card in this row (preview cards, the forwarded card, shared files, attachment\n"
+                + "        // cards) takes its text sizes from the style: without this they draw at the iPhone's\n"
+                + "        // sizes in the Mac's chat column. On the whole row, not on the one view that holds\n"
+                + "        // cards today, because the value's default is the iPhone's and a card mounted outside\n"
+                + "        // it would take that and say nothing.\n"
+                + "        .environment(\\.emailPreviewCardMetrics, style.previewCardMetrics)\n"
         ))
+        XCTAssertEqual(
+            bubble.components(separatedBy: ".environment(\\.emailPreviewCardMetrics").count - 1,
+            1,
+            "The row sets the cards' metrics once"
+        )
     }
 
     /// The cards were the app's only rounded text, and they are SF Pro now
-    /// (`EmailPreviewCardMetrics.font(size:weight:)`).
+    /// (`EmailPreviewCardMetrics.font(_:_:)`).
     ///
     /// Revert-check: `.font(.system(size: 17, weight: .semibold, design: .rounded))` on any
     /// text in the app target makes this fail.

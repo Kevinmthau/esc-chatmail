@@ -4,6 +4,7 @@ struct PDFAttachmentCard: View {
     let attachment: Attachment
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
+    @Environment(\.emailPreviewCardMetrics) private var metrics
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
 
     var body: some View {
@@ -39,7 +40,7 @@ struct PDFAttachmentCard: View {
                 // Info
                 VStack(alignment: .leading, spacing: 4) {
                     Text(attachment.filename)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(metrics.font(\.subtitleSize, .medium))
                         .lineLimit(1)
 
                     HStack(spacing: 4) {

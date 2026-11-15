@@ -120,7 +120,7 @@ struct GoogleDriveSharedFileCardContent: View {
     private var titleBlock: some View {
         // The blank stand-in draws nothing; it only reserves the two lines.
         Text(resolvedTitle ?? " ")
-            .font(metrics.font(\.linkTitleSize, .semibold))
+            .font(Self.titleFont(metrics))
             .foregroundStyle(.primary)
             .lineLimit(2, reservesSpace: true)
             .multilineTextAlignment(.leading)
@@ -133,16 +133,27 @@ struct GoogleDriveSharedFileCardContent: View {
     }
 
     /// One bar per reserved title line, pinned to the top and bottom of the reserved area.
-    /// A bar is as tall as the title's font size, so two of them fit the two reserved lines at
-    /// every size the title is drawn at: at a fixed 18pt they overlapped under the Mac's
-    /// 13pt title.
     private var titleSkeleton: some View {
         VStack(alignment: .leading, spacing: 0) {
-            skeletonLine(width: 196, height: metrics.linkTitleSize)
+            skeletonLine(width: 196, height: Self.titleSkeletonBarHeight(metrics))
             Spacer(minLength: 0)
-            skeletonLine(width: 142, height: metrics.linkTitleSize)
+            skeletonLine(width: 142, height: Self.titleSkeletonBarHeight(metrics))
         }
         .accessibilityHidden(true)
+    }
+
+    /// The title's font. Static beside `titleSkeletonBarHeight(_:)` so a test can measure two
+    /// reserved lines of the one against two bars of the other
+    /// (`GoogleDriveSharedFileCardContentTests`).
+    static func titleFont(_ metrics: EmailPreviewCardMetrics) -> Font {
+        metrics.font(\.linkTitleSize, .semibold)
+    }
+
+    /// A skeleton bar is as tall as the title's font size, which is less than a line of the
+    /// title, so two bars fit the two reserved lines at every size the title is drawn at. At
+    /// a fixed 18pt they overlapped under the Mac's 13pt title.
+    static func titleSkeletonBarHeight(_ metrics: EmailPreviewCardMetrics) -> CGFloat {
+        metrics.linkTitleSize
     }
 
     private var cardBackground: Color {

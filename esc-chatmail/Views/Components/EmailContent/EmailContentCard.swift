@@ -25,7 +25,13 @@ private struct EmailPreviewCardChromeModifier: ViewModifier {
     }
 }
 
-/// Placeholder shown while loading email content
+/// Placeholder shown while loading email content.
+///
+/// Its height is fixed and is not taken from `EmailPreviewCardMetrics`. What replaces it is not
+/// known when the row mounts: a native card, whose height follows its own content, or an HTML
+/// snapshot between 120 and 320 points (`HTMLPreviewSizing`). No one height is right for
+/// both, and a shorter placeholder on the Mac would make the swap to a card smaller only by
+/// making the swap to a snapshot larger.
 struct EmailContentPlaceholder: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {

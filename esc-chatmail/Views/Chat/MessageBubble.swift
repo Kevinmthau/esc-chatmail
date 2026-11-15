@@ -276,10 +276,6 @@ struct MessageBubble: View {
                     ),
                     textMaxWidth: style.textContentMaxWidth(transcriptWidth: transcriptWidth)
                 )
-                // The cards under this content (preview cards, the forwarded card, shared
-                // files) take their text sizes from the style: without this they draw at the
-                // iPhone's sizes in the Mac's chat column.
-                .environment(\.emailPreviewCardMetrics, style.previewCardMetrics)
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
                 metadataLine(statusLine: statusLine, sendStatus: sendStatus)
@@ -305,6 +301,12 @@ struct MessageBubble: View {
                 Spacer()
             }
         }
+        // Every card in this row (preview cards, the forwarded card, shared files, attachment
+        // cards) takes its text sizes from the style: without this they draw at the iPhone's
+        // sizes in the Mac's chat column. On the whole row, not on the one view that holds
+        // cards today, because the value's default is the iPhone's and a card mounted outside
+        // it would take that and say nothing.
+        .environment(\.emailPreviewCardMetrics, style.previewCardMetrics)
         // Crossfades every status change (Sending… → Sent, → Not sent, → Delivery unknown, the
         // receipt moving to a newer row) and the badge's arrival. None of them changes the row's
         // height: the caption shares the timestamp's line (below accessibility text sizes; see
