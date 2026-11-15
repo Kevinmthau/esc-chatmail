@@ -184,6 +184,161 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertEqual(unlinked.recipientEmails, [work])
     }
 
+    /// A chat merged while a contact card linked two addresses keeps both
+    /// people's mail once the card stops linking them, and has a row for one
+    /// of them only. A reply to the other person's message goes to that
+    /// person, read here from the managed objects a sync leaves.
+    ///
+    /// Revert-check: the `recipientsOverrulingRows` branch in
+    /// `ReplyMetadataBuilder.buildReplyMetadata`. Without it the reply, and
+    /// the message it quotes, go to the row's person, who was never on it.
+    func testBuildReplyMetadata_messageOfSomeoneTheRowsDoNotName_repliesToThePeopleOnTheMessage() async throws {
+        let conversation = makeReplyConversation(in: viewContext, friendEmail: "alex@example.com")
+        let fromSam = MessageBuilder()
+            .withId("from-sam")
+            .withThreadId("sam-thread")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .withSender(email: "sam@example.com", name: "Sam")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        addMessageParticipant(email: "sam@example.com", kind: .from, to: fromSam)
+        addMessageParticipant(email: "me@example.com", kind: .to, to: fromSam)
+        let toSam = MessageBuilder()
+            .withId("to-sam")
+            .withThreadId("sam-thread")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        addMessageParticipant(email: "me@example.com", kind: .from, to: toSam)
+        addMessageParticipant(email: "sam@example.com", kind: .to, to: toSam)
+        try viewContext.obtainPermanentIDs(for: [conversation, fromSam, toSam])
+
+        // The latest message, a chosen one, and one the user sent themself.
+        for target in [nil, fromSam.objectID, toSam.objectID] {
+            let metadata = try await makeBuilder().buildReplyMetadata(.init(
+                conversationObjectID: conversation.objectID,
+                replyingToMessageObjectID: target,
+                optimisticConversation: nil
+            ))
+            XCTAssertEqual(metadata.recipientEmails, ["sam@example.com"])
+            XCTAssertEqual(metadata.threadId, "sam-thread")
+        }
+    }
+
+    /// The rule above, shape by shape, on snapshots. Rows that keep both
+    /// promises to the message answer for it, as they always have.
+    func testBuildReplyMetadata_rowsOverruledOnlyWhereTheyBreakAPromiseToTheMessage() throws {
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        func recipients(rows: [String], message: [String], from sender: String) throws -> [String] {
+            try builder.buildReplyMetadata(
+                conversation: ReplyConversationSnapshot(participantEmails: rows, latestThreadId: "thread"),
+                replyingTo: makeReplyTarget(
+                    participants: message,
+                    sender: sender,
+                    evidence: ReplyParticipantEvidence(
+                        emails: message, hasAddressableRecipientRow: true, isComplete: true
+                    )
+                ),
+                sendAsAliases: sendAsAliases,
+                contactLinks: .none
+            ).recipientEmails
+        }
+        let alex = "alex@example.com", sam = "sam@example.com", carol = "carol@example.com"
+        let me = "me@example.com"
+
+        // A row's person is not on the message.
+        XCTAssertEqual(try recipients(rows: [alex], message: [sam, me], from: sam), [sam])
+        XCTAssertEqual(try recipients(rows: [alex, carol], message: [carol, me, sam], from: carol), [carol, sam])
+        // Every row is on the message, but its author is nobody's row.
+        XCTAssertEqual(try recipients(rows: [alex], message: [sam, me, alex], from: sam), [sam, alex])
+
+        // Promises kept: the rows answer, and add nobody.
+        XCTAssertEqual(try recipients(rows: [alex], message: [alex, me], from: alex), [alex])
+        XCTAssertEqual(try recipients(rows: [alex], message: [alex, me, sam], from: alex), [alex])
+        XCTAssertEqual(try recipients(rows: [alex], message: [me, alex, sam], from: me), [alex])
+    }
+
+    /// A message whose own rows are not known to name everyone on it is no
+    /// ground for overruling the conversation.
+    ///
+    /// Revert-check: the `evidence.namesEveryParticipant` guard in
+    /// `ReplyMetadataBuilder.recipientsOverrulingRows`, and each of its two
+    /// terms. A row set that holds only a sender (older persistence) would
+    /// drop every other participant of a group from the reply.
+    func testBuildReplyMetadata_messageNotFullyKnown_keepsTheRows() throws {
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let rows = ["alex@example.com", "carol@example.com"]
+        let evidenceCases: [ReplyParticipantEvidence?] = [
+            nil,
+            ReplyParticipantEvidence(
+                emails: ["sam@example.com"], hasAddressableRecipientRow: false, isComplete: true
+            ),
+            ReplyParticipantEvidence(
+                emails: ["sam@example.com", "me@example.com"], hasAddressableRecipientRow: true, isComplete: false
+            )
+        ]
+
+        for evidence in evidenceCases {
+            let metadata = try builder.buildReplyMetadata(
+                conversation: ReplyConversationSnapshot(participantEmails: rows, latestThreadId: "thread"),
+                replyingTo: makeReplyTarget(
+                    participants: ["sam@example.com", "me@example.com"],
+                    sender: "sam@example.com",
+                    evidence: evidence
+                ),
+                sendAsAliases: sendAsAliases,
+                contactLinks: .none
+            )
+            XCTAssertEqual(metadata.recipientEmails, rows)
+        }
+    }
+
+    /// A conversation with no usable row still fails closed: the rule never
+    /// supplies recipients where the rows had none.
+    ///
+    /// Revert-check: the `!conversationRecipients.isEmpty` guard in
+    /// `ReplyMetadataBuilder.recipientsOverrulingRows`.
+    func testBuildReplyMetadata_conversationWithNoUsableRow_isGivenNoRecipientsByTheMessage() throws {
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+
+        let metadata = try builder.buildReplyMetadata(
+            conversation: ReplyConversationSnapshot(participantEmails: ["me@example.com"], latestThreadId: "thread"),
+            replyingTo: makeReplyTarget(
+                participants: ["sam@example.com", "me@example.com"],
+                sender: "sam@example.com",
+                evidence: ReplyParticipantEvidence(
+                    emails: ["sam@example.com", "me@example.com"],
+                    hasAddressableRecipientRow: true,
+                    isComplete: true
+                )
+            ),
+            sendAsAliases: sendAsAliases,
+            contactLinks: .none
+        )
+
+        XCTAssertEqual(metadata.recipientEmails, [])
+    }
+
+    private func makeReplyTarget(
+        participants: [String],
+        sender: String,
+        evidence: ReplyParticipantEvidence?
+    ) -> ReplyTargetSnapshot {
+        ReplyTargetSnapshot(
+            participantEmails: participants,
+            subject: "Dinner",
+            threadId: "thread",
+            messageId: nil,
+            references: [],
+            deliveredToAddress: nil,
+            replyFromAddress: nil,
+            originalMessage: QuotedMessage(senderName: nil, senderEmail: sender, date: .distantPast, body: nil),
+            participantEvidence: evidence
+        )
+    }
+
     func testBuildReplyMetadata_targetNeverBorrowsSelfEvidenceFromConversationAnchor() throws {
         let builder = ReplyMetadataBuilder(
             authSession: makeTestAuthSession(userEmail: "me@example.com")

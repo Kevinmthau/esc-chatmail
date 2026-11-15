@@ -8,7 +8,60 @@ import Foundation
 /// addresses since, and a reply addressed from the rows would go to the one
 /// they have stopped using. So a linked participant is answered at the
 /// addresses the message being replied to carries.
+///
+/// The rows answer for a message only while its people are theirs, which is
+/// true of every message a conversation was given by its participant hash.
+/// It stops being true when a card stops linking two addresses: the chat that
+/// was merged keeps the other address's messages, and its rows name only one
+/// of the two people. `rowsCanAnswer` is the test for that, and
+/// `ReplyMetadataBuilder` then answers the people on the message.
 enum ReplyLinkedAddressPolicy {
+    /// Whether a reply addressed from the conversation's rows keeps two
+    /// promises to the message being replied to: it reaches nobody who was
+    /// not on that message, and it reaches the person who wrote it.
+    ///
+    /// Both hold for a message the conversation was given by its hash. They
+    /// fail in a chat that was merged while a card linked two addresses and
+    /// has since been unlinked: the row is one person's, the message
+    /// another's, and a reply from the rows sends the first person an answer
+    /// to the second's mail, quoted text and all.
+    ///
+    /// It is not a test of equality. Rows that leave out someone the message
+    /// names still keep both promises (unless that someone wrote it), and the
+    /// reply then goes to the rows, as it always has: a reply adds nobody the
+    /// conversation does not hold.
+    ///
+    /// - Parameters:
+    ///   - conversationRecipients: The conversation's participant rows, the
+    ///     user's own addresses already removed.
+    ///   - messageParticipants: Every address on the message being replied
+    ///     to, the user's own already removed. The caller asks only where the
+    ///     message's own rows are known to name everyone on it.
+    ///   - messageAuthor: The address the message was sent from. One of the
+    ///     user's own, or none, asks nothing of the rows.
+    ///   - userAddresses: The user's normalized addresses.
+    static func rowsCanAnswer(
+        conversationRecipients: [String],
+        messageParticipants: [String],
+        messageAuthor: String?,
+        contactLinks: ContactLinkedAddresses,
+        userAddresses: Set<String>
+    ) -> Bool {
+        func person(_ normalizedAddress: String) -> String {
+            contactLinks.canonicalAddress(for: normalizedAddress, excluding: userAddresses)
+        }
+        func people(_ addresses: [String]) -> Set<String> {
+            Set(addresses.map(EmailNormalizer.normalize).filter { !$0.isEmpty }.map(person))
+        }
+
+        let rows = people(conversationRecipients)
+        guard rows.isSubset(of: people(messageParticipants)) else { return false }
+
+        let author = EmailNormalizer.normalize(messageAuthor ?? "")
+        guard !author.isEmpty, !userAddresses.contains(author) else { return true }
+        return rows.contains(person(author))
+    }
+
     /// - Parameters:
     ///   - conversationRecipients: The conversation's participant rows, the
     ///     user's own addresses already removed.
