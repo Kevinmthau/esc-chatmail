@@ -18,6 +18,7 @@ final class ConversationManager: Sendable {
         NSManagedObjectContext
     ) async throws -> NSManagedObjectID
     private let currentUserEmail: @MainActor @Sendable () -> String
+    private let contactLinks: @Sendable () -> ContactLinkedAddresses
 
     init(
         rollupUpdater: ConversationRollupUpdater = ConversationRollupUpdater(),
@@ -41,12 +42,16 @@ final class ConversationManager: Sendable {
         },
         currentUserEmail: @escaping @MainActor @Sendable () -> String = {
             AuthSession.shared.userEmail ?? ""
+        },
+        contactLinks: @escaping @Sendable () -> ContactLinkedAddresses = {
+            ContactLinkedAddressStore.shared.snapshot()
         }
     ) {
         self.rollupUpdater = rollupUpdater
         self.merger = merger
         self.findOrCreateConversationHandler = findOrCreateConversationHandler
         self.currentUserEmail = currentUserEmail
+        self.contactLinks = contactLinks
     }
 
     // MARK: - Conversation Creation
@@ -108,6 +113,14 @@ final class ConversationManager: Sendable {
         myEmail: String
     ) {
         rollupUpdater.updateRollups(for: conversations, in: context, myEmail: myEmail)
+    }
+
+    /// Stores one conversation's display name again from its participant rows,
+    /// touching no rollup field. Must be called from within the conversation's
+    /// context queue; for a pass that has just changed the rows and holds its
+    /// own save.
+    func updateConversationDisplayName(for conversation: Conversation, myEmail: String) {
+        rollupUpdater.updateDisplayNameOnly(for: conversation, myEmail: myEmail)
     }
 
     /// Refreshes stored conversation display names without touching sync-owned rollup fields.
@@ -232,13 +245,18 @@ final class ConversationManager: Sendable {
     // MARK: - Conversation Identity
 
     /// Creates a participant-set conversation identity from message headers
-    /// (From+To+Cc minus the user's aliases).
+    /// (From+To+Cc minus the user's aliases, the addresses one contact card
+    /// links counted as one person).
     func createConversationIdentity(
         from headers: ProcessedHeaders,
         myAliases: Set<String>
     ) -> ConversationIdentity {
         let messageHeaders = createMessageHeaders(from: headers)
-        return makeConversationIdentity(from: messageHeaders, myAliases: myAliases)
+        return makeConversationIdentity(
+            from: messageHeaders,
+            myAliases: myAliases,
+            contactLinks: contactLinks()
+        )
     }
 
     // MARK: - Private Helpers

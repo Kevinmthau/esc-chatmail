@@ -416,6 +416,190 @@ final class ConversationIdentityTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Addresses one contact card links
+
+    private static let linkedWork = "morgan@corp.example"
+    private static let linkedHome = "m.vale@mail.example"
+    private static let oneCard = ContactLinkedAddresses(
+        contactAddressLists: [[linkedWork, linkedHome]]
+    )
+
+    // Revert-check: `contactLinks.unifiedParticipants` in
+    // `makeParticipantSetIdentity`. Hashing the addresses themselves gives the
+    // two messages two hashes, which is one person in two chats.
+    func testMakeConversationIdentity_twoAddressesOnOneContactCard_shareOneHash() {
+        func identity(from sender: String) -> ConversationIdentity {
+            makeConversationIdentity(
+                from: [
+                    MessageHeader(name: "From", value: "Morgan Vale <\(sender)>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                myAliases: ["me@example.com"],
+                contactLinks: Self.oneCard
+            )
+        }
+
+        let fromWork = identity(from: Self.linkedWork)
+        let fromHome = identity(from: Self.linkedHome)
+
+        XCTAssertEqual(fromWork.participantHash, fromHome.participantHash)
+        XCTAssertEqual(fromWork.type, .oneToOne)
+        // The row is the address the message carried: a reply reads the rows,
+        // and must not be sent to an address the card merely lists.
+        XCTAssertEqual(fromWork.participants, [Self.linkedWork])
+        XCTAssertEqual(fromHome.participants, [Self.linkedHome])
+        XCTAssertEqual(fromHome.participantDisplayNames[Self.linkedHome], "Morgan Vale")
+    }
+
+    func testMakeConversationIdentity_bothAddressesOfOnePersonOnOneMessage_isOneToOne() {
+        let identity = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: Self.linkedWork),
+                MessageHeader(name: "To", value: "me@example.com"),
+                MessageHeader(name: "Cc", value: Self.linkedHome)
+            ],
+            myAliases: ["me@example.com"],
+            contactLinks: Self.oneCard
+        )
+        let fromWorkAlone = makeParticipantSetIdentity(
+            normalizedEmails: [Self.linkedWork],
+            myAliases: ["me@example.com"],
+            contactLinks: Self.oneCard
+        )
+
+        XCTAssertEqual(identity.participantHash, fromWorkAlone.participantHash)
+        XCTAssertEqual(identity.type, .oneToOne, "Two addresses of one person are one participant")
+        XCTAssertEqual(identity.participants, [Self.linkedHome], "One row for the person")
+    }
+
+    func testMakeParticipantSetIdentity_linkedPersonInAGroup_keysTheGroupByThePerson() {
+        func group(with address: String) -> ParticipantSetIdentity {
+            makeParticipantSetIdentity(
+                normalizedEmails: [address, "carol@example.com"],
+                myAliases: ["me@example.com"],
+                contactLinks: Self.oneCard
+            )
+        }
+        let alone = makeParticipantSetIdentity(
+            normalizedEmails: [Self.linkedWork],
+            myAliases: ["me@example.com"],
+            contactLinks: Self.oneCard
+        )
+
+        XCTAssertEqual(group(with: Self.linkedWork).participantHash, group(with: Self.linkedHome).participantHash)
+        XCTAssertEqual(group(with: Self.linkedWork).type, .group)
+        XCTAssertNotEqual(group(with: Self.linkedWork).participantHash, alone.participantHash)
+    }
+
+    /// A link changes the hash of the linked person's conversations and of
+    /// nobody else's: with nothing linked, and for anyone no card links, the
+    /// hash is the plain address-set hash the web app computes.
+    func testMakeParticipantSetIdentity_personNoCardLinks_keepsThePlainAddressHash() {
+        for links in [ContactLinkedAddresses.none, Self.oneCard] {
+            let identity = makeParticipantSetIdentity(
+                normalizedEmails: ["carol@example.com", "me@example.com"],
+                myAliases: ["me@example.com"],
+                contactLinks: links
+            )
+            XCTAssertEqual(identity.participantHash, calculateParticipantHash(from: ["carol@example.com"]))
+            XCTAssertEqual(identity.participants, ["carol@example.com"])
+        }
+
+        let unlinked = makeParticipantSetIdentity(
+            normalizedEmails: [Self.linkedWork],
+            myAliases: ["me@example.com"],
+            contactLinks: .none
+        )
+        XCTAssertEqual(unlinked.participantHash, calculateParticipantHash(from: [Self.linkedWork]))
+    }
+
+    /// The compose path hashes a recipient list and the sync path the echo's
+    /// headers. They must agree for a linked address too, or a message sent
+    /// to someone's second address opens a chat its echo then leaves.
+    func testMakeRecipientParticipantSetIdentity_linkedAddress_matchesTheHeaderDerivedHash() throws {
+        let composed = try XCTUnwrap(
+            makeRecipientParticipantSetIdentity(
+                recipients: [Self.linkedHome],
+                myAliases: ["me@example.com"],
+                contactLinks: Self.oneCard
+            )
+        )
+        let echoed = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: "me@example.com"),
+                MessageHeader(name: "To", value: Self.linkedHome)
+            ],
+            myAliases: ["me@example.com"],
+            contactLinks: Self.oneCard
+        )
+        let received = makeConversationIdentity(
+            from: [
+                MessageHeader(name: "From", value: Self.linkedWork),
+                MessageHeader(name: "To", value: "me@example.com")
+            ],
+            myAliases: ["me@example.com"],
+            contactLinks: Self.oneCard
+        )
+
+        XCTAssertEqual(composed.participantHash, echoed.participantHash)
+        XCTAssertEqual(composed.participantHash, received.participantHash)
+    }
+
+    /// The drift guard above, with linked addresses: the persisted-row path
+    /// must fold them exactly as the header path does.
+    ///
+    /// Revert-check: the `contactLinks:` argument `strictParticipantSetIdentity`
+    /// passes to `makeParticipantSetIdentity`. Left at its default, the row
+    /// path hashes with the shared store's map, which holds nothing under
+    /// unit tests.
+    func testStrictParticipantSetIdentity_linkedAddresses_hashMatchesHeaderDerivedIdentity() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
+        let aliases: Set<String> = ["me@example.com"]
+
+        for (index, sender) in [Self.linkedWork, Self.linkedHome].enumerated() {
+            let headerIdentity = makeConversationIdentity(
+                from: [
+                    MessageHeader(name: "From", value: sender),
+                    MessageHeader(name: "To", value: "me@example.com, carol@example.com")
+                ],
+                myAliases: aliases,
+                contactLinks: Self.oneCard
+            )
+
+            let message = MessageBuilder()
+                .withId("linked-hash-parity-\(index)")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(2_000 + index)))
+                .withSender(email: sender)
+                .build(in: context)
+            _ = try MessageParticipantFactory.create(from: sender, kind: .from, for: message, in: context)
+            for recipient in ["me@example.com", "carol@example.com"] {
+                _ = try MessageParticipantFactory.create(from: recipient, kind: .to, for: message, in: context)
+            }
+            try context.save()
+
+            let messageIdentity = message.strictParticipantSetIdentity(
+                myAliases: aliases,
+                contactLinks: Self.oneCard
+            )
+            XCTAssertEqual(messageIdentity?.participantHash, headerIdentity.participantHash, sender)
+            XCTAssertEqual(messageIdentity?.participants, headerIdentity.participants, sender)
+            XCTAssertEqual(messageIdentity?.type, .group, sender)
+        }
+
+        let fromWork = makeParticipantSetIdentity(
+            normalizedEmails: [Self.linkedWork, "carol@example.com"],
+            myAliases: aliases,
+            contactLinks: Self.oneCard
+        )
+        let fromHome = makeParticipantSetIdentity(
+            normalizedEmails: [Self.linkedHome, "carol@example.com"],
+            myAliases: aliases,
+            contactLinks: Self.oneCard
+        )
+        XCTAssertEqual(fromWork.participantHash, fromHome.participantHash)
+    }
 }
 
 private struct ConversationIdentityCorpus: Decodable {
