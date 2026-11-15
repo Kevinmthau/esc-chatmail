@@ -166,6 +166,93 @@ final class ChatReplyBarTests: XCTestCase {
         )
     }
 
+    // MARK: - Recipients the chat's title does not name
+
+    /// A reply that goes to other people than the chat's own says so in the
+    /// quote row, before the subject, which is what a narrow row cuts off.
+    ///
+    /// Revert-check: the `announcedRecipients` argument of
+    /// `ReplyIndicatorPolicy.replyingToLabel` (or its use in the label's
+    /// prefix). Without it the row reads "Replying to: Dinner" in a chat
+    /// titled with someone else's name, and nothing says who gets the reply.
+    func testReplyIndicator_announcedRecipientsWithQuote_areNamedInTheQuoteRow() {
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: .init(subject: "Dinner", cleanedSnippet: nil, snippet: nil),
+                announcedRecipients: ["sam@example.com", "carol@example.com"]
+            ),
+            .replyingTo(label: "Replying to sam@example.com, carol@example.com: Dinner")
+        )
+    }
+
+    /// Dropping the quote keeps the reply's destination, so the recipients
+    /// keep a row of their own.
+    ///
+    /// Revert-check: the `.addressedTo` return for a nil `replyTarget` in
+    /// `ReplyIndicatorPolicy.header`. Returning `.none` there leaves a reply
+    /// that goes to someone the title does not name with no row at all.
+    func testReplyIndicator_announcedRecipientsWithoutQuote_getARowOfTheirOwn() {
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: nil,
+                announcedRecipients: ["sam@example.com"]
+            ),
+            .addressedTo(label: "To: sam@example.com")
+        )
+    }
+
+    /// Nothing to announce is the ordinary chat: the rows are as they were.
+    func testReplyIndicator_nothingToAnnounce_leavesTheRowsAsTheyWere() {
+        for announced in [nil, [String]()] {
+            XCTAssertEqual(
+                ReplyIndicatorPolicy.header(
+                    isReplyTargetUnavailable: false,
+                    recoveredRecipients: nil,
+                    replyTarget: .init(subject: "Dinner", cleanedSnippet: nil, snippet: nil),
+                    announcedRecipients: announced
+                ),
+                .replyingTo(label: "Replying to: Dinner")
+            )
+            XCTAssertEqual(
+                ReplyIndicatorPolicy.header(
+                    isReplyTargetUnavailable: false,
+                    recoveredRecipients: nil,
+                    replyTarget: nil,
+                    announcedRecipients: announced
+                ),
+                .none
+            )
+        }
+    }
+
+    /// A recovered reply is sent to its stored recipients, and an unavailable
+    /// target is not sent at all: what a fresh reply would do is not theirs
+    /// to show.
+    func testReplyIndicator_announcedRecipients_yieldToRecoveredEnvelopeAndUnavailableTarget() {
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: ["a@example.com"],
+                replyTarget: nil,
+                announcedRecipients: ["sam@example.com"]
+            ),
+            .recoveredEnvelope(label: "Replying to: a@example.com")
+        )
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: true,
+                recoveredRecipients: nil,
+                replyTarget: nil,
+                announcedRecipients: ["sam@example.com"]
+            ),
+            .unavailableTarget
+        )
+    }
+
     func testReplyIndicator_noTarget_showsNoRow() {
         XCTAssertEqual(
             ReplyIndicatorPolicy.header(

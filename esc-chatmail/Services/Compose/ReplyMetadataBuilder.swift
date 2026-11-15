@@ -18,7 +18,6 @@ struct ReplyMetadataBuilder {
         contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
     ) throws -> OutboundMessageRequest.ReplyMetadata {
         let target = replyingTo ?? conversation.latestReplyTarget
-        let currentUserEmail = authSession.userEmail ?? ""
         let selectedFrom = try ReplyFromAddressSelector(
             sendAsAliases: sendAsAliases,
             fallbackEmail: authSession.userEmail,
@@ -28,79 +27,23 @@ struct ReplyMetadataBuilder {
             deliveredToAddress: target?.deliveredToAddress ?? conversation.deliveredToAddress
         )
 
-        let userAddresses = Set(
-            ([currentUserEmail] + sendAsAliases.map(\.emailAddress) + Array(userAliases))
-                .map(EmailNormalizer.normalize)
-                .filter { !$0.isEmpty }
-        )
-
-        let usableRecipients: ([String]) -> [String] = { emails in
-            emails.filter {
-                let normalized = EmailNormalizer.normalize($0)
-                return !normalized.isEmpty && !userAddresses.contains(normalized)
-            }
-        }
-        let conversationRecipients = usableRecipients(conversation.participantEmails)
-        let replyTargetRecipients = target.map {
-            usableRecipients($0.participantEmails)
-        } ?? []
-        let normalizedParticipants = Set(
-            conversation.participantEmails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
-        )
-        let selfFallbackEvidence: ReplyParticipantEvidence?
-        if let target {
-            // A targeted reply must be authorized by that exact message. Never
-            // borrow evidence from another conversation row when its snapshot
-            // is incomplete or synthetic.
-            selfFallbackEvidence = target.participantEvidence
-        } else {
-            selfFallbackEvidence = conversation.latestThreadParticipantEvidence
-        }
-        let recipients: [String]
-        if conversation.isListConversation, target != nil {
-            // A List-Id can contain unrelated threads and recipient sets. Missing
-            // target recipients must never borrow another post's addresses.
-            recipients = replyTargetRecipients
-        } else if target?.usesReplyTo == true, !conversationRecipients.isEmpty {
-            // Honor an explicit inbound Reply-To while retaining the non-list
-            // conversation identity safety checks for incomplete/stale rows.
-            recipients = replyTargetRecipients
-        } else if !conversation.isListConversation,
-                  conversationRecipients.isEmpty,
-                  !normalizedParticipants.isEmpty,
-                  normalizedParticipants.isSubset(of: userAddresses),
-                  selfFallbackEvidence?.confirmsSelfOnly(in: userAddresses) == true,
-                  !EmailNormalizer.normalize(currentUserEmail).isEmpty {
-            // Note-to-self conversations keep a self participant for identity.
-            // Missing or inconsistent message evidence must fail closed instead.
-            recipients = [currentUserEmail]
-        } else if let messageRecipients = recipientsOverrulingRows(
+        let addressing = replyAddressing(
             conversation: conversation,
-            target: target,
-            conversationRecipients: conversationRecipients,
-            replyTargetRecipients: replyTargetRecipients,
-            usableRecipients: usableRecipients,
-            contactLinks: contactLinks,
-            userAddresses: userAddresses
-        ) {
-            // The rows do not describe the message being replied to: a chat
-            // merged while a contact card linked two addresses keeps both
-            // people's mail after the card stops linking them. Addressed from
-            // the rows, the reply (and the message it quotes) would go to
-            // someone who was never on that message, or miss the person who
-            // wrote it. The message itself says who it was between.
-            recipients = messageRecipients
-        } else {
-            // The rows hold one address for each person. Someone whose
-            // contact card links several is answered at the ones the message
-            // being replied to used (`ReplyLinkedAddressPolicy`).
-            recipients = ReplyLinkedAddressPolicy.recipients(
-                conversationRecipients: conversationRecipients,
-                targetRecipients: replyTargetRecipients,
-                contactLinks: contactLinks,
-                userAddresses: userAddresses
+            replyingTo: replyingTo,
+            sendAsAliases: sendAsAliases,
+            userAliases: userAliases,
+            contactLinks: contactLinks
+        )
+        if addressing.overrulesConversationRows {
+            // The one trace of a reply that went to other people than the
+            // chat it was typed in names. Counts only: addresses stay out of
+            // the log.
+            Log.info(
+                "Reply addressed to the \(addressing.recipients.count) participant(s) of the message being replied to, not the conversation's rows",
+                category: .message
             )
         }
+        let recipients = addressing.recipients
 
         var subject: String?
         var threadId: String?
@@ -136,6 +79,145 @@ struct ReplyMetadataBuilder {
             references: references,
             originalMessage: originalMessage
         )
+    }
+
+    /// Who a reply goes to: `buildReplyMetadata`'s whole decision about
+    /// recipients, and nothing else of the reply.
+    ///
+    /// It is its own function so the composer can ask before a send what the
+    /// send will do (`OutboundReplyContextBuilder.replyAddressing`): the reply
+    /// row then names the recipients a chat's title does not. A second copy of
+    /// the rule there would say one thing while the send did another.
+    func replyAddressing(
+        conversation: ReplyConversationSnapshot,
+        replyingTo: ReplyTargetSnapshot?,
+        sendAsAliases: [SendAsAlias],
+        userAliases: Set<String> = [],
+        contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+    ) -> ReplyAddressing {
+        let target = replyingTo ?? conversation.latestReplyTarget
+        let currentUserEmail = authSession.userEmail ?? ""
+        let userAddresses = Set(
+            ([currentUserEmail] + sendAsAliases.map(\.emailAddress) + Array(userAliases))
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
+
+        let usableRecipients: ([String]) -> [String] = { emails in
+            emails.filter {
+                let normalized = EmailNormalizer.normalize($0)
+                return !normalized.isEmpty && !userAddresses.contains(normalized)
+            }
+        }
+        let conversationRecipients = usableRecipients(conversation.participantEmails)
+        let replyTargetRecipients = target.map {
+            usableRecipients($0.participantEmails)
+        } ?? []
+        let normalizedParticipants = Set(
+            conversation.participantEmails.map(EmailNormalizer.normalize).filter { !$0.isEmpty }
+        )
+        let selfFallbackEvidence: ReplyParticipantEvidence?
+        if let target {
+            // A targeted reply must be authorized by that exact message. Never
+            // borrow evidence from another conversation row when its snapshot
+            // is incomplete or synthetic.
+            selfFallbackEvidence = target.participantEvidence
+        } else {
+            selfFallbackEvidence = conversation.latestThreadParticipantEvidence
+        }
+        let recipients: [String]
+        var overrulesConversationRows = false
+        if conversation.isListConversation, target != nil {
+            // A List-Id can contain unrelated threads and recipient sets. Missing
+            // target recipients must never borrow another post's addresses.
+            recipients = replyTargetRecipients
+        } else if target?.usesReplyTo == true, !conversationRecipients.isEmpty {
+            // Honor an explicit inbound Reply-To while retaining the non-list
+            // conversation identity safety checks for incomplete/stale rows.
+            recipients = replyTargetRecipients
+        } else if !conversation.isListConversation,
+                  conversationRecipients.isEmpty,
+                  !normalizedParticipants.isEmpty,
+                  normalizedParticipants.isSubset(of: userAddresses),
+                  selfFallbackEvidence?.confirmsSelfOnly(in: userAddresses) == true,
+                  !EmailNormalizer.normalize(currentUserEmail).isEmpty {
+            // Note-to-self conversations keep a self participant for identity.
+            // Missing or inconsistent message evidence must fail closed instead.
+            recipients = [currentUserEmail]
+        } else if let messageRecipients = recipientsOverrulingRows(
+            conversation: conversation,
+            target: target,
+            conversationRecipients: conversationRecipients,
+            replyTargetRecipients: replyTargetRecipients,
+            usableRecipients: usableRecipients,
+            contactLinks: contactLinks,
+            userAddresses: userAddresses
+        ) {
+            // The rows do not describe the message being replied to: a chat
+            // merged while a contact card linked two addresses keeps both
+            // people's mail after the card stops linking them. Addressed from
+            // the rows, the reply (and the message it quotes) would go to
+            // someone who was never on that message, or miss the person who
+            // wrote it. The message itself says who it was between.
+            recipients = messageRecipients
+            overrulesConversationRows = true
+        } else {
+            // The rows hold one address for each person. Someone whose
+            // contact card links several is answered at the ones the message
+            // being replied to used (`ReplyLinkedAddressPolicy`).
+            recipients = ReplyLinkedAddressPolicy.recipients(
+                conversationRecipients: conversationRecipients,
+                targetRecipients: replyTargetRecipients,
+                contactLinks: contactLinks,
+                userAddresses: userAddresses
+            )
+        }
+
+        return ReplyAddressing(
+            recipients: recipients,
+            overrulesConversationRows: overrulesConversationRows
+        )
+    }
+
+    /// Whether `replyAddressing` is certain to leave the conversation's rows
+    /// in charge of a reply to `target`, told from the addresses alone: with
+    /// no knowledge of the user's aliases and none of linked contacts.
+    ///
+    /// The composer asks this first, in the turn its reply target changes
+    /// (`OutboundReplyContextBuilder.replyMayOverruleConversationRows`), so
+    /// that the ordinary chat never loads aliases to learn that nothing needs
+    /// announcing. It may say false where the rows do answer (a linked
+    /// participant, a message sent from an alias); the caller then asks
+    /// `replyAddressing`. It must never say true where they are overruled,
+    /// and it cannot: the rows are overruled only for a fully known message
+    /// of a participant chat, when a row's person is not on it or its author
+    /// is nobody's row. Knowing the user's addresses only removes addresses
+    /// from both sides, and linking only makes more addresses one person, so
+    /// a row that is itself an address on the message stays on it, and an
+    /// author who is a row, or the account's own address, stays answered.
+    func rowsCertainlyAnswer(
+        conversationRowEmails: [String],
+        isListConversation: Bool,
+        target: ReplyTargetSnapshot?
+    ) -> Bool {
+        guard !isListConversation,
+              let target,
+              !target.usesReplyTo,
+              let evidence = target.participantEvidence,
+              evidence.namesEveryParticipant else {
+            return true
+        }
+        func normalized(_ emails: [String]) -> Set<String> {
+            Set(emails.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
+        }
+        let rows = normalized(conversationRowEmails)
+        guard !rows.isEmpty else { return true }
+        guard rows.isSubset(of: normalized(target.participantEmails + evidence.emails)) else {
+            return false
+        }
+        let author = EmailNormalizer.normalize(target.originalMessage.senderEmail)
+        let accountEmail = EmailNormalizer.normalize(authSession.userEmail ?? "")
+        return author.isEmpty || rows.contains(author) || (!accountEmail.isEmpty && author == accountEmail)
     }
 
     /// The people on the message being replied to, when a reply addressed

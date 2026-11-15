@@ -42,6 +42,87 @@ struct OutboundReplyContextBuilder {
     func buildReplyMetadata(
         _ context: OutboundMessageRequest.ReplyContext
     ) async throws -> OutboundMessageRequest.ReplyMetadata {
+        let reply = try await resolveReply(context)
+        return try replyMetadataBuilder.buildReplyMetadata(
+            conversation: reply.conversation,
+            replyingTo: reply.replyingTo,
+            sendAsAliases: reply.sendAsAliases,
+            userAliases: reply.userAliases,
+            includesQuotedMessage: context.includesQuotedMessage
+        )
+    }
+
+    /// Who the reply `context` describes would go to if it were sent now: the
+    /// send's own decision (`ReplyMetadataBuilder.replyAddressing`), read from
+    /// the same stored conversation and message the send reads.
+    ///
+    /// For the composer, which names the recipients above its field when they
+    /// are not the chat's own people. Nil where the send would refuse the
+    /// reply (a conversation or a target that is gone): there is then nothing
+    /// to announce, and the send says why.
+    func replyAddressing(
+        _ context: OutboundMessageRequest.ReplyContext
+    ) async -> ReplyAddressing? {
+        guard let reply = try? await resolveReply(context) else { return nil }
+        return replyMetadataBuilder.replyAddressing(
+            conversation: reply.conversation,
+            replyingTo: reply.replyingTo,
+            sendAsAliases: reply.sendAsAliases,
+            userAliases: reply.userAliases
+        )
+    }
+
+    /// Whether a reply in `conversation` to `message` (nil: to its newest
+    /// message) may go to other people than the conversation's own, told in
+    /// this turn and without loading aliases
+    /// (`ReplyMetadataBuilder.rowsCertainlyAnswer`). False is certain: the
+    /// rows answer, or the conversation or the message is gone and the send
+    /// would refuse the reply. True means only that `replyAddressing` has to
+    /// be asked.
+    ///
+    /// It takes the objects the chat already holds and reads the
+    /// conversation's rows and the one message, not the whole
+    /// `ReplyConversationSnapshot`, which looks through the conversation for
+    /// a reply-address hint: this runs whenever a chat's reply target changes,
+    /// the first time as the chat opens.
+    func replyMayOverruleConversationRows(
+        in conversation: Conversation,
+        replyingTo message: Message?
+    ) -> Bool {
+        guard conversation.managedObjectContext != nil,
+              !conversation.isDeleted,
+              !conversation.isRetainedDrainedShell,
+              conversation.conversationType != .list else {
+            return false
+        }
+
+        let target: ReplyTargetSnapshot?
+        if let message {
+            guard message.managedObjectContext != nil, !message.isDeleted else { return false }
+            target = ReplyTargetSnapshot(message: message)
+        } else {
+            target = ReplyConversationSnapshot.latestNonListReplyTarget(in: conversation)
+        }
+        return !replyMetadataBuilder.rowsCertainlyAnswer(
+            conversationRowEmails: ReplyConversationSnapshot.participantRowEmails(of: conversation),
+            isListConversation: false,
+            target: target
+        )
+    }
+
+    /// The stored state a reply is built from, read once for
+    /// `buildReplyMetadata` and `replyAddressing` alike so the two cannot
+    /// read a conversation differently.
+    private struct ResolvedReply {
+        let conversation: ReplyConversationSnapshot
+        let replyingTo: ReplyTargetSnapshot?
+        let sendAsAliases: [SendAsAlias]
+        let userAliases: Set<String>
+    }
+
+    private func resolveReply(
+        _ context: OutboundMessageRequest.ReplyContext
+    ) async throws -> ResolvedReply {
         guard fetchConversation(objectID: context.conversationObjectID) != nil else {
             throw GmailSendService.SendError.conversationNotFound
         }
@@ -70,7 +151,7 @@ struct OutboundReplyContextBuilder {
         } else {
             replyingTo = nil
         }
-        return try replyMetadataBuilder.buildReplyMetadata(
+        return ResolvedReply(
             conversation: ReplyConversationSnapshot(
                 conversation: conversation,
                 replyingTo: replyingTo,
@@ -78,8 +159,7 @@ struct OutboundReplyContextBuilder {
             ),
             replyingTo: replyingTo,
             sendAsAliases: sendAsAliases,
-            userAliases: userAliases,
-            includesQuotedMessage: context.includesQuotedMessage
+            userAliases: userAliases
         )
     }
 

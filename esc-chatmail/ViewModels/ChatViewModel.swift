@@ -27,6 +27,12 @@ final class ChatComposerState: ObservableObject {
     @Published var pendingFileDrop: DraftFileDrop?
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
+    /// The reply's recipients where they are not the chat's own people, for
+    /// the row above the field to name (`ReplyIndicatorPolicy`); nil in every
+    /// ordinary chat. Kept current by
+    /// `ChatViewModel.refreshAnnouncedReplyRecipients`; it only describes what
+    /// a send would do and decides nothing about one.
+    @Published var announcedReplyRecipients: [String]?
     /// True only from the send tap until the optimistic message is durable
     /// (`ChatViewModel.sendReply`): milliseconds, during which the composer's
     /// content lives in the send's snapshot. It blocks a second send, draft
@@ -340,6 +346,22 @@ final class ChatViewModel: ObservableObject {
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleReplyDraftSave() }
             .store(in: &cancellables)
+        // Every later change of the reply target, whoever makes it (a pick, an
+        // automatic pass, a restored draft, the X that drops the quote). The
+        // target as it is now is covered by `initializeReplyingTo`, which the
+        // chat calls as it loads: nothing is read here for a chat that may
+        // never be shown. The publisher fires before the new value is stored,
+        // so the anchor is worked out from it: a message replaces the anchor,
+        // and nil leaves it, unless `replaceReplyTarget` cleared it first.
+        composerState.$replyingTo
+            .dropFirst()
+            .sink { [weak self] newTarget in
+                guard let self else { return }
+                self.refreshAnnouncedReplyRecipients(
+                    replyAnchor: newTarget ?? self.composerState.replyAnchor
+                )
+            }
+            .store(in: &cancellables)
         // Created for a screen that is about to show it: from here on this
         // composer owns the conversation's draft, superseding any view model
         // that a still-running send keeps alive for a screen that is gone.
@@ -537,6 +559,9 @@ final class ChatViewModel: ObservableObject {
         recordingAutomaticReplyTargetChange {
             initializeAutomaticReplyTarget(lastMessage: lastMessage)
         }
+        // Also where the pass moved nothing: a restored draft's target was
+        // set before anything listened for it.
+        refreshAnnouncedReplyRecipients(replyAnchor: composerState.replyAnchor)
     }
 
     private func initializeAutomaticReplyTarget(lastMessage: Message?) {
@@ -629,6 +654,69 @@ final class ChatViewModel: ObservableObject {
         guard !composerState.isSending else { return }
         recordingAutomaticReplyTargetChange {
             reconcileAutomaticReplyTarget(lastMessage: lastMessage)
+        }
+        // With no anchor a reply answers the conversation's newest message,
+        // which the mail that just arrived may have replaced without any
+        // change of target. An anchored reply's destination does not move
+        // with new mail, so the common case reads nothing here.
+        if composerState.replyAnchor == nil {
+            refreshAnnouncedReplyRecipients(replyAnchor: nil)
+        }
+    }
+
+    // MARK: - Announced reply recipients
+
+    /// Moves with every `refreshAnnouncedReplyRecipients`. An answer that
+    /// took a suspension to get is dropped if a later refresh began meanwhile.
+    private var announcedReplyRecipientsGeneration: UInt64 = 0
+
+    /// Has the composer name the reply's recipients where a send would
+    /// address it to other people than this chat's own, and stop naming them
+    /// where it would not.
+    ///
+    /// A chat merged while a contact card linked two addresses keeps both
+    /// people's mail after the card stops linking them, and a reply to the
+    /// other person's message goes to that person
+    /// (`ReplyLinkedAddressPolicy.rowsCanAnswer`). The chat's title still
+    /// names the first, and before this nothing on screen said who would get
+    /// the reply.
+    ///
+    /// The answer is the send's own (`OutboundReplyContextBuilder.replyAddressing`),
+    /// never a second reading of the rule. Nearly every chat is settled in
+    /// this turn by `replyMayOverruleConversationRows`, which loads no
+    /// aliases; only a chat it cannot settle waits for them.
+    ///
+    /// - Parameter replyAnchor: The message the reply answers, as it is or is
+    ///   about to be; nil for the conversation's newest.
+    private func refreshAnnouncedReplyRecipients(replyAnchor: Message?) {
+        announcedReplyRecipientsGeneration &+= 1
+        let generation = announcedReplyRecipientsGeneration
+        guard outboundReplyContextBuilder.replyMayOverruleConversationRows(
+            in: conversation,
+            replyingTo: replyAnchor
+        ) else {
+            setAnnouncedReplyRecipients(nil)
+            return
+        }
+        let context = outboundReplyContextBuilder.build(
+            conversationObjectID: conversationObjectID,
+            replyingToMessageObjectID: replyAnchor?.objectID,
+            optimisticConversation: replyOptimisticConversation,
+            includesQuotedMessage: false
+        )
+        Task { @MainActor [weak self] in
+            guard let builder = self?.outboundReplyContextBuilder else { return }
+            let addressing = await builder.replyAddressing(context)
+            guard let self, generation == self.announcedReplyRecipientsGeneration else { return }
+            self.setAnnouncedReplyRecipients(addressing?.recipientsToAnnounce)
+        }
+    }
+
+    /// Published only when it changes: every change of the composer's state
+    /// schedules a draft save.
+    private func setAnnouncedReplyRecipients(_ recipients: [String]?) {
+        if composerState.announcedReplyRecipients != recipients {
+            composerState.announcedReplyRecipients = recipients
         }
     }
 

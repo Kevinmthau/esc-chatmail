@@ -15,6 +15,9 @@ struct ChatReplyBar: View {
     let style: ChatComposerStyle
     @Binding var isProcessingAttachments: Bool
     @Binding var unavailableReplyTargetURI: URL?
+    /// The reply's recipients where they are not the chat's own people
+    /// (`ChatComposerState.announcedReplyRecipients`); the header names them.
+    var announcedReplyRecipients: [String]? = nil
     var recoveredReplyEnvelope: StoredReplyEnvelope? = nil
     /// Files dropped on the chat, handed to the attachment picker to import
     /// (`ChatComposerState.pendingFileDrop`).
@@ -56,7 +59,8 @@ struct ChatReplyBar: View {
                     cleanedSnippet: message.cleanedSnippet,
                     snippet: message.snippet
                 )
-            }
+            },
+            announcedRecipients: announcedReplyRecipients
         )
     }
 
@@ -87,7 +91,7 @@ struct ChatReplyBar: View {
                 .font(.caption)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
-            case .recoveredEnvelope(let label):
+            case .recoveredEnvelope(let label), .addressedTo(let label):
                 Text(label)
                     .font(.caption)
                     .foregroundStyle(.secondary)

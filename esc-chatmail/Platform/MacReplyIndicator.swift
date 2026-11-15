@@ -5,7 +5,8 @@ import SwiftUI
 /// (`ReplyIndicatorPolicy.Header`), drawn as a small capsule to go with the field under it.
 ///
 /// It says and offers what the iPhone's row does: the quoted message with an X that drops the
-/// quote, a recovered reply's recipients with no button, or an unavailable target with
+/// quote, a recovered reply's recipients with no button, the recipients of a reply that goes
+/// to other people than the chat's with no button, or an unavailable target with
 /// "Clear target". Nothing is drawn for `.none`.
 struct MacReplyIndicator: View {
     let header: ReplyIndicatorPolicy.Header
@@ -34,7 +35,7 @@ struct MacReplyIndicator: View {
                 .help("Don’t quote this message")
                 .accessibilityLabel("Don’t quote this message")
             }
-        case .recoveredEnvelope(let label):
+        case .recoveredEnvelope(let label), .addressedTo(let label):
             capsule {
                 Text(label)
                     .lineLimit(1)
