@@ -78,7 +78,12 @@ struct ReplyMetadataBuilder {
             // The rows hold one address for each person. Someone whose
             // contact card links several is answered at the ones the message
             // being replied to used (`ReplyLinkedAddressPolicy`).
-            recipients = conversationRecipients
+            recipients = ReplyLinkedAddressPolicy.recipients(
+                conversationRecipients: conversationRecipients,
+                targetRecipients: replyTargetRecipients,
+                contactLinks: contactLinks,
+                userAddresses: userAddresses
+            )
         }
 
         var subject: String?
