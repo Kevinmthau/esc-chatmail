@@ -52,11 +52,18 @@ struct ReplyConversationSnapshot: Sendable {
         self.latestReplyTarget = latestReplyTarget
     }
 
+    /// - Parameter resolvesReplyAddressHint: False leaves `deliveredToAddress`
+    ///   and `replyFromAddress` as the target has them, without the search of
+    ///   the conversation's inbound messages for a hint. For a caller that
+    ///   reads only who the reply goes to
+    ///   (`OutboundReplyContextBuilder.replyAddressing`): the search pages
+    ///   through the conversation until a message carries one.
     @MainActor
     init(
         conversation: Conversation,
         replyingTo: ReplyTargetSnapshot? = nil,
-        sendAsAliases: [SendAsAlias] = []
+        sendAsAliases: [SendAsAlias] = [],
+        resolvesReplyAddressHint: Bool = true
     ) {
         let isListConversation = conversation.conversationType == .list
         let latestMessage: Message?
@@ -75,7 +82,7 @@ struct ReplyConversationSnapshot: Sendable {
         let effectiveTarget = replyingTo ?? latestReplyTarget
         let needsAddressHint = effectiveTarget?.deliveredToAddress == nil ||
             effectiveTarget?.replyFromAddress == nil
-        let latestReplyAddressHint = !isListConversation && needsAddressHint
+        let latestReplyAddressHint = resolvesReplyAddressHint && !isListConversation && needsAddressHint
             ? Self.latestInboundReplyAddressHint(in: conversation, sendAsAliases: sendAsAliases)
             : nil
 

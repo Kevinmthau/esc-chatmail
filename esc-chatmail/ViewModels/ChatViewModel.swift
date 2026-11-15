@@ -28,8 +28,8 @@ final class ChatComposerState: ObservableObject {
     @Published var recoveredReplyEnvelope: StoredReplyEnvelope?
     @Published var unavailableReplyTargetURI: URL?
     /// The reply's recipients where they are not the chat's own people, for
-    /// the row above the field to name (`ReplyIndicatorPolicy`); nil in every
-    /// ordinary chat. Kept current by
+    /// the row above the field to name (`ReplyIndicatorPolicy`); nil where
+    /// the reply goes to the people the chat's title names. Kept current by
     /// `ChatViewModel.refreshAnnouncedReplyRecipients`; it only describes what
     /// a send would do and decides nothing about one.
     @Published var announcedReplyRecipients: [String]?
@@ -308,7 +308,8 @@ final class ChatViewModel: ObservableObject {
         conversation: Conversation,
         chatDependencies: ChatDependencies,
         conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
-        composerDirectory: ChatReplyComposerDirectory? = nil
+        composerDirectory: ChatReplyComposerDirectory? = nil,
+        notificationCenter: NotificationCenter = .default
     ) {
         if conversation.objectID.isTemporaryID {
             try? chatDependencies.storage.viewContext.obtainPermanentIDs(for: [conversation])
@@ -360,6 +361,21 @@ final class ChatViewModel: ObservableObject {
                 self.refreshAnnouncedReplyRecipients(
                     replyAnchor: newTarget ?? self.composerState.replyAnchor
                 )
+            }
+            .store(in: &cancellables)
+        // What a reply's recipients are read from also changes with no change
+        // of target: the contact links a sync's cleanup adopts, the
+        // conversation's rows it repairs, the user's aliases. All of it
+        // changes inside a sync run, which posts `.syncCompleted` once its
+        // cleanup is done. Without this a chat left open (on the Mac, for
+        // hours) kept naming, or not naming, the recipients of a reply whose
+        // destination a changed contact card had moved. The post can come
+        // from any thread.
+        notificationCenter.publisher(for: .syncCompleted)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.hasInitializedReplyTarget else { return }
+                self.refreshAnnouncedReplyRecipients(replyAnchor: self.composerState.replyAnchor)
             }
             .store(in: &cancellables)
         // Created for a screen that is about to show it: from here on this
@@ -554,8 +570,13 @@ final class ChatViewModel: ObservableObject {
         setReplyingTo(message)
     }
 
+    /// Whether the chat has loaded (`initializeReplyingTo`). Until then a
+    /// finished sync reads nothing for it: the chat may never be shown.
+    private var hasInitializedReplyTarget = false
+
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
+        hasInitializedReplyTarget = true
         recordingAutomaticReplyTargetChange {
             initializeAutomaticReplyTarget(lastMessage: lastMessage)
         }
@@ -658,7 +679,9 @@ final class ChatViewModel: ObservableObject {
         // With no anchor a reply answers the conversation's newest message,
         // which the mail that just arrived may have replaced without any
         // change of target. An anchored reply's destination does not move
-        // with new mail, so the common case reads nothing here.
+        // with new mail, so the common case reads nothing here. What does
+        // move it (contact links, the rows, aliases) is refreshed when a
+        // sync completes.
         if composerState.replyAnchor == nil {
             refreshAnnouncedReplyRecipients(replyAnchor: nil)
         }
@@ -680,6 +703,9 @@ final class ChatViewModel: ObservableObject {
     /// (`ReplyLinkedAddressPolicy.rowsCanAnswer`). The chat's title still
     /// names the first, and before this nothing on screen said who would get
     /// the reply.
+    ///
+    /// So does a reply to a message whose Reply-To header names an address
+    /// the chat's rows do not hold.
     ///
     /// The answer is the send's own (`OutboundReplyContextBuilder.replyAddressing`),
     /// never a second reading of the rule. Nearly every chat is settled in

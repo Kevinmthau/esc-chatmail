@@ -42,6 +42,13 @@ struct ReplyMetadataBuilder {
                 "Reply addressed to the \(addressing.recipients.count) participant(s) of the message being replied to, not the conversation's rows",
                 category: .message
             )
+        } else if let recipients = addressing.recipientsToAnnounce {
+            // A reply that followed the message's Reply-To header away from
+            // the rows: the same trace, for the same reason.
+            Log.info(
+                "Reply addressed to \(recipients.count) recipient(s) who are not the conversation's own people",
+                category: .message
+            )
         }
         let recipients = addressing.recipients
 
@@ -173,50 +180,85 @@ struct ReplyMetadataBuilder {
             )
         }
 
+        // Read from the outcome, whichever branch above addressed the reply:
+        // the composer names recipients who are not the chat's own people,
+        // and a branch that set a flag of its own would leave the next one
+        // unannounced, as the Reply-To branch was.
+        let differsFromConversationPeople = !conversation.isListConversation &&
+            !conversationRecipients.isEmpty &&
+            !ReplyLinkedAddressPolicy.recipientsAreConversationPeople(
+                recipients: recipients,
+                conversationRecipients: conversationRecipients,
+                contactLinks: contactLinks,
+                userAddresses: userAddresses
+            )
         return ReplyAddressing(
             recipients: recipients,
-            overrulesConversationRows: overrulesConversationRows
+            overrulesConversationRows: overrulesConversationRows,
+            differsFromConversationPeople: differsFromConversationPeople
         )
     }
 
-    /// Whether `replyAddressing` is certain to leave the conversation's rows
-    /// in charge of a reply to `target`, told from the addresses alone: with
-    /// no knowledge of the user's aliases and none of linked contacts.
+    /// Whether `replyAddressing` is certain to send a reply to `target` to
+    /// the people the conversation's rows name
+    /// (`ReplyAddressing.differsFromConversationPeople` false), told from the
+    /// addresses alone: with none of the user's aliases but the ones passed,
+    /// and no knowledge of linked contacts.
     ///
     /// The composer asks this first, in the turn its reply target changes
     /// (`OutboundReplyContextBuilder.replyMayOverruleConversationRows`), so
     /// that the ordinary chat never loads aliases to learn that nothing needs
     /// announcing. It may say false where the rows do answer (a linked
     /// participant, a message sent from an alias); the caller then asks
-    /// `replyAddressing`. It must never say true where they are overruled,
-    /// and it cannot: the rows are overruled only for a fully known message
-    /// of a participant chat, when a row's person is not on it or its author
-    /// is nobody's row. Knowing the user's addresses only removes addresses
-    /// from both sides, and linking only makes more addresses one person, so
-    /// a row that is itself an address on the message stays on it, and an
-    /// author who is a row, or the account's own address, stays answered.
+    /// `replyAddressing`. It must never say true where the reply goes to
+    /// other people, and it cannot. Two rules send one there.
+    ///
+    /// The rows are overruled only for a fully known message of a participant
+    /// chat, when a row's person is not on it or its author is nobody's row.
+    /// Knowing the user's addresses only removes addresses from both sides,
+    /// and linking only makes more addresses one person, so a row that is
+    /// itself an address on the message stays on it, and an author who is a
+    /// row, or the account's own address, stays answered.
+    ///
+    /// A reply that follows a Reply-To header goes to the header's addresses
+    /// and the message's other recipients (`target.participantEmails`). They
+    /// are certain to be the rows' people only where they are the rows' very
+    /// addresses, the user's known ones aside: removing more of the user's
+    /// addresses from two equal sets leaves them equal, and so does linking.
+    ///
+    /// - Parameter knownUserAddresses: Addresses known to be the user's
+    ///   without loading aliases, beside the account's own; every one must be
+    ///   an address `replyAddressing` is given as the user's. Asked only of a
+    ///   Reply-To target, where a message delivered to one of them would
+    ///   otherwise never be settled here.
     func rowsCertainlyAnswer(
         conversationRowEmails: [String],
         isListConversation: Bool,
-        target: ReplyTargetSnapshot?
+        target: ReplyTargetSnapshot?,
+        knownUserAddresses: () -> [String] = { [] }
     ) -> Bool {
-        guard !isListConversation,
-              let target,
-              !target.usesReplyTo,
-              let evidence = target.participantEvidence,
-              evidence.namesEveryParticipant else {
-            return true
-        }
+        guard !isListConversation, let target else { return true }
         func normalized(_ emails: [String]) -> Set<String> {
             Set(emails.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
         }
         let rows = normalized(conversationRowEmails)
         guard !rows.isEmpty else { return true }
+        let accountEmail = EmailNormalizer.normalize(authSession.userEmail ?? "")
+
+        if target.usesReplyTo {
+            let userAddresses = normalized(knownUserAddresses() + [accountEmail])
+            return normalized(target.participantEmails).subtracting(userAddresses) ==
+                rows.subtracting(userAddresses)
+        }
+
+        guard let evidence = target.participantEvidence,
+              evidence.namesEveryParticipant else {
+            return true
+        }
         guard rows.isSubset(of: normalized(target.participantEmails + evidence.emails)) else {
             return false
         }
         let author = EmailNormalizer.normalize(target.originalMessage.senderEmail)
-        let accountEmail = EmailNormalizer.normalize(authSession.userEmail ?? "")
         return author.isEmpty || rows.contains(author) || (!accountEmail.isEmpty && author == accountEmail)
     }
 
