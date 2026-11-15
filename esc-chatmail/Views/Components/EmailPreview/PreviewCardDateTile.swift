@@ -7,30 +7,31 @@ struct PreviewCardDateTile: View {
     let dayNumber: String
     let weekdaySymbol: String
     let color: Color
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: metrics.dateTile.spacing) {
             Text(monthSymbol)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.monthSize, weight: .semibold))
                 .foregroundStyle(.white.opacity(0.92))
                 .lineLimit(1)
 
             Text(dayNumber)
-                .font(.system(size: 30, weight: .bold, design: .rounded))
+                .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.daySize, weight: .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
             if !weekdaySymbol.isEmpty {
                 Text(weekdaySymbol)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.weekdaySize, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
             }
         }
-        .frame(width: 70, height: 92)
+        .frame(width: metrics.dateTile.size.width, height: metrics.dateTile.size.height)
         .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
+            RoundedRectangle(cornerRadius: metrics.dateTile.cornerRadius, style: .continuous)
                 .fill(color.gradient)
         )
     }

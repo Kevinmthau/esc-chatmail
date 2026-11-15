@@ -2,6 +2,7 @@ import SwiftUI
 
 struct NetlifyDeployPreviewCard: View {
     let model: NetlifyDeployPreviewModel
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     private var accentColor: Color {
         Color(red: 0.0, green: 0.68, blue: 0.67)
@@ -32,13 +33,13 @@ struct NetlifyDeployPreviewCard: View {
 
                 VStack(alignment: .leading, spacing: 5) {
                     Text(model.title)
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.titleSize, .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
                     if let repoSlug = model.repoSlug, !repoSlug.isEmpty {
                         Text(repoSlug)
-                            .font(.system(size: 12, weight: .medium, design: .default))
+                            .font(metrics.font(\.secondaryDetailSize, .medium))
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                     }
@@ -46,10 +47,10 @@ struct NetlifyDeployPreviewCard: View {
                     if let commitSHA = model.commitSHA, !commitSHA.isEmpty {
                         HStack(spacing: 6) {
                             Image(systemName: "number")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(metrics.font(\.labelSize, .semibold))
                                 .foregroundStyle(.tertiary)
                             Text(commitSHA)
-                                .font(.system(size: 12, weight: .regular, design: .monospaced))
+                                .font(.system(size: metrics.secondaryDetailSize, weight: .regular, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .lineLimit(1)
                         }
@@ -58,9 +59,9 @@ struct NetlifyDeployPreviewCard: View {
                     if model.deployLogURL != nil {
                         HStack(spacing: 6) {
                             Image(systemName: "arrow.up.right.square")
-                                .font(.system(size: 11, weight: .semibold))
+                                .font(metrics.font(\.labelSize, .semibold))
                             Text("View deploy log")
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .font(metrics.font(\.secondaryDetailSize, .semibold))
                         }
                         .foregroundStyle(accentColor)
                         .padding(.top, 2)
@@ -70,8 +71,8 @@ struct NetlifyDeployPreviewCard: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 128, alignment: .leading)
+        .padding(metrics.cardPadding)
+        .frame(maxWidth: .infinity, minHeight: metrics.deployCardMinHeight, alignment: .leading)
         .emailPreviewCardChrome()
     }
 
@@ -79,7 +80,7 @@ struct NetlifyDeployPreviewCard: View {
     private var header: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(model.sourceLabel)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(metrics.font(\.labelSize, .semibold))
                 .foregroundStyle(accentColor)
                 .lineLimit(1)
 
@@ -98,7 +99,7 @@ struct NetlifyDeployPreviewCard: View {
             }
 
             Text(model.status.displayText)
-                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .font(metrics.font(\.labelSize, .semibold))
                 .foregroundStyle(statusColor)
                 .lineLimit(1)
         }

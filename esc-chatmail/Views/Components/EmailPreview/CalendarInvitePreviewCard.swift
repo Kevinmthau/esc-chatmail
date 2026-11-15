@@ -2,6 +2,7 @@ import SwiftUI
 
 struct CalendarInvitePreviewCard: View {
     let model: CalendarInvitePreviewModel
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -17,7 +18,7 @@ struct CalendarInvitePreviewCard: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.title)
-                        .font(.system(size: 17, weight: .semibold, design: .rounded))
+                        .font(metrics.font(\.titleSize, .semibold))
                         .foregroundStyle(.primary)
                         .lineLimit(2)
 
@@ -52,8 +53,8 @@ struct CalendarInvitePreviewCard: View {
                 Spacer(minLength: 0)
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, minHeight: 144, alignment: .leading)
+        .padding(metrics.cardPadding)
+        .frame(maxWidth: .infinity, minHeight: metrics.dateCardMinHeight, alignment: .leading)
         .emailPreviewCardChrome()
     }
 
@@ -62,7 +63,7 @@ struct CalendarInvitePreviewCard: View {
         HStack(alignment: .center, spacing: 8) {
             if let sourceLabel = model.sourceLabel, !sourceLabel.isEmpty {
                 Text(sourceLabel)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(Color.blue)
                     .lineLimit(1)
             }
@@ -71,7 +72,7 @@ struct CalendarInvitePreviewCard: View {
 
             if let status = model.status, !status.isEmpty {
                 Text(status)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(metrics.font(\.labelSize, .semibold))
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
@@ -87,9 +88,9 @@ struct CalendarInvitePreviewCard: View {
     private var footer: some View {
         HStack(spacing: 6) {
             Image(systemName: "calendar.badge.clock")
-                .font(.system(size: 12, weight: .semibold))
+                .font(metrics.font(\.secondaryDetailSize, .semibold))
             Text(model.actionLabel)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .font(metrics.font(\.secondaryDetailSize, .semibold))
         }
         .foregroundStyle(Color.blue)
         .padding(.top, 2)
@@ -103,12 +104,12 @@ struct CalendarInvitePreviewCard: View {
     ) -> some View {
         HStack(alignment: .top, spacing: 7) {
             Image(systemName: systemName)
-                .font(.system(size: 12, weight: .semibold))
+                .font(metrics.font(\.secondaryDetailSize, .semibold))
                 .foregroundStyle(color)
                 .frame(width: 14, alignment: .center)
 
             Text(text)
-                .font(.system(size: 13, weight: weight, design: .default))
+                .font(metrics.font(\.detailSize, weight))
                 .foregroundStyle(color)
                 .lineLimit(2)
                 .multilineTextAlignment(.leading)

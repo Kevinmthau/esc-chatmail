@@ -17,6 +17,7 @@ struct SharedDocumentLinkCard: View {
 private struct LegacySharedDocumentLinkCard: View {
     let link: SharedDocumentLink
     @Environment(\.openURL) private var openURL
+    @Environment(\.emailPreviewCardMetrics) private var metrics
 
     var body: some View {
         Button {
@@ -35,17 +36,17 @@ private struct LegacySharedDocumentLinkCard: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(link.kind.title)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(metrics.font(\.subtitleSize, .medium))
                         .foregroundColor(.primary)
                         .lineLimit(1)
 
                     Text(link.hostDisplay)
-                        .font(.system(size: 12))
+                        .font(metrics.font(\.secondaryDetailSize))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
 
                     Text(link.url.absoluteString)
-                        .font(.system(size: 11))
+                        .font(metrics.font(\.labelSize))
                         .foregroundColor(.secondary)
                         .lineLimit(1)
                         .truncationMode(.middle)
