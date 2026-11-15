@@ -12,19 +12,19 @@ struct PreviewCardDateTile: View {
     var body: some View {
         VStack(spacing: metrics.dateTile.spacing) {
             Text(monthSymbol)
-                .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.monthSize, weight: .semibold))
+                .font(metrics.font(\.dateTile.monthSize, .semibold))
                 .foregroundStyle(.white.opacity(0.92))
                 .lineLimit(1)
 
             Text(dayNumber)
-                .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.daySize, weight: .bold))
+                .font(metrics.font(\.dateTile.daySize, .bold))
                 .foregroundStyle(.white)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
 
             if !weekdaySymbol.isEmpty {
                 Text(weekdaySymbol)
-                    .font(EmailPreviewCardMetrics.font(size: metrics.dateTile.weekdaySize, weight: .semibold))
+                    .font(metrics.font(\.dateTile.weekdaySize, .semibold))
                     .foregroundStyle(.white.opacity(0.88))
                     .lineLimit(1)
             }

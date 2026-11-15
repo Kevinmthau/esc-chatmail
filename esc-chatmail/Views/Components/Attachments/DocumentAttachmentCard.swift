@@ -6,6 +6,7 @@ struct DocumentAttachmentCard: View {
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
 
+    @Environment(\.emailPreviewCardMetrics) private var metrics
     @State private var thumbnailImage: PlatformImage?
     @State private var thumbnailRequest: QLThumbnailGenerator.Request?
 
@@ -28,14 +29,14 @@ struct DocumentAttachmentCard: View {
                 // File info
                 VStack(alignment: .leading, spacing: 2) {
                     Text(attachment.filename)
-                        .font(.system(size: 14, weight: .medium))
+                        .font(metrics.font(\.subtitleSize, .medium))
                         .foregroundColor(.primary)
                         .lineLimit(1)
                         .truncationMode(.middle)
 
                     if attachment.byteSize > 0 {
                         Text(AttachmentViewHelpers.formatFileSize(attachment.byteSize))
-                            .font(.system(size: 12))
+                            .font(metrics.font(\.secondaryDetailSize))
                             .foregroundColor(.secondary)
                     }
                 }
