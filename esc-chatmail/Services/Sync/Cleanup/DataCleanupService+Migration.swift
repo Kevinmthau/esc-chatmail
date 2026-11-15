@@ -57,7 +57,31 @@ extension DataCleanupService {
 
     /// Fixes conversations with incorrect participantHashes (e.g., ones that include the user's email)
     /// and merges them with the correct conversation.
-    func fixAndMergeIncorrectParticipantHashes(in context: NSManagedObjectContext) async {
+    ///
+    /// The correct hash is the one the router would give the conversation's
+    /// participant rows now: the user's aliases left out, and the addresses a
+    /// contact card links counted as one person (`ContactLinkedAddresses`).
+    /// So this is also the pass that joins the chats of someone who wrote
+    /// from two addresses, once their card lists both
+    /// (`unifyConversationsByContactIfNeeded`).
+    ///
+    /// - Parameter scope: `.activeConversations` for the 6-hour maintenance
+    ///   run. `.conversationsNaming` for a change in linked addresses, which
+    ///   also covers archived conversations: those take the new hash, so the
+    ///   router finds them again, but are never merged, as two archived
+    ///   conversations of one participant set never are. It is also the one
+    ///   scope in which a conversation a pending send or a saved reply draft
+    ///   anchors takes its correct hash in place
+    ///   (`givesAnchoredConversationsTheirHash`); its rows, type and messages
+    ///   wait for the anchor's release in either scope.
+    /// - Returns: `.completed` only when every conversation in scope carries
+    ///   its correct hash and was merged where it had to be. Maintenance
+    ///   ignores the result; a caller that records the pass as done must not.
+    @discardableResult
+    func fixAndMergeIncorrectParticipantHashes(
+        in context: NSManagedObjectContext,
+        scope: ParticipantHashRepairScope = .activeConversations
+    ) async -> ParticipantHashRepairOutcome {
         let startTime = CFAbsoluteTimeGetCurrent()
 
         // Use the same alias source as sync-side identity (AliasManager, which
@@ -65,16 +89,23 @@ extension DataCleanupService {
         // narrower alias set than the router uses would make this pass and the
         // router disagree and flip-flop conversations between hashes.
         let myAliases = await identityAliasProvider(context)
-        guard !myAliases.isEmpty else { return }
+        guard !myAliases.isEmpty else { return .incomplete }
+        // The linked addresses are read once, for the same reason: one pass
+        // must not hash some conversations with one map and some with another.
+        let contactLinks = contactLinkStore.snapshot()
 
-        await context.perform { [self] in
-            // Fetch all active conversations
-            let request = Conversation.fetchRequest()
-            request.predicate = ConversationPredicates.active
-            request.returnsObjectsAsFaults = false
-            request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
-
-            guard let conversations = try? context.fetch(request) else { return }
+        return await context.perform { [self] () -> ParticipantHashRepairOutcome in
+            let conversations: [Conversation]
+            do {
+                conversations = try fetchConversationsForParticipantHashRepair(scope: scope, in: context)
+            } catch {
+                Log.error(
+                    "Failed to fetch conversations for participant hash repair",
+                    category: .coreData,
+                    error: error
+                )
+                return .incomplete
+            }
 
             var mergedCount = 0
             var deletedObjectIDs = [NSManagedObjectID]()
@@ -93,11 +124,14 @@ extension DataCleanupService {
                     category: .coreData,
                     error: error
                 )
-                return
+                return .incomplete
             }
 
             // Group conversations by their CORRECT participantHash (excluding user's email)
             var byCorrectHash: [String: [Conversation]] = [:]
+            var isBlockedByProtectedConversation = false
+            var correctHashesOfProtectedActiveConversations = Set<String>()
+            var conversationsWithFoldedRows: [Conversation] = []
 
             for conv in conversations {
                 // List conversations are keyed by their "l|" List-Id hash, not
@@ -106,45 +140,92 @@ extension DataCleanupService {
                 // participant chat sharing the same row set.
                 if conv.conversationType == .list { continue }
 
+                // Match routing identity by excluding the user's aliases and
+                // Hide-My-Email placeholder participants, and by counting the
+                // addresses a contact card links as one person.
+                let rowIdentity = participantRowIdentity(
+                    of: conv,
+                    myAliases: myAliases,
+                    contactLinks: contactLinks
+                )
+
                 // An in-flight optimistic send can reference this conversation
                 // while its message exists only in the view context. Leave the
-                // shell completely untouched until reconciliation finishes;
-                // deleting its final excluded participant here would make the
-                // following empty-conversation sweep delete the send's anchor.
-                if pendingSendConversationIds.contains(conv.id) { continue }
+                // shell's rows, type and messages untouched until
+                // reconciliation finishes, and never merge it; deleting its
+                // final excluded participant here would make the following
+                // empty-conversation sweep delete the send's anchor.
+                //
                 // A deferred chat-preview retry finds this conversation's rows
                 // by its ID, or by its recorded hash once a merge deletes it.
                 // Rehashing it or merging it into a different hash strands
                 // those rows on the old preview; this pass retries next run.
-                if chatPreviewRetryAnchors.anchors(conv) { continue }
-
-                // Match routing identity by excluding both the user's aliases
-                // and Hide-My-Email placeholder participants.
-                var hasIdentityRow = false
-                let correctParticipants = Array(conv.participants ?? [])
-                    .compactMap { participant -> String? in
-                        guard let person = participant.person else {
-                            return nil
+                let isAnchoredByChatPreviewRetry = chatPreviewRetryAnchors.anchors(conv)
+                if pendingSendConversationIds.contains(conv.id) || isAnchoredByChatPreviewRetry {
+                    if let rowIdentity {
+                        let correctHash = rowIdentity.identity.participantHash
+                        // The one write an anchored conversation takes, and
+                        // only for a change in linked addresses. The router
+                        // hashes with the adopted map from the moment it is
+                        // adopted, so an anchor left on the hash of its own
+                        // address stops receiving that person's mail, which
+                        // opens a second chat beside it, and a saved reply
+                        // draft anchors its chat for as long as it is kept,
+                        // which can be weeks. The hash is not what the anchor
+                        // protects: a send's echo is routed by the router's
+                        // hash wherever the optimistic row sits, and a draft
+                        // is found by conversation ID. Still left alone: a
+                        // conversation a chat-preview retry anchors, which is
+                        // found again through its recorded hash.
+                        if scope.givesAnchoredConversationsTheirHash,
+                           !isAnchoredByChatPreviewRetry,
+                           conv.participantHash != correctHash {
+                            conv.participantHash = correctHash
                         }
-                        hasIdentityRow = true
-                        if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
-                            // Hash parity is not enough: replies read these rows
-                            // directly, so retain no excluded relay recipient.
-                            context.delete(participant)
-                            return nil
+                        // Nothing else is written, but the pass is not done
+                        // for a conversation it would still change: rows to
+                        // fold, a type to set, or a hash it could not give.
+                        if rowIdentity.needsRepair(of: conv) {
+                            isBlockedByProtectedConversation = true
                         }
-                        return normalizedEmail(person.email)
+                        // Nor for two anchors that share a hash: neither can
+                        // be merged into the other while both are anchored.
+                        if conv.archivedAt == nil,
+                           !correctHashesOfProtectedActiveConversations.insert(correctHash).inserted {
+                            isBlockedByProtectedConversation = true
+                        }
                     }
-                    .filter { !$0.isEmpty }
-                guard hasIdentityRow else { continue }
+                    continue
+                }
 
-                let correctIdentity = makeParticipantSetIdentity(
-                    normalizedEmails: Set(correctParticipants),
-                    myAliases: myAliases
-                )
+                guard let rowIdentity else { continue }
+
+                for relayRow in rowIdentity.relayRows {
+                    // Hash parity is not enough: replies read these rows
+                    // directly, so retain no excluded relay recipient.
+                    context.delete(relayRow)
+                }
+                if !rowIdentity.linkedExtraRows.isEmpty {
+                    // The same for a person's further addresses: left as rows,
+                    // the title and the Participants sheet show that person
+                    // once for each. Taken out of the relationship as well as
+                    // deleted, because the title is stored again below, before
+                    // the save that would drop them from it.
+                    for extraRow in rowIdentity.linkedExtraRows {
+                        extraRow.conversation = nil
+                        context.delete(extraRow)
+                    }
+                    conversationsWithFoldedRows.append(conv)
+                }
+
+                let correctIdentity = rowIdentity.identity
                 let correctHash = correctIdentity.participantHash
 
-                byCorrectHash[correctHash, default: []].append(conv)
+                // Archived conversations take their correct hash and nothing
+                // more: one participant set can have several archived epochs.
+                if conv.archivedAt == nil {
+                    byCorrectHash[correctHash, default: []].append(conv)
+                }
                 conv.conversationType = correctIdentity.type
 
                 // Update the participantHash if it was wrong
@@ -152,6 +233,13 @@ extension DataCleanupService {
                     Log.debug("Fixing participantHash for conversation: \(conv.displayName ?? "unknown")", category: .coreData)
                     conv.participantHash = correctHash
                 }
+            }
+
+            // A protected conversation is excluded from merging, so an active
+            // conversation that now shares its hash stays beside it until the
+            // protection ends.
+            if correctHashesOfProtectedActiveConversations.contains(where: { byCorrectHash[$0] != nil }) {
+                isBlockedByProtectedConversation = true
             }
 
             // Merge groups with multiple conversations
@@ -174,6 +262,15 @@ extension DataCleanupService {
                 }
             }
 
+            let survivorsWithFoldedRows = conversationsWithFoldedRows.filter { !$0.isDeleted }
+            if !survivorsWithFoldedRows.isEmpty {
+                // The stored title named the person once for each address.
+                let myEmail = (try? context.fetch(Account.fetchRequest()).first)?.email ?? ""
+                for conversation in survivorsWithFoldedRows {
+                    conversationManager.updateConversationDisplayName(for: conversation, myEmail: myEmail)
+                }
+            }
+
             if mergedCount > 0 || context.hasChanges {
                 guard coreDataStack.saveIfNeeded(
                     context: context,
@@ -184,7 +281,7 @@ extension DataCleanupService {
                         "Participant hash repair save failed; skipping deletion merge",
                         category: .coreData
                     )
-                    return
+                    return .incomplete
                 }
 
                 if !deletedObjectIDs.isEmpty {
@@ -198,7 +295,127 @@ extension DataCleanupService {
                 let duration = CFAbsoluteTimeGetCurrent() - startTime
                 Log.info("Fixed and merged \(mergedCount) conversations with incorrect participantHashes in \(String(format: "%.3f", duration))s", category: .coreData)
             }
+            return isBlockedByProtectedConversation ? .blockedByProtectedConversation : .completed
         }
+    }
+
+    /// What a conversation's participant rows say its identity is, and the
+    /// rows that identity leaves out.
+    private struct ParticipantRowIdentity {
+        let identity: ParticipantSetIdentity
+        /// Hide-My-Email relay rows, which are no participant.
+        let relayRows: [ConversationParticipant]
+        /// Rows for a further address of a person another row already stands
+        /// for (`ContactLinkedAddresses`).
+        let linkedExtraRows: [ConversationParticipant]
+
+        /// Whether the repair pass would change this conversation.
+        func needsRepair(of conversation: Conversation) -> Bool {
+            conversation.participantHash != identity.participantHash
+                || conversation.conversationType != identity.type
+                || !relayRows.isEmpty
+                || !linkedExtraRows.isEmpty
+        }
+    }
+
+    /// Reads a conversation's rows and changes nothing. Nil when no row has a
+    /// person, which leaves the conversation without an identity to derive.
+    /// Must be called on the conversation's context queue.
+    private func participantRowIdentity(
+        of conversation: Conversation,
+        myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses
+    ) -> ParticipantRowIdentity? {
+        var hasIdentityRow = false
+        var relayRows: [ConversationParticipant] = []
+        var addressedRows: [(participant: ConversationParticipant, email: String)] = []
+
+        // In display order, so the row kept for a person is the one the title
+        // and the avatar already show first.
+        for (participant, email) in ConversationParticipantExtractor.displayOrderedParticipants(
+            conversation.participants ?? []
+        ) {
+            guard let person = participant.person else { continue }
+            hasIdentityRow = true
+            if EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
+                relayRows.append(participant)
+                continue
+            }
+            guard !email.isEmpty else { continue }
+            addressedRows.append((participant, email))
+        }
+        guard hasIdentityRow else { return nil }
+
+        let identity = makeParticipantSetIdentity(
+            normalizedEmails: Set(addressedRows.map(\.email)),
+            myAliases: myAliases,
+            contactLinks: contactLinks
+        )
+        // `identity.participants` holds one address for each person. A linked
+        // address that is not among them belongs to a person whose row is
+        // another one. The user's own rows are never among these: a
+        // conversation keeps them for the note-to-self case.
+        let keptAddresses = Set(identity.participants)
+        let linkedExtraRows = addressedRows
+            .filter { row in
+                !myAliases.contains(row.email)
+                    && contactLinks.isLinked(row.email)
+                    && !keptAddresses.contains(row.email)
+            }
+            .map(\.participant)
+
+        return ParticipantRowIdentity(
+            identity: identity,
+            relayRows: relayRows,
+            linkedExtraRows: linkedExtraRows
+        )
+    }
+
+    /// The conversations a participant-hash repair reads, with their rows.
+    /// Must be called on `context`'s queue.
+    private func fetchConversationsForParticipantHashRepair(
+        scope: ParticipantHashRepairScope,
+        in context: NSManagedObjectContext
+    ) throws -> [Conversation] {
+        let request = Conversation.fetchRequest()
+        request.returnsObjectsAsFaults = false
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
+
+        switch scope {
+        case .activeConversations:
+            request.predicate = ConversationPredicates.active
+
+        case .conversationsNaming(let addresses):
+            // `Person.email` is normalized when it is written, but nothing
+            // makes older rows so. Find the stored spellings of the addresses
+            // by normalizing every stored one, then match those exactly. The
+            // list is short: only addresses the store really holds are in it.
+            let personRequest = NSFetchRequest<NSDictionary>(entityName: "Person")
+            personRequest.resultType = .dictionaryResultType
+            personRequest.propertiesToFetch = ["email"]
+            personRequest.returnsDistinctResults = true
+            let storedSpellings = Set(
+                try context.fetch(personRequest)
+                    .compactMap { $0["email"] as? String }
+                    .filter { addresses.contains(normalizedEmail($0)) }
+            )
+            guard !storedSpellings.isEmpty else { return [] }
+
+            let participantRequest = NSFetchRequest<ConversationParticipant>(
+                entityName: "ConversationParticipant"
+            )
+            participantRequest.predicate = NSPredicate(
+                format: "person.email IN %@",
+                Array(storedSpellings)
+            )
+            let conversationIDs = Set(
+                try context.fetch(participantRequest).compactMap { $0.conversation?.objectID }
+            )
+            guard !conversationIDs.isEmpty else { return [] }
+            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
+        }
+
+        return try context.fetch(request)
     }
 
 }
@@ -735,6 +952,9 @@ extension DataCleanupService {
         // identities — return WITHOUT burning the flag so the next cleanup retries.
         let myAliases = await identityAliasProvider(context)
         guard !myAliases.isEmpty else { return }
+        // Linked addresses are part of identity too, and the whole run hashes
+        // with the one map the router is using.
+        let contactLinks = contactLinkStore.snapshot()
 
         Log.info("Starting participant-set conversation split migration...", category: .coreData)
         let startTime = CFAbsoluteTimeGetCurrent()
@@ -749,6 +969,7 @@ extension DataCleanupService {
         // Phase 1: re-home each message whose strict hash differs from its conversation's.
         guard let rehome = await rehomeMessagesByParticipantSet(
             myAliases: myAliases,
+            contactLinks: contactLinks,
             myEmail: myEmail,
             in: context
         ) else {
@@ -775,6 +996,7 @@ extension DataCleanupService {
         guard await rebuildParticipantRowsForRehomedConversations(
             candidateIDs: rowRepairCandidateIDs.union(mergedWinnerIDs),
             myAliases: myAliases,
+            contactLinks: contactLinks,
             in: context
         ) else {
             Log.warning("Participant-set row rebuild failed; will retry next cleanup", category: .coreData)
@@ -829,6 +1051,7 @@ extension DataCleanupService {
     /// or nil when the initial fetch fails (caller retries next cleanup).
     private func rehomeMessagesByParticipantSet(
         myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses,
         myEmail: String,
         in context: NSManagedObjectContext
     ) async -> RehomeResult? {
@@ -902,7 +1125,10 @@ extension DataCleanupService {
                     // Messages without derivable identity (including legacy or
                     // partially imported row-less sends) stay put, keeping their
                     // conversations alive for send reconciliation.
-                    guard let identity = message.strictParticipantSetIdentity(myAliases: myAliases) else {
+                    guard let identity = message.strictParticipantSetIdentity(
+                        myAliases: myAliases,
+                        contactLinks: contactLinks
+                    ) else {
                         return
                     }
                     let source = message.conversation
@@ -913,7 +1139,9 @@ extension DataCleanupService {
                             if pendingSendConversationIds.contains(source.id) {
                                 if conversationNeedsParticipantRowRepair(
                                     source,
-                                    identity: identity
+                                    identity: identity,
+                                    myAliases: myAliases,
+                                    contactLinks: contactLinks
                                 ) {
                                     blockedByProtectedConversation = true
                                 }
@@ -933,7 +1161,8 @@ extension DataCleanupService {
                         // validated rows reduce to the same strict identity.
                         guard let repairedSourceIdentity = validatedConversationIdentity(
                             source,
-                            myAliases: myAliases
+                            myAliases: myAliases,
+                            contactLinks: contactLinks
                         ), repairedSourceIdentity.participantHash == identity.participantHash else {
                             return
                         }
@@ -1267,6 +1496,7 @@ extension DataCleanupService {
     private func rebuildParticipantRowsForRehomedConversations(
         candidateIDs: Set<NSManagedObjectID>,
         myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses,
         in context: NSManagedObjectContext
     ) async -> Bool {
         await context.perform {
@@ -1288,14 +1518,17 @@ extension DataCleanupService {
                 // conversation shares its hash; any of them defines the expected
                 // rows (lazy: one identity computation, not one per message).
                 guard let identity = (conversation.messages ?? []).lazy
-                    .compactMap({ $0.strictParticipantSetIdentity(myAliases: myAliases) })
+                    .compactMap({
+                        $0.strictParticipantSetIdentity(myAliases: myAliases, contactLinks: contactLinks)
+                    })
                     .first(where: { $0.participantHash == conversationHash }) else { continue }
 
-                let expected = Set(identity.participants)
-                let current = Set(
-                    (conversation.participants ?? []).compactMap { $0.person }.map { normalizedEmail($0.email) }
+                let rowsNeedRepair = !Self.participantRows(
+                    of: conversation,
+                    standFor: identity,
+                    myAliases: myAliases,
+                    contactLinks: contactLinks
                 )
-                let rowsNeedRepair = expected != current
                 let typeNeedsRepair = conversation.conversationType != identity.type
                 guard rowsNeedRepair || typeNeedsRepair else { continue }
 
@@ -1347,16 +1580,43 @@ extension DataCleanupService {
 
     private func conversationNeedsParticipantRowRepair(
         _ conversation: Conversation,
-        identity: ParticipantSetIdentity
+        identity: ParticipantSetIdentity,
+        myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses
     ) -> Bool {
         // List rows are seeded from list metadata rather than one arbitrary
         // message and are intentionally not rebuilt by Phase 2c.
         guard conversation.conversationType != .list else { return false }
-        let expected = Set(identity.participants)
-        let current = Set(
-            (conversation.participants ?? []).compactMap { $0.person }.map { normalizedEmail($0.email) }
-        )
-        return expected != current || conversation.conversationType != identity.type
+        return !Self.participantRows(
+            of: conversation,
+            standFor: identity,
+            myAliases: myAliases,
+            contactLinks: contactLinks
+        ) || conversation.conversationType != identity.type
+    }
+
+    /// Whether a conversation's participant rows already stand for the people
+    /// `identity` names.
+    ///
+    /// Compared person by person, not address by address: the messages of a
+    /// conversation that unifies someone's two addresses
+    /// (`ContactLinkedAddresses`) do not all carry the same one, so whichever
+    /// message supplied `identity` would otherwise decide the rows, and they
+    /// would be rebuilt back and forth from one run to the next. With nothing
+    /// linked this is the plain comparison of the two address sets.
+    private static func participantRows(
+        of conversation: Conversation,
+        standFor identity: ParticipantSetIdentity,
+        myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses
+    ) -> Bool {
+        func people(_ addresses: some Sequence<String>) -> Set<String> {
+            Set(addresses.map { contactLinks.canonicalAddress(for: $0, excluding: myAliases) })
+        }
+        let current = (conversation.participants ?? [])
+            .compactMap { $0.person }
+            .map { normalizedEmail($0.email) }
+        return people(identity.participants) == people(current)
     }
 
     /// Returns the HME/self-filtered identity only when the source rows are
@@ -1364,7 +1624,8 @@ extension DataCleanupService {
     /// one-From-row stores conservative without rejecting known self/HME repair.
     private func validatedConversationIdentity(
         _ conversation: Conversation,
-        myAliases: Set<String>
+        myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses
     ) -> ParticipantSetIdentity? {
         let rows = Array(conversation.participants ?? [])
         guard !rows.isEmpty,
@@ -1387,11 +1648,13 @@ extension DataCleanupService {
         let rawHash = calculateParticipantHash(from: Array(rawEmails))
         let selfFilteredIdentity = makeParticipantSetIdentity(
             normalizedEmails: rawEmails,
-            myAliases: myAliases
+            myAliases: myAliases,
+            contactLinks: contactLinks
         )
         let repairedIdentity = makeParticipantSetIdentity(
             normalizedEmails: withoutHideMyEmail,
-            myAliases: myAliases
+            myAliases: myAliases,
+            contactLinks: contactLinks
         )
         let sourceHash = conversation.participantHash?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""

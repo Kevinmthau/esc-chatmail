@@ -14,7 +14,8 @@ struct ReplyMetadataBuilder {
         replyingTo: ReplyTargetSnapshot?,
         sendAsAliases: [SendAsAlias],
         userAliases: Set<String> = [],
-        includesQuotedMessage: Bool = true
+        includesQuotedMessage: Bool = true,
+        contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
     ) throws -> OutboundMessageRequest.ReplyMetadata {
         let target = replyingTo ?? conversation.latestReplyTarget
         let currentUserEmail = authSession.userEmail ?? ""
@@ -74,7 +75,15 @@ struct ReplyMetadataBuilder {
             // Missing or inconsistent message evidence must fail closed instead.
             recipients = [currentUserEmail]
         } else {
-            recipients = conversationRecipients
+            // The rows hold one address for each person. Someone whose
+            // contact card links several is answered at the ones the message
+            // being replied to used (`ReplyLinkedAddressPolicy`).
+            recipients = ReplyLinkedAddressPolicy.recipients(
+                conversationRecipients: conversationRecipients,
+                targetRecipients: replyTargetRecipients,
+                contactLinks: contactLinks,
+                userAddresses: userAddresses
+            )
         }
 
         var subject: String?

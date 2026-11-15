@@ -3,7 +3,8 @@ import CryptoKit
 
 /// Calculates participant hash from sorted participant emails.
 /// CANONICAL IMPLEMENTATION - use this everywhere, do not duplicate.
-/// - Parameter participants: Array of normalized email addresses (user's aliases should already be excluded)
+/// - Parameter participants: Array of normalized email addresses (user's aliases should already be excluded),
+///   one per person: `makeParticipantSetIdentity` folds the addresses a contact card links before it calls this.
 /// - Returns: SHA256 hex string of the participant key
 func calculateParticipantHash(from participants: [String]) -> String {
     let participantKey = "p|\(participants.sorted().joined(separator: "|"))"
@@ -43,7 +44,7 @@ struct ConversationIdentity {
 /// is derived from the List-Id ("l|" namespace) and `participants` only seeds
 /// display/reply rows.
 struct ParticipantSetIdentity {
-    let participants: [String]   // sorted, normalized, aliases removed (or self-fallback)
+    let participants: [String]   // sorted, normalized, aliases removed (or self-fallback), one address per person (`ContactLinkedAddresses`)
     let participantHash: String
     let type: ConversationType
     let listId: String?
@@ -54,14 +55,27 @@ struct ParticipantSetIdentity {
 /// participant-set split migration. All paths must agree on this hash or the
 /// same set of people forks into duplicate chats.
 ///
+/// A participant is a person, not an address: addresses one contact card links
+/// (`ContactLinkedAddresses`) hash as one, so mail from someone's second
+/// address joins the chat their first one has. With nothing linked the hash is
+/// the plain address-set hash, which is what the web app computes.
+///
 /// - Parameter normalizedEmails: From+To+Cc addresses already normalized via
 ///   `normalizedEmail(_:)`, with BCC and Hide-My-Email entries excluded.
 /// - Parameter myAliases: normalized self addresses to exclude from the set.
-func makeParticipantSetIdentity(normalizedEmails: Set<String>,
-                                myAliases: Set<String>) -> ParticipantSetIdentity {
+/// - Parameter contactLinks: The linked addresses to hash with. Every caller
+///   must hash with the map `ContactLinkedAddressStore` has adopted, which the
+///   default reads; a pass that hashes many rows reads it once and passes it,
+///   so one pass never mixes two maps.
+func makeParticipantSetIdentity(
+    normalizedEmails: Set<String>,
+    myAliases: Set<String>,
+    contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+) -> ParticipantSetIdentity {
     let parts = normalizedEmails.filter { !myAliases.contains($0) }
 
     let participants: [String]
+    let hashKeys: [String]
     if parts.isEmpty {
         // Self-conversation: use deterministic alias selection (sorted order)
         if let firstAlias = myAliases.sorted().first {
@@ -71,14 +85,15 @@ func makeParticipantSetIdentity(normalizedEmails: Set<String>,
         } else {
             participants = ["unknown@email.com"]
         }
+        hashKeys = participants
     } else {
-        participants = parts.sorted()
+        (participants, hashKeys) = contactLinks.unifiedParticipants(parts, excluding: myAliases)
     }
 
     return ParticipantSetIdentity(
         participants: participants,
-        participantHash: calculateParticipantHash(from: participants),
-        type: participants.count <= 1 ? .oneToOne : .group,
+        participantHash: calculateParticipantHash(from: hashKeys),
+        type: hashKeys.count <= 1 ? .oneToOne : .group,
         listId: nil
     )
 }
@@ -88,11 +103,15 @@ func makeParticipantSetIdentity(normalizedEmails: Set<String>,
 /// conversation is keyed by the normalized List-Id alone; the message's
 /// participant set only seeds display/reply rows. Both paths must agree on the
 /// hash or the same list forks into duplicate chats.
-func makeListSetIdentity(normalizedListId: String,
-                         normalizedEmails: Set<String>,
-                         myAliases: Set<String>) -> ParticipantSetIdentity {
+func makeListSetIdentity(
+    normalizedListId: String,
+    normalizedEmails: Set<String>,
+    myAliases: Set<String>,
+    contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+) -> ParticipantSetIdentity {
     let setIdentity = makeParticipantSetIdentity(normalizedEmails: normalizedEmails,
-                                                 myAliases: myAliases)
+                                                 myAliases: myAliases,
+                                                 contactLinks: contactLinks)
     return ParticipantSetIdentity(
         participants: setIdentity.participants,
         participantHash: calculateListConversationHash(fromNormalizedListId: normalizedListId),
@@ -103,11 +122,16 @@ func makeListSetIdentity(normalizedListId: String,
 
 /// Compose-side participant-set identity for a raw recipient list.
 /// Returns nil when no recipient yields a usable normalized address.
-func makeRecipientParticipantSetIdentity(recipients: [String],
-                                         myAliases: Set<String>) -> ParticipantSetIdentity? {
+func makeRecipientParticipantSetIdentity(
+    recipients: [String],
+    myAliases: Set<String>,
+    contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+) -> ParticipantSetIdentity? {
     let normalized = Set(recipients.map(normalizedEmail).filter { !$0.isEmpty })
     guard !normalized.isEmpty else { return nil }
-    return makeParticipantSetIdentity(normalizedEmails: normalized, myAliases: myAliases)
+    return makeParticipantSetIdentity(normalizedEmails: normalized,
+                                      myAliases: myAliases,
+                                      contactLinks: contactLinks)
 }
 
 /// Canonical email normalization for identity hashing. Delegates to
@@ -131,8 +155,11 @@ func normalizedEmail(_ raw: String) -> String {
 /// Existing-message List-Id repair instead reuses archived matches without reactivation.
 ///
 /// Key format: "p|<sorted-participants>|<uuid>" where participants excludes the current user
-func makeConversationIdentity(from headers: [MessageHeader],
-                              myAliases: Set<String>) -> ConversationIdentity {
+func makeConversationIdentity(
+    from headers: [MessageHeader],
+    myAliases: Set<String>,
+    contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+) -> ConversationIdentity {
     // Extract all participant emails from From, To, Cc headers
     // BCC is explicitly excluded for both identity and display
     func extractEmailsWithDisplayNames() -> (Set<String>, [String: String]) {
@@ -179,13 +206,16 @@ func makeConversationIdentity(from headers: [MessageHeader],
     if let parsed = ParsedListId.parse(rawListId) {
         let listIdentity = makeListSetIdentity(normalizedListId: parsed.id,
                                                normalizedEmails: allEmails,
-                                               myAliases: myAliases)
+                                               myAliases: myAliases,
+                                               contactLinks: contactLinks)
         return makeConversationIdentity(from: listIdentity,
                                         displayNames: displayNames,
                                         listTitle: parsed.title)
     }
 
-    let setIdentity = makeParticipantSetIdentity(normalizedEmails: allEmails, myAliases: myAliases)
+    let setIdentity = makeParticipantSetIdentity(normalizedEmails: allEmails,
+                                                 myAliases: myAliases,
+                                                 contactLinks: contactLinks)
 
     #if DEBUG
     let fromHeader = headers.first(where: { $0.name.caseInsensitiveCompare("From") == .orderedSame })?.value ?? "unknown"

@@ -15,7 +15,14 @@ extension Message {
     /// cannot reconstruct To/Cc. Current optimistic sends persist their known
     /// participant rows, but legacy or partially imported rows may still lack
     /// them and must not be re-homed.
-    func strictParticipantSetIdentity(myAliases: Set<String>) -> ParticipantSetIdentity? {
+    ///
+    /// - Parameter contactLinks: The linked addresses to hash with, as in
+    ///   `makeParticipantSetIdentity`. A pass over many messages reads the
+    ///   adopted map once and passes it.
+    func strictParticipantSetIdentity(
+        myAliases: Set<String>,
+        contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+    ) -> ParticipantSetIdentity? {
         var emails = Set<String>()
         var hasFromRow = false
         var hasIdentityRow = false
@@ -61,9 +68,12 @@ extension Message {
         if let listId, !listId.isEmpty {
             return makeListSetIdentity(normalizedListId: listId,
                                        normalizedEmails: emails,
-                                       myAliases: myAliases)
+                                       myAliases: myAliases,
+                                       contactLinks: contactLinks)
         }
 
-        return makeParticipantSetIdentity(normalizedEmails: emails, myAliases: myAliases)
+        return makeParticipantSetIdentity(normalizedEmails: emails,
+                                          myAliases: myAliases,
+                                          contactLinks: contactLinks)
     }
 }

@@ -134,6 +134,56 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         }
     }
 
+    /// A chat that counts a person's two addresses as one participant has one
+    /// row for them. The reply goes to the address the latest message used.
+    ///
+    /// Revert-check: the `ReplyLinkedAddressPolicy.recipients` call in
+    /// `ReplyMetadataBuilder.buildReplyMetadata`. With the rows used as they
+    /// are, the reply goes to the address the person wrote from first.
+    func testBuildReplyMetadata_linkedParticipantWroteFromOtherAddress_repliesToThatAddress() throws {
+        let work = "morgan@corp.example"
+        let home = "m.vale@mail.example"
+        let builder = ReplyMetadataBuilder(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let latestMessage = ReplyTargetSnapshot(
+            participantEmails: [home, "me@example.com"],
+            subject: "Dinner",
+            threadId: "thread-home",
+            messageId: nil,
+            references: [],
+            deliveredToAddress: nil,
+            replyFromAddress: nil,
+            originalMessage: QuotedMessage(
+                senderName: "Morgan",
+                senderEmail: home,
+                date: .distantPast,
+                body: nil
+            )
+        )
+        let conversation = ReplyConversationSnapshot(
+            participantEmails: [work],
+            latestThreadId: "thread-home",
+            latestReplyTarget: latestMessage
+        )
+
+        let linked = try builder.buildReplyMetadata(
+            conversation: conversation,
+            replyingTo: nil,
+            sendAsAliases: sendAsAliases,
+            contactLinks: ContactLinkedAddresses(contactAddressLists: [[work, home]])
+        )
+        XCTAssertEqual(linked.recipientEmails, [home])
+        XCTAssertEqual(linked.threadId, "thread-home")
+
+        // Nothing linked: the row's address, as before.
+        let unlinked = try builder.buildReplyMetadata(
+            conversation: conversation,
+            replyingTo: nil,
+            sendAsAliases: sendAsAliases,
+            contactLinks: .none
+        )
+        XCTAssertEqual(unlinked.recipientEmails, [work])
+    }
+
     func testBuildReplyMetadata_targetNeverBorrowsSelfEvidenceFromConversationAnchor() throws {
         let builder = ReplyMetadataBuilder(
             authSession: makeTestAuthSession(userEmail: "me@example.com")

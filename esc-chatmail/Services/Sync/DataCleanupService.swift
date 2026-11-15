@@ -6,6 +6,7 @@ import CoreData
 /// The service is split across multiple files for organization:
 /// - `DataCleanupService.swift` - Core structure and orchestration
 /// - `DataCleanupService+Migration.swift` - Archive model migration
+/// - `DataCleanupService+ContactUnification.swift` - One chat per contact when their linked addresses change
 /// - `DataCleanupService+DuplicateRemoval.swift` - Duplicate message/conversation removal
 /// - `DataCleanupService+EntityCleanup.swift` - Empty entity and draft cleanup
 struct DataCleanupService: Sendable {
@@ -45,6 +46,49 @@ struct DataCleanupService: Sendable {
         case saveFailed
     }
 
+    /// Which conversations `fixAndMergeIncorrectParticipantHashes` reads.
+    enum ParticipantHashRepairScope: Sendable {
+        /// Every active conversation: the 6-hour maintenance run.
+        case activeConversations
+        /// The conversations, active or archived, that have a participant row
+        /// for one of these normalized addresses: a change in the addresses a
+        /// contact card links, which touches nobody else's conversations.
+        case conversationsNaming(Set<String>)
+
+        /// Whether a conversation a pending send or a saved reply draft
+        /// anchors takes its correct hash in place, with nothing else about
+        /// it written. True for a change in linked addresses: the router is
+        /// already hashing with the new map, so an anchor left on its old
+        /// hash loses its mail to a second chat for as long as it is anchored.
+        /// False for maintenance, which repairs hashes that were stored wrong
+        /// under a map that did not change, and leaves an anchor untouched as
+        /// it always has.
+        var givesAnchoredConversationsTheirHash: Bool {
+            switch self {
+            case .activeConversations: false
+            case .conversationsNaming: true
+            }
+        }
+    }
+
+    /// How `fixAndMergeIncorrectParticipantHashes` ended.
+    enum ParticipantHashRepairOutcome: Equatable, Sendable {
+        /// Every conversation in scope carries its correct hash, and those
+        /// that came to share one were merged.
+        case completed
+        /// The pass could not finish a conversation in scope because a
+        /// pending send, a saved reply draft or a deferred chat-preview retry
+        /// anchors to it: its rows were not folded, it was not merged with the
+        /// conversation that came to share its hash, or (a chat-preview retry,
+        /// or any anchor in maintenance) it kept a wrong hash. The rest of the
+        /// scope was repaired and saved; the pass is due again once the anchor
+        /// is released.
+        case blockedByProtectedConversation
+        /// Nothing was committed: the account's aliases are not known yet, or
+        /// a fetch or the save failed.
+        case incomplete
+    }
+
     // MARK: - Properties
 
     let coreDataStack: CoreDataStack
@@ -58,6 +102,12 @@ struct DataCleanupService: Sendable {
     /// a different self-exclusion set than routing uses and chats flip-flop.
     /// Injected so tests avoid the process-global AliasManager/Contacts path.
     let identityAliasProvider: @Sendable (NSManagedObjectContext) async -> Set<String>
+    /// The linked-address map identity hashes with, for the same reason as the
+    /// aliases above: every pass that recomputes a participant hash reads
+    /// `snapshot()` once and hashes with what the router is using. Injected so
+    /// tests build a store of their own; the shared one holds nothing under
+    /// unit tests.
+    let contactLinkStore: ContactLinkedAddressStore
     /// Backing store for `IncrementalCleanupSchedule`, injected so tests can
     /// drive the 6-hour cadence without touching `UserDefaults.standard`.
     /// UserDefaults is thread-safe; `nonisolated(unsafe)` for the same reason
@@ -79,6 +129,7 @@ struct DataCleanupService: Sendable {
         identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String> = { context in
             await AliasManager.shared.getAliases(from: context)
         },
+        contactLinkStore: ContactLinkedAddressStore = .shared,
         maintenanceScheduleDefaults: UserDefaults = .standard,
         saveCleanupHold: @escaping @Sendable (NSManagedObjectContext) async throws -> Void = { context in
             try await context.perform {
@@ -92,6 +143,7 @@ struct DataCleanupService: Sendable {
         self.conversationMutationSerializer = conversationMutationSerializer
         self.migrationFlags = migrationFlags
         self.identityAliasProvider = identityAliasProvider
+        self.contactLinkStore = contactLinkStore
         self.maintenanceScheduleDefaults = maintenanceScheduleDefaults
         self.saveCleanupHold = saveCleanupHold
     }
@@ -103,6 +155,9 @@ struct DataCleanupService: Sendable {
     func runFullCleanup(in context: NSManagedObjectContext) async {
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
             await migrateConversationsToArchiveModel(in: context)
+            // Before every pass that hashes: it adopts the linked addresses
+            // the rest of this hold hashes with.
+            await unifyConversationsByContactIfNeeded(in: context)
             await splitConversationsByParticipantSetIfNeeded(in: context)
             await decodeRFC2047HeaderTextIfNeeded(in: context)
             await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
@@ -130,6 +185,9 @@ struct DataCleanupService: Sendable {
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+            // First: it adopts the linked addresses every later pass of this
+            // run hashes with. In steady state it reads no conversation.
+            await unifyConversationsByContactIfNeeded(in: context)
             await splitConversationsByParticipantSetIfNeeded(in: context)
             await decodeRFC2047HeaderTextIfNeeded(in: context)
             // After the RFC 2047 pass, which decodes the senderName values
