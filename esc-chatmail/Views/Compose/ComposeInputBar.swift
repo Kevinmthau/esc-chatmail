@@ -80,7 +80,7 @@ struct ComposeInputBar: View {
 
                 PlaceholderTextField(
                     text: $viewModel.body,
-                    placeholder: "iMessage",
+                    placeholder: "Email",
                     lineLimit: style == .iMessage ? 1...4 : 1...5,
                     cornerRadius: style == .iMessage ? 24 : 18,
                     backgroundColor: style == .iMessage ? iMessageFieldBackground : Color.systemGray6,
