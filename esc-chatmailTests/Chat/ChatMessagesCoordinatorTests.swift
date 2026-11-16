@@ -5265,8 +5265,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     /// arm time, capped every slide in the past, and the follow died on the
     /// first append, leaving it under the composer.
     ///
-    /// Revert-check: removing the `postRevealBottomFollowArmedAt = now()`
-    /// reset from `ChatMessagesCoordinator.armCompensatedShiftSettleFollowIfIdle`
+    /// Revert-check: arming with the unretired follow's arm time
+    /// (`BottomFollow(armedAt: current.armedAt, …)` in place of
+    /// `armedAt: now()`) in
+    /// `ChatMessagesCoordinator.armCompensatedShiftSettleFollowIfIdle`
     /// makes this test time out.
     func testCompensatedShift_settleOverUnretiredExpiredFollow_armsFreshFollow() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
@@ -5940,7 +5942,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testInitialAnchor_anchorGeometryNeverLaidOut_doesNotChargeRetryBudget() async throws {
-        // Revert-check: ChatMessagesCoordinator.hasObservedBottomAnchorGeometry.
+        // Revert-check: ChatMessagesCoordinator.InitialPass.hasObservedBottomAnchorGeometry.
         // Without the never-laid-out exemption, the four null-geometry events
         // exhaust the budget and reveal the fallback before the anchor exists.
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
@@ -6009,7 +6011,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testInitialAnchor_wallClockExpiryAfterObservedGrowth_revealsAndArmsFollow() async throws {
-        // Revert-check: ChatMessagesCoordinator.initialAnchorRevealDeadline.
+        // Revert-check: ChatMessagesCoordinator.InitialPass.revealDeadline.
         // Without the wall-clock terminator, growth events keep resetting the
         // budget and the transcript stays hidden past the reveal time limit;
         // without the follow arming on that path, the post-expiry growth event
@@ -6151,7 +6153,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testPostRevealBottomFollow_contentKeepsGrowing_graceSlides() async throws {
-        // Revert-check: slidPostRevealFollowDeadline(extending:) and its use
+        // Revert-check: slidPostRevealFollow(extending:) and its use
         // in ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate's
         // .following / .checkingAfterScroll / .waitingForGrowth branches —
         // including the visible-anchor arms. With the fixed deadline, the
@@ -6253,7 +6255,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testInitialAnchor_growthDuringRecheckWindow_stillResetsRetryBudget() async throws {
-        // Revert-check: ChatMessagesCoordinator.didObserveGrowthDuringInitialRecheck.
+        // Revert-check: ChatMessagesCoordinator.InitialPass.didObserveGrowthDuringRecheck.
         // Growth events overwhelmingly land while the machine sits in
         // .checkingAfterScroll (entered synchronously on every probe); the
         // tracker overwrite consumes their deltas before the phase guard
@@ -6370,8 +6372,10 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testPostRevealBottomFollow_growthDuringValidation_spendsLatchInsteadOfStranding() async throws {
-        // Revert-check: the didObserveGrowthDuringPostRevealCheck consumption
-        // in ChatMessagesCoordinator.validatePostRevealBottomScroll's
+        // Revert-check: the consumption of the growth latch
+        // (`.checkingAfterScroll`'s `didObserveGrowth`, read as
+        // `didLatchGrowth`) in
+        // ChatMessagesCoordinator.validatePostRevealBottomScroll's
         // exhausted-attempts branch. Without it, growth swallowed while the
         // second corrective scroll's validation was in flight parks the
         // machine in .waitingForGrowth with the delta already consumed — no
@@ -6462,7 +6466,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
 
     func testPostRevealBottomFollow_sustainedGrowth_absoluteLifetimeCapsSliding() async throws {
         // Revert-check: the maximumPostRevealBottomFollowLifetime clamp in
-        // ChatMessagesCoordinator.slidPostRevealFollowDeadline(extending:).
+        // ChatMessagesCoordinator.slidPostRevealFollow(extending:).
         // Without it, a layout whose height never converges slides the
         // deadline forever and the follow's scroll bursts never go quiet.
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
@@ -6807,11 +6811,14 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     }
 
     func testOptimisticReplyPublication_staleGrowthLatchFromPreSendFollow_doesNotLeak() async throws {
-        // Revert-check: the didObserveGrowthDuringPostRevealCheck clear in
-        // handleReplyOptimisticMessagePersisted's bottom-follow re-arm. Without it, growth
-        // latched during a pre-send validation window buys the re-armed
-        // follow an unearned corrective scroll pair after its own attempts
-        // exhaust.
+        // Revert-check: the growth latch living in
+        // `PostRevealBottomFollowState.checkingAfterScroll`, which
+        // handleReplyOptimisticMessagePersisted's bottom-follow re-arm
+        // (`armPostSendBottomFollow`) replaces. Kept anywhere that outlives
+        // the case (a stored property the re-arm does not clear, as it was
+        // before it moved into the case), growth latched during a pre-send
+        // validation window buys the re-armed follow an unearned corrective
+        // scroll pair after its own attempts exhaust.
         // HONEST SCOPE: the re-arm's companion postRevealGeometryCheck cancel
         // is not detectable here — the parked task dies on its state guard
         // either way, and the final drive's same-key run cancels it anyway.
@@ -7626,9 +7633,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     /// viewport.
     ///
     /// Revert-check: passing `false` instead of
-    /// `didObserveParkedPastEndDuringInitialPass` to the attempts-exhausted
+    /// `pass.didObserveParkedPastEnd` to the attempts-exhausted
     /// `completeInitialReveal` in
-    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` leaves the
+    /// `ChatMessagesCoordinator.continueInitialPass` leaves the
     /// follow inactive and this test times out on the growth.
     func testFallbackReveal_parkedPastContentEnd_armsBottomFollowForLaterGrowth() async throws {
         let (coordinator, rows) = try makeParkedTestCoordinator()
