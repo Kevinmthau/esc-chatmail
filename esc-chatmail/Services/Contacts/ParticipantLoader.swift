@@ -310,10 +310,20 @@ final class ParticipantLoader {
     /// Named as that resolve names its rows: Contacts, then the newest explicit From header
     /// name. There is no stored Person name to offer, because these addresses have no
     /// participant row; each is the sender of a message, so its From header is the source.
+    ///
+    /// A list can have hundreds of senders, and each is asked of Contacts in turn. So they
+    /// are resolved `batchSize` at a time, and `onProgress` is given the senders resolved so
+    /// far after each batch but the last (`ParticipantInfoResolver`'s batched resolve): the
+    /// sheet draws its first rows without waiting for its last. A list of no more than one
+    /// batch, which is nearly every list, makes no such call. Once the calling task is
+    /// cancelled the rest is not resolved, and the result is then short: the caller checks
+    /// before it uses it.
     func resolveSenders(
         inConversation conversationObjectID: NSManagedObjectID,
         context: NSManagedObjectContext,
-        currentUserEmail: String
+        currentUserEmail: String,
+        batchSize: Int = ParticipantLoader.senderResolutionBatchSize,
+        onProgress: (([ResolvedParticipant]) -> Void)? = nil
     ) async -> [ResolvedParticipant] {
         let currentUserAliases = await loadCurrentUserAliases(
             currentUserEmail: currentUserEmail,
@@ -344,9 +354,16 @@ final class ParticipantLoader {
         return await resolver.resolveParticipants(
             for: senders.emails,
             storedDisplayNamesByEmail: [:],
-            headerDisplayNamesByEmail: senders.headerDisplayNamesByEmail
+            headerDisplayNamesByEmail: senders.headerDisplayNamesByEmail,
+            inBatchesOf: batchSize,
+            onProgress: { onProgress?($0) }
         )
     }
+
+    /// How many of a mailing list's senders `resolveSenders` resolves before it hands over
+    /// what it has. Small enough that the first rows come after a few Contacts queries, and
+    /// more than the senders of nearly every list, so those are still resolved in one go.
+    nonisolated static let senderResolutionBatchSize = 25
 
     /// Extracts non-me participant emails from a conversation, deduplicated
     nonisolated

@@ -1312,6 +1312,148 @@ final class ParticipantLoaderTests: XCTestCase {
         XCTAssertEqual(senders.map(\.email), ["ada@example.com"])
     }
 
+    // MARK: - A list's senders, a batch at a time
+
+    /// A list with more senders than one batch hands them over as they are resolved, so the
+    /// sheet draws its first rows without waiting for its last: each sender is asked of
+    /// Contacts in turn, and a list can have hundreds.
+    ///
+    /// Revert-check: resolving with the unbatched
+    /// `resolver.resolveParticipants(for:storedDisplayNamesByEmail:headerDisplayNamesByEmail:)`
+    /// in `ParticipantLoader.resolveSenders`, as it was, makes this fail: nothing is handed
+    /// over before the whole list. So does calling `onProgress` after the last batch too in
+    /// `ParticipantInfoResolver`'s batched resolve: a third call is then made.
+    func testResolveSendersInConversation_moreSendersThanABatch_handsOverTheSendersResolvedSoFar() async throws {
+        let conversation = try makeListConversation(senderCount: 7)
+        let loader = makeSenderLoader(contactsResolver: MockContactsResolving(contactMap: [:]))
+        var handedOver: [[String]] = []
+
+        let senders = await loader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com",
+            batchSize: 3,
+            onProgress: { handedOver.append($0.map(\.email)) }
+        )
+
+        let everyone = (1...7).map { "sender\($0)@example.com" }
+        XCTAssertEqual(senders.map(\.email), everyone)
+        XCTAssertEqual(handedOver, [Array(everyone.prefix(3)), Array(everyone.prefix(6))])
+    }
+
+    /// Nearly every list has no more senders than one batch, and is resolved in one go as it
+    /// was: nothing is handed over before the result.
+    ///
+    /// Revert-check: the `if batchStart < emails.endIndex` around the `onProgress` call in
+    /// `ParticipantInfoResolver`'s batched resolve (call it after every batch) makes this
+    /// fail.
+    func testResolveSendersInConversation_noMoreSendersThanABatch_handsNothingOverBeforeTheResult() async throws {
+        let conversation = try makeListConversation(senderCount: 3)
+        let loader = makeSenderLoader(contactsResolver: MockContactsResolving(contactMap: [:]))
+        var handedOverCount = 0
+
+        let senders = await loader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com",
+            batchSize: 3,
+            onProgress: { _ in handedOverCount += 1 }
+        )
+
+        XCTAssertEqual(senders.count, 3)
+        XCTAssertEqual(handedOverCount, 0)
+    }
+
+    /// Two addresses of one contact are one row, in different batches as in one.
+    ///
+    /// Revert-check: appending every participant of a batch in `ParticipantInfoResolver`'s
+    /// batched resolve, whatever `seenParticipantKeys` holds, makes this fail: the contact
+    /// is listed a second time, under its other address.
+    func testResolveSendersInConversation_contactListedInAnEarlierBatch_isNotListedAgain() async throws {
+        let conversation = try makeListConversation(senderCount: 4)
+        let sameContact = [1, 4].map { number in
+            ContactMatch(
+                displayName: "Ada Lovelace",
+                email: "sender\(number)@example.com",
+                imageData: nil,
+                contactIdentifier: "contact-ada"
+            )
+        }
+        let loader = makeSenderLoader(contactsResolver: MockContactsResolving(contactMap: [
+            "sender1@example.com": sameContact[0],
+            "sender4@example.com": sameContact[1]
+        ]))
+
+        let senders = await loader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com",
+            batchSize: 2,
+            onProgress: { _ in }
+        )
+
+        XCTAssertEqual(
+            senders.map(\.email),
+            ["sender1@example.com", "sender2@example.com", "sender3@example.com"]
+        )
+        XCTAssertEqual(senders.first?.contactIdentifier, "contact-ada")
+    }
+
+    /// A sheet that is closed, or resolving again, cancels its load, and the senders not yet
+    /// resolved are then not asked of Contacts at all.
+    ///
+    /// Revert-check: the `!Task.isCancelled` of the loop in `ParticipantInfoResolver`'s
+    /// batched resolve makes this fail: all seven senders are looked up.
+    func testResolveSendersInConversation_cancelledAfterTheFirstBatch_asksContactsNoFurther() async throws {
+        let conversation = try makeListConversation(senderCount: 7)
+        let contactsResolver = CountingContactsResolving()
+        let loader = makeSenderLoader(contactsResolver: contactsResolver)
+        let conversationID = conversation.objectID
+        let context = try XCTUnwrap(self.context)
+
+        // A task of its own, so that what is cancelled is the load and not the test.
+        let senders = await Task { @MainActor in
+            await loader.resolveSenders(
+                inConversation: conversationID,
+                context: context,
+                currentUserEmail: "me@example.com",
+                batchSize: 3,
+                onProgress: { _ in withUnsafeCurrentTask { $0?.cancel() } }
+            )
+        }.value
+
+        XCTAssertEqual(contactsResolver.lookupCount, 3)
+        XCTAssertEqual(senders.count, 3)
+    }
+
+    /// A list conversation with one received message from each of `sender1@example.com` to
+    /// `sender<senderCount>@example.com` (fewer than ten, so that order is address order).
+    private func makeListConversation(senderCount: Int) throws -> Conversation {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Analytical Engines")
+            .asList()
+            .build(in: context)
+        for number in 1...senderCount {
+            _ = MessageBuilder()
+                .withSender(email: "sender\(number)@example.com", name: "Sender \(number)")
+                .inConversation(conversation)
+                .build(in: context)
+        }
+        try saveViewContext()
+        return conversation
+    }
+
+    private func makeSenderLoader(contactsResolver: any ContactsResolving) -> ParticipantLoader {
+        ParticipantLoader(
+            contactsResolver: contactsResolver,
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+    }
+
     func testLoadParticipants_usesCachedRollupForRepeatedLoadsOfUnchangedConversation() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Fallback Name")

@@ -92,13 +92,10 @@ final class ParticipantInfoResolver {
             guard !normalizedEmail.isEmpty else { continue }
 
             let match = await contactsResolver.lookup(email: email)
-            let participantKey: String
-            if let contactIdentifier = match?.contactIdentifier,
-               !contactIdentifier.isEmpty {
-                participantKey = "contact:\(contactIdentifier)"
-            } else {
-                participantKey = "email:\(normalizedEmail)"
-            }
+            let participantKey = Self.participantKey(
+                contactIdentifier: match?.contactIdentifier,
+                normalizedEmail: normalizedEmail
+            )
 
             guard seenParticipantKeys.insert(participantKey).inserted else { continue }
 
@@ -116,6 +113,73 @@ final class ParticipantInfoResolver {
                     contactIdentifier: match?.contactIdentifier
                 )
             )
+        }
+
+        return resolvedParticipants
+    }
+
+    /// What makes two addresses one participant: the address-book contact that lists both,
+    /// or else the address itself.
+    static func participantKey(contactIdentifier: String?, normalizedEmail: String) -> String {
+        if let contactIdentifier, !contactIdentifier.isEmpty {
+            return "contact:\(contactIdentifier)"
+        }
+        return "email:\(normalizedEmail)"
+    }
+
+    /// `resolveParticipants(for:storedDisplayNamesByEmail:headerDisplayNamesByEmail:)` for a
+    /// list that can be long, handed over as it grows. The addresses are resolved
+    /// `batchSize` at a time, and after each batch but the last `onProgress` is given
+    /// everyone resolved so far, in the order of `emails`. The return value is everyone.
+    ///
+    /// For the sheet a mailing list's header opens, which lists every address that has
+    /// written to the list. Each address is asked of Contacts, one after another
+    /// (`ContactsResolver.lookup` is an actor's, and it keeps a match and never a miss), so
+    /// a list with hundreds of senders opened a sheet that stayed empty until the last of
+    /// them was answered. The whole list takes as long as it did; its first rows no longer
+    /// wait for its last.
+    ///
+    /// An address of a contact that an earlier batch already listed is left out, as it is
+    /// inside one batch.
+    ///
+    /// Once the calling task is cancelled no further batch is started, and what was
+    /// resolved is returned: only the caller knows the list is no longer wanted. So this is
+    /// not for a result that is kept, such as a row's rollup.
+    func resolveParticipants(
+        for emails: [String],
+        storedDisplayNamesByEmail: [String: String],
+        headerDisplayNamesByEmail: [String: String],
+        inBatchesOf batchSize: Int,
+        onProgress: ([ParticipantLoader.ResolvedParticipant]) -> Void
+    ) async -> [ParticipantLoader.ResolvedParticipant] {
+        let batchSize = max(batchSize, 1)
+        var resolvedParticipants: [ParticipantLoader.ResolvedParticipant] = []
+        var seenParticipantKeys = Set<String>()
+        var batchStart = emails.startIndex
+
+        while batchStart < emails.endIndex, !Task.isCancelled {
+            let batchEnd = min(batchStart + batchSize, emails.endIndex)
+            let batch = await resolveParticipants(
+                for: Array(emails[batchStart..<batchEnd]),
+                storedDisplayNamesByEmail: storedDisplayNamesByEmail,
+                headerDisplayNamesByEmail: headerDisplayNamesByEmail
+            )
+            batchStart = batchEnd
+
+            for participant in batch {
+                let participantKey = Self.participantKey(
+                    contactIdentifier: participant.contactIdentifier,
+                    normalizedEmail: EmailNormalizer.normalize(participant.email)
+                )
+                if seenParticipantKeys.insert(participantKey).inserted {
+                    resolvedParticipants.append(participant)
+                }
+            }
+
+            // The last batch is the return value.
+            if batchStart < emails.endIndex {
+                onProgress(resolvedParticipants)
+            }
         }
 
         return resolvedParticipants
