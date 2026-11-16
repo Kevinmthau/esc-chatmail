@@ -175,6 +175,11 @@ final class ChatReplyBarTests: XCTestCase {
     /// `ReplyIndicatorPolicy.replyingToLabel` (or its use in the label's
     /// prefix). Without it the row reads "Replying to: Dinner" in a chat
     /// titled with someone else's name, and nothing says who gets the reply.
+    /// And the `unabridgedLabel` argument of the `.replyingTo` that
+    /// `ReplyIndicatorPolicy.header` returns (pass it only where it differs
+    /// from the label, as it was): this label cuts and counts nothing, so
+    /// the header then carries no other, and the iPhone's row does not open
+    /// although its one line can end before the second address does.
     func testReplyIndicator_announcedRecipientsWithQuote_areNamedInTheQuoteRow() {
         XCTAssertEqual(
             ReplyIndicatorPolicy.header(
@@ -183,7 +188,10 @@ final class ChatReplyBarTests: XCTestCase {
                 replyTarget: .init(subject: "Dinner", cleanedSnippet: nil, snippet: nil),
                 announcedRecipients: ["sam@example.com", "carol@example.com"]
             ),
-            .replyingTo(label: "Replying to sam@example.com, carol@example.com: Dinner")
+            .replyingTo(
+                label: "Replying to sam@example.com, carol@example.com: Dinner",
+                unabridgedLabel: "Replying to sam@example.com, carol@example.com: Dinner"
+            )
         )
     }
 
@@ -353,6 +361,100 @@ final class ChatReplyBarTests: XCTestCase {
             ReplyIndicatorPolicy.wholeLabel("To: sam@example.com", unabridged: nil),
             "To: sam@example.com"
         )
+    }
+
+    // MARK: - The iPhone's quote row, closed and opened
+
+    /// The cut keeps both ends of an address and still loses its middle, so
+    /// two addresses that differ there are drawn the same on the row's one
+    /// line. The Mac's row has a tooltip and VoiceOver is read the whole
+    /// label; on an iPhone a sighted user had nowhere to see either address
+    /// whole. The row opens on a tap, and open it draws the whole label.
+    ///
+    /// Revert-check: the `isOpen` branch of `ReplyIndicatorPolicy.quoteRow`
+    /// (return the closed row whatever `isOpen` says). The opened row then
+    /// draws the same short label, and the two replies below still read the
+    /// same.
+    func testQuoteRow_opened_drawsTheWholeLabel_andTellsApartAddressesTheCutDrawsTheSame() {
+        let target = ReplyIndicatorPolicy.ReplyTarget(subject: "Invoice", cleanedSnippet: nil, snippet: nil)
+        func row(announcing address: String, isOpen: Bool) -> ReplyIndicatorPolicy.QuoteRow? {
+            guard case .replyingTo(let label, let unabridgedLabel) = ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: target,
+                announcedRecipients: [address]
+            ) else { return nil }
+            return ReplyIndicatorPolicy.quoteRow(label: label, unabridgedLabel: unabridgedLabel, isOpen: isOpen)
+        }
+        let finance = "alice.johnson.personal.finance@gmail.com"
+        let payFinance = "alice.johnson.pay.finance@gmail.com"
+
+        // Closed, the two are one text: the cut dropped the part they differ in.
+        XCTAssertEqual(
+            row(announcing: finance, isOpen: false),
+            .init(text: "Replying to alice.johnson…ance@gmail.com: Invoice", wraps: false, opens: true)
+        )
+        XCTAssertEqual(row(announcing: payFinance, isOpen: false), row(announcing: finance, isOpen: false))
+
+        XCTAssertEqual(
+            row(announcing: finance, isOpen: true),
+            .init(text: "Replying to \(finance): Invoice", wraps: true, opens: true)
+        )
+        XCTAssertEqual(
+            row(announcing: payFinance, isOpen: true),
+            .init(text: "Replying to \(payFinance): Invoice", wraps: true, opens: true)
+        )
+    }
+
+    /// The ordinary chat's row announces nobody, carries no other label and
+    /// is drawn as it always was: one line, nothing to open, and no mark
+    /// that says it opens. Not even where the bar still holds an "open" from
+    /// a row that did.
+    ///
+    /// Revert-check: the `guard let unabridgedLabel` of
+    /// `ReplyIndicatorPolicy.quoteRow` (make an open row from `label` where
+    /// there is none). Every quote row then opens, and one left open wraps.
+    func testQuoteRow_announcingNobody_neverOpens() {
+        for isOpen in [false, true] {
+            XCTAssertEqual(
+                ReplyIndicatorPolicy.quoteRow(label: "Replying to: Lunch?", unabridgedLabel: nil, isOpen: isOpen),
+                .init(text: "Replying to: Lunch?", wraps: false, opens: false)
+            )
+        }
+    }
+
+    /// A line that wraps breaks a long word at a syllable and adds a hyphen,
+    /// and an address is one long word: `…@accounts.subsidiary.example.com`
+    /// was drawn `…@accounts.sub-` and then `sidiary.example.com`, a hyphen
+    /// the address does not have. Marked as text in no language it is broken
+    /// where the line runs out and nothing is added.
+    ///
+    /// Revert-check: the `languageIdentifier` assignment in
+    /// `ReplyIndicatorPolicy.wrappingLabel` (delete it, or make it for every
+    /// word). Deleted, no address is marked; made for every word, the
+    /// subject's words are marked too and stop wrapping as words.
+    /// HONEST SCOPE: this pins what is marked. That a marked address is drawn
+    /// with no hyphen added was looked at in a drawing of the row (test host,
+    /// iOS 27.0), and no test asks the text where its lines break.
+    func testWrappingLabel_marksEachAddressAsNoLanguage_andNoOtherWord() {
+        let label = "Replying to sam@example.com, carol@accounts.subsidiary.example.com: Dinner at eight"
+
+        let marked = ReplyIndicatorPolicy.wrappingLabel(label)
+
+        XCTAssertEqual(String(marked.characters), label, "The row draws the label's own characters")
+        var noLanguage: [String] = []
+        var otherText = ""
+        for run in marked.runs {
+            let text = String(marked[run.range].characters)
+            if run.languageIdentifier == ReplyIndicatorPolicy.addressLanguageIdentifier {
+                noLanguage.append(text)
+            } else {
+                XCTAssertNil(run.languageIdentifier, text)
+                otherText += text
+            }
+        }
+        XCTAssertEqual(noLanguage, ["sam@example.com,", "carol@accounts.subsidiary.example.com:"])
+        XCTAssertEqual(otherText, "Replying to   Dinner at eight")
     }
 
     /// Nothing to announce is the ordinary chat: the rows are as they were.

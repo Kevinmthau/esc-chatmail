@@ -23,7 +23,10 @@ struct ChatReplyBar: View {
     /// (`ChatComposerState.pendingFileDrop`).
     var fileDrop: Binding<DraftFileDrop?> = .constant(nil)
     @Environment(\.managedObjectContext) private var viewContext
-    
+    /// Whether the user has opened the iPhone's quote row to see its whole label
+    /// (`ChatReplyBarHeaderRow`, `ReplyIndicatorPolicy.quoteRow`).
+    @State private var isQuoteRowOpen = false
+
     var canSend: Bool {
         canSend(replyText: replyText)
     }
@@ -79,30 +82,16 @@ struct ChatReplyBar: View {
     // No bar-wide `.disabled(isSending)`: see ChatReplyBarControlPolicy. Only
     // the controls that mutate the draft's attachments or destination wait.
     private var bar: some View {
-        VStack(spacing: 0) {
-            switch header {
-            case .unavailableTarget:
-                HStack {
-                    Text("Original reply target unavailable")
-                    Spacer()
-                    Button("Clear target") { unavailableReplyTargetURI = nil }
-                        .disabled(!allowsDraftMutation)
-                }
-                .font(.caption)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-            case .recoveredEnvelope(let label):
-                wrappingRow(label)
-            case .addressedTo(let label, let unabridgedLabel):
-                // This row wraps and shares its lines with nothing, so it has room for
-                // every recipient's address whole: the short label is for a row of one line.
-                wrappingRow(ReplyIndicatorPolicy.wholeLabel(label, unabridged: unabridgedLabel))
-            case .replyingTo(let label, let unabridgedLabel):
-                replyingToIndicator(label: label, unabridgedLabel: unabridgedLabel)
-            case .none:
-                EmptyView()
-            }
-            
+        let header = self.header
+        return VStack(spacing: 0) {
+            ChatReplyBarHeaderRow(
+                header: header,
+                allowsDraftMutation: allowsDraftMutation,
+                isQuoteRowOpen: $isQuoteRowOpen,
+                onDropQuote: dropQuote,
+                onClearUnavailableTarget: { unavailableReplyTargetURI = nil }
+            )
+
             if !attachments.isEmpty {
                 attachmentStrip
             }
@@ -123,46 +112,13 @@ struct ChatReplyBar: View {
             .padding(.vertical, 8)
             .background(Color.systemBackground)
         }
-    }
-    
-    /// A header row of text alone, on as many lines as the text needs.
-    private func wrappingRow(_ label: String) -> some View {
-        Text(label)
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 6)
+        // An opened row is the user's look at one reply's recipients. Another target, or
+        // other recipients for the same one, is another row, and starts closed.
+        .onChange(of: header) { _, _ in
+            isQuoteRowOpen = false
+        }
     }
 
-    @ViewBuilder
-    private func replyingToIndicator(label: String, unabridgedLabel: String?) -> some View {
-        HStack {
-            Image(systemName: "arrow.turn.up.left")
-                .font(.caption)
-                .foregroundColor(.secondary)
-            
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .lineLimit(1)
-                // One line, so it draws the short label, which can cut an address and
-                // count recipients it does not name. VoiceOver reads the whole one.
-                .accessibilityLabel(ReplyIndicatorPolicy.wholeLabel(label, unabridged: unabridgedLabel))
-            
-            Spacer()
-            
-            Button(action: dropQuote) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-            }
-            .disabled(!allowsDraftMutation)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 6)
-        .background(Color.gray.opacity(0.1))
-    }
-    
     @ViewBuilder
     private var textField: some View {
         PlaceholderTextField(text: $replyText, placeholder: MessageFieldPolicy.placeholder)
