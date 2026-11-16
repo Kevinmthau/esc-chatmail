@@ -62,6 +62,20 @@ final class TestCoreDataStack: @unchecked Sendable {
         /// in-use vnode is a libsqlite3 API violation that invalidates the
         /// open file descriptors under every retired stack.
         case sqlite
+        /// A SQLite store that already exists at this URL, opened with the
+        /// options `.sqlite` uses. `ScaleStoreTemplate` seeds one store and
+        /// hands every test a copy of it this way. Name the file with
+        /// `makeTemporarySQLiteStoreURL()` so the stale-store sweep removes it
+        /// in a later run.
+        case sqliteStore(at: URL)
+    }
+
+    /// A fresh URL for a temp-file SQLite store, named so the stale-store
+    /// sweep finds it.
+    static func makeTemporarySQLiteStoreURL() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("TestCoreDataStack-\(UUID().uuidString)")
+            .appendingPathExtension("sqlite")
     }
 
     /// One-time, best-effort sweep of temp-store files left by previous test
@@ -93,8 +107,9 @@ final class TestCoreDataStack: @unchecked Sendable {
     ///     direct access from the cooperative thread. Enable only for tests that
     ///     specifically verify merge-driven behavior (e.g. view-model refresh on
     ///     background saves) and tolerate that window.
-    ///   - storeKind: `.inMemory` (default) or `.sqlite` for tests needing
-    ///     store features the in-memory type lacks (persistent history).
+    ///   - storeKind: `.inMemory` (default), `.sqlite` for tests needing
+    ///     store features the in-memory type lacks (persistent history, real
+    ///     SQL), or `.sqliteStore(at:)` to open a store file that exists.
     init(automaticallyMergesChanges: Bool = false, storeKind: StoreKind = .inMemory) {
         Self.creationLock.lock()
         let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: Self.sharedModel)
@@ -106,9 +121,11 @@ final class TestCoreDataStack: @unchecked Sendable {
             description.type = NSInMemoryStoreType
         case .sqlite:
             _ = Self.staleStoreSweep
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("TestCoreDataStack-\(UUID().uuidString)")
-                .appendingPathExtension("sqlite")
+            description.type = NSSQLiteStoreType
+            description.url = Self.makeTemporarySQLiteStoreURL()
+            description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        case .sqliteStore(let url):
+            _ = Self.staleStoreSweep
             description.type = NSSQLiteStoreType
             description.url = url
             description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
