@@ -170,6 +170,12 @@ final class SQLiteQueryPlanRecorderTests: XCTestCase {
 
     /// The async form records across suspensions, as the transcript's page
     /// loader needs.
+    ///
+    /// The two statements are asked for by their SQL and the plans are never
+    /// counted: a recording is of the whole process, and this suite runs
+    /// after thousands of tests, any of which can have left a task that
+    /// fetches messages from a SQLite store while this one records.
+    ///
     /// Revert-check: the same two lines as the test above, in the async
     /// `record`'s session.
     func testRecord_asyncBody_reportsThePlansOfWhatRanInside() async throws {
@@ -187,7 +193,9 @@ final class SQLiteQueryPlanRecorderTests: XCTestCase {
 
         XCTAssertEqual(page?.messageIDs.count, 5)
         XCTAssertEqual(page?.totalCount, 5)
-        XCTAssertEqual(plans.filter { $0.reads("ZMESSAGE") }.count, 2, "\(plans)")
+        let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
+        XCTAssertTrue(messagePlans.contains { $0.sql.hasPrefix("SELECT COUNT(") }, "\(plans)")
+        XCTAssertTrue(messagePlans.contains { !$0.sql.hasPrefix("SELECT COUNT(") }, "\(plans)")
     }
 
     /// What identifies the file standard error is going to.
@@ -234,7 +242,9 @@ final class SQLiteQueryPlanRecorderTests: XCTestCase {
             XCTAssertNotEqual(try standardErrorIdentity(), standardErrorBefore)
             _ = try fetchMessageIDs(MessagePredicates.id("recorded-4"), in: context)
         }
-        XCTAssertEqual(plans.filter { $0.reads("ZMESSAGE") }.count, 1, "\(plans)")
+        // At least the lookup's: other work in the process can add plans to a
+        // recording, so they are not counted.
+        XCTAssertTrue(plans.contains { $0.reads("ZMESSAGE") }, "\(plans)")
         XCTAssertEqual(try SQLiteQueryPlanRecorder.currentDebugLevel(), levelBefore)
         XCTAssertEqual(try standardErrorIdentity(), standardErrorBefore)
     }
