@@ -125,16 +125,29 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         )
     }
 
-    func testListConversationDoesNotPresentCreationSeededParticipantsAsMembership() {
-        XCTAssertFalse(
-            ChatView.allowsParticipantListPresentation(conversationType: .list)
-        )
-        XCTAssertTrue(
-            ChatView.allowsParticipantListPresentation(conversationType: .oneToOne)
-        )
-        XCTAssertTrue(
-            ChatView.allowsParticipantListPresentation(conversationType: .group)
-        )
+    /// A mailing list's header opens the sheet as every other chat's does, and the sheet
+    /// lists who has written to the list, never its participant rows: those are the people on
+    /// the first message filed there, and shown as the list's membership they named whoever
+    /// posted first and nobody since. Before, the header of a list opened nothing at all,
+    /// which read as a broken tap.
+    ///
+    /// Revert-check: returning `.participants` for `.list` from
+    /// `ParticipantsListPolicy.listing(conversationType:)` makes this fail.
+    /// HONEST SCOPE: XCTest cannot tap the navigation title; that the tap is no longer
+    /// refused for a list is the removal of `ChatView.allowsParticipantListPresentation`,
+    /// which no test can call any more.
+    func testParticipantsSheet_mailingList_listsSendersNotCreationSeededParticipantRows() {
+        XCTAssertEqual(ParticipantsListPolicy.listing(conversationType: .list), .senders)
+        XCTAssertEqual(ParticipantsListPolicy.listing(conversationType: .oneToOne), .participants)
+        XCTAssertEqual(ParticipantsListPolicy.listing(conversationType: .group), .participants)
+    }
+
+    /// Revert-check: returning "Participants" for `.senders` from
+    /// `ParticipantsListPolicy.title(for:)` makes this fail: the sheet would call a list's
+    /// senders its participants.
+    func testParticipantsSheetTitle_mailingList_doesNotCallSendersParticipants() {
+        XCTAssertEqual(ParticipantsListPolicy.title(for: .participants), "Participants")
+        XCTAssertEqual(ParticipantsListPolicy.title(for: .senders), "Senders")
     }
 
     func testChatNavigation_duringReplySend_staysAvailable() {

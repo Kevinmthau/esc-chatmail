@@ -58,14 +58,6 @@ enum ChatHeaderPolicy {
         }
     }
 
-    /// Whether the header's name and avatar open Participants: for every conversation but a
-    /// mailing list, whose participant rows are not its membership
-    /// (`ChatView.allowsParticipantListPresentation`). Where they do not, the header draws them
-    /// as plain views, with no chevron.
-    static func opensParticipants(conversationType: ConversationType) -> Bool {
-        ChatView.allowsParticipantListPresentation(conversationType: conversationType)
-    }
-
     /// The participant info the header's avatar is drawn from: what the chat's view model
     /// loaded, and until that lands, what the rollup cache already holds for the conversation's
     /// row.

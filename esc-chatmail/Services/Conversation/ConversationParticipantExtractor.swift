@@ -122,6 +122,66 @@ enum ConversationParticipantExtractor {
         return result
     }
 
+    /// The addresses that wrote the conversation's received messages, deduplicated, in the
+    /// order `participantsInDisplayOrder` gives rows: ascending by normalized address.
+    ///
+    /// For a mailing list, whose participant rows cannot say who is in it: they are the people
+    /// on the first message filed there, and every later post can be from someone else. Who
+    /// has written to the list is read from the messages themselves. The user's own addresses
+    /// are left out, as they are from the rows.
+    ///
+    /// Where one address was written in more than one spelling the first in `String`'s own
+    /// order is returned, so the answer is the same on every load. A failed fetch is logged
+    /// and returns no one: the caller draws a list, and has nothing to draw one from.
+    static func nonMeSenderEmails(
+        in context: NSManagedObjectContext,
+        conversation: Conversation,
+        currentUserEmail: String,
+        currentUserAliases: Set<String>
+    ) -> [String] {
+        var normalizedSelfAliases = normalizedAliasSet(from: currentUserAliases)
+        let normalizedMyEmail = EmailNormalizer.normalize(currentUserEmail)
+        if !normalizedMyEmail.isEmpty {
+            normalizedSelfAliases.insert(normalizedMyEmail)
+        }
+
+        // Distinct addresses, not one row per message: see `headerDisplayNamesByEmail`. An
+        // in-memory store returns per-row duplicates, which the dictionary below absorbs.
+        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+        request.resultType = .dictionaryResultType
+        request.propertiesToFetch = ["senderEmail"]
+        request.returnsDistinctResults = true
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND senderEmail != nil AND isFromMe == NO",
+            conversation
+        )
+
+        let rows: [NSDictionary]
+        do {
+            rows = try context.fetch(request)
+        } catch {
+            Log.error("Failed to fetch conversation sender addresses", category: .coreData, error: error)
+            return []
+        }
+
+        var emailByNormalizedEmail: [String: String] = [:]
+        for row in rows {
+            guard let senderEmail = row["senderEmail"] as? String else { continue }
+
+            let normalized = EmailNormalizer.normalize(senderEmail)
+            guard !normalized.isEmpty, !normalizedSelfAliases.contains(normalized) else { continue }
+
+            if let existing = emailByNormalizedEmail[normalized], existing <= senderEmail {
+                continue
+            }
+            emailByNormalizedEmail[normalized] = senderEmail
+        }
+
+        return emailByNormalizedEmail
+            .sorted { $0.key < $1.key }
+            .map(\.value)
+    }
+
     static func participantDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
         guard let participants = conversation.participants else { return [:] }
 

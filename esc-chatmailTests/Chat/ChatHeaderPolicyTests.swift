@@ -73,24 +73,6 @@ final class ChatHeaderPolicyTests: XCTestCase {
         XCTAssertEqual(ChatHeaderPolicy.nameBarMetrics(for: .avatarOverNameCapsule(.mac)), .mac)
     }
 
-    // MARK: - Opening Participants
-
-    /// A mailing list's participant rows only seed the conversation from its first message;
-    /// they are not its membership (`ChatView.allowsParticipantListPresentation`).
-    ///
-    /// Revert-check: returning true from `ChatHeaderPolicy.opensParticipants(conversationType:)`
-    /// makes this fail.
-    func testOpensParticipants_mailingList_doesNot() {
-        XCTAssertFalse(ChatHeaderPolicy.opensParticipants(conversationType: .list))
-    }
-
-    /// Revert-check: returning false from `ChatHeaderPolicy.opensParticipants(conversationType:)`
-    /// makes this fail: nothing in the Mac header would open Participants.
-    func testOpensParticipants_peopleAndGroups_do() {
-        XCTAssertTrue(ChatHeaderPolicy.opensParticipants(conversationType: .oneToOne))
-        XCTAssertTrue(ChatHeaderPolicy.opensParticipants(conversationType: .group))
-    }
-
     // MARK: - Which participant info
 
     /// Revert-check: changing `loaded ?? cached()` to `cached() ?? loaded` in
