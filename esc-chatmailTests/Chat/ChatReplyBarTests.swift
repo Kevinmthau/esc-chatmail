@@ -205,6 +205,103 @@ final class ChatReplyBarTests: XCTestCase {
         )
     }
 
+    // MARK: - Room for the subject beside announced recipients
+
+    /// A chat with an automated sender whose mail names another address to
+    /// answer (GitHub's `reply+<token>@reply.github.com`) announces that
+    /// address, and at full length it took the whole one-line row: the
+    /// subject, which says which message the reply quotes, was never seen.
+    ///
+    /// Revert-check: the `abbreviatedAddress` map in
+    /// `ReplyIndicatorPolicy.announcedRecipientsText`. Without it the label
+    /// carries all 59 characters of the address ahead of the subject.
+    func testReplyIndicator_machineReplyToAddress_isShortenedAheadOfTheSubject() {
+        let machineAddress = "reply+aaab3xk7q2zp5wj6n4t8yv9rmd0cevfhgs7b@reply.github.com"
+        XCTAssertEqual(machineAddress.count, 59)
+
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: .init(subject: "[repo] Fix the build", cleanedSnippet: nil, snippet: nil),
+                announcedRecipients: [machineAddress]
+            ),
+            .replyingTo(label: "Replying to reply+aaab…@reply.github.com: [repo] Fix the build")
+        )
+        // The row of its own too: cut at its end, the address lost its domain.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: nil,
+                announcedRecipients: [machineAddress]
+            ),
+            .addressedTo(label: "To: reply+aaab…@reply.github.com")
+        )
+    }
+
+    /// Revert-check: the `limit` argument `ReplyIndicatorPolicy.header` gives
+    /// `announcedRecipientsText` for the quote row
+    /// (`quoteRowAnnouncedRecipientLimit`). Without it the quote row names all
+    /// four ahead of the subject, and the row's end cuts off the later ones
+    /// with nothing to say how many there were.
+    func testReplyIndicator_manyAnnouncedRecipients_quoteRowCountsTheRest() {
+        let recipients = ["a@example.com", "b@example.com", "c@example.com", "d@example.com"]
+
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: .init(subject: "Dinner", cleanedSnippet: nil, snippet: nil),
+                announcedRecipients: recipients
+            ),
+            .replyingTo(label: "Replying to a@example.com, b@example.com +2 more: Dinner")
+        )
+        // No subject shares the row of its own, so it names everyone.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: nil,
+                announcedRecipients: recipients
+            ),
+            .addressedTo(label: "To: a@example.com, b@example.com, c@example.com, d@example.com")
+        )
+    }
+
+    /// Revert-check: `ReplyIndicatorPolicy.abbreviatedAddress`, case by case.
+    /// The guard on `announcedAddressMaxLength` keeps an ordinary address
+    /// whole; cutting `domain` to make the address fit would show the start
+    /// of a long domain, which can read as somebody else's.
+    func testAbbreviatedAddress_cutsOnlyTheLocalPartAndNeverTheDomain() {
+        // At the limit: shown whole.
+        let atLimit = "firstname.last@example.co.uk"
+        XCTAssertEqual(atLimit.count, ReplyIndicatorPolicy.announcedAddressMaxLength)
+        XCTAssertEqual(ReplyIndicatorPolicy.abbreviatedAddress(atLimit), atLimit)
+
+        // One over: the local part gives up the room, the domain none.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.abbreviatedAddress("firstname.lastn@example.co.uk"),
+            "firstname.las…@example.co.uk"
+        )
+
+        // A domain longer than the limit is still shown whole, behind the
+        // least of the local part that is ever kept.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.abbreviatedAddress("notifications@paypal.com.accounts.example.net"),
+            "not…@paypal.com.accounts.example.net"
+        )
+        // And a local part already that short is left as it is.
+        let shortLocal = "no@paypal.com.accounts.example.net"
+        XCTAssertEqual(ReplyIndicatorPolicy.abbreviatedAddress(shortLocal), shortLocal)
+
+        // No "@" is no address, but it still may not take the row.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.abbreviatedAddress(String(repeating: "x", count: 40)),
+            String(repeating: "x", count: 27) + "…"
+        )
+    }
+
     /// Nothing to announce is the ordinary chat: the rows are as they were.
     func testReplyIndicator_nothingToAnnounce_leavesTheRowsAsTheyWere() {
         for announced in [nil, [String]()] {

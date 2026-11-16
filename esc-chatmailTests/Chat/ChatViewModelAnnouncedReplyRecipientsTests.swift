@@ -16,8 +16,9 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
     private var stack: TestCoreDataStack!
     private var context: NSManagedObjectContext!
     private var aliasLoader: AliasLoaderStub!
-    /// The suite's own: production posts `.syncCompleted` on the default
-    /// center, where a post would also reach the app's own observers.
+    /// The suite's own: production posts `.syncCompleted` and
+    /// `.conversationCleanupFinished` on the default center, where a post
+    /// would also reach the app's own observers.
     private var notificationCenter: NotificationCenter!
     private var conversation: Conversation!
     private var fromAlex: Message!
@@ -164,7 +165,8 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
         await waitUntil { viewModel.composerState.announcedReplyRecipients == ["assistant@example.com"] }
     }
 
-    // Revert-check: the `.syncCompleted` subscription in `ChatViewModel.init`.
+    // Revert-check: the `.syncCompleted` publisher in the refresh
+    // subscription of `ChatViewModel.init`.
     // Who a reply goes to is also read from the conversation's rows, the
     // adopted contact links and the user's aliases, which a sync changes with
     // no change of target. Without the subscription the row goes on naming
@@ -199,18 +201,65 @@ final class ChatViewModelAnnouncedReplyRecipientsTests: XCTestCase {
         await waitUntil { viewModel.composerState.announcedReplyRecipients == ["sam@example.com"] }
     }
 
-    // Revert-check: the `hasInitializedReplyTarget` guard in the
-    // `.syncCompleted` sink of `ChatViewModel.init`. Without it every sync
-    // reads the conversation, and here loads aliases, for a view model whose
-    // chat was never shown.
+    // Revert-check: the `.merge(with:)` of `.conversationCleanupFinished` in
+    // the refresh subscription of `ChatViewModel.init`. The daily database
+    // cleanup repairs participant rows and merges conversations outside any
+    // sync, so no `.syncCompleted` follows it: listening for that alone, a
+    // chat left open kept its old answer until a sync next succeeded.
+    func testAnnouncedReplyRecipients_cleanupFinishedOutsideASync_asksAgain() async throws {
+        let viewModel = makeViewModel()
+        viewModel.initializeReplyingTo(lastMessage: fromSam)
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == ["sam@example.com"] }
+
+        // A maintenance pass leaves the chat's row naming Sam.
+        let row = try XCTUnwrap(conversation.participants?.first)
+        row.person = person("sam@example.com")
+        try context.save()
+
+        notificationCenter.post(name: .conversationCleanupFinished, object: nil)
+
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == nil }
+    }
+
+    // Revert-check: the `.debounce` in the refresh subscription of
+    // `ChatViewModel.init`. An incremental sync posts
+    // `.conversationCleanupFinished` and then `.syncCompleted`; with a
+    // `.receive(on:)` in its place every loaded chat reads its addressing
+    // twice for each sync, here two alias loads where one is made.
+    //
+    // HONEST SCOPE: a second refresh that never came leaves nothing to
+    // observe, so this watches for a quarter of a second after the first.
+    func testAnnouncedReplyRecipients_cleanupThenSyncCompleted_asksOnce() async {
+        let viewModel = makeViewModel()
+        viewModel.initializeReplyingTo(lastMessage: fromSam)
+        await waitUntil { viewModel.composerState.announcedReplyRecipients == ["sam@example.com"] }
+        let loadsBefore = aliasLoader.loadCount
+
+        notificationCenter.post(name: .conversationCleanupFinished, object: nil)
+        notificationCenter.post(name: .syncCompleted, object: nil)
+
+        await waitUntil { self.aliasLoader.loadCount > loadsBefore }
+        let deadline = Date().addingTimeInterval(0.25)
+        while Date() < deadline {
+            XCTAssertEqual(aliasLoader.loadCount, loadsBefore + 1)
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    // Revert-check: the `hasInitializedReplyTarget` guard in the refresh
+    // subscription's sink in `ChatViewModel.init`. Without it every sync and
+    // cleanup reads the conversation, and here loads aliases, for a view
+    // model whose chat was never shown.
     //
     // HONEST SCOPE: a refresh that was not made leaves nothing to observe, so
-    // this watches for a quarter of a second after the post. One that took
-    // longer than that to start would pass.
+    // this watches for a quarter of a second after the posts, which is past
+    // the subscription's quiet interval. One that took longer than that to
+    // start would pass.
     func testAnnouncedReplyRecipients_syncCompletedBeforeTheChatLoads_readsNothing() async {
         let viewModel = makeViewModel()
 
         notificationCenter.post(name: .syncCompleted, object: nil)
+        notificationCenter.post(name: .conversationCleanupFinished, object: nil)
 
         let deadline = Date().addingTimeInterval(0.25)
         while Date() < deadline {

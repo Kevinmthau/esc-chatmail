@@ -171,6 +171,89 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         XCTAssertTrue(conversationExistsInStore(shellID), "Maintenance must not run before its cadence is due")
     }
 
+    // MARK: - Announcing a finished run
+
+    // Revert-check: the `defer { announceCleanupFinished() }` in
+    // `DataCleanupService.runMaintenanceCleanup`. The daily database cleanup
+    // runs these passes outside any sync, so nothing else says that they
+    // rewrote participant rows or merged conversations, and a chat left open
+    // went on naming a reply's recipients from what it read before. The
+    // announcement comes after the passes' own saves: a listener that reads
+    // on hearing it must find what they wrote.
+    func testRunMaintenanceCleanup_announcesOnceAfterItsSaves() async throws {
+        let shellID = try seedEmptyConversationShell()
+        let stack = self.stack!
+        let announcements = AnnouncementLog()
+        let service = makeService(announceCleanupFinished: {
+            let context = stack.newBackgroundContext()
+            announcements.record(
+                shellExisted: context.performAndWait { Self.conversationExists(shellID, in: context) }
+            )
+        })
+
+        let outcome = await service.runMaintenanceCleanup(in: stack.newBackgroundContext())
+
+        XCTAssertEqual(outcome, .completed)
+        XCTAssertEqual(
+            announcements.shellExistedAtEach, [false],
+            "One announcement, made once the pass that removes the empty shell had saved"
+        )
+    }
+
+    // Revert-check: the `defer { announceCleanupFinished() }` in
+    // `DataCleanupService.runIncrementalCleanup`, which covers the early
+    // return for a cadence that is not due as well as the full run. The hold
+    // ahead of that return is where contact links are adopted, so a run that
+    // skips the store-wide passes still has to say it ended.
+    func testRunIncrementalCleanup_announcesOnceWhetherOrNotMaintenanceIsDue() async {
+        let announcements = AnnouncementLog()
+        let service = makeService(announceCleanupFinished: { announcements.record(shellExisted: false) })
+
+        await service.runIncrementalCleanup(in: stack.newBackgroundContext())
+        XCTAssertEqual(announcements.count, 1, "A run whose maintenance passes were due")
+        XCTAssertFalse(DataCleanupService.IncrementalCleanupSchedule.isDue(defaults: scheduleDefaults))
+
+        await service.runIncrementalCleanup(in: stack.newBackgroundContext())
+        XCTAssertEqual(announcements.count, 2, "A run that skipped them")
+    }
+
+    // Revert-check: the `announceCleanupFinished()` call that ends
+    // `DataCleanupService.runFullCleanup`. The first initial sync runs it
+    // before work that can fail, and a sync that fails posts nothing.
+    func testRunFullCleanup_announcesOnce() async {
+        let announcements = AnnouncementLog()
+        let service = makeService(announceCleanupFinished: { announcements.record(shellExisted: false) })
+
+        await service.runFullCleanup(in: stack.newBackgroundContext())
+
+        XCTAssertEqual(announcements.count, 1)
+    }
+
+    // Revert-check: the default value of `announceCleanupFinished` in
+    // `DataCleanupService.init`. Production builds the service without the
+    // argument, and `ChatViewModel` listens for this name on the default
+    // center.
+    //
+    // HONEST SCOPE: the default center is the process's, so another cleanup
+    // running in this process would fulfill the expectation too. Tests in one
+    // process run one at a time, and nothing else here runs a cleanup.
+    func testRunMaintenanceCleanup_byDefault_postsConversationCleanupFinished() async {
+        let posted = expectation(forNotification: .conversationCleanupFinished, object: nil)
+        let flags = InMemoryMigrationFlagStore()
+        let service = DataCleanupService(
+            coreDataStack: coreDataStack,
+            conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+            conversationMutationSerializer: ConversationRollupMutationSerializer(),
+            migrationFlags: flags,
+            identityAliasProvider: { _ in [Self.me] },
+            maintenanceScheduleDefaults: scheduleDefaults
+        )
+
+        _ = await service.runMaintenanceCleanup(in: stack.newBackgroundContext())
+
+        await fulfillment(of: [posted], timeout: 2.0)
+    }
+
     // MARK: - Helpers
 
     /// Pass 4 (`fixAndMergeIncorrectParticipantHashes`) is the only alias
@@ -202,6 +285,25 @@ final class MaintenanceCleanupGateTests: XCTestCase {
                     try context.save()
                 }
             }
+        )
+    }
+
+    /// A service whose runs announce through `announceCleanupFinished`
+    /// and nowhere else, with everything else as `makeService` has it.
+    private func makeService(
+        announceCleanupFinished: @escaping @Sendable () -> Void
+    ) -> DataCleanupService {
+        let flags = InMemoryMigrationFlagStore()
+        flags.set(true, forKey: DataCleanupService.participantSetSplitMigrationKey)
+        flags.set(true, forKey: DataCleanupService.rfc2047HeaderTextRepairKey)
+        return DataCleanupService(
+            coreDataStack: coreDataStack,
+            conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+            conversationMutationSerializer: ConversationRollupMutationSerializer(),
+            migrationFlags: flags,
+            identityAliasProvider: { _ in [Self.me] },
+            maintenanceScheduleDefaults: scheduleDefaults,
+            announceCleanupFinished: announceCleanupFinished
         )
     }
 
@@ -270,6 +372,30 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         request.predicate = NSPredicate(format: "id == %@", id as CVarArg)
         return ((try? context.count(for: request)) ?? 0) > 0
     }
+}
+
+/// What a service's `announceCleanupFinished` was called with the store in:
+/// one entry for each call.
+///
+/// `@unchecked Sendable`: every read and write of `entries` is made under
+/// `lock`.
+private final class AnnouncementLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [Bool] = []
+
+    func record(shellExisted: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        entries.append(shellExisted)
+    }
+
+    var shellExistedAtEach: [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
+
+    var count: Int { shellExistedAtEach.count }
 }
 
 /// Starts one queued gate mutation from inside a maintenance pass and holds
