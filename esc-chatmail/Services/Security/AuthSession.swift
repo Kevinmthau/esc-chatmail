@@ -967,10 +967,37 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         #endif
     }
 
+    /// How long the cleanup waits for WebKit to remove the web views' data.
+    /// On the iOS 27.0 simulator the removal took a third of a second.
+    private static let webViewDataRemovalTimeout: TimeInterval = 5
+
     /// Every web view uses the default, persistent data store, so remote
     /// images and cookies of the mail that was read stay in it.
-    @MainActor
+    ///
+    /// The wait has a bound. WebKit answers from its own processes and
+    /// nothing bounds that answer, and the durable cleanup awaits this with
+    /// the auth-transition gate held and its reset marker still to hand over:
+    /// an answer that never came would leave the sign-out unfinished and
+    /// every later sign-in waiting on the gate, which is why
+    /// `signOutAndDisconnect` does not await `GIDSignIn.disconnect` either.
+    /// The fresh-install cleanup awaits it before the app has started. Past
+    /// the bound the cleanup goes on and the removal is left to finish by
+    /// itself: what it removes then is a cache.
     private static func clearWebViewData() async {
+        let finished = await withSoftTimeout(seconds: webViewDataRemovalTimeout) {
+            await removeAllWebViewData()
+            return true
+        }
+        if finished == nil {
+            Log.warning(
+                "Web view data removal did not finish in time; continuing the cleanup without it",
+                category: .auth
+            )
+        }
+    }
+
+    @MainActor
+    private static func removeAllWebViewData() async {
         await WKWebsiteDataStore.default().removeData(
             ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
             modifiedSince: .distantPast

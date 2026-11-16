@@ -1931,6 +1931,44 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(resetScript.attemptCount, 0)
     }
 
+    // MARK: - Mail-derived caches
+
+    // Revert-check: fails if `AuthSession.clearWebViewData` awaits
+    // `removeAllWebViewData()` directly, in place of through
+    // `withSoftTimeout`, or if WebKit's removal is called from anywhere else.
+    // The durable cleanup awaits that removal with the auth-transition gate
+    // held and its reset marker still to hand over, and nothing bounds
+    // WebKit's answer: one that never came would leave the sign-out
+    // unfinished and every later sign-in waiting on the gate.
+    // HONEST SCOPE: this reads source text. No test asks WebKit to remove
+    // anything or makes it stall; `AsyncTimeoutTests` pins that
+    // `withSoftTimeout` returns at its bound over work that has not finished.
+    func testClearWebViewData_webKitRemoval_isAwaitedThroughASoftTimeout() throws {
+        let code = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("//") }
+
+        let boundedWait = try XCTUnwrap(code.firstIndex(
+            of: "let finished = await withSoftTimeout(seconds: webViewDataRemovalTimeout) {"
+        ))
+        XCTAssertEqual(code[boundedWait - 1], "private static func clearWebViewData() async {")
+        XCTAssertEqual(code[boundedWait + 1], "await removeAllWebViewData()")
+        XCTAssertEqual(
+            code.filter { $0.contains("removeAllWebViewData()") },
+            ["await removeAllWebViewData()", "private static func removeAllWebViewData() async {"],
+            "WebKit's removal must be awaited only inside the bounded wait"
+        )
+
+        let removal = try XCTUnwrap(code.firstIndex(of: "private static func removeAllWebViewData() async {"))
+        XCTAssertEqual(code[removal + 1], "await WKWebsiteDataStore.default().removeData(")
+        XCTAssertEqual(
+            code.filter { $0.contains("WKWebsiteDataStore") }.count,
+            2,
+            "The web views' data store must be touched only in removeAllWebViewData()"
+        )
+    }
+
     // MARK: - Mailbox start time
 
     // Revert-check: fails if `performDurableLocalCleanup` stops calling
