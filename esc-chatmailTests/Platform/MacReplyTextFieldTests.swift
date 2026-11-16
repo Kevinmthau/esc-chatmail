@@ -460,6 +460,39 @@ final class MacReplyTextFieldTests: XCTestCase {
         XCTAssertTrue(harness.window.firstResponder === other)
         harness.close()
     }
+
+    // MARK: - Name
+
+    /// The field's name for VoiceOver and Voice Control is the one it is given, which is the
+    /// word drawn over it (`MacChatReplyBarLayout`). It was "Message" whatever the field
+    /// showed.
+    ///
+    /// The name is given in `updateNSView` alone, which SwiftUI calls as it makes the view: a
+    /// second call in `makeNSView` was written first, and with a name of its own there no
+    /// test failed, because the update had already replaced it.
+    ///
+    /// Revert-check: deleting the `textView.setAccessibilityLabel(accessibilityLabel)` call
+    /// from `updateNSView` makes this fail (the field has no name), and so does writing
+    /// `"Message"` for its argument.
+    func testField_isNamedByTheLabelItIsGiven() async throws {
+        let harness = try await Harness(text: "")
+
+        XCTAssertEqual(harness.textView.accessibilityLabel(), "The word the field shows")
+        harness.close()
+    }
+
+    /// Revert-check: replacing `textView.accessibilityLabel() != accessibilityLabel` with
+    /// `textView.accessibilityLabel() == nil` in `updateNSView`, which names the field once,
+    /// makes this fail.
+    func testNewLabel_renamesTheField() async throws {
+        let harness = try await Harness(text: "")
+
+        harness.model.accessibilityLabel = "Another word"
+        await harness.waitUntil { harness.textView.accessibilityLabel() == "Another word" }
+
+        XCTAssertEqual(harness.textView.accessibilityLabel(), "Another word")
+        harness.close()
+    }
 }
 
 /// A view that takes the focus, standing in for the sidebar's list.
@@ -477,6 +510,9 @@ private final class FieldModel: ObservableObject {
     var textAtSend: [String] = []
     /// Each text the field asked `canSend` about.
     var textAskedAbout: [String] = []
+    /// The name the field is given. Not the app's word, so a name the field wrote for itself
+    /// cannot pass for it.
+    @Published var accessibilityLabel = "The word the field shows"
     /// Changed to make SwiftUI update the field for a reason other than its text.
     @Published var unrelated = 0
     /// How many times `FieldHost.body` ran.
@@ -500,6 +536,7 @@ private struct FieldHost: View {
             text: $model.text,
             fontSize: ChatComposerMetrics.mac.fontSize,
             maximumLineCount: ChatComposerMetrics.mac.maximumLineCount,
+            accessibilityLabel: model.accessibilityLabel,
             focusBridge: bridge,
             canSend: { [model] text in
                 model.textAskedAbout.append(text)

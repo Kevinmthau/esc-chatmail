@@ -22,6 +22,10 @@ struct MacReplyTextField: NSViewRepresentable {
     @Binding var text: String
     let fontSize: CGFloat
     let maximumLineCount: Int
+    /// The field's name for VoiceOver and Voice Control. `MacChatReplyBarLayout` gives the
+    /// placeholder it draws over the field, which it hides from accessibility: the field was
+    /// named "Message" here while it showed another word.
+    let accessibilityLabel: String
     let focusBridge: ReplyFieldFocusBridge
     /// Whether the composer would send the text given, asked as Return is pressed.
     let canSend: (String) -> Bool
@@ -66,7 +70,6 @@ struct MacReplyTextField: NSViewRepresentable {
             width: CGFloat.greatestFiniteMagnitude,
             height: CGFloat.greatestFiniteMagnitude
         )
-        textView.setAccessibilityLabel("Message")
         textView.string = text
 
         let scrollView = NSScrollView()
@@ -89,6 +92,11 @@ struct MacReplyTextField: NSViewRepresentable {
             if textView.font != font {
                 textView.font = font
                 scrollView.invalidateIntrinsicContentSize()
+            }
+            // The field's name, here and not in `makeNSView`: SwiftUI calls this as it makes
+            // the view and again when the name changes, so the one call covers both.
+            if textView.accessibilityLabel() != accessibilityLabel {
+                textView.setAccessibilityLabel(accessibilityLabel)
             }
         }
         context.coordinator.applyTextFromComposer()
