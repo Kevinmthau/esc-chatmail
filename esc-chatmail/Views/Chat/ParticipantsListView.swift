@@ -177,22 +177,36 @@ struct ParticipantsListView: View {
         let resolvedSenders = await participantLoader.resolveSenders(
             inConversation: conversation.objectID,
             context: context,
-            currentUserEmail: currentUserEmail
+            currentUserEmail: currentUserEmail,
+            onProgress: { sendersSoFar in
+                // A list with hundreds of senders is resolved a batch at a time, and its
+                // first rows are drawn without waiting for its last.
+                guard !Task.isCancelled,
+                      ParticipantsListPolicy.showsSendersResolvedSoFar(
+                        resolvedCount: sendersSoFar.count,
+                        shownCount: cachedOtherParticipants.count
+                      ) else {
+                    return
+                }
+                cachedOtherParticipants = sendersSoFar.map { Self.senderItem($0) }
+            }
         )
         guard !Task.isCancelled else { return }
 
-        cachedOtherParticipants = resolvedSenders.map { sender in
-            ParticipantListItem(
-                displayName: sender.displayName,
-                email: sender.email,
-                isExistingContact: sender.contactIdentifier != nil,
-                contactIdentifier: sender.contactIdentifier,
-                newContactPrefill: NewContactPrefillPolicy.prefill(
-                    for: sender,
-                    storedDisplayName: nil
-                )
+        cachedOtherParticipants = resolvedSenders.map { Self.senderItem($0) }
+    }
+
+    private static func senderItem(_ sender: ParticipantLoader.ResolvedParticipant) -> ParticipantListItem {
+        ParticipantListItem(
+            displayName: sender.displayName,
+            email: sender.email,
+            isExistingContact: sender.contactIdentifier != nil,
+            contactIdentifier: sender.contactIdentifier,
+            newContactPrefill: NewContactPrefillPolicy.prefill(
+                for: sender,
+                storedDisplayName: nil
             )
-        }
+        )
     }
 }
 

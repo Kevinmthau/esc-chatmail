@@ -25,6 +25,18 @@ enum ParticipantsListPolicy {
         }
     }
 
+    /// Whether the sheet draws the senders resolved so far while the rest are still being
+    /// resolved (`ParticipantLoader.resolveSenders`'s `onProgress`): only where that is more
+    /// rows than it shows.
+    ///
+    /// So a sheet that is filling for the first time grows, and one that already lists
+    /// everyone keeps its rows while they are resolved again after a change in Contacts.
+    /// Without this check that refresh would cut a list of hundreds back to its first batch
+    /// and grow it again.
+    static func showsSendersResolvedSoFar(resolvedCount: Int, shownCount: Int) -> Bool {
+        resolvedCount > shownCount
+    }
+
     /// The sheet's title. "Participants" would claim a list's senders are everyone in it.
     static func title(for listing: Listing) -> String {
         switch listing {

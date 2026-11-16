@@ -150,6 +150,21 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         XCTAssertEqual(ParticipantsListPolicy.title(for: .senders), "Senders")
     }
 
+    /// A list's senders are resolved a batch at a time, and the sheet draws those resolved
+    /// so far only where that is more rows than it shows: a sheet filling for the first
+    /// time grows, and one that already lists everyone keeps its rows while they are
+    /// resolved again after a change in Contacts.
+    ///
+    /// Revert-check: returning true from
+    /// `ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount:shownCount:)` makes the
+    /// last two assertions fail: a refresh then cuts a full list back to its first batch.
+    func testParticipantsSheet_sendersResolvedSoFar_areDrawnOnlyWhereTheyAreMoreRows() {
+        XCTAssertTrue(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 0))
+        XCTAssertTrue(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 50, shownCount: 25))
+        XCTAssertFalse(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 300))
+        XCTAssertFalse(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 25))
+    }
+
     func testChatNavigation_duringReplySend_staysAvailable() {
         // The back chevron, swipe-back and menu used to hide or disable for
         // every send, so the navigation bar blinked on each reply.
