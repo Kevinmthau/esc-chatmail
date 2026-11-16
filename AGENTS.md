@@ -80,7 +80,7 @@ bash Scripts/run-tests.sh \
 ```
 
 Notes:
-- `Scripts/run-tests.sh` uses scheme `esc-chatmail`, configuration `Debug`, and skips `PerformanceRegressionTests` unless `--performance` is passed.
+- `Scripts/run-tests.sh` uses scheme `esc-chatmail`, configuration `Debug`, and skips `PerformanceRegressionTests` and the scale harness (`ScaleQueryPlanTests`, `ScaleHubFaultTests`) unless `--performance` is passed.
 - If `DESTINATION` is omitted, the script picks the first available iPhone simulator. Prefer setting it explicitly for reproducible Codex runs and to avoid failures when a previously documented runtime is no longer installed.
 
 ## Key Architecture Notes

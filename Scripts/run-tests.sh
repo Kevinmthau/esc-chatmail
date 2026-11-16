@@ -66,15 +66,17 @@ if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
     echo "The performance test plan runs on the iOS simulator only." >&2
     exit 1
   fi
-  # Performance test plan: runs only PerformanceRegressionTests.
+  # Performance test plan: PerformanceRegressionTests and the scale harness
+  # (ScaleQueryPlanTests, ScaleHubFaultTests), which seeds a 120k-message store.
   ARGS+=("-testPlan" "Performance")
 elif [[ "${IS_MAC_DESTINATION}" == "true" ]]; then
   # Mac test plan: the suites that show Services/ behaves the same on macOS
   # (docs/mac-app-plan.md, PR F). The full suite stays on iOS.
   ARGS+=("-testPlan" "Mac")
 else
-  # Default test plan: runs the suite with PerformanceRegressionTests excluded
-  # because they are timing-sensitive.
+  # Default test plan: runs the suite without the Performance plan's suites.
+  # PerformanceRegressionTests are timing-sensitive, and the scale harness
+  # takes about half a minute to seed its store.
   ARGS+=("-testPlan" "esc-chatmail")
 fi
 
