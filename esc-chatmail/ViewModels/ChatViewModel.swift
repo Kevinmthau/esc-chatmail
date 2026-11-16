@@ -365,14 +365,25 @@ final class ChatViewModel: ObservableObject {
             .store(in: &cancellables)
         // What a reply's recipients are read from also changes with no change
         // of target: the contact links a sync's cleanup adopts, the
-        // conversation's rows it repairs, the user's aliases. All of it
-        // changes inside a sync run, which posts `.syncCompleted` once its
-        // cleanup is done. Without this a chat left open (on the Mac, for
-        // hours) kept naming, or not naming, the recipients of a reply whose
-        // destination a changed contact card had moved. The post can come
-        // from any thread.
+        // conversation's rows it repairs, the user's aliases. Without this a
+        // chat left open (on the Mac, for hours) kept naming, or not naming,
+        // the recipients of a reply whose destination a changed contact card
+        // had moved.
+        //
+        // Two posts, because neither covers the other. Stored aliases change
+        // only in a sync run that succeeded, which posts `.syncCompleted`.
+        // Links and rows are written by `DataCleanupService`'s cleanup runs,
+        // and not every one of those is the tail of a successful sync: the
+        // daily database cleanup runs outside any, and listening for
+        // `.syncCompleted` alone left its row repairs and merges unread until
+        // a sync next succeeded, which offline is not soon.
+        //
+        // An incremental sync makes both posts back to back, cleanup first.
+        // The quiet interval makes one refresh of the two, and the posts can
+        // come from any thread.
         notificationCenter.publisher(for: .syncCompleted)
-            .receive(on: DispatchQueue.main)
+            .merge(with: notificationCenter.publisher(for: .conversationCleanupFinished))
+            .debounce(for: Self.replyAddressingRefreshQuietInterval, scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self, self.hasInitializedReplyTarget else { return }
                 self.refreshAnnouncedReplyRecipients(replyAnchor: self.composerState.replyAnchor)
@@ -571,8 +582,15 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Whether the chat has loaded (`initializeReplyingTo`). Until then a
-    /// finished sync reads nothing for it: the chat may never be shown.
+    /// finished sync or cleanup reads nothing for it: the chat may never be
+    /// shown.
     private var hasInitializedReplyTarget = false
+
+    /// How long the posts that have the announcement asked again
+    /// (`.syncCompleted`, `.conversationCleanupFinished`) must have stopped
+    /// before it is. Long enough to make one refresh of the pair a sync
+    /// posts, far too short to see.
+    static let replyAddressingRefreshQuietInterval: DispatchQueue.SchedulerTimeType.Stride = .milliseconds(100)
 
     /// Sets the initial replyingTo message when the conversation loads
     func initializeReplyingTo(lastMessage: Message?) {
@@ -681,7 +699,7 @@ final class ChatViewModel: ObservableObject {
         // change of target. An anchored reply's destination does not move
         // with new mail, so the common case reads nothing here. What does
         // move it (contact links, the rows, aliases) is refreshed when a
-        // sync completes.
+        // sync completes or a cleanup run ends.
         if composerState.replyAnchor == nil {
             refreshAnnouncedReplyRecipients(replyAnchor: nil)
         }

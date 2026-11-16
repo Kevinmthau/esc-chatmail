@@ -1,6 +1,26 @@
 import Foundation
 import CoreData
 
+extension Notification.Name {
+    /// Posted when one of `DataCleanupService`'s cleanup runs ends
+    /// (`runFullCleanup`, `runIncrementalCleanup`, `runMaintenanceCleanup`),
+    /// whatever came of it, after the run's own saves.
+    ///
+    /// Those runs are the only writers of two things that are read to decide
+    /// who a reply goes to: the contact links (adopted in the first step of
+    /// the two sync cleanups) and a stored conversation's participant rows
+    /// (the hash repair and the merges). A chat left open asks again when it
+    /// hears this (`ChatViewModel`). `.syncCompleted` alone was not enough:
+    /// it is posted only by a sync run that succeeded. The daily database
+    /// cleanup task (`DatabaseMaintenanceService.performCleanup`) runs the
+    /// maintenance passes outside any sync, on the Mac while the app is open,
+    /// and the first initial sync runs the full cleanup before work that can
+    /// then fail.
+    ///
+    /// It can come from any thread.
+    static let conversationCleanupFinished = Notification.Name("com.esc.inboxchat.conversationCleanupFinished")
+}
+
 /// Handles data cleanup operations like duplicate removal and empty conversation cleanup.
 ///
 /// The service is split across multiple files for organization:
@@ -118,6 +138,11 @@ struct DataCleanupService: Sendable {
     /// so the hold can log the underlying error with the pass that hit it.
     /// Injected so tests can fail one pass's save on demand.
     let saveCleanupHold: @Sendable (NSManagedObjectContext) async throws -> Void
+    /// Tells whoever reads what a cleanup run writes that one has ended
+    /// (`.conversationCleanupFinished`). A closure, so a test can count the
+    /// calls without listening on the default center, which every other
+    /// suite's cleanup posts to.
+    let announceCleanupFinished: @Sendable () -> Void
 
     // MARK: - Initialization
 
@@ -136,6 +161,9 @@ struct DataCleanupService: Sendable {
                 guard context.hasChanges else { return }
                 try context.save()
             }
+        },
+        announceCleanupFinished: @escaping @Sendable () -> Void = {
+            NotificationCenter.default.post(name: .conversationCleanupFinished, object: nil)
         }
     ) {
         self.coreDataStack = coreDataStack
@@ -146,6 +174,7 @@ struct DataCleanupService: Sendable {
         self.contactLinkStore = contactLinkStore
         self.maintenanceScheduleDefaults = maintenanceScheduleDefaults
         self.saveCleanupHold = saveCleanupHold
+        self.announceCleanupFinished = announceCleanupFinished
     }
 
     // MARK: - Orchestration
@@ -169,6 +198,7 @@ struct DataCleanupService: Sendable {
                 caller: "DataCleanupService.runFullCleanup"
             )
         }
+        announceCleanupFinished()
     }
 
     /// Runs incremental cleanup (no duplicate message check).
@@ -184,6 +214,10 @@ struct DataCleanupService: Sendable {
     /// retries at the next sync.
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
+        // On every way out, after the last save of the run: the hold below
+        // adopts contact links and can rewrite participant rows whether or
+        // not the store-wide passes are due.
+        defer { announceCleanupFinished() }
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
             // First: it adopts the linked addresses every later pass of this
             // run hashes with. In steady state it reads no conversation.
@@ -234,7 +268,11 @@ struct DataCleanupService: Sendable {
     ///   which leaves the context clean, so a caller's own save afterwards
     ///   cannot detect it.
     func runMaintenanceCleanup(in context: NSManagedObjectContext) async -> MaintenanceRunOutcome {
-        await runMaintenancePassesCooperatively(in: context)
+        // Also for a run that was cancelled or lost a pass's save: the passes
+        // before it saved theirs. This run belongs to no sync, so nothing
+        // else says it happened.
+        defer { announceCleanupFinished() }
+        return await runMaintenancePassesCooperatively(in: context)
     }
 
     /// The store-wide maintenance passes, in run order. Every destructive pass
