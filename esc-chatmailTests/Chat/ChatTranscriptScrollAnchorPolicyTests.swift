@@ -4,8 +4,10 @@ import XCTest
 
 /// HONEST SCOPE: these pin the policy's decisions only. The view wiring that
 /// applies them (`ChatTranscriptScrollAnchors` in `ChatMessagesView`, keyed on
-/// `coordinator.isReadyToShow`) is SwiftUI modifier state with no unit-test
-/// seam, so dropping that modifier, passing `isTranscriptRevealed: true`
+/// `coordinator.isReadyToShow` through
+/// `ChatTranscriptPresentationPolicy.Presentation.anchorsTreatTranscriptAsRevealed`,
+/// which `ChatTranscriptPresentationPolicyTests` pins) is SwiftUI modifier
+/// state with no unit-test seam, so dropping that modifier, passing `isTranscriptRevealed: true`
 /// unconditionally, or keying it on the view's loaded-and-revealed
 /// `isTranscriptRevealed` keeps this suite green while the slow open (or, for
 /// the last, the row-less `.bottom` anchor) returns. That half is owned by the

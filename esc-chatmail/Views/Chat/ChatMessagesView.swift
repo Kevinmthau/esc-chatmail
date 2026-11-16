@@ -130,12 +130,10 @@ struct ChatMessagesView: View {
             )
             let bottomContentInset = bottomInsetComponents.inset
             let initialLoadPhase = scrollState.initialLoadPhase
-            let isWaitingForInitialWindow = initialLoadPhase == .loading
-            let isInitialLoadUnavailable =
-                initialLoadPhase == .empty || initialLoadPhase == .failed
-            let isHidingInitialContent = !coordinator.isReadyToShow && !displayedMessages.isEmpty
-            let shouldHideMessages =
-                isWaitingForInitialWindow || isInitialLoadUnavailable || isHidingInitialContent
+            // What is covered and what takes touches in this state:
+            // `ChatTranscriptPresentationPolicy`.
+            let presentation = transcriptPresentation
+            let shouldHideMessages = presentation.coversTranscript
 
             ZStack(alignment: .bottom) {
                 ZStack {
@@ -172,12 +170,12 @@ struct ChatMessagesView: View {
                     // Rows exist to touch only once the window has loaded;
                     // the scroll gesture stays available through the hidden
                     // anchor pass (see the cover above).
-                    .allowsHitTesting(initialLoadPhase == .loaded)
+                    .allowsHitTesting(presentation.scrollViewTakesTouches)
 
                     if shouldHideMessages {
                         initialLoadOverlay(
                             phase: initialLoadPhase,
-                            isWaitingForInitialAnchor: isHidingInitialContent,
+                            isWaitingForInitialAnchor: presentation.isWaitingForInitialAnchor,
                             bottomInset: bottomContentInset
                         )
                     }
@@ -214,18 +212,12 @@ struct ChatMessagesView: View {
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)
             }
             .onChange(of: coordinator.isReadyToShow) { _, isReady in
-                guard isReady else {
-                    // The empty-to-loaded restart re-hides the transcript and
-                    // re-runs the hidden anchor pass over rows the latest
-                    // window load publishes; give it the same onAppear hold
-                    // the first-open pass gets.
-                    scrollState.beginInitialAnchorHold()
-                    return
-                }
-                // The reveal (confirmed, fallback, or user takeover) ends the
-                // hold that kept pre-reveal onAppear events from mutating the
-                // virtual-scroll window mid-anchor.
-                scrollState.endInitialAnchorHold()
+                // A reveal ends the initial-anchor hold, and the
+                // empty-to-loaded restart that re-hides the transcript arms
+                // it again (`ChatTranscriptPresentationPolicy.initialAnchorHoldChange`).
+                // Decided on the value this change delivered.
+                applyInitialAnchorHoldChange(on: .revealChanged, isReadyToShow: isReady)
+                guard isReady else { return }
                 ChatViewPerformanceSignposts.contentReady(
                     conversationID: conversation.id.uuidString
                 )
@@ -450,23 +442,20 @@ struct ChatMessagesView: View {
             // reader cannot see. Scrolling is the scroll view's own gesture
             // and keeps working, so a drag during the hidden pass still
             // reveals (see the cover in `body`).
-            .allowsHitTesting(coordinator.isReadyToShow)
+            .allowsHitTesting(transcriptPresentation.rowsTakeTouches)
         }
         // Anchor roles: `ChatTranscriptScrollAnchorPolicy`. The content end
         // is pinned while the transcript is hidden, so the window lands on
         // its newest rows and bubble growth cannot push the bottom anchor
         // off the viewport during the hidden anchor pass. Keyed on the
         // coordinator's reveal alone, not `isTranscriptRevealed`: the two
-        // differ only while a revealed transcript has no rows (`.empty`,
-        // `.failed`, or `.loading` after an empty reveal), where the
-        // transcript always kept its `.top` size-change anchor. Pinning the
-        // end there instead parked a chat emptied while open past its
-        // content end once the composer and keyboard outgrew the viewport,
-        // and left it scrolled away from the top when a screenful of rows
-        // came back (measured in a replica of this scroll structure on the
-        // iOS 27.0 simulator, not in the app).
+        // differ only while a revealed transcript has no rows, and
+        // `ChatTranscriptPresentationPolicy.Presentation.anchorsTreatTranscriptAsRevealed`
+        // records what pinning the end there did.
         .modifier(
-            ChatTranscriptScrollAnchors(isTranscriptRevealed: coordinator.isReadyToShow)
+            ChatTranscriptScrollAnchors(
+                isTranscriptRevealed: transcriptPresentation.anchorsTreatTranscriptAsRevealed
+            )
         )
         .modifier(
             ChatTranscriptOffsetShifter(
@@ -551,11 +540,9 @@ struct ChatMessagesView: View {
         groupingMessages: [ChatMessageRowModel]
     ) {
         scrollState.resume()
-        if coordinator.isReadyToShow {
-            // Re-appear after a completed reveal publishes no isReadyToShow
-            // change, so release the initial-anchor hold here as well.
-            scrollState.endInitialAnchorHold()
-        }
+        // Re-appear after a completed reveal publishes no isReadyToShow
+        // change, so the initial-anchor hold is released here as well.
+        applyInitialAnchorHoldChange(on: .appeared, isReadyToShow: coordinator.isReadyToShow)
         let messageCount = totalMessageCountForCoordinator()
         if let first = displayedMessages.first, let last = displayedMessages.last {
             Log.diagnostic(
@@ -603,18 +590,16 @@ struct ChatMessagesView: View {
 
     private func handleInitialWindowLoaded(isComplete: Bool, proxy: ScrollViewProxy) {
         guard isComplete else { return }
-        if coordinator.isReadyToShow && !coordinator.isRevealRestartableFromEmpty {
-            // A re-publish of the initial window after a terminal reveal
-            // (retry from the failure overlay, resume of an interrupted load)
-            // re-arms the hold, but no isReadyToShow transition will ever
-            // release it — the coordinator does not restart a reveal from a
-            // non-empty ready state. Release it here: this onChange fires
-            // after every initial-window publish. Empty-conversation
-            // readiness is excluded: the coordinator restarts from it when
-            // messages arrive, and that restarted hidden pass needs the hold
-            // the re-publish just armed.
-            scrollState.endInitialAnchorHold()
-        }
+        // A re-publish of the initial window after a terminal reveal (retry
+        // from the failure overlay, resume of an interrupted load) re-arms
+        // the hold, and no isReadyToShow transition will ever release it.
+        // It is released here, because this onChange fires after every
+        // initial-window publish; an empty conversation's readiness is the
+        // exception (`ChatTranscriptPresentationPolicy.initialAnchorHoldChange`).
+        applyInitialAnchorHoldChange(
+            on: .initialWindowPublished,
+            isReadyToShow: coordinator.isReadyToShow
+        )
         let visibleMessages = scrollState.visibleMessages
         viewModel.initializeReplyingTo(lastMessage: latestMessageForCoordinator())
         coordinator.handleInitialWindowLoaded(
@@ -717,17 +702,50 @@ struct ChatMessagesView: View {
         return max(0, keyboard.currentHeight - currentBottomSafeAreaInset)
     }
 
+    /// The transcript's cover, touch gates and reveal readings in the current
+    /// state (`ChatTranscriptPresentationPolicy`, which says how they differ
+    /// and why).
+    private var transcriptPresentation: ChatTranscriptPresentationPolicy.Presentation {
+        ChatTranscriptPresentationPolicy.presentation(
+            initialLoadPhase: scrollState.initialLoadPhase,
+            isReadyToShow: coordinator.isReadyToShow,
+            hasDisplayedRows: !scrollState.visibleMessages.isEmpty
+        )
+    }
+
+    /// Arms or releases the virtual window's initial-anchor hold as
+    /// `ChatTranscriptPresentationPolicy.initialAnchorHoldChange` decides for
+    /// `event`.
+    private func applyInitialAnchorHoldChange(
+        on event: ChatTranscriptPresentationPolicy.InitialAnchorHoldEvent,
+        isReadyToShow: Bool
+    ) {
+        switch ChatTranscriptPresentationPolicy.initialAnchorHoldChange(
+            on: event,
+            isReadyToShow: isReadyToShow,
+            isRevealRestartableFromEmpty: coordinator.isRevealRestartableFromEmpty
+        ) {
+        case .begin:
+            scrollState.beginInitialAnchorHold()
+        case .end:
+            scrollState.endInitialAnchorHold()
+        case nil:
+            break
+        }
+    }
+
     /// The initial window has loaded and the coordinator has revealed it. The
     /// one definition of "revealed" for the inset shift
     /// (`isTranscriptOffsetShiftAvailable`) and the spacer transition
     /// (`ChatBottomInsetPolicy.spacerTransition`). The scroll anchors
     /// (`ChatTranscriptScrollAnchors`) read `coordinator.isReadyToShow` alone
-    /// (see the modifier's call site for why), which this implies: whenever a
-    /// shift is available the transcript has the `.top` size-change anchor
-    /// `ChatBottomInsetPolicy` assumes. Passing this to the anchors as well
-    /// is not needed for that premise and changes the row-less states.
+    /// (`ChatTranscriptPresentationPolicy.Presentation.anchorsTreatTranscriptAsRevealed`
+    /// says why), which this implies: whenever a shift is available the
+    /// transcript has the `.top` size-change anchor `ChatBottomInsetPolicy`
+    /// assumes. Passing this to the anchors as well is not needed for that
+    /// premise and changes the row-less states.
     private var isTranscriptRevealed: Bool {
-        scrollState.initialLoadPhase == .loaded && coordinator.isReadyToShow
+        transcriptPresentation.isRevealedForInsetChanges
     }
 
     /// Whether the transcript can be scrolled by inset shifts right now.
@@ -877,12 +895,15 @@ struct ChatMessagesView: View {
             viewportHeight: geometry.viewportSize.height
         ) { performBottomAnchor($0, proxy: scrollProxy) }
 
-        let isVisible =
-            scrollState.initialLoadPhase == .loaded &&
-            coordinator.isReadyToShow &&
-            !isScrollGestureActive &&
-            !coordinator.isUserScrollTakeoverActive &&
-            rawIsVisible
+        // Read after the coordinator handled this report: a reveal happens
+        // inside that call.
+        let isVisible = ChatTranscriptPresentationPolicy.isBottomAnchorVisibleForFollowing(
+            initialLoadPhase: scrollState.initialLoadPhase,
+            isReadyToShow: coordinator.isReadyToShow,
+            isUserScrollGestureActive: isScrollGestureActive,
+            isUserScrollTakeoverActive: coordinator.isUserScrollTakeoverActive,
+            isBottomAnchorInViewport: rawIsVisible
+        )
         let becameVisible = !isBottomAnchorVisible && isVisible
         if isBottomAnchorVisible != isVisible {
             isBottomAnchorVisible = isVisible
