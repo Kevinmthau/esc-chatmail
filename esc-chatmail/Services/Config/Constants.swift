@@ -167,6 +167,15 @@ struct SyncConfig {
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
 
+    /// UserDefaults key for the moment the local mailbox began: no sync lists
+    /// mail from before it (less a clock-drift buffer). The stored name is the
+    /// key's first meaning, the app's first launch, which `FreshInstallHandler`
+    /// still writes. `AuthSession` moves it to now whenever it wipes the local
+    /// mailbox and whenever an interactive sign-in lands on an empty store, so
+    /// a sign-out followed by a sign-in starts from the sign-in and brings no
+    /// earlier mail back (Kevin, 2026-11-16).
+    static let mailboxStartTimestampKey = "installTimestamp"
+
     /// Interval between forced label reconciliations even when history is empty (in seconds)
     /// Running reconciliation hourly ensures label drift is caught even without history changes
     static let reconciliationInterval: TimeInterval = 3600 // 1 hour
@@ -205,11 +214,12 @@ struct SyncConfig {
     /// Fallback window when no sync history exists - initial sync (30 days)
     static let initialSyncFallbackWindow: TimeInterval = 30 * 24 * 60 * 60
 
-    /// Furthest back any initial sync lists (30 days). A first install's
-    /// since-install window is minutes long; this cap only binds a re-initial
-    /// sync on a long-lived install (sign-out/sign-in, store reset), which
+    /// Furthest back any initial sync lists (30 days). A sign-in's window is
+    /// minutes long, because the mailbox start moves to the sign-in
+    /// (`mailboxStartTimestampKey`); this cap only binds a re-initial sync
+    /// that no sign-in preceded (a store reset, a missing cursor), which
     /// would otherwise re-list and full-fetch every message since the
-    /// original install in one run.
+    /// mailbox began in one run.
     static let initialSyncMaxWindow: TimeInterval = 30 * 24 * 60 * 60
 
     /// Fallback window for history recovery sync (7 days)

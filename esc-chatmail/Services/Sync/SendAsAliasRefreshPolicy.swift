@@ -24,6 +24,15 @@ struct SendAsAliasRefreshPolicy {
         userDefaults.set(now().timeIntervalSince1970, forKey: Self.key(for: accountEmail))
     }
 
+    /// Removes every account's timestamp. The key is named after the account's
+    /// address, so one left behind keeps that address in the preferences
+    /// after its sign-out; the cost of removing it is one alias refresh.
+    static func forgetAllAccounts(in userDefaults: UserDefaults) {
+        for key in userDefaults.dictionaryRepresentation().keys where key.hasPrefix(keyPrefix) {
+            userDefaults.removeObject(forKey: key)
+        }
+    }
+
     private static func key(for accountEmail: String) -> String {
         keyPrefix + EmailNormalizer.normalize(accountEmail)
     }

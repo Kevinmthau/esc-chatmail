@@ -308,7 +308,7 @@ final class InitialSyncOrchestrator {
             return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
         }
 
-        let installTimestamp = UserDefaults.standard.double(forKey: "installTimestamp")
+        let installTimestamp = UserDefaults.standard.double(forKey: SyncConfig.mailboxStartTimestampKey)
         if installTimestamp > 0 {
             log.info("Fetching messages after install time: \(Date(timeIntervalSince1970: installTimestamp)), capped to the initial-sync window")
         } else {

@@ -30,13 +30,14 @@ struct SyncTimeCalculator {
         /// Configuration for initial sync
         /// Uses install timestamp only, with 30-day fallback, capped at 30 days.
         ///
-        /// Sign-out leaves `installTimestamp` in place: it marks the app's
-        /// first launch (written by `FreshInstallHandler`), not the sign-in.
-        /// Uncapped, the install branch therefore made every re-initial sync
-        /// on a long-lived install (sign-out/sign-in, store reset, missing
-        /// cursor) re-list and full-fetch the whole multi-year window in one
-        /// run. The cap bounds that run; resetting the timestamp at sign-out
-        /// would not cover a store reset or a missing cursor. Callers freeze
+        /// `installTimestamp` is the mailbox's start
+        /// (`SyncConfig.mailboxStartTimestampKey`): the first launch, then
+        /// every wipe of the local mailbox and every interactive sign-in onto
+        /// an empty store, so a sign-in after a sign-out lists only mail from
+        /// the sign-in on. A store reset or a missing cursor moves nothing,
+        /// and uncapped, the install branch made such a re-initial sync
+        /// re-list and full-fetch everything since the mailbox began in one
+        /// run. The cap bounds that run. Callers freeze
         /// the result at a run's first attempt (`SyncWindowCheckpointStore`),
         /// so a retry never slides the lower bound past mail it still owes.
         static let initialSync = Config(
@@ -97,7 +98,7 @@ struct SyncTimeCalculator {
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let now = now ?? Date().timeIntervalSince1970
-        let install = installTimestamp ?? defaults.double(forKey: "installTimestamp")
+        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
 
         // Try last successful sync first (if configured)
         if config.useLastSyncAsPrimary {
@@ -169,7 +170,7 @@ struct SyncTimeCalculator {
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let config = Config.historyRecovery
-        let install = installTimestamp ?? defaults.double(forKey: "installTimestamp")
+        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
         let now = now ?? Date().timeIntervalSince1970
         guard let newestReceivedInternalDate else {
             if install > 0 {

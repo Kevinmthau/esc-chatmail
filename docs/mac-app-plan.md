@@ -98,7 +98,7 @@ Already decided: SwiftUI on AppKit (2026-11-09). Items 1 and 2 are decided and a
 5. **The From: alias picker: not built. Decided 2026-11-11.** Kevin asked for whichever option was simpler, and that is no picker on either platform.
    - The Mac sends as iOS does today. A new message goes out from the signed-in Gmail address. A reply goes out from the send-as alias the mail was addressed to (`ReplyFromAddressResolver`).
    - The picker is the one web feature that goes away with `web/`. Revisit it only if the two weeks of daily use in Phase 3 show it is missed.
-6. **Older mail: none. Decided 2026-11-11.** A new Mac install starts at the install time, as iOS does, with about five minutes of mail. Nothing loads older mail.
+6. **Older mail: none. Decided 2026-11-11.** A new Mac install starts at the install time, as iOS does, with about five minutes of mail. Nothing loads older mail. Since 2026-11-16 the start is the sign-in, not the install, on both platforms: a new install and a sign-in after a sign-out both start with about five minutes of mail from the moment of signing in.
 7. **Closing the window quits the app. Decided 2026-11-11.** The alternative was to keep running and syncing like Mail. See "Closing the window" in Phase 2.
 8. **The first click in an inactive window only activates it. Decided 2026-11-11.** A click that brings the window forward does not follow a link in the reader. See the gotchas under PR E.
 

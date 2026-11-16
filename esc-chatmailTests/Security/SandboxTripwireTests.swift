@@ -23,6 +23,8 @@ final class SandboxTripwireTests: XCTestCase {
             "guard SandboxTripwire.permitsDestructiveCleanup(.freshInstallAttachmentFiles) else {",
         .accountRemovalAttachmentFiles:
             "try SandboxTripwire.ensureDestructiveCleanupPermitted(.accountRemovalAttachmentFiles)",
+        .accountRemovalMailDerivedCaches:
+            "guard SandboxTripwire.permitsDestructiveCleanup(.accountRemovalMailDerivedCaches) else {",
         .accountRemovalMessageBodies:
             "try SandboxTripwire.ensureDestructiveCleanupPermitted(.accountRemovalMessageBodies)",
         .orphanedMessageBodySweep:
@@ -108,6 +110,7 @@ final class SandboxTripwireTests: XCTestCase {
     // Revert-check: fails if any guard statement in expectedGuardStatements is
     // removed from FreshInstallHandler.clearAttachmentFiles,
     // AuthSession.deleteAttachmentFilesFromDisk,
+    // AuthSession.clearMailDerivedCaches,
     // HTMLContentHandler.deleteAllHTMLFromClosedAccount,
     // HTMLContentHandler.cleanupOrphanedFiles or
     // AttachmentDownloader.cleanupOrphanedFiles, moved below the function's

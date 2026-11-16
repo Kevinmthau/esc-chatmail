@@ -49,7 +49,7 @@ struct ReconciliationPhase: SyncPhase {
 
         context.reportProgress(0, status: "Checking for missed messages...", phase: self)
 
-        let installTimestamp = defaults.double(forKey: "installTimestamp")
+        let installTimestamp = defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
 
         // Check for missed messages
         let missedResult = await reconciliation.checkForMissedMessagesWithDiagnostics(

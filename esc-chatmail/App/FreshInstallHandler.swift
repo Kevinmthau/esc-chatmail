@@ -14,7 +14,7 @@ struct FreshInstallHandler {
     private let handleDetectedFreshInstall: (@Sendable (Bool) async -> Void)?
 
     private static let installationKey = "AppInstallationID"
-    private static let installTimestampKey = "installTimestamp"
+    private static let installTimestampKey = SyncConfig.mailboxStartTimestampKey
     private static let isFreshInstallKey = "isFreshInstall"
 
     /// Consecutive indeterminate keychain reads, accumulated across bootstrap
@@ -179,6 +179,10 @@ struct FreshInstallHandler {
         await clearCoreData()
         await clearCaches()
         clearAttachmentFiles()
+        // The same remnants a sign-out removes. An iOS reinstall starts with
+        // an empty container, so this matters where the container outlived
+        // the installation it belonged to.
+        await AuthSession.clearMailDerivedCaches()
 
         Log.info("Fresh install cleanup complete", category: .auth)
     }
