@@ -165,7 +165,7 @@ struct ChatReplyBar: View {
     
     @ViewBuilder
     private var textField: some View {
-        PlaceholderTextField(text: $replyText, placeholder: "Email")
+        PlaceholderTextField(text: $replyText, placeholder: MessageFieldPolicy.placeholder)
             .focused(focus.fieldBinding)
             .disabled(!ChatReplyBarControlPolicy.isTextFieldEnabled(isSending: isSending))
     }
@@ -218,7 +218,7 @@ struct ChatReplyBar: View {
         MacChatReplyBarLayout(
             metrics: metrics,
             text: $replyText,
-            placeholder: "Email",
+            placeholder: MessageFieldPolicy.placeholder,
             showsSendArrow: ChatComposerPolicy.showsSendArrow(
                 replyText: replyText,
                 hasAttachments: !attachments.isEmpty

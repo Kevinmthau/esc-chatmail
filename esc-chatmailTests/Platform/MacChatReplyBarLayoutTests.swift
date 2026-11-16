@@ -4,8 +4,9 @@ import SwiftUI
 import XCTest
 @testable import esc_chatmail
 
-/// The height of the Mac's floating composer (`MacChatReplyBarLayout`, `MacReplyIndicator`).
-/// Mac only, so it runs in `Mac.xctestplan`.
+/// The height of the Mac's floating composer (`MacChatReplyBarLayout`, `MacReplyIndicator`),
+/// and the name its field has for VoiceOver and Voice Control. Mac only, so it runs in
+/// `Mac.xctestplan`.
 ///
 /// The composer's measured height is the transcript's bottom inset
 /// (`ChatBottomInsetPolicy`). It changes when the draft does something the reader can see (a
@@ -117,6 +118,27 @@ final class MacChatReplyBarLayoutTests: XCTestCase {
         )
     }
 
+    // MARK: - The field's name
+
+    /// The field is named, for VoiceOver and Voice Control, by the word drawn over it. That
+    /// word is hidden from accessibility, so the name is all either of them has: the field was
+    /// named "Message" while it showed another word.
+    ///
+    /// Revert-check: passing `accessibilityLabel: "Message"` to `MacReplyTextField` in
+    /// `MacChatReplyBarLayout.field` makes this fail.
+    func testField_isNamedByTheWordItShows() throws {
+        let host = MacOffscreenHost(
+            window: try makeTestHostWindow(),
+            size: CGSize(width: 520, height: 400),
+            rootView: composer(text: "", showsSendArrow: false, placeholder: "A word of the test's")
+        )
+        defer { host.close() }
+
+        let textView = try XCTUnwrap(host.waitForView(MacReplyTextView.self))
+
+        XCTAssertEqual(textView.accessibilityLabel(), "A word of the test's")
+    }
+
     // MARK: - Measuring
 
     private func indicator(_ header: ReplyIndicatorPolicy.Header) -> MacReplyIndicator {
@@ -135,11 +157,28 @@ final class MacChatReplyBarLayoutTests: XCTestCase {
         showsSendArrow: Bool,
         header: ReplyIndicatorPolicy.Header? = nil
     ) -> CGFloat {
+        let host = NSHostingView(
+            rootView: composer(text: text, showsSendArrow: showsSendArrow, header: header)
+        )
+        host.frame = NSRect(x: 0, y: 0, width: 520, height: 400)
+        host.layoutSubtreeIfNeeded()
+        return host.fittingSize.height
+    }
+
+    /// The composer as `ChatReplyBar` builds it, 520 points wide, with empty slots for the
+    /// attachment strip and the "+" menu. It shows the app's own word unless a test gives
+    /// another.
+    private func composer(
+        text: String,
+        showsSendArrow: Bool,
+        header: ReplyIndicatorPolicy.Header? = nil,
+        placeholder: String = MessageFieldPolicy.placeholder
+    ) -> some View {
         let metrics = self.metrics
-        let root = MacChatReplyBarLayout(
+        return MacChatReplyBarLayout(
             metrics: metrics,
             text: .constant(text),
-            placeholder: "Email",
+            placeholder: placeholder,
             showsSendArrow: showsSendArrow,
             isSendEnabled: showsSendArrow,
             focusBridge: ReplyFieldFocusBridge(),
@@ -163,10 +202,6 @@ final class MacChatReplyBarLayoutTests: XCTestCase {
             }
         )
         .frame(width: 520)
-        let host = NSHostingView(rootView: root)
-        host.frame = NSRect(x: 0, y: 0, width: 520, height: 400)
-        host.layoutSubtreeIfNeeded()
-        return host.fittingSize.height
     }
 }
 #endif

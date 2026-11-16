@@ -16,11 +16,15 @@ struct PlaceholderTextField: View {
     var body: some View {
         ZStack(alignment: .leading) {
             if text.isEmpty {
+                // The field below is named by this word, so the word drawn here is hidden
+                // from accessibility: left in, VoiceOver read it as text of its own, and then
+                // a text field with no name.
                 Text(placeholder)
                     .foregroundColor(Color.placeholderText)
                     .font(textFont)
                     .padding(.horizontal, horizontalPadding)
                     .padding(.vertical, verticalPadding)
+                    .accessibilityHidden(true)
             }
 
             TextField("", text: $text, axis: .vertical)
@@ -28,6 +32,7 @@ struct PlaceholderTextField: View {
                 .padding(.horizontal, horizontalPadding)
                 .padding(.vertical, verticalPadding)
                 .lineLimit(lineLimit)
+                .accessibilityLabel(placeholder)
         }
         .background(backgroundColor)
         .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
@@ -37,11 +42,11 @@ struct PlaceholderTextField: View {
 
 #Preview {
     VStack(spacing: 20) {
-        PlaceholderTextField(text: .constant(""), placeholder: "Email")
-        PlaceholderTextField(text: .constant("Hello world"), placeholder: "Email")
+        PlaceholderTextField(text: .constant(""), placeholder: MessageFieldPolicy.placeholder)
+        PlaceholderTextField(text: .constant("Hello world"), placeholder: MessageFieldPolicy.placeholder)
         PlaceholderTextField(
             text: .constant("A longer message that\nspans multiple lines"),
-            placeholder: "Email"
+            placeholder: MessageFieldPolicy.placeholder
         )
     }
     .padding()
