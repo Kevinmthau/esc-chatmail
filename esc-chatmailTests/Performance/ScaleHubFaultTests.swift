@@ -17,6 +17,14 @@ import CoreData
 /// Neither is a timing, and neither can be seen on an in-memory store or on a
 /// store of a few hundred rows.
 ///
+/// The context under test keeps what it registers (`makeContextUnderTest`).
+/// A context holds a row it has not changed weakly, so after the save a row
+/// nothing else holds is gone, with whatever its relationships had read:
+/// measured on an ordinary context, a label removal and a deletion that each
+/// read a hub left 0 objects registered and both relationships reading as
+/// untouched faults. Keeping the rows is the only difference from a sync
+/// run's context, and it changes what the context forgets, not what it reads.
+///
 /// KNOWN GAPS. Today every one of these writes reads a hub, so the assertions
 /// that say it must not are wrapped in `XCTExpectFailure`, each naming what
 /// was measured (iOS 27.0 simulator, 2026-11-16). `XCTExpectFailure` is
@@ -35,8 +43,8 @@ final class ScaleHubFaultTests: XCTestCase {
     /// Far above what one message needs and far below either hub (97,031
     /// and 120,000 members), so the bound says "in proportion to the write"
     /// without pinning a count that moves with every rollup change. Of the
-    /// 217,062 objects the new-message write leaves registered today, 31 are
-    /// not a hub's members.
+    /// 217,062 objects the new-message write registers today, 29 are not a
+    /// hub's members.
     private static let registeredObjectBound = 1_000
 
     /// Someone who writes to the user now and then, not one of the 25 people
@@ -49,18 +57,6 @@ final class ScaleHubFaultTests: XCTestCase {
         let inboxMembersAreFault: Bool
         let selfParticipationsAreFault: Bool
         let registeredObjectCount: Int
-    }
-
-    /// The INBOX label and the user's own Person in the context under test.
-    /// Unchecked: the rows are touched only inside that context's `perform`.
-    private final class Hubs: @unchecked Sendable {
-        let inbox: Label
-        let me: Person
-
-        init(inbox: Label, me: Person) {
-            self.inbox = inbox
-            self.me = me
-        }
     }
 
     private var stack: TestCoreDataStack!
@@ -93,19 +89,30 @@ final class ScaleHubFaultTests: XCTestCase {
         }
     }
 
-    /// The two hub rows of a context that has read nothing else, held for the
-    /// length of the test. Held, because a context keeps only weak references
-    /// to what it has registered: after the save nothing else holds a label
-    /// that only a history record touched, the row is dropped with whatever
-    /// its relationship had read, and a second look finds a new row whose
-    /// relationship is a fault again. Measured here before the rows were held:
-    /// the label removal and the deletion both read the hubs and both left
-    /// the context with 0 registered objects.
-    ///
-    /// Holding a row does not read its relationships, which the first two
-    /// assertions say.
-    private func holdHubs(in context: NSManagedObjectContext) async throws -> Hubs {
+    /// A context that has read nothing, as each sync run's is, and that keeps
+    /// every row it registers for as long as it lives. Without that, what
+    /// `state(of:)` reads after the save is only what something else still
+    /// holds: the count misses every row the write read and let go of, and a
+    /// hub row the write read is a new row by then, whose relationship is a
+    /// fault again.
+    private func makeContextUnderTest() -> NSManagedObjectContext {
+        let context = coreDataStack.newBackgroundContext()
+        context.performAndWait {
+            context.retainsRegisteredObjects = true
+        }
+        return context
+    }
+
+    /// Reads the context as the write and its save left it.
+    private func state(of context: NSManagedObjectContext) async throws -> ContextState {
         try await context.perform {
+            // Counted first: the two fetches below register a hub row the
+            // write never touched.
+            let registeredObjectCount = context.registeredObjects.count
+
+            // A fetch returns the row the context already holds, as the write
+            // left it, and a row the write never registered comes back with
+            // its relationships unread.
             let labelRequest = NSFetchRequest<Label>(entityName: "Label")
             labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
             let inbox = try XCTUnwrap(try context.fetch(labelRequest).first)
@@ -114,19 +121,10 @@ final class ScaleHubFaultTests: XCTestCase {
             personRequest.predicate = NSPredicate(format: "email == %@", Self.selfEmail)
             let me = try XCTUnwrap(try context.fetch(personRequest).first)
 
-            XCTAssertTrue(inbox.hasFault(forRelationshipNamed: "messages"))
-            XCTAssertTrue(me.hasFault(forRelationshipNamed: "messageParticipations"))
-            return Hubs(inbox: inbox, me: me)
-        }
-    }
-
-    /// Reads the context as the write and its save left it.
-    private func state(of context: NSManagedObjectContext, holding hubs: Hubs) async -> ContextState {
-        await context.perform {
-            ContextState(
-                inboxMembersAreFault: hubs.inbox.hasFault(forRelationshipNamed: "messages"),
-                selfParticipationsAreFault: hubs.me.hasFault(forRelationshipNamed: "messageParticipations"),
-                registeredObjectCount: context.registeredObjects.count
+            return ContextState(
+                inboxMembersAreFault: inbox.hasFault(forRelationshipNamed: "messages"),
+                selfParticipationsAreFault: me.hasFault(forRelationshipNamed: "messageParticipations"),
+                registeredObjectCount: registeredObjectCount
             )
         }
     }
@@ -143,6 +141,38 @@ final class ScaleHubFaultTests: XCTestCase {
         }
     }
 
+    // MARK: - The measure
+
+    /// The count is of everything the write registered, through any
+    /// relationship, and not only of what the two hubs hold: a write that
+    /// reads the largest chat's 20,000 messages is over the bound although it
+    /// reads neither hub. And a context that read neither hub says so.
+    ///
+    /// Revert-check: `retainsRegisteredObjects = true` in
+    /// `makeContextUnderTest`. The context then lets go of the conversation
+    /// after the save, and of its messages with it, and the count is of a
+    /// handful of rows.
+    func testRegisteredObjectCount_countsWhatAWriteReadThroughAnyRelationship() async throws {
+        let conversationID = manifest.largestConversationID
+        let messageCount = manifest.largestConversationMessageCount
+        let context = makeContextUnderTest()
+
+        try await context.perform {
+            let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+            request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+            let conversation = try XCTUnwrap(try context.fetch(request).first)
+            XCTAssertEqual(conversation.messages?.count, messageCount)
+            conversation.snippet = "A write that read the whole chat"
+        }
+        try await save(context)
+        let state = try await state(of: context)
+
+        XCTAssertGreaterThan(messageCount, Self.registeredObjectBound)
+        XCTAssertGreaterThan(state.registeredObjectCount, messageCount)
+        XCTAssertTrue(state.inboxMembersAreFault)
+        XCTAssertTrue(state.selfParticipationsAreFault)
+    }
+
     // MARK: - A new message
 
     /// The commonest write there is: an incremental sync that found one new
@@ -156,7 +186,7 @@ final class ScaleHubFaultTests: XCTestCase {
             saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
             conversationManager: ConversationManager(currentUserEmail: { Self.selfEmail })
         )
-        let context = coreDataStack.newBackgroundContext()
+        let context = makeContextUnderTest()
         let newMessage = GmailMessageBuilder()
             .withId("scale-new-message")
             .withThreadId("scale-new-thread")
@@ -167,10 +197,9 @@ final class ScaleHubFaultTests: XCTestCase {
             .withSnippet("New mail")
             .build()
 
-        let hubs = try await holdHubs(in: context)
         let report = try await persister.saveMessages([newMessage], myAliases: [Self.selfEmail], in: context)
         try await save(context)
-        let state = await state(of: context, holding: hubs)
+        let state = try await state(of: context)
 
         XCTAssertEqual(report.persistedIds, ["scale-new-message"])
         let stored = try XCTUnwrap(try storedMessage(id: "scale-new-message"))
@@ -183,7 +212,7 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTExpectFailure("inverse-tomany-hub-fault-tax: a new message reads all 120,000 of the user's participations") {
             XCTAssertTrue(state.selfParticipationsAreFault)
         }
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: one new message leaves 217,062 objects registered") {
+        XCTExpectFailure("inverse-tomany-hub-fault-tax: one new message registers 217,062 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
     }
@@ -194,8 +223,7 @@ final class ScaleHubFaultTests: XCTestCase {
     /// `HistoryProcessor.processLabelRemovals` and the save.
     func testRemovingInboxFromOneMessage_readsNeitherHubIntoTheSyncContext() async throws {
         let messageID = manifest.ordinaryConversationInboxMessageID
-        let context = coreDataStack.newBackgroundContext()
-        let hubs = try await holdHubs(in: context)
+        let context = makeContextUnderTest()
 
         try await HistoryProcessor(coreDataStack: coreDataStack).processLabelRemovals(
             [HistoryLabelRemoved(message: MessageListItem(id: messageID, threadId: nil), labelIds: ["INBOX"])],
@@ -204,7 +232,7 @@ final class ScaleHubFaultTests: XCTestCase {
             modificationTransaction: nil
         )
         try await save(context)
-        let state = await state(of: context, holding: hubs)
+        let state = try await state(of: context)
 
         let stored = try XCTUnwrap(try storedMessage(id: messageID))
         XCTAssertFalse(stored.labels.contains("INBOX"))
@@ -215,7 +243,7 @@ final class ScaleHubFaultTests: XCTestCase {
         // A label change has nothing to do with who is on the message, and
         // does not read the user's participations today either.
         XCTAssertTrue(state.selfParticipationsAreFault)
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: one label removal leaves 97,032 objects registered") {
+        XCTExpectFailure("inverse-tomany-hub-fault-tax: one label removal registers 97,040 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
     }
@@ -226,8 +254,7 @@ final class ScaleHubFaultTests: XCTestCase {
     /// `HistoryProcessor.processMessageDeletions` and the save.
     func testDeletingOneMessage_readsNeitherHubIntoTheSyncContext() async throws {
         let messageID = manifest.ordinaryConversationInboxMessageID
-        let context = coreDataStack.newBackgroundContext()
-        let hubs = try await holdHubs(in: context)
+        let context = makeContextUnderTest()
 
         try await HistoryProcessor(coreDataStack: coreDataStack).processMessageDeletions(
             [HistoryMessageDeleted(message: MessageListItem(id: messageID, threadId: nil))],
@@ -235,7 +262,7 @@ final class ScaleHubFaultTests: XCTestCase {
             in: context
         )
         try await save(context)
-        let state = await state(of: context, holding: hubs)
+        let state = try await state(of: context)
 
         XCTAssertNil(try storedMessage(id: messageID))
 
@@ -245,7 +272,11 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTExpectFailure("inverse-tomany-hub-fault-tax: deleting one message reads all of the user's participations") {
             XCTAssertTrue(state.selfParticipationsAreFault)
         }
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: one deletion leaves 217,031 objects registered") {
+        // 2,885 of them are members of neither hub: 2,841 messages and the
+        // rows of the message's other people. Which read brings those
+        // messages in was not looked into; the count before this context
+        // kept its rows (217,031) could not see them.
+        XCTExpectFailure("inverse-tomany-hub-fault-tax: one deletion registers 219,916 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
     }

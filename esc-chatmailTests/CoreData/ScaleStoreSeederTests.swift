@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import SQLite3
 @testable import esc_chatmail
 
 /// Pins the store the scale harness measures on, at a size the default plan
@@ -228,33 +229,59 @@ final class ScaleStoreSeederTests: XCTestCase {
         XCTAssertEqual(try count("Message", in: try template.makeStack().stack.viewContext), Self.shape.messageCount)
     }
 
+    /// The one number in the first row of what `sql` returns.
+    private func scalar(_ sql: String, in database: OpaquePointer?) throws -> Int {
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "\(sql): \(String(cString: sqlite3_errmsg(database)))"
+            ])
+        }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    /// How many rows of statistics SQLite holds for the store (`sqlite_stat1`,
+    /// which `ANALYZE` writes), or nil for a store with no such table. Read
+    /// on a connection of the test's own, because the table is SQLite's and
+    /// Core Data has no name for it.
+    private func statisticsRowCount(of stack: TestCoreDataStack) throws -> Int? {
+        let storeURL = try XCTUnwrap(
+            stack.persistentContainer.persistentStoreCoordinator.persistentStores.first?.url
+        )
+        var database: OpaquePointer?
+        defer { sqlite3_close(database) }
+        guard sqlite3_open_v2(storeURL.path, &database, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            throw CocoaError(.fileReadNoPermission, userInfo: [NSFilePathErrorKey: storeURL.path])
+        }
+        let tableCount = try scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1'", in: database
+        )
+        guard tableCount == 1 else { return nil }
+        return try scalar("SELECT COUNT(*) FROM sqlite_stat1", in: database)
+    }
+
     /// `.analyzed` gives the copy SQLite's statistics, and `.none` leaves it
     /// without the table, which is the state a new install is in.
     ///
-    /// Revert-check: the `ANALYZE` in `ScaleStoreTemplate.makeStack`.
+    /// What is asked is whether the statistics are there, not which plan
+    /// SQLite then picks. On a store this small that choice is the planner's
+    /// cost estimate, which another SQLite can make the other way, and this
+    /// suite runs in the default plan on whatever runtime CI has. What the
+    /// statistics do to a plan is `ScaleQueryPlanTests`' to say, at S2 size.
+    ///
+    /// Revert-check: the `ANALYZE` in `ScaleStoreTemplate.makeStack` (the
+    /// analyzed copy then has no table either).
     func testTemplate_analyzedCopyHasStatistics_plainCopyHasNone() throws {
         let template = ScaleStoreTemplate(shape: Self.shape)
 
-        func messageScans(_ statistics: ScaleStoreTemplate.Statistics) throws -> [String] {
-            let stack = try template.makeStack(statistics: statistics).stack
-            let context = stack.newBackgroundContext()
-            // Any fetch of messages by conversation: with statistics SQLite
-            // starts from the conversation, without them from the messages.
-            let plans = try SQLiteQueryPlanRecorder.record {
-                try context.performAndWait {
-                    let request = NSFetchRequest<Message>(entityName: "Message")
-                    request.predicate = NSPredicate(
-                        format: "conversation.id == %@", ScaleStoreSeeder.conversationID(at: 0) as CVarArg
-                    )
-                    request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: true)]
-                    request.fetchLimit = 10
-                    _ = try context.fetch(request)
-                }
-            }
-            return try XCTUnwrap(plans.first { $0.reads("ZMESSAGE") }).scans(of: "ZMESSAGE")
-        }
+        let plain = try template.makeStack(statistics: .none).stack
+        XCTAssertNil(try statisticsRowCount(of: plain))
 
-        XCTAssertEqual(try messageScans(.none).count, 1)
-        XCTAssertEqual(try messageScans(.analyzed), [])
+        let analyzed = try template.makeStack(statistics: .analyzed).stack
+        XCTAssertGreaterThan(try XCTUnwrap(try statisticsRowCount(of: analyzed)), 0)
+        // The copy still opens as the seeded store.
+        XCTAssertEqual(try count("Message", in: analyzed.viewContext), Self.shape.messageCount)
     }
 }
