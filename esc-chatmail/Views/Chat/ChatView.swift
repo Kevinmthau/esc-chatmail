@@ -169,21 +169,20 @@ struct ChatView: View {
         }
         // On the Mac a sheet is as large as its content asks to be, and these
         // ask for nothing, so each destination names its size (`MacSheetSize`).
-        .appSheet(item: activeDestinationBinding, mac: \.macSheetChrome, onDismiss: {
-            dismissActiveDestination(presentationDidEnd: true)
-        }) { destination in
+        //
+        // The sheet on screen is recorded from `onItemShown` and from nothing else, never
+        // from an `onAppear` of the content: the Mac can give an open sheet's window to the
+        // next destination (Participants, then New Contact) with no `onDismiss` and without
+        // running such an `onAppear` again. The chat then still took Participants for the
+        // sheet on screen, and `dismissActiveDestination` read every dismissal of New Contact
+        // as a replacement's: neither of its buttons closed it (`View.onSheetItemShown`).
+        .appSheet(
+            item: activeDestinationBinding,
+            mac: \.macSheetChrome,
+            onDismiss: { dismissActiveDestination(presentationDidEnd: true) },
+            onItemShown: { presentedSheetDestination = $0 }
+        ) { destination in
             destinationSheet(destination)
-                .onAppear {
-                    presentedSheetDestination = destination
-                }
-                // The Mac can give an open sheet's window to the next destination
-                // (Participants, then New Contact) with no `onDismiss` and without running
-                // the `onAppear` above again. The chat then still took Participants for the
-                // sheet on screen, and `dismissActiveDestination` read every dismissal of
-                // New Contact as a replacement's: neither of its buttons closed it.
-                .onMacSheetItemHandOver(to: destination.id) {
-                    presentedSheetDestination = destination
-                }
         }
         .alert(item: $viewModel.contactManager.contactActionAlert) { alert in
             switch alert.kind {
@@ -536,9 +535,11 @@ struct ChatView: View {
         // the outgoing sheet, so leave the incoming destination's state intact.
         // This is only right while `presentedSheetDestination` is the sheet on
         // screen: stale, it refuses the dismissal of the sheet that is up, which
-        // then nothing closes (`onMacSheetItemHandOver`).
-        if let pendingDestination = activeDestination,
-           pendingDestination.id != dismissedDestination?.id {
+        // then nothing closes (`ChatSheetDismissalPolicy`).
+        guard ChatSheetDismissalPolicy.clearsDestinations(
+            pendingDestinationID: activeDestination?.id,
+            dismissedDestinationID: dismissedDestination?.id
+        ) else {
             return
         }
 
