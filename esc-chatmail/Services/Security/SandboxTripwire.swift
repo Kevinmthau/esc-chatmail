@@ -27,6 +27,10 @@ enum SandboxTripwire {
         /// Account-removal cleanup of `Application Support/Attachments`,
         /// `Application Support/Previews` and the legacy attachment cache.
         case accountRemovalAttachmentFiles = "AuthSession.deleteAttachmentFilesFromDisk"
+        /// Account-removal and fresh-install cleanup of what the mailbox left
+        /// outside the store and the attachment folders: `Documents/Avatars`,
+        /// the remote-image cache, the URL cache and the web views' data.
+        case accountRemovalMailDerivedCaches = "AuthSession.clearMailDerivedCaches"
         /// Account-removal cleanup of everything in `Documents/Messages`. It
         /// runs before `accountRemovalAttachmentFiles` in every account-removal
         /// cleanup, so guarding that one alone would still empty the folder.
@@ -43,7 +47,7 @@ enum SandboxTripwire {
             switch self {
             case .freshInstallAttachmentFiles, .accountRemovalAttachmentFiles, .orphanedAttachmentFileSweep:
                 return .attachment
-            case .accountRemovalMessageBodies, .orphanedMessageBodySweep:
+            case .accountRemovalMessageBodies, .orphanedMessageBodySweep, .accountRemovalMailDerivedCaches:
                 return .general
             }
         }

@@ -2,6 +2,7 @@ import CoreData
 import Foundation
 import GoogleSignIn
 import Security
+import WebKit
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -89,6 +90,14 @@ enum AccountWorkReopenOutcome: Hashable, CaseIterable, Sendable {
     /// transition owns the teardown, including credential cleanup, so this one
     /// must unwind without duplicating its work.
     case supersededByAccountRemoval
+}
+
+/// How a session reached `AuthSession.prepareLocalStoreForAuthenticatedAccount`.
+enum AuthenticatedAccountEntry: Equatable, Sendable {
+    /// The user signed in just now, through Google's sign-in.
+    case interactiveSignIn
+    /// A launch restored the session of an earlier sign-in.
+    case restoredSession
 }
 
 struct LocalMailboxStoreInspection: Equatable, Sendable {
@@ -375,7 +384,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             try await ProductionLocalMailboxStoreInspector.inspect()
         },
         deleteAttachmentFiles: @escaping @Sendable () async throws -> Void = {
+            // The throwing deletion first: on the Mac its tripwire refusal
+            // must fail the cleanup before anything else is removed.
             try AuthSession.deleteAttachmentFilesFromDisk()
+            await AuthSession.clearMailDerivedCaches()
         },
         clearAttachmentCache: @escaping @Sendable () async -> Void = {
             await AttachmentCacheActor.shared.clearCache(level: .aggressive)
@@ -752,7 +764,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         // and, when necessary, replacing a previous account's
                         // persistent store. Never publish authenticated UI on
                         // top of mismatched local data.
-                        try await self.prepareLocalStoreForAuthenticatedAccount(result.user.profile?.email)
+                        try await self.prepareLocalStoreForAuthenticatedAccount(
+                            result.user.profile?.email,
+                            entry: .interactiveSignIn
+                        )
                         guard !self.isAccountRemovalRequested else {
                             throw CancellationError()
                         }
@@ -918,6 +933,77 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Removes what the mailbox left on disk outside the store, the message
+    /// bodies and the attachment folders: correspondents' photos
+    /// (`Documents/Avatars`, whose file names are made from their addresses),
+    /// images downloaded for mail (`Caches/ImageCache`), cached responses of
+    /// the app's requests, and what the web views kept of the remote content
+    /// in messages. Before 2026-11-16 a sign-out left all four.
+    ///
+    /// Best effort and never thrown: each is a cache the next account rebuilds,
+    /// and none is read as another account's mail. The writers of the avatar
+    /// files are drained by `clearParticipantCaches` before this runs. The
+    /// image cache has no account fence, so an image load still in flight can
+    /// write one file after this returns; its cache expires files by age.
+    nonisolated static func clearMailDerivedCaches() async {
+        #if os(macOS)
+        // Outside the App Sandbox `Documents/Avatars` and the caches folder
+        // are the user's own (docs/mac-app-plan.md, PR C).
+        guard SandboxTripwire.permitsDestructiveCleanup(.accountRemovalMailDerivedCaches) else {
+            return
+        }
+        #endif
+        await AvatarStorage.shared.deleteAllAvatars()
+        await EnhancedImageCache.shared.clearAll()
+        URLCache.shared.removeAllCachedResponses()
+        await clearWebViewData()
+        #if os(macOS)
+        // The vCard last handed to Contacts holds one correspondent's name
+        // and address (`ContactsAppLink.writeNewContactCard`).
+        try? FileManager.default.removeItem(
+            at: FileManager.default.temporaryDirectory
+                .appendingPathComponent(ContactsAppLink.newContactCardsFolderName, isDirectory: true)
+        )
+        #endif
+    }
+
+    /// How long the cleanup waits for WebKit to remove the web views' data.
+    /// On the iOS 27.0 simulator the removal took a third of a second.
+    private static let webViewDataRemovalTimeout: TimeInterval = 5
+
+    /// Every web view uses the default, persistent data store, so remote
+    /// images and cookies of the mail that was read stay in it.
+    ///
+    /// The wait has a bound. WebKit answers from its own processes and
+    /// nothing bounds that answer, and the durable cleanup awaits this with
+    /// the auth-transition gate held and its reset marker still to hand over:
+    /// an answer that never came would leave the sign-out unfinished and
+    /// every later sign-in waiting on the gate, which is why
+    /// `signOutAndDisconnect` does not await `GIDSignIn.disconnect` either.
+    /// The fresh-install cleanup awaits it before the app has started. Past
+    /// the bound the cleanup goes on and the removal is left to finish by
+    /// itself: what it removes then is a cache.
+    private static func clearWebViewData() async {
+        let finished = await withSoftTimeout(seconds: webViewDataRemovalTimeout) {
+            await removeAllWebViewData()
+            return true
+        }
+        if finished == nil {
+            Log.warning(
+                "Web view data removal did not finish in time; continuing the cleanup without it",
+                category: .auth
+            )
+        }
+    }
+
+    @MainActor
+    private static func removeAllWebViewData() async {
+        await WKWebsiteDataStore.default().removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast
+        )
+    }
+
     nonisolated static func googleTokenRevocationRequest(for token: String) -> URLRequest {
         var request = URLRequest(url: URL(string: "https://oauth2.googleapis.com/revoke")!)
         request.httpMethod = "POST"
@@ -1059,7 +1145,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// Ensures authenticated UI can never be published over another
     /// account's surviving local store. The caller owns the account-transition
     /// lease for this entire operation.
-    func prepareLocalStoreForAuthenticatedAccount(_ accountEmail: String?) async throws {
+    ///
+    /// It also decides where the mailbox starts. A store it resets starts now
+    /// (`performDurableLocalCleanup`). A store an interactive sign-in finds
+    /// empty starts now as well: the sign-out before it moved the start to the
+    /// sign-out, and mail that arrived while signed out is not brought back.
+    /// A restored session that finds the store empty moves nothing: its
+    /// sign-in already set the start, and the launch after a sign-in whose
+    /// first sync saved nothing must not skip the mail in between.
+    func prepareLocalStoreForAuthenticatedAccount(
+        _ accountEmail: String?,
+        entry: AuthenticatedAccountEntry = .restoredSession
+    ) async throws {
         guard let normalizedEmail = Self.normalizedLoginHint(accountEmail) else {
             throw AuthError.missingAccountEmail
         }
@@ -1074,6 +1171,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             throw AuthError.localAccountIsolationFailed(error)
         }
         var resetRequired = hasCleanupRequirement
+        var foundEmptyStore = false
         if !resetRequired {
             let storeInspection: LocalMailboxStoreInspection
             do {
@@ -1091,6 +1189,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // publish under the new login.
             if storeInspection.accountEmails.isEmpty {
                 resetRequired = storeInspection.hasAccountScopedMailboxData
+                foundEmptyStore = !resetRequired
             } else {
                 resetRequired = storeInspection.accountEmails.contains {
                     $0.caseInsensitiveCompare(normalizedEmail) != .orderedSame
@@ -1098,7 +1197,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         }
 
-        guard resetRequired else { return }
+        guard resetRequired else {
+            if foundEmptyStore, entry == .interactiveSignIn {
+                restartMailboxStartTime()
+            }
+            return
+        }
 
         // Persist the requirement in Keychain before touching the store. A
         // process crash or reset failure therefore cannot let a later sign-in
@@ -1518,6 +1622,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // account's recovery windows or continuation cursor.
         clearAccountScopedSyncDefaults()
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
+        // The mailbox that started at the old timestamp is gone. Whatever is
+        // synced into the empty store next starts here, not at the app's first
+        // launch: left in place, the old start let the next sign-in's initial
+        // sync list up to `SyncConfig.initialSyncMaxWindow` of the mail this
+        // cleanup just removed.
+        restartMailboxStartTime()
         if let removalRequest {
             // An earlier removal can complete its destructive work while a
             // later removal remains queued. The shared marker belongs to both;
@@ -1867,11 +1977,31 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// retry. A recovery that then finds no `lastSuccessfulSyncTime` starts at
     /// the newest received row, not at install
     /// (`SyncTimeCalculator.historyRecoveryInstallBranchStartTime`).
+    ///
+    /// The missed-message cursor goes too. It holds the `after:` query of the
+    /// window it was paging and stays valid for a day, so one left behind was
+    /// resumed by the next sign-in's first reconciliation, which listed the
+    /// old window and fetched every message of it as missing: mail from
+    /// before the sign-in, back in a mailbox that was wiped. Dropping it on a
+    /// store-preserving path costs the rest of one capped window, which the
+    /// next reconciliation lists again from its start.
     private func clearAccountScopedSyncDefaults() {
         userDefaults.removeObject(forKey: SyncConfig.consecutiveFailuresKey)
         userDefaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
         userDefaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         userDefaults.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
+        userDefaults.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
+        SendAsAliasRefreshPolicy.forgetAllAccounts(in: userDefaults)
+    }
+
+    /// Moves the mailbox's start to now (`SyncConfig.mailboxStartTimestampKey`).
+    /// Only for a store that holds no mailbox: moved over a retained one, it
+    /// would make a history recovery skip the mail between the old start and
+    /// now. So it is called where the store was just wiped or found empty,
+    /// never from `clearAccountScopedSyncDefaults`, which also runs on the
+    /// paths that keep the store for a same-account retry.
+    private func restartMailboxStartTime() {
+        userDefaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.mailboxStartTimestampKey)
     }
 
     private var isAccountRemovalRequested: Bool {

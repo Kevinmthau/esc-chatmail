@@ -1931,6 +1931,207 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(resetScript.attemptCount, 0)
     }
 
+    // MARK: - Mail-derived caches
+
+    // Revert-check: fails if `AuthSession.clearWebViewData` awaits
+    // `removeAllWebViewData()` directly, in place of through
+    // `withSoftTimeout`, or if WebKit's removal is called from anywhere else.
+    // The durable cleanup awaits that removal with the auth-transition gate
+    // held and its reset marker still to hand over, and nothing bounds
+    // WebKit's answer: one that never came would leave the sign-out
+    // unfinished and every later sign-in waiting on the gate.
+    // HONEST SCOPE: this reads source text. No test asks WebKit to remove
+    // anything or makes it stall; `AsyncTimeoutTests` pins that
+    // `withSoftTimeout` returns at its bound over work that has not finished.
+    func testClearWebViewData_webKitRemoval_isAwaitedThroughASoftTimeout() throws {
+        let code = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("//") }
+
+        let boundedWait = try XCTUnwrap(code.firstIndex(
+            of: "let finished = await withSoftTimeout(seconds: webViewDataRemovalTimeout) {"
+        ))
+        XCTAssertEqual(code[boundedWait - 1], "private static func clearWebViewData() async {")
+        XCTAssertEqual(code[boundedWait + 1], "await removeAllWebViewData()")
+        XCTAssertEqual(
+            code.filter { $0.contains("removeAllWebViewData()") },
+            ["await removeAllWebViewData()", "private static func removeAllWebViewData() async {"],
+            "WebKit's removal must be awaited only inside the bounded wait"
+        )
+
+        let removal = try XCTUnwrap(code.firstIndex(of: "private static func removeAllWebViewData() async {"))
+        XCTAssertEqual(code[removal + 1], "await WKWebsiteDataStore.default().removeData(")
+        XCTAssertEqual(
+            code.filter { $0.contains("WKWebsiteDataStore") }.count,
+            2,
+            "The web views' data store must be touched only in removeAllWebViewData()"
+        )
+    }
+
+    // MARK: - Mailbox start time
+
+    // Revert-check: fails if `performDurableLocalCleanup` stops calling
+    // `restartMailboxStartTime()`. With the old start left in place, the next
+    // sign-in's initial sync listed up to 30 days of the mail the sign-out
+    // had just removed.
+    func testSignOut_wipedMailbox_restartsMailboxStartTime() async {
+        let defaults = makeDefaults()
+        let oldStart = Date().timeIntervalSince1970 - 400 * 86_400
+        defaults.set(oldStart, forKey: SyncConfig.mailboxStartTimestampKey)
+        let session = makeAuthSession(userDefaults: defaults)
+        let signOutTime = Date().timeIntervalSince1970
+
+        await session.signOut()
+
+        XCTAssertGreaterThanOrEqual(
+            defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            signOutTime,
+            "A wiped mailbox must not keep the start of the one that was removed"
+        )
+        XCTAssertGreaterThanOrEqual(
+            SyncTimeCalculator.calculateStartTime(config: .initialSync, defaults: defaults),
+            signOutTime - SyncConfig.timestampBufferSeconds,
+            "The next initial sync must list nothing from before the sign-out"
+        )
+    }
+
+    // Revert-check: fails if `prepareLocalStoreForAuthenticatedAccount` stops
+    // calling `restartMailboxStartTime()` for an interactive sign-in that finds
+    // the store empty. The start then stays at the sign-out (or at the first
+    // launch of a new install), and the mail that arrived while signed out is
+    // brought in.
+    func testAccountPreparation_interactiveSignInFindsEmptyStore_restartsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        let signedOutAt = Date().timeIntervalSince1970 - 3 * 86_400
+        defaults.set(signedOutAt, forKey: SyncConfig.mailboxStartTimestampKey)
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { [] }
+        )
+        let signInTime = Date().timeIntervalSince1970
+
+        try await session.prepareLocalStoreForAuthenticatedAccount(
+            "person@example.com",
+            entry: .interactiveSignIn
+        )
+
+        XCTAssertEqual(resetScript.attemptCount, 0, "An empty store needs no reset")
+        XCTAssertGreaterThanOrEqual(
+            defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            signInTime,
+            "A sign-in onto an empty store starts the mailbox at the sign-in"
+        )
+        XCTAssertGreaterThanOrEqual(
+            SyncTimeCalculator.calculateStartTime(config: .initialSync, defaults: defaults),
+            signInTime - SyncConfig.timestampBufferSeconds,
+            "The initial sync must list nothing from the days signed out"
+        )
+    }
+
+    // Revert-check: fails if the `entry == .interactiveSignIn` condition is
+    // dropped from `prepareLocalStoreForAuthenticatedAccount`. A launch after
+    // a sign-in whose first sync saved nothing finds the store empty too, and
+    // moving the start there skips the mail since that sign-in.
+    func testAccountPreparation_restoredSessionFindsEmptyStore_keepsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        let signedInAt = Date().timeIntervalSince1970 - 86_400
+        defaults.set(signedInAt, forKey: SyncConfig.mailboxStartTimestampKey)
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            fetchStoredAccountEmails: { [] }
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertEqual(defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), signedInAt)
+    }
+
+    // Revert-check: fails if `prepareLocalStoreForAuthenticatedAccount` moves
+    // the start without `foundEmptyStore`. Over a retained mailbox a moved
+    // start is the floor of history recovery, which would then skip the mail
+    // between the old start and the sign-in.
+    func testAccountPreparation_interactiveSignInKeepsMatchingStore_keepsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        let mailboxStart = Date().timeIntervalSince1970 - 90 * 86_400
+        defaults.set(mailboxStart, forKey: SyncConfig.mailboxStartTimestampKey)
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            fetchStoredAccountEmails: { ["person@example.com"] }
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount(
+            "person@example.com",
+            entry: .interactiveSignIn
+        )
+
+        XCTAssertEqual(defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), mailboxStart)
+    }
+
+    // Revert-check: fails if `performDurableLocalCleanup` stops calling
+    // `restartMailboxStartTime()`. A restored session takes this path too, so
+    // the reset itself has to move the start: the entry does not.
+    func testAccountPreparation_restoredSessionReplacesForeignStore_restartsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        defaults.set(Date().timeIntervalSince1970 - 90 * 86_400, forKey: SyncConfig.mailboxStartTimestampKey)
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { ["first@example.com"] }
+        )
+        let resetTime = Date().timeIntervalSince1970
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("second@example.com")
+
+        XCTAssertEqual(resetScript.attemptCount, 1)
+        XCTAssertGreaterThanOrEqual(
+            defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            resetTime
+        )
+    }
+
+    // Revert-check: fails if `clearAccountScopedSyncDefaults()` stops removing
+    // `SyncConfig.missedMessageReconciliationCursorKey`. The cursor holds the
+    // old window's `after:` query and is valid for a day, so the next
+    // sign-in's first reconciliation resumed it and fetched that window's
+    // mail as missing.
+    func testSignOut_pendingMissedMessageCursor_isRemoved() async {
+        let defaults = makeDefaults()
+        defaults.set(Data("cursor".utf8), forKey: SyncConfig.missedMessageReconciliationCursorKey)
+        let session = makeAuthSession(userDefaults: defaults)
+
+        await session.signOut()
+
+        XCTAssertNil(
+            defaults.object(forKey: SyncConfig.missedMessageReconciliationCursorKey),
+            "A sign-out must not leave a window of the old mailbox for the next sign-in to resume"
+        )
+    }
+
+    // Revert-check: fails if `clearAccountScopedSyncDefaults()` stops calling
+    // `SendAsAliasRefreshPolicy.forgetAllAccounts(in:)`. The key is named
+    // after the account's address, which then stays in the preferences.
+    func testSignOut_sendAsAliasRefreshTimestamp_isRemovedWithItsAddress() async {
+        let defaults = makeDefaults()
+        SendAsAliasRefreshPolicy(userDefaults: defaults)
+            .recordSuccessfulRefresh(accountEmail: "Person@Example.com")
+        XCTAssertTrue(
+            defaults.dictionaryRepresentation().keys.contains { $0.contains("person@example.com") },
+            "Precondition: the refresh timestamp's key names the account"
+        )
+        let session = makeAuthSession(userDefaults: defaults)
+
+        await session.signOut()
+
+        XCTAssertFalse(
+            defaults.dictionaryRepresentation().keys.contains { $0.contains("person@example.com") },
+            "A sign-out must not leave the account's address in the preferences"
+        )
+    }
+
     func testAccountPreparationReplacesStoreWhenMatchingAndForeignAccountRowsCoexist() async throws {
         let resetScript = AuthSessionStoreResetScript()
         let session = makeAuthSession(
