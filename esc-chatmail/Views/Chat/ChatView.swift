@@ -98,7 +98,6 @@ struct ChatView: View {
         .macChatHeaderNameBar(
             metrics: ChatHeaderPolicy.nameBarMetrics(for: headerStyle),
             name: navigationDisplayName,
-            opensParticipants: headerOpensParticipants,
             onOpenParticipants: presentParticipantsList
         )
         // A file dropped anywhere on the Mac's chat column is attached to the reply, as the
@@ -129,18 +128,12 @@ struct ChatView: View {
                         .frame(maxWidth: .infinity)
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            guard Self.allowsParticipantListPresentation(
-                                conversationType: conversation.conversationType
-                            ) else {
-                                return
-                            }
                             presentParticipantsList()
                         }
                 case .avatar(let diameter):
                     ChatHeaderAvatarButton(
                         avatar: headerAvatar,
                         diameter: diameter,
-                        opensParticipants: headerOpensParticipants,
                         onOpenParticipants: presentParticipantsList
                     )
                 }
@@ -303,12 +296,6 @@ struct ChatView: View {
         )
     }
 
-    /// Whether a click on the Mac header's avatar or name opens Participants. The iOS title's
-    /// tap asks the same question itself.
-    private var headerOpensParticipants: Bool {
-        ChatHeaderPolicy.opensParticipants(conversationType: conversation.conversationType)
-    }
-
     /// The Mac header's avatar: the row's, from what the view model loaded or, until then,
     /// what the row already cached. Read only where the header draws an avatar.
     private var headerAvatar: ChatHeaderAvatar {
@@ -322,8 +309,10 @@ struct ChatView: View {
         )
     }
 
-    /// Opens Participants, a sheet (`activeDestination`). Every header control that opens it
-    /// first asks whether this conversation's does.
+    /// Opens Participants, a sheet (`activeDestination`), from the iOS title and from the Mac
+    /// header's avatar and name. Every conversation's header opens it, a mailing list's too:
+    /// the sheet lists a list's senders in place of its participant rows
+    /// (`ParticipantsListPolicy`).
     private func presentParticipantsList() {
         composerFocus.wrappedValue = false
         viewModel.contactManager.showingParticipantsList = true
@@ -364,14 +353,6 @@ struct ChatView: View {
             !hasContactAccessPicker &&
             !hasContactActionAlert &&
             !hasSendErrorAlert
-    }
-
-    static func allowsParticipantListPresentation(
-        conversationType: ConversationType
-    ) -> Bool {
-        // List participant rows only seed the conversation from its first
-        // message; presenting them as list membership would be misleading.
-        conversationType != .list
     }
 
     /// Gates the drained auto-dismiss while a reply send still owns the

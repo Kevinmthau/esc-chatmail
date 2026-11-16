@@ -11,7 +11,6 @@ extension View {
     func macChatHeaderNameBar(
         metrics: ChatHeaderMetrics?,
         name: String,
-        opensParticipants: Bool,
         onOpenParticipants: @escaping () -> Void
     ) -> some View {
         #if os(macOS)
@@ -19,7 +18,6 @@ extension View {
             MacChatHeaderNameBarModifier(
                 metrics: metrics,
                 name: name,
-                opensParticipants: opensParticipants,
                 onOpenParticipants: onOpenParticipants
             )
         )

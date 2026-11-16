@@ -55,7 +55,7 @@ struct ParticipantsListView: View {
                     )
                 }
             }
-            .navigationTitle("Participants")
+            .navigationTitle(ParticipantsListPolicy.title(for: listing))
             .inlineNavigationTitle()
             .toolbar {
                 // A sheet's placement, not `.trailingBarEdge`: a Mac sheet draws no toolbar
@@ -83,10 +83,26 @@ struct ParticipantsListView: View {
         }
     }
 
+    /// Whose rows the sheet lists: the conversation's participants, or for a mailing list the
+    /// people who have written to it (`ParticipantsListPolicy`).
+    private var listing: ParticipantsListPolicy.Listing {
+        ParticipantsListPolicy.listing(conversationType: conversation.conversationType)
+    }
+
     /// Computes the list of other participants (non-current-user).
     /// Uses email normalization to properly match participants.
     @MainActor
     private func updateOtherParticipants() async {
+        switch listing {
+        case .participants:
+            await updateFromParticipantRows()
+        case .senders:
+            await updateFromMessageSenders()
+        }
+    }
+
+    @MainActor
+    private func updateFromParticipantRows() async {
         guard let participants = conversation.participants else {
             cachedOtherParticipants = []
             return
@@ -141,6 +157,39 @@ struct ParticipantsListView: View {
                 newContactPrefill: NewContactPrefillPolicy.prefill(
                     for: participant,
                     storedDisplayName: person.displayName
+                )
+            )
+        }
+    }
+
+    /// A mailing list's rows: the senders of its received messages. They are read from the
+    /// messages, so there is no participant row to match a sender against and no stored Person
+    /// name to prefill a new contact from; the row's own name is its From header's.
+    @MainActor
+    private func updateFromMessageSenders() async {
+        // The senders are fetched, and a conversation no longer in a context has no messages
+        // to fetch them from.
+        guard let context = conversation.managedObjectContext else {
+            cachedOtherParticipants = []
+            return
+        }
+
+        let resolvedSenders = await participantLoader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: currentUserEmail
+        )
+        guard !Task.isCancelled else { return }
+
+        cachedOtherParticipants = resolvedSenders.map { sender in
+            ParticipantListItem(
+                displayName: sender.displayName,
+                email: sender.email,
+                isExistingContact: sender.contactIdentifier != nil,
+                contactIdentifier: sender.contactIdentifier,
+                newContactPrefill: NewContactPrefillPolicy.prefill(
+                    for: sender,
+                    storedDisplayName: nil
                 )
             )
         }

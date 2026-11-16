@@ -296,9 +296,9 @@ Measured on macOS 27.2 in two more throwaway programs, each an `.inset` `List(se
   - What the toolbar's principal item is: the name, as before, or the avatar at 40 points (`ChatHeaderAvatarButton`).
   - Whether there is a name bar, and its sizes (`ChatHeaderMetrics.mac`).
   - Whether the principal item keeps the toolbar's glass (below).
-  - Whether a click opens Participants: not for a mailing list, the rule the iOS title's tap already had.
+  - Whether a click opens Participants: not for a mailing list, the rule the iOS title's tap already had. (Changed 2026-11-16: a list's header opens the sheet too, on both platforms, and the policy no longer has this question. See the next note.)
 - **The name is in a capsule in a bar on the transcript** (`MacChatHeaderNameBar`, put there by `View.macChatHeaderNameBar` with `safeAreaBar(edge: .top)`): the name and a chevron, on glass. The bar is 30 points tall whatever the name is, and whether a chat has one is fixed by its style, so the transcript's top inset is one number from the moment the chat mounts. `ChatMessagesView` did not change.
-- **The avatar and the capsule both open Participants,** the same sheet through the same `appSheet`. For a mailing list neither is a button, and the capsule has no chevron.
+- **The avatar and the capsule both open Participants,** the same sheet through the same `appSheet`. For a mailing list neither is a button, and the capsule has no chevron. (Changed 2026-11-16: a header that did nothing on a tap read as broken on the iPhone, so every conversation's header now opens the sheet. A list's sheet is titled Senders and lists the people who have written to it, read from its messages, never its participant rows: `ParticipantsListPolicy`, `ParticipantLoader.resolveSenders`. Not seen on the Mac.)
 - **The avatar is the row's.** `ChatHeaderPolicy.avatar` builds it from `ConversationRowPolicy`'s rules, so the header and the row cannot show different faces for one conversation.
   - `ChatViewModel` keeps the `ParticipantInfo` its title load already fetched (`participantInfo`), and asks for the row's four participants by one constant (`rollupMaxParticipants`).
   - Until that load lands the avatar is drawn from the row's entry in the rollup cache (`cachedParticipantInfo()`), so a chat opened from its row has its photo at once.

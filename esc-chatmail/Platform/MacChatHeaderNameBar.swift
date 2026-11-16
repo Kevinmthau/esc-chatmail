@@ -4,7 +4,7 @@ import SwiftUI
 /// The lower half of the Mac chat header: the conversation's name in a glass capsule, in a bar
 /// under the window's toolbar, as in Messages (`docs/mac-imessage-ui-plan.md`, PR 3). The upper
 /// half is the avatar in the toolbar (`ChatHeaderAvatarButton`); a click on either opens
-/// Participants (`ChatHeaderPolicy.opensParticipants`).
+/// Participants (`ChatView.presentParticipantsList`).
 ///
 /// The bar is `metrics.nameBarHeight` tall whatever the name is, and as wide as the chat
 /// column. Only the capsule draws and takes clicks; the rest of the bar is empty, so the
@@ -12,14 +12,13 @@ import SwiftUI
 struct MacChatHeaderNameBar: View {
     let metrics: ChatHeaderMetrics
     let name: String
-    let opensParticipants: Bool
     let onOpenParticipants: () -> Void
     /// The display's pixels per point, for the bar's offset. An environment value, not a plain
     /// property, so it is no part of the memberwise initializer.
     @Environment(\.displayScale) private var displayScale
 
     var body: some View {
-        ChatHeaderParticipantsButton(opensParticipants: opensParticipants, action: onOpenParticipants) {
+        ChatHeaderParticipantsButton(action: onOpenParticipants) {
             HStack(spacing: metrics.nameToChevronSpacing) {
                 Text(name)
                     .font(metrics.nameFont)
@@ -27,27 +26,25 @@ struct MacChatHeaderNameBar: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
 
-                if opensParticipants {
-                    // Says the capsule opens something, as Messages' does. Not part of the
-                    // name, so not read out with it.
-                    Image(systemName: "chevron.right")
-                        .font(metrics.chevronFont)
-                        // A hierarchical style, like the name's own default color, and not a
-                        // system color by name: glass gives its content a light or a dark
-                        // look to suit what is behind it, and a named color follows the
-                        // window's appearance instead, so it could part ways with the name
-                        // beside it.
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                }
+                // Says the capsule opens something, as Messages' does. Not part of the
+                // name, so not read out with it.
+                Image(systemName: "chevron.right")
+                    .font(metrics.chevronFont)
+                    // A hierarchical style, like the name's own default color, and not a
+                    // system color by name: glass gives its content a light or a dark
+                    // look to suit what is behind it, and a named color follows the
+                    // window's appearance instead, so it could part ways with the name
+                    // beside it.
+                    .foregroundStyle(.secondary)
+                    .accessibilityHidden(true)
             }
             .padding(.horizontal, metrics.nameCapsuleHorizontalPadding)
             .frame(height: metrics.nameCapsuleHeight)
             // The whole capsule takes the click, not only the text in it.
             .contentShape(Capsule())
         }
-        // Interactive glass answers a press, so only where a click does something.
-        .glassEffect(.regular.interactive(opensParticipants), in: Capsule())
+        // Interactive glass answers a press, and a click on the capsule always does something.
+        .glassEffect(.regular.interactive(), in: Capsule())
         .accessibilityAddTraits(.isHeader)
         .padding(.horizontal, metrics.nameBarHorizontalPadding)
         .frame(maxWidth: .infinity)
