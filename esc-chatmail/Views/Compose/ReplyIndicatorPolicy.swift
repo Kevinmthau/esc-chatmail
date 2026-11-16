@@ -17,11 +17,19 @@ enum ReplyIndicatorPolicy {
         /// A recovered failed reply owns the destination; no dismiss button.
         case recoveredEnvelope(label: String)
         /// The dismissible "Replying to:" row. Its X drops the quote.
-        case replyingTo(label: String)
+        ///
+        /// `unabridgedLabel` is the label with every announced recipient
+        /// named, each address whole; nil where `label` already is that. The
+        /// row is one line, so it draws `label`; the other is what VoiceOver
+        /// reads and the Mac shows as the row's tooltip.
+        case replyingTo(label: String, unabridgedLabel: String? = nil)
         /// The reply goes to people the chat's title does not name, and no
         /// quote row is up to say so; no dismiss button, because there is
         /// nothing to drop: the destination is the reply's, not the row's.
-        case addressedTo(label: String)
+        ///
+        /// `unabridgedLabel` as for `replyingTo`. A row that wraps (the
+        /// bar's) draws it in place of `label`.
+        case addressedTo(label: String, unabridgedLabel: String? = nil)
         case none
     }
 
@@ -36,7 +44,13 @@ enum ReplyIndicatorPolicy {
     ///   quote row they go into its label; without one (the quote was
     ///   dropped, which keeps the destination) they get a row of their own.
     ///   Either way they are drawn through `announcedRecipientsText`, which
-    ///   keeps a machine's long address from taking the row.
+    ///   keeps a machine's long address from taking the row. They come with
+    ///   the people the title does not name first (`recipientsToAnnounce`),
+    ///   so the ones the quote row counts and does not name are the chat's
+    ///   own people before they are anyone else. What the row shortens or
+    ///   counts is still in the header, as its `unabridgedLabel`: a cut
+    ///   address can be someone else's, and the row is where the user learns
+    ///   who gets the reply.
     static func header(
         isReplyTargetUnavailable: Bool,
         recoveredRecipients: [String]?,
@@ -56,17 +70,42 @@ enum ReplyIndicatorPolicy {
         // must show whenever one exists. Gating it on a non-empty subject hid
         // the only way to drop the quote of a subjectless message.
         let announced = announcedRecipients ?? []
+        let everyoneWhole = announced.isEmpty ? nil : announced.joined(separator: ", ")
         guard let replyTarget else {
             // Nothing shares this row, so it names everyone.
-            return announcedRecipientsText(announced, limit: nil)
-                .map { .addressedTo(label: "To: \($0)") } ?? .none
+            guard let text = announcedRecipientsText(announced, limit: nil) else { return .none }
+            let label = "To: \(text)"
+            return .addressedTo(
+                label: label,
+                unabridgedLabel: everyoneWhole.flatMap { unabridged("To: \($0)", beside: label) }
+            )
         }
+        let label = replyingToLabel(
+            for: replyTarget,
+            announcedRecipients: announcedRecipientsText(announced, limit: quoteRowAnnouncedRecipientLimit)
+        )
         return .replyingTo(
-            label: replyingToLabel(
-                for: replyTarget,
-                announcedRecipients: announcedRecipientsText(announced, limit: quoteRowAnnouncedRecipientLimit)
+            label: label,
+            unabridgedLabel: unabridged(
+                replyingToLabel(for: replyTarget, announcedRecipients: everyoneWhole),
+                beside: label
             )
         )
+    }
+
+    /// A row's label with nothing shortened and nobody only counted: its
+    /// `unabridged` one where the header carries one, and `label` itself
+    /// where it does not. What a row that wraps draws, and what a one-line
+    /// row gives VoiceOver and, on the Mac, its tooltip.
+    static func wholeLabel(_ label: String, unabridged: String?) -> String {
+        unabridged ?? label
+    }
+
+    /// `whole` where the row's `label` says less than it, nil where the two
+    /// are the same: a header carries an unabridged label only where there
+    /// is more to read than the row draws.
+    private static func unabridged(_ whole: String, beside label: String) -> String? {
+        whole == label ? nil : whole
     }
 
     // MARK: - Announced recipients
@@ -83,14 +122,23 @@ enum ReplyIndicatorPolicy {
     /// What is kept of the part before the "@" however long the domain is.
     static let announcedAddressMinLocalLength = 3
 
+    /// The most that is kept of the end of the part before the "@". The rest
+    /// of what is kept is its start.
+    static let announcedAddressLocalTailLength = 4
+
     /// How many recipients the quote row names before it counts the rest: the
     /// subject follows them on the same line.
     static let quoteRowAnnouncedRecipientLimit = 2
 
-    /// The announced recipients as the row shows them: each address at most
-    /// `announcedAddressMaxLength` long (`abbreviatedAddress`) and, where
-    /// `limit` is given, the first `limit` of them with the rest counted
-    /// ("+2 more"), never silently cut off by the row's end. Nil for none.
+    /// The announced recipients as the row shows them: each address
+    /// shortened to `announcedAddressMaxLength` where its domain allows
+    /// (`abbreviatedAddress`) and, where `limit` is given, the first `limit`
+    /// of them with the rest counted ("+2 more"), never silently cut off by
+    /// the row's end. Nil for none.
+    ///
+    /// The first are the ones named, so the caller's order decides who is
+    /// only counted: `ReplyAddressing.recipientsToAnnounce` puts the people
+    /// the chat's title does not name first.
     static func announcedRecipientsText(_ recipients: [String], limit: Int?) -> String? {
         guard !recipients.isEmpty else { return nil }
         let named = limit.map { Array(recipients.prefix(max($0, 1))) } ?? recipients
@@ -99,12 +147,21 @@ enum ReplyIndicatorPolicy {
         return uncounted > 0 ? "\(text) +\(uncounted) more" : text
     }
 
-    /// `address` with the part before the "@" cut to fit
-    /// `announcedAddressMaxLength`, or `address` itself where it already fits.
+    /// `address` with the middle of the part before the "@" cut out to fit
+    /// `announcedAddressMaxLength`, or `address` itself where it already
+    /// fits or the cut would not shorten it.
     ///
     /// The domain is never cut, whatever its length: it says whose machine
     /// gets the mail, and the start of a long one can read as somebody else's
     /// (`paypal.com.example.net`).
+    ///
+    /// Both ends of the part before the "@" are kept. At a mailbox provider
+    /// that part is who gets the mail, and an address made to pass for
+    /// another's is most easily made by adding to its end
+    /// (`first.last.consulting` and `first.last.consulting.pay`): cut to
+    /// their start alone, the two were drawn the same. What is cut is still
+    /// lost to the row, which is why the header also carries the label whole
+    /// (`Header.replyingTo`).
     static func abbreviatedAddress(_ address: String) -> String {
         guard address.count > announcedAddressMaxLength else { return address }
         guard let at = address.lastIndex(of: "@") else {
@@ -113,8 +170,11 @@ enum ReplyIndicatorPolicy {
         let local = address[..<at]
         let domain = address[at...]
         let room = max(announcedAddressMinLocalLength, announcedAddressMaxLength - domain.count - 1)
-        guard local.count > room else { return address }
-        return "\(local.prefix(room))…\(domain)"
+        // The ellipsis takes a place itself: a part one longer than the room
+        // would lose a character and be drawn no shorter.
+        guard local.count > room + 1 else { return address }
+        let tail = min(announcedAddressLocalTailLength, room / 3)
+        return "\(local.prefix(room - tail))…\(local.suffix(tail))\(domain)"
     }
 
     /// "Replying to:" plus the subject, falling back to the message's preview

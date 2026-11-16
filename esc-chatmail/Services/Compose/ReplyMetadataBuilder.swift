@@ -192,10 +192,22 @@ struct ReplyMetadataBuilder {
                 contactLinks: contactLinks,
                 userAddresses: userAddresses
             )
+        // Asked only where there is something to announce: who among the
+        // recipients the chat's title does not name, for the composer to
+        // name ahead of the rest (`ReplyAddressing.recipientsToAnnounce`).
+        let recipientsOutsideConversation = differsFromConversationPeople
+            ? ReplyLinkedAddressPolicy.recipientsOutsideConversation(
+                recipients: recipients,
+                conversationRecipients: conversationRecipients,
+                contactLinks: contactLinks,
+                userAddresses: userAddresses
+            )
+            : []
         return ReplyAddressing(
             recipients: recipients,
             overrulesConversationRows: overrulesConversationRows,
-            differsFromConversationPeople: differsFromConversationPeople
+            differsFromConversationPeople: differsFromConversationPeople,
+            recipientsOutsideConversation: recipientsOutsideConversation
         )
     }
 

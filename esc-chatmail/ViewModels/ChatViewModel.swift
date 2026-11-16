@@ -29,7 +29,9 @@ final class ChatComposerState: ObservableObject {
     @Published var unavailableReplyTargetURI: URL?
     /// The reply's recipients where they are not the chat's own people, for
     /// the row above the field to name (`ReplyIndicatorPolicy`); nil where
-    /// the reply goes to the people the chat's title names. Kept current by
+    /// the reply goes to the people the chat's title names. Those the title
+    /// does not name come first (`ReplyAddressing.recipientsToAnnounce`):
+    /// this is the order they are named in, not the reply's. Kept current by
     /// `ChatViewModel.refreshAnnouncedReplyRecipients`; it only describes what
     /// a send would do and decides nothing about one.
     @Published var announcedReplyRecipients: [String]?

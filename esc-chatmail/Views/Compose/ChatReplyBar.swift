@@ -91,14 +91,14 @@ struct ChatReplyBar: View {
                 .font(.caption)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 6)
-            case .recoveredEnvelope(let label), .addressedTo(let label):
-                Text(label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-            case .replyingTo(let label):
-                replyingToIndicator(label: label)
+            case .recoveredEnvelope(let label):
+                wrappingRow(label)
+            case .addressedTo(let label, let unabridgedLabel):
+                // This row wraps and shares its lines with nothing, so it has room for
+                // every recipient's address whole: the short label is for a row of one line.
+                wrappingRow(ReplyIndicatorPolicy.wholeLabel(label, unabridged: unabridgedLabel))
+            case .replyingTo(let label, let unabridgedLabel):
+                replyingToIndicator(label: label, unabridgedLabel: unabridgedLabel)
             case .none:
                 EmptyView()
             }
@@ -125,8 +125,17 @@ struct ChatReplyBar: View {
         }
     }
     
+    /// A header row of text alone, on as many lines as the text needs.
+    private func wrappingRow(_ label: String) -> some View {
+        Text(label)
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 6)
+    }
+
     @ViewBuilder
-    private func replyingToIndicator(label: String) -> some View {
+    private func replyingToIndicator(label: String, unabridgedLabel: String?) -> some View {
         HStack {
             Image(systemName: "arrow.turn.up.left")
                 .font(.caption)
@@ -136,6 +145,9 @@ struct ChatReplyBar: View {
                 .font(.caption)
                 .foregroundColor(.secondary)
                 .lineLimit(1)
+                // One line, so it draws the short label, which can cut an address and
+                // count recipients it does not name. VoiceOver reads the whole one.
+                .accessibilityLabel(ReplyIndicatorPolicy.wholeLabel(label, unabridged: unabridgedLabel))
             
             Spacer()
             
