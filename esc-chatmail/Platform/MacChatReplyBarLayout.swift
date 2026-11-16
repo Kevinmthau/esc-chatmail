@@ -16,6 +16,8 @@ import SwiftUI
 struct MacChatReplyBarLayout<Indicator: View, Attachments: View, AttachmentMenu: View>: View {
     let metrics: ChatComposerMetrics
     @Binding var text: String
+    /// What the empty field shows, and the field's name for VoiceOver and Voice Control: the
+    /// word drawn here is hidden from accessibility, and the text view carries it.
     let placeholder: String
     /// Whether the send arrow is drawn (`ChatComposerPolicy.showsSendArrow`).
     let showsSendArrow: Bool
@@ -68,6 +70,7 @@ struct MacChatReplyBarLayout<Indicator: View, Attachments: View, AttachmentMenu:
                     text: $text,
                     fontSize: metrics.fontSize,
                     maximumLineCount: metrics.maximumLineCount,
+                    accessibilityLabel: placeholder,
                     focusBridge: focusBridge,
                     canSend: canSend,
                     onSend: onSend,

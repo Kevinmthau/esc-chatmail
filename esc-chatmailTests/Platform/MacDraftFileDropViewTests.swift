@@ -1661,6 +1661,7 @@ private struct ChatStandIn: View {
                 text: Binding(get: { model.text }, set: { model.text = $0 }),
                 fontSize: 13,
                 maximumLineCount: 5,
+                accessibilityLabel: MessageFieldPolicy.placeholder,
                 focusBridge: ReplyFieldFocusBridge(),
                 canSend: { _ in true },
                 onSend: {},

@@ -342,6 +342,11 @@ struct ComposeView: View {
 
     // MARK: - Body Section
 
+    /// What the empty body shows, and the editor's name for VoiceOver and Voice Control.
+    private var bodyPlaceholder: String {
+        MessageFieldPolicy.composeBodyPlaceholder(isForward: viewModel.isForwardMode)
+    }
+
     @ViewBuilder
     private var bodySection: some View {
         if viewModel.showSubjectField {
@@ -351,13 +356,18 @@ struct ComposeView: View {
                         .focused($focusedField, equals: .body)
                         .padding(.horizontal, 8)
                         .frame(minHeight: viewModel.isForwardMode ? 120 : nil)
+                        .accessibilityLabel(bodyPlaceholder)
 
                     if viewModel.body.isEmpty {
-                        Text(viewModel.isForwardMode ? "Add a message (optional)" : "Message")
+                        // The editor is named by these words, so the ones drawn here are
+                        // hidden from accessibility, as in `PlaceholderTextField`: left in,
+                        // VoiceOver read them as text of their own.
+                        Text(bodyPlaceholder)
                             .foregroundColor(.gray.opacity(0.5))
                             .padding(.horizontal, 12)
                             .padding(.top, 8)
                             .allowsHitTesting(false)
+                            .accessibilityHidden(true)
                     }
                 }
 
