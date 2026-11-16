@@ -176,6 +176,14 @@ struct ChatView: View {
                 .onAppear {
                     presentedSheetDestination = destination
                 }
+                // The Mac can give an open sheet's window to the next destination
+                // (Participants, then New Contact) with no `onDismiss` and without running
+                // the `onAppear` above again. The chat then still took Participants for the
+                // sheet on screen, and `dismissActiveDestination` read every dismissal of
+                // New Contact as a replacement's: neither of its buttons closed it.
+                .onMacSheetItemHandOver(to: destination.id) {
+                    presentedSheetDestination = destination
+                }
         }
         .alert(item: $viewModel.contactManager.contactActionAlert) { alert in
             switch alert.kind {
@@ -526,6 +534,9 @@ struct ChatView: View {
         // A different destination already pending means this dismissal is a sheet
         // replacement (e.g. participants -> add contact); the onDismiss belongs to
         // the outgoing sheet, so leave the incoming destination's state intact.
+        // This is only right while `presentedSheetDestination` is the sheet on
+        // screen: stale, it refuses the dismissal of the sheet that is up, which
+        // then nothing closes (`onMacSheetItemHandOver`).
         if let pendingDestination = activeDestination,
            pendingDestination.id != dismissedDestination?.id {
             return

@@ -139,7 +139,7 @@ final class MacChatReplyBarLayoutTests: XCTestCase {
         let root = MacChatReplyBarLayout(
             metrics: metrics,
             text: .constant(text),
-            placeholder: "iMessage",
+            placeholder: "Email",
             showsSendArrow: showsSendArrow,
             isSendEnabled: showsSendArrow,
             focusBridge: ReplyFieldFocusBridge(),

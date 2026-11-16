@@ -37,11 +37,11 @@ struct PlaceholderTextField: View {
 
 #Preview {
     VStack(spacing: 20) {
-        PlaceholderTextField(text: .constant(""), placeholder: "iMessage")
-        PlaceholderTextField(text: .constant("Hello world"), placeholder: "iMessage")
+        PlaceholderTextField(text: .constant(""), placeholder: "Email")
+        PlaceholderTextField(text: .constant("Hello world"), placeholder: "Email")
         PlaceholderTextField(
             text: .constant("A longer message that\nspans multiple lines"),
-            placeholder: "iMessage"
+            placeholder: "Email"
         )
     }
     .padding()
