@@ -180,15 +180,15 @@ struct ParticipantsListView: View {
             currentUserEmail: currentUserEmail,
             onProgress: { sendersSoFar in
                 // A list with hundreds of senders is resolved a batch at a time, and its
-                // first rows are drawn without waiting for its last.
-                guard !Task.isCancelled,
-                      ParticipantsListPolicy.showsSendersResolvedSoFar(
-                        resolvedCount: sendersSoFar.count,
-                        shownCount: cachedOtherParticipants.count
-                      ) else {
-                    return
-                }
-                cachedOtherParticipants = sendersSoFar.map { Self.senderItem($0) }
+                // first rows are drawn without waiting for its last. A load that was
+                // cancelled draws nothing: the rows on screen are the next load's.
+                guard !Task.isCancelled else { return }
+                cachedOtherParticipants = ParticipantsListPolicy.sendersToDraw(
+                    resolvedSoFar: sendersSoFar.map { Self.senderItem($0) },
+                    shown: cachedOtherParticipants,
+                    id: { $0.id },
+                    normalizedAddress: { EmailNormalizer.normalize($0.email) }
+                )
             }
         )
         guard !Task.isCancelled else { return }
