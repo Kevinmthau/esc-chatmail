@@ -24,27 +24,24 @@ import XCTest
 final class MacChatHeaderNameBarLayoutTests: XCTestCase {
     /// Revert-check: deleting `.frame(height: metrics.nameBarHeight)` from
     /// `MacChatHeaderNameBar.body` makes this fail: the bar would be as tall as its capsule.
-    func testBar_isTheMetricsHeight_whateverTheNameAndWhetherItOpensParticipants() {
+    func testBar_isTheMetricsHeight_whateverTheName() {
         let names = ["A", "Ada Lovelace", String(repeating: "A very long conversation name ", count: 20)]
 
         for name in names {
-            for opensParticipants in [true, false] {
-                let host = NSHostingView(
-                    rootView: MacChatHeaderNameBar(
-                        metrics: .mac,
-                        name: name,
-                        opensParticipants: opensParticipants,
-                        onOpenParticipants: {}
-                    )
+            let host = NSHostingView(
+                rootView: MacChatHeaderNameBar(
+                    metrics: .mac,
+                    name: name,
+                    onOpenParticipants: {}
                 )
+            )
 
-                XCTAssertEqual(
-                    host.fittingSize.height,
-                    ChatHeaderMetrics.mac.nameBarHeight,
-                    accuracy: 0.01,
-                    "name of \(name.count) characters, opensParticipants: \(opensParticipants)"
-                )
-            }
+            XCTAssertEqual(
+                host.fittingSize.height,
+                ChatHeaderMetrics.mac.nameBarHeight,
+                accuracy: 0.01,
+                "name of \(name.count) characters"
+            )
         }
     }
 
@@ -90,7 +87,6 @@ final class MacChatHeaderNameBarLayoutTests: XCTestCase {
         .macChatHeaderNameBar(
             metrics: .mac,
             name: String(repeating: "A very long conversation name ", count: 20),
-            opensParticipants: true,
             onOpenParticipants: {}
         )
         let size = NSSize(width: 520, height: 320)
@@ -160,7 +156,6 @@ final class MacChatHeaderNameBarLayoutTests: XCTestCase {
         .macChatHeaderNameBar(
             metrics: metrics,
             name: "Ada Lovelace",
-            opensParticipants: true,
             onOpenParticipants: {}
         )
 

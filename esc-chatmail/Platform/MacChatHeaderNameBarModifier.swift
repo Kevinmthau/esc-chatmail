@@ -20,7 +20,6 @@ struct MacChatHeaderNameBarModifier: ViewModifier {
     /// Nil for a chat with no name bar.
     let metrics: ChatHeaderMetrics?
     let name: String
-    let opensParticipants: Bool
     let onOpenParticipants: () -> Void
 
     func body(content: Content) -> some View {
@@ -30,7 +29,6 @@ struct MacChatHeaderNameBarModifier: ViewModifier {
                 MacChatHeaderNameBar(
                     metrics: metrics,
                     name: name,
-                    opensParticipants: opensParticipants,
                     onOpenParticipants: onOpenParticipants
                 )
             }

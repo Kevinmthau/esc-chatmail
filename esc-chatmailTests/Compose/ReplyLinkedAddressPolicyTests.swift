@@ -154,4 +154,54 @@ final class ReplyLinkedAddressPolicyTests: XCTestCase {
         XCTAssertTrue(rowsCanAnswer(rows: [Self.work], message: [Self.home], author: Self.home, links: Self.oneCard))
         XCTAssertFalse(rowsCanAnswer(rows: [Self.work], message: [Self.home], author: Self.home, links: .none))
     }
+
+    // MARK: - Recipients outside the conversation
+
+    private func outside(
+        recipients: [String],
+        rows: [String],
+        links: ContactLinkedAddresses = .none
+    ) -> [String] {
+        ReplyLinkedAddressPolicy.recipientsOutsideConversation(
+            recipients: recipients,
+            conversationRecipients: rows,
+            contactLinks: links,
+            userAddresses: Self.me
+        )
+    }
+
+    // Revert-check: the filter of
+    // `ReplyLinkedAddressPolicy.recipientsOutsideConversation` (return
+    // `recipients`, or `[]`). The composer names these ahead of the chat's
+    // own people, so with all of them, or none, the order it names a reply's
+    // recipients in is the sender's again.
+    /// The recipients the rows do not name, in the reply's order, whatever
+    /// case an address was written in.
+    func testRecipientsOutsideConversation_areThoseTheRowsDoNotName_inTheRepliesOrder() {
+        XCTAssertEqual(
+            outside(
+                recipients: [Self.carol, "x@elsewhere.example", "Morgan@Corp.Example", "y@elsewhere.example"],
+                rows: [Self.work, Self.carol]
+            ),
+            ["x@elsewhere.example", "y@elsewhere.example"]
+        )
+        XCTAssertEqual(outside(recipients: [Self.carol], rows: [Self.work, Self.carol]), [])
+    }
+
+    // Revert-check: the `person` mapping in
+    // `ReplyLinkedAddressPolicy.recipientsOutsideConversation` (compare the
+    // normalized addresses themselves). A linked participant answered at
+    // their other address is then called an outsider and named ahead of
+    // someone the chat's title really does not name.
+    /// People, not addresses: a participant answered at another address of
+    /// their card is the chat's own, for as long as the card links the two.
+    func testRecipientsOutsideConversation_linkedParticipantAtAnotherAddress_isNotOutside() {
+        let recipients = [Self.home, "x@elsewhere.example"]
+
+        XCTAssertEqual(
+            outside(recipients: recipients, rows: [Self.work], links: Self.oneCard),
+            ["x@elsewhere.example"]
+        )
+        XCTAssertEqual(outside(recipients: recipients, rows: [Self.work], links: .none), recipients)
+    }
 }

@@ -301,6 +301,53 @@ final class ParticipantLoader {
         )
     }
 
+    /// Resolves the people who wrote one conversation's received messages, for the sheet a
+    /// mailing list's header opens (`ParticipantsListPolicy`). A list's participant rows are
+    /// the people on the first message filed there, not who is in the list, so
+    /// `resolveParticipants(inConversation:context:currentUserEmail:)` would name whoever
+    /// happened to post first and nobody since.
+    ///
+    /// Named as that resolve names its rows: Contacts, then the newest explicit From header
+    /// name. There is no stored Person name to offer, because these addresses have no
+    /// participant row; each is the sender of a message, so its From header is the source.
+    func resolveSenders(
+        inConversation conversationObjectID: NSManagedObjectID,
+        context: NSManagedObjectContext,
+        currentUserEmail: String
+    ) async -> [ResolvedParticipant] {
+        let currentUserAliases = await loadCurrentUserAliases(
+            currentUserEmail: currentUserEmail,
+            context: context
+        )
+        let senders: (emails: [String], headerDisplayNamesByEmail: [String: String]) = await context.perform {
+            guard let conversation = try? context.existingObject(with: conversationObjectID) as? Conversation,
+                  !conversation.isDeleted else {
+                return ([], [:])
+            }
+
+            let emails = ConversationParticipantExtractor.nonMeSenderEmails(
+                in: context,
+                conversation: conversation,
+                currentUserEmail: currentUserEmail,
+                currentUserAliases: currentUserAliases
+            )
+            return (
+                emails,
+                ConversationParticipantExtractor.headerDisplayNamesByEmail(
+                    in: context,
+                    conversation: conversation,
+                    participantEmails: emails
+                )
+            )
+        }
+
+        return await resolver.resolveParticipants(
+            for: senders.emails,
+            storedDisplayNamesByEmail: [:],
+            headerDisplayNamesByEmail: senders.headerDisplayNamesByEmail
+        )
+    }
+
     /// Extracts non-me participant emails from a conversation, deduplicated
     nonisolated
     func extractNonMeParticipants(

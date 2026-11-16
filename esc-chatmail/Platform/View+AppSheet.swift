@@ -22,14 +22,25 @@ extension View {
 
     /// Presents a sheet for an item; `chrome` gives each item its Mac size and close control.
     /// See `appSheet(isPresented:mac:onDismiss:content:)`.
+    ///
+    /// `onItemShown` is for a presenter that keeps track of the item on screen
+    /// (`ChatView.presentedSheetDestination`), and is the only way to keep it. It runs when an
+    /// item's sheet appears, and when the Mac gives an open sheet's window to the next item,
+    /// which it does with no `onDismiss` and without running an `onAppear` the presenter put
+    /// on `content` a second time (`View.onSheetItemShown`). A presenter that tracked the item
+    /// with such an `onAppear` took the first item for the one on screen after the second had
+    /// replaced it.
     func appSheet<Item: Identifiable, Content: View>(
         item: Binding<Item?>,
         mac chrome: @escaping (Item) -> MacSheetChrome,
         onDismiss: (() -> Void)? = nil,
+        onItemShown: ((Item) -> Void)? = nil,
         @ViewBuilder content: @escaping (Item) -> Content
     ) -> some View {
         sheet(item: item, onDismiss: onDismiss) { item in
-            content(item).macSheetChrome(chrome(item))
+            content(item)
+                .onSheetItemShown(item.id) { onItemShown?(item) }
+                .macSheetChrome(chrome(item))
         }
     }
 }

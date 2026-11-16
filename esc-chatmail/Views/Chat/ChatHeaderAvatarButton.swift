@@ -10,11 +10,10 @@ import SwiftUI
 struct ChatHeaderAvatarButton: View {
     let avatar: ChatHeaderAvatar
     let diameter: CGFloat
-    let opensParticipants: Bool
     let onOpenParticipants: () -> Void
 
     var body: some View {
-        ChatHeaderParticipantsButton(opensParticipants: opensParticipants, action: onOpenParticipants) {
+        ChatHeaderParticipantsButton(action: onOpenParticipants) {
             AvatarStackView(
                 alignedAvatarPhotos: avatar.photos,
                 participants: avatar.participantNames,

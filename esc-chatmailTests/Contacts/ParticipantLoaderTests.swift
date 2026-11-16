@@ -1195,6 +1195,123 @@ final class ParticipantLoaderTests: XCTestCase {
         )
     }
 
+    /// The sheet a mailing list's header opens lists everyone who has written to the list,
+    /// read from its messages. The list's one participant row is the first poster's: it is
+    /// the only person `resolveParticipants(inConversation:context:currentUserEmail:)` knows
+    /// of, which is why a list's header used to open nothing.
+    ///
+    /// Revert-check: replacing the `ConversationParticipantExtractor.nonMeSenderEmails` call in
+    /// `ParticipantLoader.resolveSenders(inConversation:context:currentUserEmail:)` with
+    /// `ConversationParticipantExtractor.extractNonMeParticipants(from:currentUserEmail:currentUserAliases:)`
+    /// fails this test: only the first poster is listed.
+    func testResolveSendersInConversation_listSeededWithFirstPoster_listsEverySenderInAddressOrder() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Analytical Engines")
+            .asList()
+            .build(in: context)
+        let firstPoster = PersonBuilder()
+            .withEmail("zed@example.com")
+            .withDisplayName("Zed Shaw")
+            .build(in: context)
+        addConversationParticipant(person: firstPoster, to: conversation)
+        _ = MessageBuilder()
+            .withSender(email: "zed@example.com", name: "Zed Shaw")
+            .inConversation(conversation)
+            .build(in: context)
+        // One person, whose address two posts spell differently: one row.
+        _ = MessageBuilder()
+            .withSender(email: "ada@example.com", name: "Ada Lovelace")
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withSender(email: "Ada@example.com", name: "Ada Lovelace")
+            .inConversation(conversation)
+            .build(in: context)
+        try saveViewContext()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let participants = await loader.resolveParticipants(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com"
+        )
+        let senders = await loader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com"
+        )
+
+        // What the sheet would have listed for the list: its first poster and nobody since.
+        XCTAssertEqual(participants.map(\.email), ["zed@example.com"])
+        XCTAssertEqual(senders, [
+            ParticipantLoader.ResolvedParticipant(
+                email: "Ada@example.com",
+                displayName: "Ada Lovelace",
+                isRealDisplayName: true,
+                contactIdentifier: nil
+            ),
+            ParticipantLoader.ResolvedParticipant(
+                email: "zed@example.com",
+                displayName: "Zed Shaw",
+                isRealDisplayName: true,
+                contactIdentifier: nil
+            )
+        ])
+    }
+
+    /// The user's own posts to a list are not its senders: neither a sent message nor the copy
+    /// of one the list delivered back from a send-as alias, which is a received message.
+    ///
+    /// Revert-check: passing `[]` for `currentUserAliases` to
+    /// `ConversationParticipantExtractor.nonMeSenderEmails` in
+    /// `ParticipantLoader.resolveSenders(inConversation:context:currentUserEmail:)` fails this
+    /// test: the alias is listed.
+    func testResolveSendersInConversation_ownPostsAndSendAsAlias_areExcluded() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Analytical Engines")
+            .asList()
+            .build(in: context)
+        _ = MessageBuilder()
+            .withSender(email: "ada@example.com", name: "Ada Lovelace")
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withSender(email: "me@example.com", name: "Me")
+            .fromMe()
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withSender(email: "me.work@example.org", name: "Me At Work")
+            .inConversation(conversation)
+            .build(in: context)
+        try saveViewContext()
+
+        let loader = ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com", "me.work@example.org"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker()
+        )
+
+        let senders = await loader.resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(senders.map(\.email), ["ada@example.com"])
+    }
+
     func testLoadParticipants_usesCachedRollupForRepeatedLoadsOfUnchangedConversation() async throws {
         let conversation = ConversationBuilder()
             .withDisplayName("Fallback Name")
