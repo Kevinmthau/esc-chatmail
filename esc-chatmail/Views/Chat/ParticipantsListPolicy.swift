@@ -25,16 +25,45 @@ enum ParticipantsListPolicy {
         }
     }
 
-    /// Whether the sheet draws the senders resolved so far while the rest are still being
-    /// resolved (`ParticipantLoader.resolveSenders`'s `onProgress`): only where that is more
-    /// rows than it shows.
+    /// The rows the sheet draws when it is handed the senders resolved so far, while the rest
+    /// are still being resolved (`ParticipantLoader.resolveSenders`'s `onProgress`): those
+    /// senders, then the rows it already shows that the resolve has not reached.
     ///
-    /// So a sheet that is filling for the first time grows, and one that already lists
-    /// everyone keeps its rows while they are resolved again after a change in Contacts.
-    /// Without this check that refresh would cut a list of hundreds back to its first batch
-    /// and grow it again.
-    static func showsSendersResolvedSoFar(resolvedCount: Int, shownCount: Int) -> Bool {
-        resolvedCount > shownCount
+    /// A sheet filling for the first time shows nothing the resolve has not reached, so it
+    /// draws the senders resolved so far and grows. One that already has rows is resolving
+    /// again after a change in Contacts, and its rows are replaced from the top as they are
+    /// resolved while the rest stay: drawing only the senders resolved so far would cut a
+    /// list of hundreds back to its first batch and grow it again.
+    ///
+    /// The rule this replaces drew the senders resolved so far only where they were more
+    /// rows than the sheet showed. A sheet resolving again then kept every row of the
+    /// earlier resolve until the new one had passed it, a contact just added still shown as
+    /// none, and where the earlier resolve had itself been cut short those rows were its
+    /// first batches, on screen for as many batches again.
+    ///
+    /// Senders are resolved in ascending order of normalized address
+    /// (`ConversationParticipantExtractor.nonMeSenderEmails`), so a shown row has been
+    /// reached where its address is not after the last resolved sender's. A row after that
+    /// is also left out where a resolved sender has its `id`: a contact that has gained an
+    /// earlier address is listed under that one now, and two rows of one `id` are drawn as
+    /// one or as neither.
+    ///
+    /// What the last batch leaves is not this function's: the sheet then draws the result,
+    /// which is everyone.
+    static func sendersToDraw<Row>(
+        resolvedSoFar: [Row],
+        shown: [Row],
+        id: (Row) -> String,
+        normalizedAddress: (Row) -> String
+    ) -> [Row] {
+        guard let lastResolved = resolvedSoFar.last else { return shown }
+
+        let lastResolvedAddress = normalizedAddress(lastResolved)
+        let resolvedIDs = Set(resolvedSoFar.map(id))
+        let notYetReached = shown.filter { row in
+            normalizedAddress(row) > lastResolvedAddress && !resolvedIDs.contains(id(row))
+        }
+        return resolvedSoFar + notYetReached
     }
 
     /// The sheet's title. "Participants" would claim a list's senders are everyone in it.

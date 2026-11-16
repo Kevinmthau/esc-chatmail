@@ -150,19 +150,103 @@ final class FullEmailEntryPointPresentationTests: XCTestCase {
         XCTAssertEqual(ParticipantsListPolicy.title(for: .senders), "Senders")
     }
 
-    /// A list's senders are resolved a batch at a time, and the sheet draws those resolved
-    /// so far only where that is more rows than it shows: a sheet filling for the first
-    /// time grows, and one that already lists everyone keeps its rows while they are
-    /// resolved again after a change in Contacts.
+    /// A list's senders are resolved a batch at a time, and a sheet filling for the first
+    /// time draws those resolved so far: it shows nothing the resolve has not reached.
     ///
-    /// Revert-check: returning true from
-    /// `ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount:shownCount:)` makes the
-    /// last two assertions fail: a refresh then cuts a full list back to its first batch.
-    func testParticipantsSheet_sendersResolvedSoFar_areDrawnOnlyWhereTheyAreMoreRows() {
-        XCTAssertTrue(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 0))
-        XCTAssertTrue(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 50, shownCount: 25))
-        XCTAssertFalse(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 300))
-        XCTAssertFalse(ParticipantsListPolicy.showsSendersResolvedSoFar(resolvedCount: 25, shownCount: 25))
+    /// Revert-check: returning `shown` from `ParticipantsListPolicy.sendersToDraw` makes
+    /// this fail: the sheet stays empty, or at its first batch, until the last sender.
+    func testParticipantsSheet_fillingForTheFirstTime_drawsTheSendersResolvedSoFar() {
+        let firstBatch = [senderRow("ada"), senderRow("bob")]
+        let secondBatch = firstBatch + [senderRow("cy"), senderRow("dee")]
+
+        XCTAssertEqual(sendersToDraw(resolvedSoFar: firstBatch, shown: []), firstBatch)
+        XCTAssertEqual(sendersToDraw(resolvedSoFar: secondBatch, shown: firstBatch), secondBatch)
+    }
+
+    /// A sheet that has rows is resolving again after a change in Contacts. Its rows are
+    /// replaced from the top as they are resolved, and the rows the resolve has not reached
+    /// stay, whether the earlier resolve listed everyone or was itself cut short.
+    ///
+    /// Revert-check: returning `resolvedSoFar` alone from
+    /// `ParticipantsListPolicy.sendersToDraw` makes this fail: the list is cut back to its
+    /// first batch. So does drawing the senders resolved so far only where they are more
+    /// rows than the sheet shows, as the rule before did (`guard resolvedSoFar.count >
+    /// shown.count else { return shown }`): Bob is then still shown as no contact.
+    func testParticipantsSheet_resolvingAgain_replacesTheRowsReachedAndKeepsTheRest() {
+        let shown = [senderRow("ada"), senderRow("bob"), senderRow("cy"), senderRow("dee")]
+        let bobAsContact = senderRow("bob", id: "contact:bob-card", name: "Bob Contact")
+
+        XCTAssertEqual(
+            sendersToDraw(resolvedSoFar: [senderRow("ada"), bobAsContact], shown: shown),
+            [senderRow("ada"), bobAsContact, senderRow("cy"), senderRow("dee")]
+        )
+    }
+
+    /// A shown row is reached where its address is not after the last resolved sender's,
+    /// and is then drawn only as the resolve lists it. Ada is a contact now, so her row has
+    /// another `id`, and her old row is not kept beside it. Cy is not yet reached.
+    ///
+    /// Revert-check: leaving out a shown row only where a resolved sender has its `id` (no
+    /// `normalizedAddress(row) > lastResolvedAddress` in
+    /// `ParticipantsListPolicy.sendersToDraw`) makes this fail: Ada's old row is drawn a
+    /// second time, after her new one.
+    func testParticipantsSheet_resolvingAgain_leavesOutAReachedRowTheResolveNoLongerLists() {
+        let shown = [senderRow("ada"), senderRow("cy")]
+        let adaAsContact = senderRow("ada", id: "contact:ada-card", name: "Ada Contact")
+
+        XCTAssertEqual(
+            sendersToDraw(resolvedSoFar: [adaAsContact], shown: shown),
+            [adaAsContact, senderRow("cy")]
+        )
+    }
+
+    /// A contact that has gained an earlier address is listed under that one now, and its
+    /// row under the later address is not drawn too: two rows of one `id` in a `ForEach`
+    /// are drawn as one or as neither.
+    ///
+    /// Revert-check: the `!resolvedIDs.contains(id(row))` of
+    /// `ParticipantsListPolicy.sendersToDraw` makes this fail: Cy's card is listed twice.
+    func testParticipantsSheet_resolvingAgain_neverDrawsTwoRowsOfOneContact() {
+        let cyUnderLaterAddress = senderRow("cy", id: "contact:cy-card", name: "Cy Contact")
+        let cyUnderEarlierAddress = senderRow("ada", id: "contact:cy-card", name: "Cy Contact")
+        let shown = [senderRow("ada"), cyUnderLaterAddress, senderRow("dee")]
+
+        let drawn = sendersToDraw(resolvedSoFar: [cyUnderEarlierAddress], shown: shown)
+
+        XCTAssertEqual(drawn, [cyUnderEarlierAddress, senderRow("dee")])
+        XCTAssertEqual(Set(drawn.map(\.id)).count, drawn.count)
+    }
+
+    /// Nothing resolved yet is no reason to empty the sheet.
+    ///
+    /// Revert-check: the `guard let lastResolved = resolvedSoFar.last else { return shown }`
+    /// of `ParticipantsListPolicy.sendersToDraw` (return `resolvedSoFar` there) makes this
+    /// fail.
+    func testParticipantsSheet_nothingResolvedSoFar_keepsTheRowsShown() {
+        let shown = [senderRow("ada"), senderRow("bob")]
+
+        XCTAssertEqual(sendersToDraw(resolvedSoFar: [], shown: shown), shown)
+    }
+
+    private struct SenderRow: Equatable {
+        let id: String
+        let address: String
+        let name: String
+    }
+
+    /// A row for `<localPart>@example.com`, which is no contact unless `id` says so.
+    private func senderRow(_ localPart: String, id: String? = nil, name: String? = nil) -> SenderRow {
+        let address = "\(localPart)@example.com"
+        return SenderRow(id: id ?? "email:\(address)", address: address, name: name ?? localPart)
+    }
+
+    private func sendersToDraw(resolvedSoFar: [SenderRow], shown: [SenderRow]) -> [SenderRow] {
+        ParticipantsListPolicy.sendersToDraw(
+            resolvedSoFar: resolvedSoFar,
+            shown: shown,
+            id: { $0.id },
+            normalizedAddress: { $0.address }
+        )
     }
 
     func testChatNavigation_duringReplySend_staysAvailable() {
