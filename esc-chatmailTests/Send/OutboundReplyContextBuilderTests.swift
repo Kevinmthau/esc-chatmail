@@ -403,6 +403,61 @@ final class OutboundReplyContextBuilderTests: XCTestCase {
         XCTAssertTrue(builder.replyMayOverruleConversationRows(in: chat.conversation, replyingTo: chat.fromAlex))
     }
 
+    /// The order of a Reply-To header is the sender's, and a reply is
+    /// addressed in it. The composer's row names only so many recipients and
+    /// counts the rest, so a header that put the chat's own person ahead of
+    /// two other addresses had the row name that person, whom the title names
+    /// already, and count the last address: the one recipient the row is
+    /// there to show. The announcement names the others first.
+    ///
+    /// Revert-check: the order `ReplyAddressing.recipientsToAnnounce` returns
+    /// (return `recipients`), and the `recipientsOutsideConversation` argument
+    /// `ReplyMetadataBuilder.replyAddressing` gives `ReplyAddressing` (pass
+    /// `[]`). Either way the announcement is in the header's order, Alex
+    /// first.
+    func testReplyAddressing_replyToNamesTheRowsPersonFirst_announcesTheOthersFirst() async throws {
+        let chat = try makeChatHoldingAnotherPersonsMail()
+        chat.fromAlex.replyTo = "Alex <alex@example.com>, Billing <billing@example.com>, other@elsewhere.example"
+        let builder = makeBuilder()
+        let context = OutboundMessageRequest.ReplyContext(
+            conversationObjectID: chat.conversation.objectID,
+            replyingToMessageObjectID: chat.fromAlex.objectID,
+            optimisticConversation: nil
+        )
+
+        let asked = await builder.replyAddressing(context)
+        let addressing = try XCTUnwrap(asked)
+        let sent = try await builder.buildReplyMetadata(context)
+
+        // The reply itself is addressed as the header wrote it.
+        XCTAssertEqual(
+            sent.recipientEmails,
+            ["alex@example.com", "billing@example.com", "other@elsewhere.example"]
+        )
+        XCTAssertEqual(addressing.recipients, sent.recipientEmails)
+        XCTAssertEqual(
+            addressing.recipientsOutsideConversation,
+            ["billing@example.com", "other@elsewhere.example"]
+        )
+        XCTAssertEqual(
+            addressing.recipientsToAnnounce,
+            ["billing@example.com", "other@elsewhere.example", "alex@example.com"]
+        )
+        // And so the row that names two and counts the rest counts Alex.
+        XCTAssertEqual(
+            ReplyIndicatorPolicy.header(
+                isReplyTargetUnavailable: false,
+                recoveredRecipients: nil,
+                replyTarget: .init(subject: "Invoice", cleanedSnippet: nil, snippet: nil),
+                announcedRecipients: addressing.recipientsToAnnounce
+            ),
+            .replyingTo(
+                label: "Replying to billing@example.com, other@elsewhere.example +1 more: Invoice",
+                unabridgedLabel: "Replying to billing@example.com, other@elsewhere.example, alex@example.com: Invoice"
+            )
+        )
+    }
+
     /// Most Reply-To headers repeat the sender. That reply goes to the chat's
     /// own person: nothing is announced, and the screen settles it without
     /// loading aliases.

@@ -20,13 +20,11 @@ struct MacReplyIndicator: View {
         switch header {
         case .none:
             EmptyView()
-        case .replyingTo(let label):
+        case .replyingTo(let label, let unabridgedLabel):
             capsule {
                 Image(systemName: "arrow.turn.up.left")
                     .accessibilityHidden(true)
-                Text(label)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                oneLineLabel(label, unabridgedLabel: unabridgedLabel)
                 Button(action: onDropQuote) {
                     Image(systemName: "xmark.circle.fill")
                 }
@@ -35,11 +33,15 @@ struct MacReplyIndicator: View {
                 .help("Don’t quote this message")
                 .accessibilityLabel("Don’t quote this message")
             }
-        case .recoveredEnvelope(let label), .addressedTo(let label):
+        case .recoveredEnvelope(let label):
             capsule {
                 Text(label)
                     .lineLimit(1)
                     .truncationMode(.tail)
+            }
+        case .addressedTo(let label, let unabridgedLabel):
+            capsule {
+                oneLineLabel(label, unabridgedLabel: unabridgedLabel)
             }
         case .unavailableTarget:
             capsule {
@@ -50,6 +52,21 @@ struct MacReplyIndicator: View {
                     .disabled(!allowsDraftMutation)
             }
         }
+    }
+
+    /// A label that can name a reply's recipients, on the capsule's one line.
+    ///
+    /// The line draws the short label, which can cut an address and count recipients it does
+    /// not name, and the line's own end can cut more. The whole label is the tooltip and what
+    /// VoiceOver reads: this row is where the user learns who gets the reply, and a cut
+    /// address can be someone else's.
+    private func oneLineLabel(_ label: String, unabridgedLabel: String?) -> some View {
+        let whole = ReplyIndicatorPolicy.wholeLabel(label, unabridged: unabridgedLabel)
+        return Text(label)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .help(whole)
+            .accessibilityLabel(whole)
     }
 
     private func capsule<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {

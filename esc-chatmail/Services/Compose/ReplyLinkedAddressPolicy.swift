@@ -91,6 +91,45 @@ enum ReplyLinkedAddressPolicy {
         return people(recipients) == people(conversationRecipients)
     }
 
+    /// Those of a reply's recipients who are none of the people the
+    /// conversation's rows name, in the reply's own order.
+    ///
+    /// The composer names these first (`ReplyAddressing.recipientsToAnnounce`).
+    /// The order of a reply's recipients is partly the sender's: the
+    /// addresses of a Reply-To header come first, as the header wrote them.
+    /// The row above the field names only so many before it counts the rest,
+    /// so in the reply's order a header that put the chat's own people first
+    /// had the row name them, whom the title names already, and count the
+    /// one recipient it is there to show.
+    ///
+    /// People, not addresses, as in `recipientsAreConversationPeople`: a
+    /// linked participant answered at another of their addresses is still
+    /// the chat's own.
+    ///
+    /// - Parameters:
+    ///   - recipients: The reply's recipients, the user's own addresses
+    ///     already removed.
+    ///   - conversationRecipients: The conversation's participant rows, the
+    ///     user's own addresses already removed.
+    ///   - userAddresses: The user's normalized addresses.
+    static func recipientsOutsideConversation(
+        recipients: [String],
+        conversationRecipients: [String],
+        contactLinks: ContactLinkedAddresses,
+        userAddresses: Set<String>
+    ) -> [String] {
+        func person(_ normalizedAddress: String) -> String {
+            contactLinks.canonicalAddress(for: normalizedAddress, excluding: userAddresses)
+        }
+        let conversationPeople = Set(
+            conversationRecipients.map(EmailNormalizer.normalize).filter { !$0.isEmpty }.map(person)
+        )
+        return recipients.filter {
+            let normalized = EmailNormalizer.normalize($0)
+            return !normalized.isEmpty && !conversationPeople.contains(person(normalized))
+        }
+    }
+
     /// - Parameters:
     ///   - conversationRecipients: The conversation's participant rows, the
     ///     user's own addresses already removed.
