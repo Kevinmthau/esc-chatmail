@@ -1,3 +1,4 @@
+import CoreGraphics
 import Foundation
 
 /// Pure display-decision namespace for the header row `ChatReplyBar` shows
@@ -19,16 +20,23 @@ enum ReplyIndicatorPolicy {
         /// The dismissible "Replying to:" row. Its X drops the quote.
         ///
         /// `unabridgedLabel` is the label with every announced recipient
-        /// named, each address whole; nil where `label` already is that. The
-        /// row is one line, so it draws `label`; the other is what VoiceOver
-        /// reads and the Mac shows as the row's tooltip.
+        /// named, each address whole; nil where the row announces nobody.
+        /// The row is one line, so it draws `label`, and the line's end can
+        /// cut even a label that shortens nothing: two addresses of ordinary
+        /// length are more than a phone's row holds. So the other label is
+        /// carried whenever recipients are announced, the same as `label` or
+        /// not. It is what VoiceOver reads, what the Mac shows as the row's
+        /// tooltip, and what the iPhone's row draws once the user opens it
+        /// (`quoteRow`).
         case replyingTo(label: String, unabridgedLabel: String? = nil)
         /// The reply goes to people the chat's title does not name, and no
         /// quote row is up to say so; no dismiss button, because there is
         /// nothing to drop: the destination is the reply's, not the row's.
         ///
-        /// `unabridgedLabel` as for `replyingTo`. A row that wraps (the
-        /// bar's) draws it in place of `label`.
+        /// `unabridgedLabel` is the label with each address whole; nil where
+        /// `label` already is that. A row that wraps (the bar's) draws it in
+        /// place of `label`, on no more lines than fit
+        /// `wrappingLabelMaxHeight`.
         case addressedTo(label: String, unabridgedLabel: String? = nil)
         case none
     }
@@ -50,7 +58,8 @@ enum ReplyIndicatorPolicy {
     ///   own people before they are anyone else. What the row shortens or
     ///   counts is still in the header, as its `unabridgedLabel`: a cut
     ///   address can be someone else's, and the row is where the user learns
-    ///   who gets the reply.
+    ///   who gets the reply. The quote row carries one whenever it announces
+    ///   anyone, because its one line can end before the label does.
     static func header(
         isReplyTargetUnavailable: Bool,
         recoveredRecipients: [String]?,
@@ -80,16 +89,14 @@ enum ReplyIndicatorPolicy {
                 unabridgedLabel: everyoneWhole.flatMap { unabridged("To: \($0)", beside: label) }
             )
         }
-        let label = replyingToLabel(
-            for: replyTarget,
-            announcedRecipients: announcedRecipientsText(announced, limit: quoteRowAnnouncedRecipientLimit)
-        )
         return .replyingTo(
-            label: label,
-            unabridgedLabel: unabridged(
-                replyingToLabel(for: replyTarget, announcedRecipients: everyoneWhole),
-                beside: label
-            )
+            label: replyingToLabel(
+                for: replyTarget,
+                announcedRecipients: announcedRecipientsText(announced, limit: quoteRowAnnouncedRecipientLimit)
+            ),
+            // Whenever anyone is announced, and not only where `label` cuts
+            // or counts: the row's one line can end before the label does.
+            unabridgedLabel: everyoneWhole.map { replyingToLabel(for: replyTarget, announcedRecipients: $0) }
         )
     }
 
@@ -99,6 +106,92 @@ enum ReplyIndicatorPolicy {
     /// row gives VoiceOver and, on the Mac, its tooltip.
     static func wholeLabel(_ label: String, unabridged: String?) -> String {
         unabridged ?? label
+    }
+
+    // MARK: - The whole label on the iPhone
+
+    /// The tallest the text of a header row is drawn (`ChatReplyBarHeaderRow`).
+    /// Text that needs more scrolls inside that height.
+    ///
+    /// A row that wraps draws every announced recipient's address whole, and
+    /// both how many there are and how long each is are the sender's to
+    /// choose (a Reply-To header). Without a limit the row took the screen:
+    /// the composer's height is the transcript's bottom inset, so forty
+    /// addresses in the newest message's header left no transcript to read.
+    /// Some seven lines of the caption font at its usual size, which is more
+    /// than a dozen ordinary addresses.
+    static let wrappingLabelMaxHeight: CGFloat = 120
+
+    /// The language tag for text that is in no language (BCP 47 `zxx`), which
+    /// is what an address is.
+    static let addressLanguageIdentifier = "zxx"
+
+    /// `label` as a row that wraps draws it: the same characters, with each
+    /// address marked as text in no language.
+    ///
+    /// A line that wraps breaks a long word at a syllable and adds a hyphen,
+    /// and an address is one long word. `billing@accounts.subsidiary.example.com`
+    /// was drawn `billing@accounts.sub-` and, on the next line,
+    /// `sidiary.example.com`: a hyphen the address does not have, in the one
+    /// row that says who gets the reply, and `sub-sidiary.example.com` is how
+    /// another domain is written. Text in no language has no syllables to
+    /// break at, so it is broken only where the line runs out, and nothing
+    /// is added to it (drawn in the test host, 2026-11-16, iOS 27.0).
+    ///
+    /// Only the addresses are marked. The label's other words, the subject of
+    /// the quoted message among them, keep the language they are in and wrap
+    /// as words do.
+    ///
+    /// An address here is any run of the label between spaces that holds an
+    /// "@", with the comma or colon that follows it. A word of a subject that
+    /// holds one is marked too, and loses nothing by it.
+    static func wrappingLabel(_ label: String) -> AttributedString {
+        var result = AttributedString()
+        for (index, word) in label.split(separator: " ", omittingEmptySubsequences: false).enumerated() {
+            if index > 0 {
+                result += AttributedString(" ")
+            }
+            var part = AttributedString(String(word))
+            if word.contains("@") {
+                part.languageIdentifier = addressLanguageIdentifier
+            }
+            result += part
+        }
+        return result
+    }
+
+    /// What the iPhone's quote row draws (`ChatReplyBarHeaderRow`).
+    struct QuoteRow: Equatable {
+        /// The row's text.
+        let text: String
+        /// Whether the text is on as many lines as it needs, up to
+        /// `wrappingLabelMaxHeight`, or on the row's one line.
+        let wraps: Bool
+        /// Whether a tap on the row opens or closes it, and the row shows the
+        /// mark that says so.
+        let opens: Bool
+    }
+
+    /// The iPhone's quote row, closed or opened by the user.
+    ///
+    /// Closed it is one line and draws `label`, which can cut an address in
+    /// its middle and count recipients it does not name, and whose end the
+    /// line can cut again. Two addresses cut that way can be drawn the same,
+    /// and before this a sighted user had nowhere to see either whole: the
+    /// Mac's row has a tooltip, and VoiceOver is read the whole label. So a
+    /// row that announces anyone opens on a tap, and open it draws the
+    /// header's unabridged label, wrapped.
+    ///
+    /// A row that announces nobody carries no unabridged label and does not
+    /// open, whatever `isOpen` says: it is the ordinary chat's row, drawn as
+    /// it always was.
+    static func quoteRow(label: String, unabridgedLabel: String?, isOpen: Bool) -> QuoteRow {
+        guard let unabridgedLabel else {
+            return QuoteRow(text: label, wraps: false, opens: false)
+        }
+        return isOpen
+            ? QuoteRow(text: unabridgedLabel, wraps: true, opens: true)
+            : QuoteRow(text: label, wraps: false, opens: true)
     }
 
     /// `whole` where the row's `label` says less than it, nil where the two
