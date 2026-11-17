@@ -260,7 +260,7 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         )
     }
 
-    // Revert-check: `runExclusivelyWhenStoreIsIdle` in
+    // Revert-check: `resultOfExclusiveRun` in
     // `DataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner:)`. Run
     // without it, the passes start while the sync's run is still active (the
     // shell is gone before the run ends) and hold no run of their own (the
@@ -324,7 +324,7 @@ final class MaintenanceCleanupGateTests: XCTestCase {
     }
 
     // Revert-check: the account-work request in
-    // `StoreMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle`, which
+    // `StoreMaintenanceCoordinator.resultOfExclusiveRun`, which
     // `runStoreMaintenanceIfDue(exclusiveRunner:)` goes through. A sign-out
     // that starts while the maintenance waits behind the sync must find it
     // gone, not let it run its merges on the next account's store.

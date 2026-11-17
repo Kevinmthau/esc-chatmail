@@ -98,10 +98,26 @@ final class SyncEngine: ObservableObject, Sendable {
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
     private let availableStorageBytes: @Sendable () -> Int64?
-    /// Runs the 6-hour store maintenance if it is due, as a run of its own
-    /// (`DataCleanupService.runStoreMaintenanceIfDue`). Called only after an
-    /// incremental run has ended; see `runStoreMaintenanceAfterSync()`.
-    private let runDueStoreMaintenance: @Sendable () async -> Void
+    /// Runs the store-wide maintenance passes, if their 6-hour cadence is
+    /// due, as a run of their own (`DataCleanupService.runStoreMaintenanceIfDue`),
+    /// after an incremental run that succeeded.
+    ///
+    /// Only ever called once `runSyncTask` has ended the sync's run. The
+    /// passes take the exclusive run themselves, so from inside a run they
+    /// would wait for a boundary their own caller holds. They ran inside
+    /// the sync's run, ahead of `.syncCompleted`: every six hours one sync
+    /// kept its run, its progress and everything waiting on it for all of
+    /// them. Whoever was waiting for the sync
+    /// (`waitForCurrentSyncToComplete()`) is released before they start.
+    ///
+    /// Not called after a run whose follow-up is about to run: in the
+    /// foreground where the caller queued a continuation, in a processing
+    /// task where the run needs one. The follow-up is new mail, and it
+    /// would wait behind the passes for the exclusive run.
+    ///
+    /// Internal (not private) only so a test can ask for the maintenance
+    /// without a scripted sync in front of it.
+    let runStoreMaintenanceAfterSync: @Sendable () async -> Void
 
     private let log = LogCategory.sync.logger
 
@@ -117,7 +133,8 @@ final class SyncEngine: ObservableObject, Sendable {
             coreDataStack: CoreDataStack.shared,
             attachmentDownloader: AttachmentDownloader.shared,
             networkMonitor: NetworkMonitorService(),
-            syncRunCoordinator: .shared
+            syncRunCoordinator: .shared,
+            storeMaintenanceCoordinator: .shared
         )
     }
 
@@ -137,7 +154,7 @@ final class SyncEngine: ObservableObject, Sendable {
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
         availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
-        runDueStoreMaintenance: (@Sendable () async -> Void)? = nil
+        storeMaintenanceCoordinator: StoreMaintenanceCoordinator? = nil
     ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
@@ -150,8 +167,17 @@ final class SyncEngine: ObservableObject, Sendable {
         self.syncRunCoordinator = syncRunCoordinator
         self.clock = clock
         self.availableStorageBytes = availableStorageBytes
-        self.runDueStoreMaintenance = runDueStoreMaintenance ?? {
-            await dataCleanupService.runStoreMaintenanceIfDue()
+        // The maintenance takes its exclusive run on the coordinator this
+        // engine's own runs use. The shared engine is given the shared
+        // maintenance coordinator, which the daily database tasks also go
+        // through, so only one of them runs at a time. An engine built
+        // around a coordinator of its own gets one built on that: on the
+        // shared one its passes held the process-wide boundary and were not
+        // kept out of this engine's next run.
+        let exclusiveRunner = storeMaintenanceCoordinator
+            ?? StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+        self.runStoreMaintenanceAfterSync = {
+            await dataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner: exclusiveRunner)
         }
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
@@ -296,25 +322,6 @@ final class SyncEngine: ObservableObject, Sendable {
         case .skippedInsufficientStorage:
             return .deferredForInsufficientStorage
         }
-    }
-
-    /// Runs the store-wide maintenance passes, if they are due, after an
-    /// incremental run that succeeded.
-    ///
-    /// Only ever called once `runSyncTask` has ended the sync's run. The
-    /// passes take the exclusive run themselves, so from inside a run they
-    /// would wait for a boundary their own caller holds. They ran inside
-    /// the sync's run, ahead of `.syncCompleted`: every six hours one sync
-    /// kept its run, its progress and everything waiting on it for all of
-    /// them. Whoever was waiting for the sync
-    /// (`waitForCurrentSyncToComplete()`) is released before they start.
-    ///
-    /// Not called after a run whose follow-up is about to run: in the
-    /// foreground where the caller queued a continuation, in a processing
-    /// task where the run needs one. The follow-up is new mail, and it
-    /// would wait behind the passes for the exclusive run.
-    private func runStoreMaintenanceAfterSync() async {
-        await runDueStoreMaintenance()
     }
 
     func waitForCurrentSyncToComplete() async {

@@ -76,10 +76,10 @@ final class SQLiteDatabaseTests: XCTestCase {
     }
 
     // HONEST SCOPE: pins the code a locked store is reported with, and has
-    // no revert target. With no `sqlite3_busy_timeout` the statement fails
-    // with the same `SQLITE_BUSY`, only at once. That a statement waits out a
-    // short lock was not made into a test: it needs a second thread that
-    // releases the lock on a timer.
+    // no revert target. With no busy handler the statement fails with the
+    // same `SQLITE_BUSY`, only at once. That a statement waits out a short
+    // lock was not made into a test: it needs a second thread that releases
+    // the lock on a timer.
     //
     // The lock is met when the statement is prepared, which reads the
     // schema, so that is the error it arrives as.
@@ -147,6 +147,43 @@ final class SQLiteDatabaseTests: XCTestCase {
         } catch {
             XCTAssertEqual(error as? SQLiteDatabase.DatabaseError, .interrupted(long))
         }
+    }
+
+    // Revert-check: the busy handler `SQLiteDatabase.init` installs in place
+    // of `sqlite3_busy_timeout`, and the `isInterruption` reading of the
+    // `SQLITE_BUSY` it leaves. The store is locked for the whole test and
+    // the handle would wait ten seconds for it. With the timeout nothing
+    // ends that wait, and the statement fails ten seconds later: the time
+    // assertion fails. With `SQLITE_BUSY` not read as the interrupt's, it
+    // is reported as a locked store: the error assertion fails.
+    func testExecuteUnlessCancelled_cancelledWhileWaitingForALock_stopsWaiting() async throws {
+        var holder: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(databasePath, &holder), SQLITE_OK)
+        defer { sqlite3_close(holder) }
+        XCTAssertEqual(sqlite3_exec(holder, "BEGIN EXCLUSIVE", nil, nil, nil), SQLITE_OK)
+        defer { sqlite3_exec(holder, "ROLLBACK", nil, nil, nil) }
+        let database = try SQLiteDatabase(path: databasePath, busyTimeoutMilliseconds: 10_000)
+
+        let started = Date()
+        let statement = Task.detached {
+            try await database.executeUnlessCancelled("ANALYZE")
+        }
+        // Long enough for the statement to be waiting on the lock. One
+        // cancelled before it starts is refused by the guard at the top of
+        // `execute`, which would pass this test without the handler.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        statement.cancel()
+
+        do {
+            try await statement.value
+            XCTFail("The statement ran against a locked store")
+        } catch {
+            XCTAssertEqual(error as? SQLiteDatabase.DatabaseError, .interrupted("ANALYZE"))
+        }
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started), 5,
+            "A cancelled statement must not wait out the busy timeout"
+        )
     }
 
     // MARK: - Helpers

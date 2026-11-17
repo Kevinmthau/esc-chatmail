@@ -136,7 +136,7 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
     // MARK: - Cancelling a running operation
 
     // Revert-check: `acquireRunWithTask` in
-    // `StoreMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle`. Taken
+    // `StoreMaintenanceCoordinator.resultOfExclusiveRun`. Taken
     // with `acquireRun`, the run has no task, `beginQuiescence()` has nothing
     // to cancel, and a sign-out waits for the whole operation: here the
     // operation runs to its own deadline and never sees a cancellation.
@@ -172,7 +172,7 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
     }
 
     // Revert-check: the `withTaskCancellationHandler` in
-    // `StoreMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle`. The
+    // `StoreMaintenanceCoordinator.resultOfExclusiveRun`. The
     // operation runs in a task of its own, so without the handler the
     // cancellation of the caller, which is how a background task's
     // expiration arrives, stops nothing.
@@ -262,6 +262,23 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
             try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
         }
         return await condition()
+    }
+
+    // Revert-check: the nil `StoreMaintenanceCoordinator.resultOfExclusiveRun`
+    // returns for an operation that never ran, as distinct from what an
+    // operation that ran returned. `DataCleanupService.runStoreMaintenanceIfDue`
+    // reads the nil as `.notAdmitted`.
+    func testResultOfExclusiveRun_returnsTheOperationsValue_andNilWhenNotAdmitted() async {
+        let syncRunCoordinator = SyncRunCoordinator()
+        let coordinator = StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+
+        let ran = await coordinator.resultOfExclusiveRun(operationName: "test cleanup") { "ran" }
+        XCTAssertEqual(ran, "ran")
+
+        await syncRunCoordinator.beginQuiescence()
+        let refused = await coordinator.resultOfExclusiveRun(operationName: "test cleanup") { "ran" }
+        await syncRunCoordinator.endQuiescence()
+        XCTAssertNil(refused, "An account transition admits nothing")
     }
 
     /// Stands in for a maintenance operation's work: returns true as soon as

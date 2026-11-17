@@ -263,12 +263,6 @@ final class BackgroundTaskRegistry {
         Log.debug("Cancelled background task: \(identifier)", category: .background)
     }
 
-    /// Cancels all pending tasks
-    func cancelAll() {
-        BGTaskScheduler.shared.cancelAllTaskRequests()
-        Log.debug("Cancelled all background tasks", category: .background)
-    }
-
     /// Returns all registered task identifiers
     var registeredIdentifiers: [String] {
         Array(taskConfigurations.keys)

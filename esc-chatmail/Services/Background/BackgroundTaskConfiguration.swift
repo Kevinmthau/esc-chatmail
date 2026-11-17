@@ -41,21 +41,6 @@ struct BackgroundTaskConfiguration {
         )
     }
 
-    /// Creates a weekly processing task configuration
-    static func weeklyProcessing(
-        identifier: String,
-        requiresNetwork: Bool = false,
-        requiresPower: Bool = true
-    ) -> BackgroundTaskConfiguration {
-        BackgroundTaskConfiguration(
-            identifier: identifier,
-            taskType: .processing,
-            interval: 7 * 24 * 60 * 60,  // 1 week
-            requiresNetworkConnectivity: requiresNetwork,
-            requiresExternalPower: requiresPower
-        )
-    }
-
     /// Creates an app refresh task configuration
     static func appRefresh(
         identifier: String,

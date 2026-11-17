@@ -168,7 +168,8 @@ final class SyncRunCoordinatorTests: XCTestCase {
                 }
             }
         }
-        await coordinator.waitUntilWorkIsWaiting()
+        let parked = await workIsWaiting(on: coordinator)
+        XCTAssertTrue(parked, "The acquisition waits for the active run")
         XCTAssertFalse(builtTask.isSet, "The task is built only once the run is taken")
 
         await coordinator.endRun(activeRun)
@@ -210,13 +211,15 @@ final class SyncRunCoordinatorTests: XCTestCase {
                 return Task {}
             }
         }
-        await coordinator.waitUntilWorkIsWaiting()
+        let parked = await workIsWaiting(on: coordinator)
+        XCTAssertTrue(parked, "The acquisition waits for the active run")
         let quiescenceTask = Task {
             await coordinator.beginQuiescence()
         }
-        while await coordinator.makeAccountWorkRequest() != nil {
-            await Task.yield()
+        let quiescing = await waitUntil(timeout: 5) {
+            await coordinator.makeAccountWorkRequest() == nil
         }
+        XCTAssertTrue(quiescing, "The account transition has begun")
         await coordinator.endRun(activeRun)
         await quiescenceTask.value
         await coordinator.endQuiescence()

@@ -1,6 +1,5 @@
 import Foundation
 import CoreData
-import os
 
 extension Notification.Name {
     /// Posted when one of `DataCleanupService`'s cleanup runs ends
@@ -278,13 +277,10 @@ struct DataCleanupService: Sendable {
         guard IncrementalCleanupSchedule.isDue(defaults: maintenanceScheduleDefaults) else {
             return .notDue
         }
-        let outcome = OSAllocatedUnfairLock<DueStoreMaintenanceOutcome>(initialState: .notAdmitted)
-        _ = await exclusiveRunner.runExclusivelyWhenStoreIsIdle(operationName: "store maintenance") { [self] in
-            let result = await runStoreMaintenanceIfDue(in: coreDataStack.newBackgroundContext())
-            outcome.withLock { $0 = result }
-            return result == .finished(.completed) || result == .notDue
+        let outcome = await exclusiveRunner.resultOfExclusiveRun(operationName: "store maintenance") { [self] in
+            await runStoreMaintenanceIfDue(in: coreDataStack.newBackgroundContext())
         }
-        return outcome.withLock { $0 }
+        return outcome ?? .notAdmitted
     }
 
     /// The passes and their cadence, for a caller that already owns the

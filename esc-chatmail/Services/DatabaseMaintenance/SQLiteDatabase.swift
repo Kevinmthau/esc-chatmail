@@ -26,10 +26,18 @@ final class SQLiteDatabase: @unchecked Sendable {
     /// milliseconds, large enough that the look costs nothing measurable.
     private static let progressStepInterval: Int32 = 1_000
 
+    /// How long a statement that met another connection's lock sleeps
+    /// before it tries again, and so the longest an interrupt waits to be
+    /// seen there.
+    private static let busyRetryIntervalMilliseconds: Int32 = 10
+
+    private let busyTimeoutMilliseconds: Int32
+
     /// - Parameter busyTimeoutMilliseconds: how long a statement waits for
     ///   another connection's write to finish before it fails with
     ///   `SQLITE_BUSY`. With none, a statement that met a Core Data save in
-    ///   progress failed at once.
+    ///   progress failed at once. The wait ends early when the handle is
+    ///   interrupted.
     init(path: String, busyTimeoutMilliseconds: Int32 = 5_000) throws {
         var handle: OpaquePointer?
         // Read-write and never create: the path is the app's store, and a
@@ -41,7 +49,20 @@ final class SQLiteDatabase: @unchecked Sendable {
             throw DatabaseError.cannotOpen(path: path, code: result, message: message)
         }
         db = handle
-        sqlite3_busy_timeout(handle, busyTimeoutMilliseconds)
+        self.busyTimeoutMilliseconds = busyTimeoutMilliseconds
+        // A busy handler of its own in place of `sqlite3_busy_timeout`,
+        // whose wait nothing can end: the progress handler below is called
+        // only while a statement is stepping, so a statement waiting for a
+        // lock did not see its interrupt until the whole timeout had passed.
+        sqlite3_busy_handler(
+            handle,
+            { context, attempts in
+                guard let context else { return 0 }
+                let database = Unmanaged<SQLiteDatabase>.fromOpaque(context).takeUnretainedValue()
+                return database.waitsAgainForLock(afterAttempts: attempts) ? 1 : 0
+            },
+            Unmanaged.passUnretained(self).toOpaque()
+        )
         // SQLite calls this on the thread running the statement, every
         // `progressStepInterval` steps, and stops the statement with
         // `SQLITE_INTERRUPT` once it returns non-zero. A flag read here in
@@ -64,6 +85,25 @@ final class SQLiteDatabase: @unchecked Sendable {
         sqlite3_close(db)
     }
 
+    /// SQLite asks this each time a statement finds the store locked by
+    /// another connection. True, after one short sleep, has it try again;
+    /// false has it fail with `SQLITE_BUSY`.
+    private func waitsAgainForLock(afterAttempts attempts: Int32) -> Bool {
+        guard !isInterrupted.withLock({ $0 }),
+              attempts < busyTimeoutMilliseconds / Self.busyRetryIntervalMilliseconds else {
+            return false
+        }
+        usleep(useconds_t(Self.busyRetryIntervalMilliseconds) * 1_000)
+        return true
+    }
+
+    /// Whether `code` is what an interrupt leaves behind: SQLite's own
+    /// `SQLITE_INTERRUPT`, or the `SQLITE_BUSY` of a wait for a lock that
+    /// the interrupt ended.
+    private func isInterruption(_ code: Int32) -> Bool {
+        code == SQLITE_INTERRUPT || (code == SQLITE_BUSY && isInterrupted.withLock { $0 })
+    }
+
     /// Stops the statement that is running, if one is, and refuses every
     /// later one. Safe to call from any thread.
     func interrupt() {
@@ -79,7 +119,12 @@ final class SQLiteDatabase: @unchecked Sendable {
         defer { sqlite3_finalize(statement) }
 
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw DatabaseError.prepareFailed(sql: sql, code: sqlite3_errcode(db), message: lastErrorMessage())
+            // Preparing reads the schema, which can meet the lock too.
+            let code = sqlite3_errcode(db)
+            if isInterruption(code) {
+                throw DatabaseError.interrupted(sql)
+            }
+            throw DatabaseError.prepareFailed(sql: sql, code: code, message: lastErrorMessage())
         }
 
         var result = sqlite3_step(statement)
@@ -87,7 +132,7 @@ final class SQLiteDatabase: @unchecked Sendable {
             result = sqlite3_step(statement)
         }
         guard result == SQLITE_DONE else {
-            if result == SQLITE_INTERRUPT {
+            if isInterruption(result) {
                 throw DatabaseError.interrupted(sql)
             }
             throw DatabaseError.executeFailed(sql: sql, code: result, message: lastErrorMessage())

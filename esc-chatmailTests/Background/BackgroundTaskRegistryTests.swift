@@ -35,7 +35,7 @@ final class BackgroundTaskRegistryTests: XCTestCase {
         let spy = BackgroundTaskRegistrySchedulerSpy()
         let registry = spy.makeRegistry()
         registry.register(
-            config: .weeklyProcessing(
+            config: .dailyProcessing(
                 identifier: "task.vacuumlike",
                 requiresNetwork: false,
                 requiresPower: true
