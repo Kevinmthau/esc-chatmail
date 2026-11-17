@@ -185,9 +185,13 @@ extension VirtualScrollState {
         }
     }
 
+    /// `conversationObjectID` is the conversation's permanent objectID where
+    /// the caller already has it (the scroll state keeps the one its first
+    /// load resolved). With it the load does not look the conversation up.
     nonisolated static func loadMessagePage(
         conversationId: String,
         range: Range<Int>,
+        conversationObjectID: NSManagedObjectID? = nil,
         in context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage {
         guard let conversationUUID = UUID(uuidString: conversationId) else {
@@ -198,13 +202,15 @@ extension VirtualScrollState {
             do {
                 // This load reads the store only, and a conversation the
                 // store has no row for has no stored messages either.
-                guard let predicate = try transcriptPredicate(
+                guard let transcript = try transcriptPredicate(
                     conversationUUID: conversationUUID,
+                    knownConversationObjectID: conversationObjectID,
                     includesPendingChanges: false,
                     in: context
                 ) else {
                     return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
                 }
+                let predicate = transcript.predicate
 
                 let messageIDs: [NSManagedObjectID]
                 if range.isEmpty {
@@ -230,7 +236,8 @@ extension VirtualScrollState {
 
                 return VirtualScrollMessagePage(
                     messageIDs: messageIDs,
-                    totalCount: totalCount
+                    totalCount: totalCount,
+                    conversationObjectID: transcript.conversationObjectID
                 )
             } catch {
                 return VirtualScrollMessagePage(
@@ -245,6 +252,7 @@ extension VirtualScrollState {
     nonisolated static func loadPendingMessagePage(
         conversationId: String,
         range: Range<Int>,
+        conversationObjectID: NSManagedObjectID? = nil,
         in context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage {
         guard let conversationUUID = UUID(uuidString: conversationId) else {
@@ -256,11 +264,14 @@ extension VirtualScrollState {
                 // With pending changes in play, a conversation this lookup
                 // cannot name (one deleted but not yet saved, say) keeps the
                 // UUID form and whatever it selected before.
-                let predicate = try transcriptPredicate(
+                let transcript = try transcriptPredicate(
                     conversationUUID: conversationUUID,
+                    knownConversationObjectID: conversationObjectID,
                     includesPendingChanges: true,
                     in: context
-                ) ?? MessagePredicates.visibleInChat(conversationId: conversationUUID)
+                )
+                let predicate = transcript?.predicate
+                    ?? MessagePredicates.visibleInChat(conversationId: conversationUUID)
 
                 let messages: [Message]
                 if range.isEmpty {
@@ -283,7 +294,8 @@ extension VirtualScrollState {
 
                 return VirtualScrollMessagePage(
                     messageIDs: messages.map(\.objectID),
-                    totalCount: totalCount
+                    totalCount: totalCount,
+                    conversationObjectID: transcript?.conversationObjectID
                 )
             } catch {
                 return VirtualScrollMessagePage(
@@ -295,13 +307,18 @@ extension VirtualScrollState {
         }
     }
 
-    /// The transcript's predicate for the conversation with this UUID, or nil
-    /// when `context` finds no such conversation. Call inside
-    /// `context.perform`.
+    /// The transcript's predicate for the conversation with this UUID, with
+    /// the conversation's permanent objectID where it has one, or nil when
+    /// `context` finds no such conversation. Call inside `context.perform`.
     ///
-    /// The conversation is looked up once, by its UUID, and the messages are
-    /// then asked for by its objectID, which SQLite answers from the
-    /// conversation's own message index whatever statistics the store has.
+    /// The conversation is looked up by its UUID, unless the caller hands in
+    /// the permanent objectID an earlier load resolved
+    /// (`knownConversationObjectID`): the lookup compares a UUID no index
+    /// covers, and a chat that pages as it scrolls made it at every page.
+    /// The messages are then asked for by the objectID, which SQLite answers
+    /// from the conversation's own message index whatever statistics the
+    /// store has. A known ID whose conversation the store no longer has
+    /// selects no messages, which is the lookup's "no such conversation".
     /// Filtering messages on `conversation.id` instead joins every message to
     /// its conversation, and without statistics SQLite reads the whole
     /// message table for a page and again for its count
@@ -314,9 +331,17 @@ extension VirtualScrollState {
     /// must, and a background context cannot resolve one at all.)
     nonisolated static func transcriptPredicate(
         conversationUUID: UUID,
+        knownConversationObjectID: NSManagedObjectID? = nil,
         includesPendingChanges: Bool,
         in context: NSManagedObjectContext
-    ) throws -> NSPredicate? {
+    ) throws -> (predicate: NSPredicate, conversationObjectID: NSManagedObjectID?)? {
+        if let knownConversationObjectID, !knownConversationObjectID.isTemporaryID {
+            return (
+                MessagePredicates.visibleInChat(conversationObjectID: knownConversationObjectID),
+                knownConversationObjectID
+            )
+        }
+
         let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
         request.predicate = ConversationPredicates.id(conversationUUID)
         request.resultType = .managedObjectIDResultType
@@ -325,9 +350,9 @@ extension VirtualScrollState {
 
         guard let conversationObjectID = try context.fetch(request).first else { return nil }
         guard !conversationObjectID.isTemporaryID else {
-            return MessagePredicates.visibleInChat(conversationId: conversationUUID)
+            return (MessagePredicates.visibleInChat(conversationId: conversationUUID), nil)
         }
-        return MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID)
+        return (MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID), conversationObjectID)
     }
 
     nonisolated private static var messageSortDescriptors: [NSSortDescriptor] {

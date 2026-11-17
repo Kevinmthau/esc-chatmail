@@ -17,6 +17,10 @@ final class GmailSendService: ObservableObject {
     let authSession: AuthSession
     let viewContext: NSManagedObjectContext
     let conversationMutationSerializer: ConversationRollupMutationSerializer
+    /// Called once an optimistic send has queued for the turns of the
+    /// conversations it may anchor to. Nil in the app: a test learns from it
+    /// that a send is waiting behind an Archive, with no sleep.
+    let anchorTurnDidEnqueue: (@Sendable () async -> Void)?
 
     // MARK: - Initialization
 
@@ -24,12 +28,14 @@ final class GmailSendService: ObservableObject {
         viewContext: NSManagedObjectContext,
         apiClient: (any GmailAPIClientProtocol)? = nil,
         authSession: AuthSession? = nil,
-        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared
+        conversationMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        anchorTurnDidEnqueue: (@Sendable () async -> Void)? = nil
     ) {
         self.viewContext = viewContext
         self.apiClient = apiClient ?? GmailAPIClient.shared
         self.authSession = authSession ?? .shared
         self.conversationMutationSerializer = conversationMutationSerializer
+        self.anchorTurnDidEnqueue = anchorTurnDidEnqueue
     }
 
     // MARK: - Public API

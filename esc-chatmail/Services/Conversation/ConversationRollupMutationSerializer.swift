@@ -141,6 +141,36 @@ actor ConversationRollupMutationSerializer {
         )
     }
 
+    /// The turns of the conversations an optimistic send may anchor to, for
+    /// a caller that already holds the cleanup-sensitive gate
+    /// (`GmailSendService.createOptimisticMessage`).
+    ///
+    /// Archive and Report Spam change a conversation on a background context
+    /// inside that conversation's turn. A send that chose the conversation
+    /// while one of them was still running read it as it was, anchored to
+    /// it, and was archived with it. Inside the turn the send runs wholly
+    /// before the action or wholly after it, and only a send to a
+    /// conversation being archived waits for the archive.
+    ///
+    /// The order is the gate, then the turn, and it is one-way: an operation
+    /// that holds a conversation's turn must never ask for the gate, because
+    /// a send that holds the gate and waits for that turn is then waited on
+    /// by it. For the same reason nothing may ask for the gate and a
+    /// conversation's turn in one call: queued behind a send's gate, it is
+    /// ahead of that send's turn. Both fail silently, as a hang. No holder
+    /// of a conversation's turn asks for the gate today.
+    func performThrowingAnchoredSendMutation<Value: Sendable>(
+        conversationIDs: Set<NSManagedObjectID>,
+        onEnqueued: (@Sendable () async -> Void)? = nil,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await performThrowing(
+            conversationKeys: Self.conversationKeys(for: conversationIDs),
+            onEnqueued: onEnqueued,
+            operation: operation
+        )
+    }
+
     func performSyncMutation<Value: Sendable>(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext,

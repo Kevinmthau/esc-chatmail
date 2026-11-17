@@ -569,15 +569,32 @@ extension VirtualScrollState {
         _ range: Range<Int>,
         preferPendingConversationMessages: Bool = false
     ) async -> VirtualScrollMessagePage {
+        // Only an ID already in hand. `currentConversationObjectID()` would
+        // look one up on the view context, which is a fetch on the main
+        // thread; the load does that lookup on its own queue and hands the
+        // ID back.
+        let knownConversationObjectID = cachedConversationObjectID
+        let page: VirtualScrollMessagePage
         if preferPendingConversationMessages {
-            return await Self.loadPendingMessagePage(
+            page = await Self.loadPendingMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: knownConversationObjectID,
                 in: viewContext
             )
+        } else {
+            page = await pageLoader(conversationId, range, knownConversationObjectID, makeBackgroundContext())
         }
 
-        return await pageLoader(conversationId, range, makeBackgroundContext())
+        // A chat pages many times and its conversation is one row: keep the
+        // ID the first load resolved, as `currentConversationObjectID()`
+        // does, permanent IDs only.
+        if cachedConversationObjectID == nil,
+           let resolvedConversationObjectID = page.conversationObjectID,
+           !resolvedConversationObjectID.isTemporaryID {
+            cachedConversationObjectID = resolvedConversationObjectID
+        }
+        return page
     }
 
     func preloadIfNeeded() {

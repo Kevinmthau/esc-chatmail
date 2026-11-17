@@ -52,25 +52,141 @@ extension GmailSendService {
         forwardEnvelope: StoredForwardEnvelope? = nil
     ) async throws -> OptimisticSendHandle {
         try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
-            try await createOptimisticMessageWithoutCleanupInterleaving(
-                to: recipients,
-                body: body,
-                subject: subject,
-                threadId: threadId,
-                attachments: attachments,
-                chatPreviewText: chatPreviewText,
-                senderEmail: senderEmail,
-                senderName: senderName,
-                optimisticConversation: optimisticConversation,
-                replyMetadata: replyMetadata,
-                forwardEnvelope: forwardEnvelope
+            // The gate first, then the turns of the conversations this send
+            // may anchor to, never the other way round: see
+            // `ConversationRollupMutationSerializer.performThrowingAnchoredSendMutation(conversationIDs:onEnqueued:operation:)`.
+            let anchor = await resolveOptimisticSendAnchor(
+                recipients: recipients,
+                optimisticConversation: optimisticConversation
             )
+            return try await conversationMutationSerializer.performThrowingAnchoredSendMutation(
+                conversationIDs: anchor.storedConversationIDs,
+                onEnqueued: anchorTurnDidEnqueue
+            ) { [self] in
+                await adoptStoredArchiveState(of: anchor.storedConversationIDs)
+                return try await createOptimisticMessageWithoutCleanupInterleaving(
+                    to: recipients,
+                    body: body,
+                    subject: subject,
+                    threadId: threadId,
+                    attachments: attachments,
+                    chatPreviewText: chatPreviewText,
+                    senderEmail: senderEmail,
+                    senderName: senderName,
+                    anchor: anchor,
+                    replyMetadata: replyMetadata,
+                    forwardEnvelope: forwardEnvelope
+                )
+            }
+        }
+    }
+
+    /// Where this send will look for its conversation, and the stored
+    /// conversations it can end up anchored to. Worked out inside the
+    /// cleanup-sensitive gate, before the conversations' turns are taken.
+    @MainActor
+    private func resolveOptimisticSendAnchor(
+        recipients: [String],
+        optimisticConversation: OptimisticConversationReference?
+    ) async -> OptimisticSendAnchor {
+        if let existingConversationObjectID = optimisticConversation?
+            .existingConversationReference?
+            .resolveObjectID(in: viewContext) {
+            return OptimisticSendAnchor(
+                target: .existingConversation(existingConversationObjectID),
+                storedConversationIDs: existingConversationObjectID.isTemporaryID ? [] : [existingConversationObjectID]
+            )
+        }
+
+        // Use the same alias set the sync router excludes so the optimistic
+        // conversation and the synced-back copy of this send hash identically.
+        // getAliases(from:) falls back to Core Data when the cache is cold
+        // (fresh launch, post-invalidate) — a cached-only read would hash
+        // without self-exclusion exactly when parity is load-bearing.
+        let myAliases = await AliasManager.shared.getAliases(from: viewContext)
+        let participantHash = optimisticConversation?.participantHashValue
+            ?? makeOptimisticParticipantHash(from: recipients, myAliases: myAliases)
+        return OptimisticSendAnchor(
+            target: .participantHash(participantHash, myAliases: myAliases),
+            storedConversationIDs: storedConversationIDs(participantHash: participantHash)
+        )
+    }
+
+    /// The stored conversations with this participant hash, archived ones
+    /// included: the ones `findOrCreateOptimisticConversation` chooses from.
+    /// A conversation the view context has not saved has no turn anyone else
+    /// could hold, and is left out.
+    @MainActor
+    private func storedConversationIDs(participantHash: String) -> Set<NSManagedObjectID> {
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+        request.predicate = NSPredicate(format: "participantHash == %@", participantHash)
+        request.resultType = .managedObjectIDResultType
+        request.includesPendingChanges = false
+        do {
+            return Set(try viewContext.fetch(request))
+        } catch {
+            // The creation's own fetch of these conversations fails next and
+            // stops the send.
+            Log.error("Failed to fetch a send's candidate conversations", category: .coreData, error: error)
+            return []
+        }
+    }
+
+    /// Gives the view context the store's archive state for these
+    /// conversations, where the two differ. Call inside the conversations'
+    /// turns.
+    ///
+    /// The view context learns of a background save by merging it, a
+    /// main-queue block of its own, so a conversation another context has
+    /// just archived can still read as active here. A send that read it so
+    /// anchored to it without reactivating it, and was archived with it when
+    /// the merge landed. This is done where the state is read, not where it
+    /// is written, so it holds for every writer: Archive and Report Spam
+    /// (`MessageActions`), and the launch repair and the cleanup passes,
+    /// which archive on contexts of their own inside the gate.
+    ///
+    /// The store is read through a context of its own, which never saves.
+    /// Only a conversation whose archive state differs is refreshed, so an
+    /// ordinary send reloads nothing, and only one the store still has:
+    /// refreshing a row the store has deleted leaves a tombstone whose nil
+    /// `id` traps when read.
+    @MainActor
+    private func adoptStoredArchiveState(of conversationIDs: Set<NSManagedObjectID>) {
+        guard !conversationIDs.isEmpty,
+              let coordinator = viewContext.persistentStoreCoordinator else {
+            return
+        }
+        let storeContext = NSManagedObjectContext(concurrencyType: .mainQueueConcurrencyType)
+        storeContext.persistentStoreCoordinator = coordinator
+
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
+        request.returnsObjectsAsFaults = false
+        let storedConversations: [Conversation]
+        do {
+            storedConversations = try storeContext.fetch(request)
+        } catch {
+            // The view context's own values stand, as they did before this
+            // read existed.
+            Log.error("Failed to read the stored archive state of a send's conversations", category: .coreData, error: error)
+            return
+        }
+
+        for stored in storedConversations {
+            guard let conversation = viewContext.registeredObject(for: stored.objectID) as? Conversation,
+                  !conversation.isDeleted,
+                  conversation.archivedAt != stored.archivedAt || conversation.hidden != stored.hidden else {
+                continue
+            }
+            viewContext.refresh(conversation, mergeChanges: true)
         }
     }
 
     /// The shared cleanup-sensitive mutation gate makes the conversation lookup
     /// and the atomic optimistic graph + recovery-record save one indivisible
-    /// operation relative to destructive store maintenance.
+    /// operation relative to destructive store maintenance. The turns of the
+    /// conversations in `anchor` do the same relative to Archive and Report
+    /// Spam.
     @MainActor
     private func createOptimisticMessageWithoutCleanupInterleaving(
         to recipients: [String],
@@ -81,7 +197,7 @@ extension GmailSendService {
         chatPreviewText: String?,
         senderEmail: String?,
         senderName: String?,
-        optimisticConversation: OptimisticConversationReference?,
+        anchor: OptimisticSendAnchor,
         replyMetadata: OutboundMessageRequest.ReplyMetadata?,
         forwardEnvelope: StoredForwardEnvelope?
     ) async throws -> OptimisticSendHandle {
@@ -93,7 +209,8 @@ extension GmailSendService {
         let hasAttachments = !attachments.isEmpty
 
         let conversation: Conversation
-        if let existingConversationObjectID = optimisticConversation?.existingConversationReference?.resolveObjectID(in: viewContext) {
+        switch anchor.target {
+        case .existingConversation(let existingConversationObjectID):
             // Replies from an open chat should always attach to the currently visible
             // conversation so the optimistic bubble appears immediately in-thread.
             if let registered = viewContext.registeredObject(for: existingConversationObjectID) as? Conversation {
@@ -113,16 +230,9 @@ extension GmailSendService {
                 )
                 throw SendError.replyConversationUnavailable
             }
-        } else {
-            // Use the same alias set the sync router excludes so the optimistic
-            // conversation and the synced-back copy of this send hash identically.
-            // getAliases(from:) falls back to Core Data when the cache is cold
-            // (fresh launch, post-invalidate) — a cached-only read would hash
-            // without self-exclusion exactly when parity is load-bearing.
-            let myAliases = await AliasManager.shared.getAliases(from: viewContext)
+        case .participantHash(let participantHash, let myAliases):
             conversation = try findOrCreateOptimisticConversation(
-                participantHash: optimisticConversation?.participantHashValue
-                    ?? makeOptimisticParticipantHash(from: recipients, myAliases: myAliases),
+                participantHash: participantHash,
                 recipients: recipients,
                 myAliases: myAliases,
                 in: viewContext
@@ -1645,6 +1755,24 @@ extension GmailSendService {
 }
 
 /// Managed-object access in these helpers stays on the caller's context queue.
+/// Where an optimistic send looks for its conversation
+/// (`GmailSendService.resolveOptimisticSendAnchor`).
+private struct OptimisticSendAnchor: Sendable {
+    enum Target: Sendable {
+        /// A reply from an open chat: that chat's conversation.
+        case existingConversation(NSManagedObjectID)
+        /// Any other send: the conversation with this participant hash,
+        /// found or created. The aliases are the ones the hash was made
+        /// with.
+        case participantHash(String, myAliases: Set<String>)
+    }
+
+    let target: Target
+    /// The stored conversations the send can end up anchored to. The send
+    /// takes their turns before it reads any of them.
+    let storedConversationIDs: Set<NSManagedObjectID>
+}
+
 private struct OptimisticSendMutationSnapshot {
     let optimisticMessageID: String
     let conversationID: UUID?

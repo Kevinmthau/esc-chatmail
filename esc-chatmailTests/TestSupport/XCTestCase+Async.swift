@@ -2,6 +2,23 @@ import XCTest
 
 extension XCTestCase {
 
+    /// Keeps the calling thread busy until `condition` holds or `timeout`
+    /// elapses, and returns whether it held. Called on the main thread from
+    /// a `@MainActor` test, nothing queued for the main actor runs
+    /// meanwhile: that is how a test shows that some work finishes without
+    /// the main actor's help, as it must while a screen is laying out.
+    ///
+    /// Not a way to wait in general. `condition` must be safe to read from
+    /// this thread while other threads change what it reads.
+    func holdThisThread(until condition: () -> Bool, timeout: TimeInterval = 5.0) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else { return false }
+            usleep(2_000)
+        }
+        return true
+    }
+
     /// Waits for an async operation to complete within a timeout.
     /// - Parameters:
     ///   - timeout: Maximum time to wait (default: 5 seconds)

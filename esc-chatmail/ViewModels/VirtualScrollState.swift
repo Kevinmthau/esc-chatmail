@@ -8,15 +8,21 @@ struct VirtualScrollMessagePage: @unchecked Sendable {
     let messageIDs: [NSManagedObjectID]
     let totalCount: Int
     let fetchErrorDescription: String?
+    /// The conversation's permanent objectID, where the load had it or
+    /// looked it up. The scroll state keeps it, so its later page loads ask
+    /// for the messages by it without looking the conversation up again.
+    let conversationObjectID: NSManagedObjectID?
 
     init(
         messageIDs: [NSManagedObjectID],
         totalCount: Int,
-        fetchErrorDescription: String? = nil
+        fetchErrorDescription: String? = nil,
+        conversationObjectID: NSManagedObjectID? = nil
     ) {
         self.messageIDs = messageIDs
         self.totalCount = totalCount
         self.fetchErrorDescription = fetchErrorDescription
+        self.conversationObjectID = conversationObjectID
     }
 }
 
@@ -66,9 +72,14 @@ final class VirtualScrollState: ObservableObject {
         case end
     }
 
+    /// Loads one page of a chat's message IDs. `conversationObjectID` is the
+    /// conversation's permanent objectID once a load has resolved it, and
+    /// nil for a chat's first load: a loader hands it on to
+    /// `loadMessagePage`, which then does not look the conversation up.
     typealias MessagePageLoader = (
         _ conversationId: String,
         _ range: Range<Int>,
+        _ conversationObjectID: NSManagedObjectID?,
         _ context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage
 
