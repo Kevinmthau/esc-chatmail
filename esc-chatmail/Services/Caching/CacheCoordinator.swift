@@ -26,9 +26,64 @@ final class CacheCoordinator {
         let htmlContent: HTMLContentAccountGeneration
     }
 
-    private struct AccountScopedSaveNotification {
-        let notification: Notification
+    /// What one save asks of the caches, with the account that made it. Built on the
+    /// posting context's queue and made of values only: no managed object and no
+    /// notification leaves that queue.
+    private struct AccountScopedSavePlan: Sendable {
+        let plan: CacheInvalidationPlan
         let htmlContentGeneration: HTMLContentAccountGeneration
+    }
+
+    /// The two removers of the files a deleted row leaves. Both run off the main actor and
+    /// both ask the store before they remove anything; a test puts in its own.
+    struct FileReclamation: Sendable {
+        /// Removes the body files of deleted messages (`HTMLContentHandler.deleteHTML(forDeleted:…)`).
+        var deleteMessageBodies: @Sendable (
+            _ bodies: [DeletedMessageBody],
+            _ deletedAt: Date,
+            _ generation: HTMLContentAccountGeneration
+        ) -> Void
+        /// Removes the files of deleted attachments (`AttachmentCacheActor.deleteFiles(at:…)`).
+        var deleteAttachmentFiles: @Sendable (
+            _ relativePaths: [String],
+            _ deletedAt: Date,
+            _ generation: AttachmentCacheAccountGeneration
+        ) async -> Void
+
+        static let production = FileReclamation.asking {
+            CoreDataStack.shared.newBackgroundContext()
+        }
+
+        /// The app's removers, asking a store for its rows through a context of
+        /// `makeContext`'s. A fresh context sees saved rows only, which is what is asked.
+        static func asking(
+            _ makeContext: @escaping @Sendable () -> NSManagedObjectContext
+        ) -> FileReclamation {
+            FileReclamation(
+                deleteMessageBodies: { bodies, deletedAt, generation in
+                    let context = makeContext()
+                    HTMLContentHandler.shared.deleteHTML(
+                        forDeleted: bodies,
+                        deletedAt: deletedAt,
+                        expectedGeneration: generation,
+                        liveMessageIDs: { ids in
+                            try DeletedRowFileReclamation.liveMessageIDs(among: ids, in: context)
+                        }
+                    )
+                },
+                deleteAttachmentFiles: { relativePaths, deletedAt, generation in
+                    let context = makeContext()
+                    await AttachmentCacheActor.shared.deleteFiles(
+                        at: relativePaths,
+                        deletedAt: deletedAt,
+                        expectedAccountGeneration: generation,
+                        referencedPaths: { paths in
+                            try DeletedRowFileReclamation.referencedAttachmentPaths(among: paths, in: context)
+                        }
+                    )
+                }
+            )
+        }
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -36,12 +91,10 @@ final class CacheCoordinator {
     private var acceptsAccountWork = true
     private var accountGeneration: UInt64 = 0
     private var invalidationTasks: [UUID: Task<Void, Never>] = [:]
+    private let fileReclamation: FileReclamation
 
     struct CacheInvalidationPlan: Sendable {
-        struct DeletedHTMLArtifact: Sendable, Hashable {
-            let messageId: String
-            let bodyStorageURI: String?
-        }
+        typealias DeletedHTMLArtifact = DeletedMessageBody
 
         struct AttachmentIdentity: Sendable, Hashable {
             let messageId: String?
@@ -54,31 +107,54 @@ final class CacheCoordinator {
         var attachmentPathsToDelete: Set<String> = []
         var attachmentIdentitiesToInvalidate: Set<AttachmentIdentity> = []
         var shouldClearPersonCache = false
+        /// When the save that deleted the rows was posted. A file written after this is not
+        /// the deleted row's: the same message or attachment was stored again, and the
+        /// removers leave it (`DeletedRowFileReclamation.wasWrittenAfter`).
+        var deletedAt = Date()
+
+        var isEmpty: Bool {
+            personEmailsToInvalidate.isEmpty &&
+                messageIdsToInvalidate.isEmpty &&
+                deletedHTMLArtifacts.isEmpty &&
+                attachmentPathsToDelete.isEmpty &&
+                attachmentIdentitiesToInvalidate.isEmpty &&
+                !shouldClearPersonCache
+        }
     }
 
-    init() {}
+    init(fileReclamation: FileReclamation = .production) {
+        self.fileReclamation = fileReclamation
+    }
 
     /// Starts listening for Core Data changes. Call once at app startup.
-    func start() {
+    ///
+    /// - Parameter context: Only this context's saves are heard. The app hears every
+    ///   context's; a test names its own, so that no other save in the process reaches the
+    ///   coordinator it started.
+    func start(observing context: NSManagedObjectContext? = nil) {
         guard !isStarted else { return }
         isStarted = true
 
-        NotificationCenter.default.publisher(for: .NSManagedObjectContextDidSave)
-            // Capture the file-store epoch on the posting context's queue. If
-            // delivery to main is delayed across sign-out/reopen, this token
-            // still identifies the account that produced the save.
-            .compactMap { notification -> AccountScopedSaveNotification? in
+        NotificationCenter.default.publisher(for: .NSManagedObjectContextDidSave, object: context)
+            // Everything a save tells the caches is read here, on the posting context's
+            // queue, inside the save. Two things are only available here. The file-store
+            // epoch: if delivery to main is delayed across sign-out/reopen, this token
+            // still identifies the account that produced the save. And the deleted rows'
+            // values: the instances under `NSDeletedObjectsKey` still hold them, and
+            // anything resolved from their IDs later is a tombstone with a nil `id`, nil
+            // paths and no attachments, so a plan built after the hop was empty for every
+            // delete and no file of a deleted message was ever removed.
+            .compactMap { notification -> AccountScopedSavePlan? in
                 guard let generation = HTMLContentHandler.shared.captureAccountGeneration() else {
                     return nil
                 }
-                return AccountScopedSaveNotification(
-                    notification: notification,
-                    htmlContentGeneration: generation
-                )
+                let plan = CacheCoordinator.invalidationPlan(forSave: notification)
+                guard !plan.isEmpty else { return nil }
+                return AccountScopedSavePlan(plan: plan, htmlContentGeneration: generation)
             }
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] capturedNotification in
-                self?.handleContextDidSave(capturedNotification)
+            .sink { [weak self] savePlan in
+                self?.handleSavePlan(savePlan)
             }
             .store(in: &cancellables)
 
@@ -135,123 +211,154 @@ final class CacheCoordinator {
             HTMLContentHandler.shared.isAccountGenerationCurrent(context.htmlContent)
     }
 
-    private func handleContextDidSave(_ capturedNotification: AccountScopedSaveNotification) {
-        let notification = capturedNotification.notification
-        guard let sourceContext = notification.object as? NSManagedObjectContext else { return }
-
-        let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> ?? []
-        let deletedObjects = notification.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject> ?? []
-        let updatedObjectIDs = (notification.userInfo?[NSUpdatedObjectIDsKey] as? Set<NSManagedObjectID>) ??
-            Set(updatedObjects.map(\.objectID))
-        let deletedObjectIDs = (notification.userInfo?[NSDeletedObjectIDsKey] as? Set<NSManagedObjectID>) ??
-            Set(deletedObjects.map(\.objectID))
-
-        guard !updatedObjectIDs.isEmpty || !deletedObjectIDs.isEmpty else { return }
+    private func handleSavePlan(_ savePlan: AccountScopedSavePlan) {
         guard let accountContext = captureInvalidationAccountContext(
-            htmlGeneration: capturedNotification.htmlContentGeneration
+            htmlGeneration: savePlan.htmlContentGeneration
         ) else { return }
-
-        sourceContext.perform { [weak self] in
-            let localPlan = CacheCoordinator.computeInvalidationPlan(
-                updatedObjectIDs: updatedObjectIDs,
-                deletedObjectIDs: deletedObjectIDs,
-                in: sourceContext
-            )
-
-            Task { @MainActor [weak self] in
-                self?.applyInvalidationPlan(localPlan, accountContext: accountContext)
-            }
-        }
+        applyInvalidationPlan(savePlan.plan, accountContext: accountContext)
     }
 
-    /// Computes the cache-invalidation plan for a set of changed Core Data object IDs.
-    ///
-    /// Pure and side-effect-free: it inspects the changed managed objects and
-    /// decides which caches need invalidating, returning the decision as a
-    /// `CacheInvalidationPlan`. It performs no invalidation itself — that is the
-    /// job of `applyInvalidationPlan(_:)`.
-    ///
-    /// Declared `nonisolated` so it can run on the source context's queue (where
-    /// these managed objects are safe to read), and so the invalidation contract
-    /// can be unit-tested directly without driving the global
-    /// `NSManagedObjectContextDidSave` notification and async-apply path.
-    ///
-    /// - Note: Reads managed-object values via KVC defensively because deleted
-    ///   objects can fault and lose their property values.
-    nonisolated static func computeInvalidationPlan(
-        updatedObjectIDs: Set<NSManagedObjectID>,
-        deletedObjectIDs: Set<NSManagedObjectID>,
-        in context: NSManagedObjectContext
+    /// The plan for one `NSManagedObjectContextDidSave` notification. Call it only while the
+    /// notification is being posted, on the queue that posts it: it reads the notification's
+    /// managed objects.
+    nonisolated static func invalidationPlan(
+        forSave notification: Notification,
+        deletedAt: Date = Date()
     ) -> CacheInvalidationPlan {
-        var plan = CacheInvalidationPlan()
+        let updatedObjects = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> ?? []
+        let deletedObjects = notification.userInfo?[NSDeletedObjectsKey] as? Set<NSManagedObject> ?? []
+        guard !updatedObjects.isEmpty || !deletedObjects.isEmpty else {
+            return CacheInvalidationPlan(deletedAt: deletedAt)
+        }
+        return computeInvalidationPlan(
+            updatedObjects: updatedObjects,
+            deletedObjects: deletedObjects,
+            deletedAt: deletedAt
+        )
+    }
 
-        // Access managed object values on the context's queue to avoid cross-queue reads.
-        for objectID in updatedObjectIDs.union(deletedObjectIDs) {
-            let object = context.object(with: objectID)
+    /// Computes the cache-invalidation plan for a set of changed managed objects.
+    ///
+    /// Pure and side-effect-free: it reads the objects it is given and decides which caches
+    /// need invalidating and which files a deleted row leaves, returning the decision as a
+    /// `CacheInvalidationPlan`. It performs no invalidation itself — that is the job of
+    /// `applyInvalidationPlan(_:)`.
+    ///
+    /// It takes the objects themselves, never their IDs, and must run on their context's
+    /// queue. In a save notification a deleted object still holds its attributes, while its
+    /// relationships are already cut: a deleted message's `attachments` is empty there, and
+    /// each attachment is in the deleted set itself, which is where its paths are read. The
+    /// read through `attachments` stays for a caller that asks before the save.
+    ///
+    /// Nothing here fires a fault. A deleted row has nothing to fulfil one from, and a
+    /// fault fired inside a save notification would mark the object deleted in its context.
+    nonisolated static func computeInvalidationPlan(
+        updatedObjects: Set<NSManagedObject>,
+        deletedObjects: Set<NSManagedObject>,
+        deletedAt: Date = Date()
+    ) -> CacheInvalidationPlan {
+        var plan = CacheInvalidationPlan(deletedAt: deletedAt)
+
+        for object in updatedObjects {
+            guard let person = object as? Person else { continue }
+            if let email = storedString("email", of: person) {
+                plan.personEmailsToInvalidate.insert(email)
+            } else {
+                plan.shouldClearPersonCache = true
+            }
+        }
+
+        for object in deletedObjects {
             if let person = object as? Person {
-                if let email = person.value(forKey: "email") as? String, !email.isEmpty {
+                // One entry, never the whole cache: a deleted Person read after the save
+                // had a nil email, and every delete cleared the cache. One whose email
+                // cannot be read here was never cached under an address.
+                if let email = storedString("email", of: person) {
                     plan.personEmailsToInvalidate.insert(email)
-                } else {
-                    plan.shouldClearPersonCache = true
                 }
                 continue
             }
 
-            if deletedObjectIDs.contains(objectID),
-               let message = object as? Message,
-               let messageId = message.value(forKey: "id") as? String,
-               !messageId.isEmpty {
+            if let message = object as? Message {
+                guard let messageId = storedString("id", of: message) else { continue }
                 plan.messageIdsToInvalidate.insert(messageId)
                 plan.deletedHTMLArtifacts.insert(
-                    CacheInvalidationPlan.DeletedHTMLArtifact(
+                    DeletedMessageBody(
                         messageId: messageId,
-                        bodyStorageURI: message.value(forKey: "bodyStorageURI") as? String
+                        bodyStorageURI: storedString("bodyStorageURI", of: message)
                     )
                 )
-
-                if let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
+                if !message.isFault,
+                   !message.hasFault(forRelationshipNamed: "attachments"),
+                   let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
                     for attachment in attachments {
-                        if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
-                            plan.attachmentPathsToDelete.insert(localURL)
-                        }
-                        if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
-                            plan.attachmentPathsToDelete.insert(previewURL)
-                        }
-                        if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                            plan.attachmentIdentitiesToInvalidate.insert(
-                                CacheInvalidationPlan.AttachmentIdentity(
-                                    messageId: messageId,
-                                    attachmentId: attachmentId
-                                )
-                            )
-                        }
+                        collectDeletedAttachment(attachment, messageId: messageId, into: &plan)
                     }
                 }
                 continue
             }
 
-            if deletedObjectIDs.contains(objectID),
-               let attachment = object as? Attachment {
-                if let localURL = attachment.value(forKey: "localURL") as? String, !localURL.isEmpty {
-                    plan.attachmentPathsToDelete.insert(localURL)
-                }
-                if let previewURL = attachment.value(forKey: "previewURL") as? String, !previewURL.isEmpty {
-                    plan.attachmentPathsToDelete.insert(previewURL)
-                }
-                if let attachmentId = attachment.value(forKey: "id") as? String, !attachmentId.isEmpty {
-                    let messageId = (attachment.value(forKey: "message") as? Message)?
-                        .value(forKey: "id") as? String
-                    plan.attachmentIdentitiesToInvalidate.insert(
-                        CacheInvalidationPlan.AttachmentIdentity(
-                            messageId: messageId,
-                            attachmentId: attachmentId
-                        )
-                    )
-                }
+            if let attachment = object as? Attachment {
+                collectDeletedAttachment(
+                    attachment,
+                    messageId: messageId(ofDeleted: attachment),
+                    into: &plan
+                )
             }
         }
 
         return plan
+    }
+
+    private nonisolated static func collectDeletedAttachment(
+        _ attachment: NSManagedObject,
+        messageId: String?,
+        into plan: inout CacheInvalidationPlan
+    ) {
+        if let localURL = storedString("localURL", of: attachment) {
+            plan.attachmentPathsToDelete.insert(localURL)
+        }
+        if let previewURL = storedString("previewURL", of: attachment) {
+            plan.attachmentPathsToDelete.insert(previewURL)
+        }
+        guard let attachmentId = storedString("id", of: attachment) else { return }
+        if let messageId {
+            // The message's own identity is the exact one. Drop the wider nil-message
+            // entry the same attachment may have been given from the deleted set, where
+            // its message is no longer attached.
+            plan.attachmentIdentitiesToInvalidate.remove(
+                CacheInvalidationPlan.AttachmentIdentity(messageId: nil, attachmentId: attachmentId)
+            )
+            plan.attachmentIdentitiesToInvalidate.insert(
+                CacheInvalidationPlan.AttachmentIdentity(messageId: messageId, attachmentId: attachmentId)
+            )
+        } else if !plan.attachmentIdentitiesToInvalidate.contains(where: { $0.attachmentId == attachmentId }) {
+            // A nil message evicts every message's entry for this attachment ID
+            // (`AttachmentCacheActor.removeFromCache`): wider than needed, and only a cache.
+            plan.attachmentIdentitiesToInvalidate.insert(
+                CacheInvalidationPlan.AttachmentIdentity(messageId: nil, attachmentId: attachmentId)
+            )
+        }
+    }
+
+    /// The ID of the message a deleted attachment belonged to, where the attachment still
+    /// names it and the message's values are in memory.
+    private nonisolated static func messageId(ofDeleted attachment: NSManagedObject) -> String? {
+        guard !attachment.isFault,
+              let message = attachment.value(forKey: "message") as? NSManagedObject else {
+            return nil
+        }
+        return storedString("id", of: message)
+    }
+
+    /// A non-empty string attribute of `object`, or nil where the object is a fault.
+    private nonisolated static func storedString(_ key: String, of object: NSManagedObject) -> String? {
+        guard !object.isFault,
+              let value = object.value(forKey: key) as? String,
+              !value.isEmpty else {
+            return nil
+        }
+        return value
     }
 
     func applyInvalidationPlan(
@@ -354,22 +461,23 @@ final class CacheCoordinator {
                 )
             }
 
-            for artifact in plan.deletedHTMLArtifacts {
+            if !plan.deletedHTMLArtifacts.isEmpty {
                 guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
-                HTMLContentHandler.shared.deleteHTML(
-                    for: artifact.messageId,
-                    bodyStorageURI: artifact.bodyStorageURI,
-                    expectedGeneration: accountContext.htmlContent
+                await deleteMessageBodiesOffMainActor(
+                    Array(plan.deletedHTMLArtifacts),
+                    deletedAt: plan.deletedAt,
+                    generation: accountContext.htmlContent
                 )
             }
         }
 
         if let attachmentGeneration {
-            for relativePath in plan.attachmentPathsToDelete {
+            if !plan.attachmentPathsToDelete.isEmpty {
                 guard !Task.isCancelled, isAccountContextCurrent(accountContext) else { return }
-                await AttachmentCacheActor.shared.deleteFile(
-                    at: relativePath,
-                    expectedAccountGeneration: attachmentGeneration
+                await fileReclamation.deleteAttachmentFiles(
+                    Array(plan.attachmentPathsToDelete),
+                    plan.deletedAt,
+                    attachmentGeneration
                 )
             }
 
@@ -381,6 +489,26 @@ final class CacheCoordinator {
                     expectedAccountGeneration: attachmentGeneration
                 )
             }
+        }
+    }
+
+    /// Removes the deleted messages' body files in a task of its own, never on the main
+    /// actor: a purge of thousands of messages is thousands of unlinks under the HTML
+    /// boundary's lock. The invalidation task that calls this waits for it, cancelled or
+    /// not, so `closeAccountWorkAndAwait` still drains the removal before storage is cleared.
+    private func deleteMessageBodiesOffMainActor(
+        _ bodies: [DeletedMessageBody],
+        deletedAt: Date,
+        generation: HTMLContentAccountGeneration
+    ) async {
+        let deleteMessageBodies = fileReclamation.deleteMessageBodies
+        let removal = Task.detached(priority: .utility) {
+            deleteMessageBodies(bodies, deletedAt, generation)
+        }
+        await withTaskCancellationHandler {
+            await removal.value
+        } onCancel: {
+            removal.cancel()
         }
     }
 }

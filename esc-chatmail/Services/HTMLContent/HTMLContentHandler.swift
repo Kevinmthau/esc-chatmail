@@ -380,6 +380,76 @@ final class HTMLContentHandler: @unchecked Sendable {
         }
     }
 
+    /// Removes the body files of messages a save deleted, some time after that save.
+    ///
+    /// Each chunk is one turn under the boundary's lock, so a writer of the same directory
+    /// waits for a hundred unlinks at most, and a closed or retired boundary stops the
+    /// removal at the next chunk. Within a chunk a file is left where the store has a row
+    /// for its message again, or where it was written after the delete
+    /// (`DeletedRowFileReclamation`). `deleteHTML(for:bodyStorageURI:)` asks neither, and
+    /// from this path it removed the body of a message that had been taken out of Trash
+    /// and stored again before the removal ran.
+    ///
+    /// - Parameters:
+    ///   - deletedAt: When the deleting save was posted.
+    ///   - liveMessageIDs: The IDs among those given that a stored row has. It is called
+    ///     with the lock held, so that no body can be written between the answer and the
+    ///     unlink. A throw removes nothing of that chunk.
+    ///   - isCancelled: Asked before each chunk.
+    func deleteHTML(
+        forDeleted bodies: [DeletedMessageBody],
+        deletedAt: Date,
+        expectedGeneration: HTMLContentAccountGeneration,
+        chunkSize: Int = 100,
+        liveMessageIDs: (Set<String>) throws -> Set<String>,
+        isCancelled: () -> Bool = { Task.isCancelled }
+    ) {
+        let chunkSize = max(1, chunkSize)
+        var start = 0
+        while start < bodies.count {
+            guard !isCancelled() else { return }
+            let chunk = bodies[start..<min(start + chunkSize, bodies.count)]
+            start += chunkSize
+            let admitted: Void? = accountBoundary.perform(
+                directoryKey: directoryKey,
+                expectedGeneration: expectedGeneration
+            ) {
+                let live: Set<String>
+                do {
+                    live = try liveMessageIDs(Set(chunk.map(\.messageId)))
+                } catch {
+                    Log.error(
+                        "Leaving deleted messages' body files: stored rows could not be read",
+                        category: .general,
+                        error: error
+                    )
+                    return
+                }
+                for body in chunk where !live.contains(body.messageId) {
+                    let fileURL = messagesDirectory.appendingPathComponent("\(body.messageId).html")
+                    removeDeletedBodyFile(at: fileURL, deletedAt: deletedAt)
+
+                    guard let bodyStorageURI = body.bodyStorageURI,
+                          let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+                          resolvedURL.path != fileURL.path else {
+                        continue
+                    }
+                    removeDeletedBodyFile(at: resolvedURL, deletedAt: deletedAt)
+                }
+            }
+            // Closed, or reopened for another account: nothing later is this caller's.
+            guard admitted != nil else { return }
+        }
+    }
+
+    private func removeDeletedBodyFile(at fileURL: URL, deletedAt: Date) {
+        guard !DeletedRowFileReclamation.wasWrittenAfter(deletedAt, fileAt: fileURL) else {
+            return
+        }
+        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+        invalidateCaches(for: fileURL)
+    }
+
     func deleteAllHTML() {
         _ = accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: nil) {
             // Delete contents instead of directory to avoid race conditions

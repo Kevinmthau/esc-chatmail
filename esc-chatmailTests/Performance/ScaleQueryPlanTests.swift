@@ -491,4 +491,38 @@ final class ScaleQueryPlanTests: XCTestCase {
             XCTAssertFalse(plan.indexes(on: "ZMESSAGE").isEmpty, "\(statistics): \(plan)")
         }
     }
+
+    // MARK: - Stored rows of deleted messages
+
+    /// Before a deleted message's body file is removed, the store is asked which of a
+    /// chunk's 100 message IDs have a row again (`DeletedRowFileReclamation.liveMessageIDs`,
+    /// scalability review step 7). It is asked under the HTML boundary's lock, once for
+    /// each chunk of a purge, so it must be 100 searches of the index on `id` and never a
+    /// walk of ZMESSAGE.
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this. It fails if the fetch
+    /// stops being an `IN` over `id`, or if a model version leaves `Message.id` with no
+    /// index. The matching check for attachment files has no test here: `Attachment` has
+    /// no index on its two path columns, so it reads ZATTACHMENT from one end, and this
+    /// store has no attachments to make that visible.
+    func testStoredRowCheckForDeletedBodies_searchesTheIndexOnTheMessageID() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.newBackgroundContext()
+            let stored = Set((0..<100).map { ScaleStoreSeeder.messageID(at: $0 * 1_000) })
+
+            var live: Set<String> = []
+            let plans = try SQLiteQueryPlanRecorder.record {
+                live = try DeletedRowFileReclamation.liveMessageIDs(
+                    among: stored.union(["never-stored"]),
+                    in: context
+                )
+            }
+
+            XCTAssertEqual(live, stored, "\(statistics)")
+            let plan = try XCTUnwrap(plans.first { $0.reads("ZMESSAGE") }, "\(statistics):\n\(plans)")
+            XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)")
+            XCTAssertFalse(plan.indexes(on: "ZMESSAGE").isEmpty, "\(statistics): \(plan)")
+        }
+    }
 }

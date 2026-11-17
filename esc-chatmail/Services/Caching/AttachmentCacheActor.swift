@@ -595,6 +595,70 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         AttachmentPaths.deleteFile(at: relativePath)
     }
 
+    /// Removes the files of attachments a save deleted, some time after that save.
+    ///
+    /// Each chunk is one turn on this actor with no suspension in it, so `closeAdmission()`
+    /// cannot land between a chunk's check of the generation and its unlinks, and a load
+    /// waits for one chunk at most. Within a chunk a file is left where a stored row still
+    /// names its path (a path can be shared by sibling messages), or where it was written
+    /// after the delete (`DeletedRowFileReclamation`).
+    ///
+    /// - Parameters:
+    ///   - deletedAt: When the deleting save was posted.
+    ///   - referencedPaths: The paths among those given that a stored row names. A throw
+    ///     removes nothing of that chunk.
+    func deleteFiles(
+        at relativePaths: [String],
+        deletedAt: Date,
+        expectedAccountGeneration: AttachmentCacheAccountGeneration,
+        chunkSize: Int = 200,
+        referencedPaths: @Sendable ([String]) throws -> Set<String>
+    ) async {
+        let chunkSize = max(1, chunkSize)
+        var start = 0
+        while start < relativePaths.count {
+            guard !Task.isCancelled else { return }
+            let chunk = Array(relativePaths[start..<min(start + chunkSize, relativePaths.count)])
+            start += chunkSize
+            guard deleteFileChunk(
+                chunk,
+                deletedAt: deletedAt,
+                expectedAccountGeneration: expectedAccountGeneration,
+                referencedPaths: referencedPaths
+            ) else { return }
+            await Task.yield()
+        }
+    }
+
+    /// False once the caller's account is no longer the current one.
+    private func deleteFileChunk(
+        _ relativePaths: [String],
+        deletedAt: Date,
+        expectedAccountGeneration: AttachmentCacheAccountGeneration,
+        referencedPaths: @Sendable ([String]) throws -> Set<String>
+    ) -> Bool {
+        guard isAccountGenerationCurrent(expectedAccountGeneration) else { return false }
+        let referenced: Set<String>
+        do {
+            referenced = try referencedPaths(relativePaths)
+        } catch {
+            Log.error(
+                "Leaving deleted attachments' files: stored rows could not be read",
+                category: .attachment,
+                error: error
+            )
+            return true
+        }
+        for relativePath in relativePaths where !referenced.contains(relativePath) {
+            guard let url = AttachmentPaths.fullURL(for: relativePath),
+                  !DeletedRowFileReclamation.wasWrittenAfter(deletedAt, fileAt: url) else {
+                continue
+            }
+            AttachmentPaths.deleteFile(at: relativePath)
+        }
+        return true
+    }
+
     private func loadThumbnail(
         for attachmentId: String,
         messageId: String?,

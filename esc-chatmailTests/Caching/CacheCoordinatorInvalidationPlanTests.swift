@@ -44,17 +44,18 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         super.tearDown()
     }
 
-    /// Runs the planning function on the context's queue, the main queue here,
-    /// mirroring how `handleContextDidSave` invokes it inside
-    /// `sourceContext.perform`.
+    /// Runs the planning function on the context's queue, the main queue here.
+    /// The objects are unsaved and still whole, which is what a caller that
+    /// asks before a save sees. What the function reads inside a save
+    /// notification, where a deleted row's relationships are already cut, is
+    /// `CacheCoordinatorDeletedRowCaptureTests`'.
     private func computePlan(
         updated: [NSManagedObject] = [],
         deleted: [NSManagedObject] = []
     ) -> CacheCoordinator.CacheInvalidationPlan {
         CacheCoordinator.computeInvalidationPlan(
-            updatedObjectIDs: Set(updated.map(\.objectID)),
-            deletedObjectIDs: Set(deleted.map(\.objectID)),
-            in: context
+            updatedObjects: Set(updated),
+            deletedObjects: Set(deleted)
         )
     }
 

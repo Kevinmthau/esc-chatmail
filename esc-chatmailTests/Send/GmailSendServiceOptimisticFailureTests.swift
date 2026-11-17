@@ -1080,9 +1080,8 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         let invalidationPlan = await syncContext.perform {
             CacheCoordinator.computeInvalidationPlan(
-                updatedObjectIDs: Set(syncContext.updatedObjects.map(\.objectID)),
-                deletedObjectIDs: Set(syncContext.deletedObjects.map(\.objectID)),
-                in: syncContext
+                updatedObjects: syncContext.updatedObjects,
+                deletedObjects: syncContext.deletedObjects
             )
         }
         XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(localOriginalPath))
@@ -1094,7 +1093,11 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             try syncContext.save()
         }
 
-        let cacheCoordinator = CacheCoordinator()
+        // The removers ask this test's store, not the app's, whether a row still names a file.
+        let rowLookupStack: TestCoreDataStack = coreDataStack
+        let cacheCoordinator = CacheCoordinator(
+            fileReclamation: .asking { rowLookupStack.newBackgroundContext() }
+        )
         if let accountContext = cacheCoordinator.captureInvalidationAccountContext() {
             cacheCoordinator.applyInvalidationPlan(
                 invalidationPlan,
