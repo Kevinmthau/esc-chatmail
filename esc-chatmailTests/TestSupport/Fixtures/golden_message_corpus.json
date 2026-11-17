@@ -481,6 +481,12 @@
       "expected": "Please find the summary attached.\n\nThanks\nRobin"
     },
     {
+      "id": "plain_trailing_disclaimer_keeps_authored_two_clause_line",
+      "notes": "An authored line naming two clauses but not the reader stays above the disclaimer; the disclaimer starts where it says who the message is for. Revert-check: LegalDisclaimerPolicy.ParagraphEvidence.opensDisclaimer / web opensDisclaimer.",
+      "input": "Please find the summary attached.\n\nPlease keep this confidential and delete the attachments after review.\n\nThis communication is the property of Northwind and its affiliates; it is confidential and intended solely for the use of the addressee(s). We expressly disclaim any reliance on or use of this communication by anyone else. If you are not an addressee, please notify the sender and delete this message immediately from your computer, computing device, and/or all related systems and data storage. Any other use is without our consent and with a complete reservation of rights for any losses caused by such misuse.",
+      "expected": "Please find the summary attached.\n\nPlease keep this confidential and delete the attachments after review."
+    },
+    {
       "id": "plain_trailing_disclaimer_before_postscript_preserved",
       "notes": "HONEST SCOPE: passed before the fix. A postscript after the disclaimer keeps the whole tail. Revert-check: LegalDisclaimerPolicy.ParagraphEvidence.isPostscript / web POSTSCRIPT_PATTERN.",
       "input": "Please find the summary attached.\n\nThis communication is the property of Northwind and its affiliates; it is confidential and intended solely for the use of the addressee(s). We expressly disclaim any reliance on or use of this communication by anyone else. If you are not an addressee, please notify the sender and delete this message immediately from your computer, computing device, and/or all related systems and data storage. Any other use is without our consent and with a complete reservation of rights for any losses caused by such misuse.\n\nP.S. The deadline moved to Friday.",
@@ -1003,6 +1009,12 @@
       "notes": "An authored line naming one legal clause ends the disclaimer and stays; the disclaimer after it goes. Revert-check: EmailDOMQuoteRemover.truncateTrailingLegalDisclaimer / LegalDisclaimerPolicy, web truncateTrailingLegalDisclaimer / legalDisclaimer.ts.",
       "inputHTML": "<p>Here is the draft.</p><p>Please keep this confidential.</p><p>This communication is the property of Northwind and its affiliates; it is confidential and intended solely for the use of the addressee(s). We expressly disclaim any reliance on or use of this communication by anyone else. If you are not an addressee, please notify the sender and delete this message immediately from your computer, computing device, and/or all related systems and data storage. Any other use is without our consent and with a complete reservation of rights for any losses caused by such misuse.</p>",
       "expected": "Here is the draft.\n\nPlease keep this confidential."
+    },
+    {
+      "id": "html_trailing_disclaimer_keeps_authored_two_clause_line",
+      "notes": "An authored line naming two clauses (confidentiality, delete) but not the reader stays; the disclaimer after it goes. Started at any paragraph naming two, the run took the authored line too. Revert-check: LegalDisclaimerPolicy.ParagraphEvidence.opensDisclaimer / web opensDisclaimer.",
+      "inputHTML": "<p>Here is the draft.</p><p>Please keep this confidential and delete the attachments after review.</p><p>This communication is the property of Northwind and its affiliates; it is confidential and intended solely for the use of the addressee(s). We expressly disclaim any reliance on or use of this communication by anyone else. If you are not an addressee, please notify the sender and delete this message immediately from your computer, computing device, and/or all related systems and data storage. Any other use is without our consent and with a complete reservation of rights for any losses caused by such misuse.</p>",
+      "expected": "Here is the draft.\n\nPlease keep this confidential and delete the attachments after review."
     },
     {
       "id": "html_trailing_disclaimer_before_postscript_preserved",

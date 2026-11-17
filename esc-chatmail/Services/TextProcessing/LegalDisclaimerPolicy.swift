@@ -13,13 +13,21 @@ import Foundation
 /// several of them, one of which must say who the message is for. An authored sentence
 /// that names one clause ("Please keep this confidential.", "Disclaimer: figures are
 /// provisional.") is never enough, and a paragraph that names none ends the disclaimer,
-/// so a postscript or an authored line after it keeps the whole tail.
+/// so a postscript or an authored line after it keeps the whole tail. And the disclaimer
+/// starts at its heading or where it says who the message is for (`opensDisclaimer`): an
+/// authored line just above it that names two other clauses ("Please keep this
+/// confidential and delete the attachments after review.") was cut with it when the
+/// disclaimer could start at any paragraph naming two.
 ///
 /// HONEST SCOPE: a disclaimer hard-wrapped so that a line starts with a capital in the
 /// middle of a sentence ("… the property of" / "Northwind and its …") splits into two
 /// paragraphs, and the part with no clause stays. Paragraphs with no clause at all
 /// ("Email cannot be guaranteed to be secure.") end the disclaimer too, and a
-/// disclaimer whose last paragraph is one of them stays whole.
+/// disclaimer whose last paragraph is one of them stays whole. A disclaimer whose first
+/// paragraph names two clauses but not the reader ("This email is confidential and may
+/// be privileged. Unauthorized use is prohibited.") keeps that paragraph: by its clauses
+/// it cannot be told from an authored line. And authored paragraphs that themselves say
+/// who a message is for, each naming two clauses, are still taken for a disclaimer.
 enum LegalDisclaimerPolicy {
     /// One kind of legal clause. A disclaimer names several kinds; repeating one kind
     /// (the Front footer is the same paragraph twice) counts it once.
@@ -51,6 +59,17 @@ enum LegalDisclaimerPolicy {
         var belongsToDisclaimer: Bool {
             !isPostscript && (isHeading || isEnvironmentFooter || clauses.count >= 2)
         }
+
+        /// A paragraph a disclaimer can start at: its heading, an environment footer, or
+        /// one that says who the message is for. Two other clauses ("Please keep this
+        /// confidential and delete the attachments.") are what an authored line above a
+        /// disclaimer names, so a run starting at one starts below it.
+        var opensDisclaimer: Bool {
+            belongsToDisclaimer && (
+                isHeading || isEnvironmentFooter ||
+                    clauses.contains(.misdirectedReader) || clauses.contains(.intendedReader)
+            )
+        }
     }
 
     /// The index of the first line of a trailing disclaimer in `lines`, or nil when the
@@ -59,21 +78,28 @@ enum LegalDisclaimerPolicy {
     /// `lines` are visible lines in order; an empty line ends a paragraph. A line whose
     /// predecessor does not end a sentence and which starts with a lowercase letter
     /// continues its predecessor's paragraph (a hard-wrapped disclaimer). The disclaimer
-    /// is the longest run of paragraphs at the end that each `belongsToDisclaimer`,
-    /// taken whole only when their text together `isDisclaimer`.
+    /// is the longest run of paragraphs at the end that each `belongsToDisclaimer`, from
+    /// the first of them that `opensDisclaimer`, taken whole only when their text
+    /// together `isDisclaimer`.
     static func trailingDisclaimerStartLine(in lines: [String]) -> Int? {
         let found = paragraphs(in: lines)
         guard found.count >= 2 else { return nil }
 
-        var runStart = found.count
-        while runStart > 1, evidence(for: found[runStart - 1].text).belongsToDisclaimer {
-            runStart -= 1
+        // Up the run from the end, keeping the highest paragraph it can start at: a
+        // two-clause paragraph above that one is authored and stays.
+        var index = found.count
+        var opening: Int?
+        while index > 1 {
+            let candidate = evidence(for: found[index - 1].text)
+            guard candidate.belongsToDisclaimer else { break }
+            index -= 1
+            if candidate.opensDisclaimer { opening = index }
         }
-        guard runStart < found.count else { return nil }
+        guard let start = opening else { return nil }
 
-        let runText = found[runStart...].map(\.text).joined(separator: " ")
+        let runText = found[start...].map(\.text).joined(separator: " ")
         guard isDisclaimer(runText) else { return nil }
-        return found[runStart].firstLine
+        return found[start].firstLine
     }
 
     /// Text that names at least three kinds of clause, one of them a statement of who

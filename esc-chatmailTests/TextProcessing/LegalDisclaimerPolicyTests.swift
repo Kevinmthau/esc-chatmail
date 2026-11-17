@@ -60,6 +60,32 @@ final class LegalDisclaimerPolicyTests: XCTestCase {
         XCTAssertEqual(LegalDisclaimerPolicy.trailingDisclaimerStartLine(in: lines), 2)
     }
 
+    // Revert-check: ParagraphEvidence.opensDisclaimer, where trailingDisclaimerStartLine starts
+    // the run. Started at any paragraph that belongs, the run took each of these authored lines,
+    // which name two clauses and not the reader, and the bubble lost it.
+    func testTrailingDisclaimerStartLine_authoredTwoClauseLineBefore_staysOutOfTheDisclaimer() {
+        for authored in [
+            "Please keep this confidential and delete the attachments after review.",
+            "Please delete the old messages and notify us when done.",
+            "Unauthorized access to the confidential folder was flagged."
+        ] {
+            XCTAssertEqual(LegalDisclaimerPolicy.clauses(in: authored).count, 2, authored)
+            let lines = ["Hi team,", "", authored, "", addresseeDisclaimer]
+            XCTAssertEqual(LegalDisclaimerPolicy.trailingDisclaimerStartLine(in: lines), 4, authored)
+        }
+    }
+
+    /// The trade-off of starting at the reader: a disclaimer whose first paragraph names two
+    /// clauses and not the reader keeps that paragraph, which by its clauses is an authored line.
+    func testTrailingDisclaimerStartLine_disclaimerOpeningWithoutReader_keepsThatParagraph() {
+        let lines = [
+            "Reply.", "",
+            "This email is confidential and may be privileged. Unauthorized use is prohibited.", "",
+            "If you are not the intended recipient, please notify the sender and delete this message."
+        ]
+        XCTAssertEqual(LegalDisclaimerPolicy.trailingDisclaimerStartLine(in: lines), 4)
+    }
+
     func testTrailingDisclaimerStartLine_headingAndEnvironmentFooter_belongToTheDisclaimer() {
         let lines = [
             "Reply.", "", "CONFIDENTIALITY NOTICE:", addresseeDisclaimer, "",

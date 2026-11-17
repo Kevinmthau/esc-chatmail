@@ -84,6 +84,30 @@ describe('trailingLegalDisclaimerStartLine', () => {
     expect(trailingLegalDisclaimerStartLine(lines)).toBe(2)
   })
 
+  // Revert-check: opensDisclaimer, where trailingLegalDisclaimerStartLine starts the run.
+  it('leaves an authored two-clause line above the disclaimer', () => {
+    for (const authored of [
+      'Please keep this confidential and delete the attachments after review.',
+      'Please delete the old messages and notify us when done.',
+      'Unauthorized access to the confidential folder was flagged.',
+    ]) {
+      expect(legalDisclaimerClauses(authored).size, authored).toBe(2)
+      const lines = ['Hi team,', '', authored, '', ADDRESSEE_DISCLAIMER]
+      expect(trailingLegalDisclaimerStartLine(lines), authored).toBe(4)
+    }
+  })
+
+  it('keeps a disclaimer opening that names two clauses but not the reader', () => {
+    const lines = [
+      'Reply.',
+      '',
+      'This email is confidential and may be privileged. Unauthorized use is prohibited.',
+      '',
+      'If you are not the intended recipient, please notify the sender and delete this message.',
+    ]
+    expect(trailingLegalDisclaimerStartLine(lines)).toBe(4)
+  })
+
   it('takes a heading and an environment footer with the disclaimer', () => {
     const lines = [
       'Reply.',
