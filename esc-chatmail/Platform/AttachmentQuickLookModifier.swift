@@ -15,10 +15,16 @@ import QuickLook
 /// The Mac uses SwiftUI's `.quickLookPreview`, which shows the system Quick Look panel and pages
 /// through the presentation's files there. Closing the panel clears the selection, which clears
 /// the presentation.
+///
+/// On both, the files shown have their backup mark taken off for as long as Quick Look can
+/// show them, because its share button hands them on (`QuickLookBackupMark`).
 struct AttachmentQuickLookModifier: ViewModifier {
     @Binding var presentation: QuickLookPresentation?
     #if os(macOS)
     @State private var selectedURL: URL?
+    /// The files the panel was given, whose backup mark is off while it can show them
+    /// (`QuickLookBackupMark`): its share menu hands on the file it shows.
+    @State private var handedOverURLs: [URL] = []
     #endif
 
     func body(content: Content) -> some View {
@@ -47,11 +53,18 @@ struct AttachmentQuickLookModifier: ViewModifier {
         content
             .quickLookPreview($selectedURL, in: presentation?.itemURLs ?? [])
             .onChange(of: presentation?.id, initial: true) {
+                QuickLookBackupMark.takeBack(handedOverURLs)
+                handedOverURLs = presentation?.itemURLs ?? []
+                QuickLookBackupMark.handOver(handedOverURLs)
                 selectedURL = presentation?.selectedItemURL
             }
             .onChange(of: selectedURL) { _, newURL in
                 guard newURL == nil, presentation != nil else { return }
                 presentation = nil
+            }
+            .onDisappear {
+                QuickLookBackupMark.takeBack(handedOverURLs)
+                handedOverURLs = []
             }
         #endif
     }

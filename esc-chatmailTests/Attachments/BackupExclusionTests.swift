@@ -205,6 +205,54 @@ final class BackupExclusionTests: XCTestCase {
         XCTAssertFalse(AttachmentPaths.isRedownloadable(AttachmentPaths.previewPath(messageId: "m", attachmentId: "a")))
     }
 
+    // MARK: - Quick Look
+
+    // Revert-check: `QuickLookBackupMark.handOver`, and the `applyBackupPolicy` in
+    // `QuickLookBackupMark.takeBack`. Without the first the downloaded file keeps its mark
+    // while Quick Look's share button can copy it; without the second it is left in backups
+    // after Quick Look closes, until the daily orphan sweep.
+    func testQuickLook_takesTheMarkOffWhatItShows_andPutsItBackByTheFilesName() throws {
+        AttachmentPaths.setupDirectories()
+        let downloadedPath = AttachmentPaths.originalPath(
+            messageId: "quick-look-\(UUID().uuidString)",
+            attachmentId: "att-1",
+            ext: "pdf"
+        )
+        let originalPath = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "jpg")
+        defer {
+            AttachmentPaths.deleteFile(at: downloadedPath)
+            AttachmentPaths.deleteFile(at: originalPath)
+        }
+        XCTAssertTrue(AttachmentPaths.saveData(Data("downloaded".utf8), to: downloadedPath))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("mine".utf8), to: originalPath))
+        let downloaded = try XCTUnwrap(AttachmentPaths.fullURL(for: downloadedPath))
+        let original = try XCTUnwrap(AttachmentPaths.fullURL(for: originalPath))
+        XCTAssertTrue(BackupExclusion.isExcluded(downloaded), "Precondition: a download is marked when written")
+
+        QuickLookBackupMark.handOver([downloaded, original])
+
+        XCTAssertFalse(BackupExclusion.isExcluded(downloaded), "What Quick Look shares must carry no mark")
+        XCTAssertFalse(BackupExclusion.isExcluded(original))
+
+        QuickLookBackupMark.takeBack([downloaded, original])
+
+        XCTAssertTrue(BackupExclusion.isExcluded(downloaded))
+        XCTAssertFalse(BackupExclusion.isExcluded(original), "A user's original is never marked")
+    }
+
+    // The Mac's Quick Look is SwiftUI's panel, which no test mounts: its hand-over is pinned
+    // from the modifier's source.
+    // Revert-check: either `QuickLookBackupMark` call on `handedOverURLs` in the Mac branch of
+    // `AttachmentQuickLookModifier`.
+    // HONEST SCOPE: this reads source text. It proves the calls are there, not that SwiftUI
+    // calls the closures they are in when the panel opens and closes.
+    func testMacQuickLookPanel_handsOverAndTakesBackTheFilesItWasGiven() throws {
+        let source = try repositorySource("esc-chatmail/Platform/AttachmentQuickLookModifier.swift")
+
+        XCTAssertTrue(source.contains("QuickLookBackupMark.handOver(handedOverURLs)"))
+        XCTAssertTrue(source.contains("QuickLookBackupMark.takeBack(handedOverURLs)"))
+    }
+
     // MARK: - Avatars
 
     // Revert-check: `BackupExclusion.exclude(directory)` in

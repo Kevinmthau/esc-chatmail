@@ -156,7 +156,89 @@ final class DeletedRowFileRemovalTests: XCTestCase {
         XCTAssertEqual(ids.map { handler.htmlFileExists(for: $0) }, [false, false, false, false, true])
     }
 
+    // Revert-check: asking `liveMessageIDs` before `accountBoundary.perform` in
+    // `HTMLContentHandler.deleteHTML(forDeleted:…)`. Ask it inside the perform again and the
+    // other thread waits for the lock until the question is answered: the wait here times
+    // out. That thread does what every context's save does in its notification
+    // (`CacheCoordinator` captures the boundary's generation), and every body load.
+    func testDeletedBodies_storeIsAskedWithoutTheBoundaryLockHeld() throws {
+        XCTAssertNotNil(handler.saveHTML("<p>gone</p>", for: "gone"))
+        let generation = try XCTUnwrap(handler.captureAccountGeneration())
+        let handler = self.handler!
+        let otherThreadGotTheLock = LockedBox<Bool?>(nil)
+
+        handler.deleteHTML(
+            forDeleted: [DeletedMessageBody(messageId: "gone", bodyStorageURI: nil)],
+            deletedAt: Date(),
+            expectedGeneration: generation,
+            liveMessageIDs: { _ in
+                let captured = DispatchSemaphore(value: 0)
+                DispatchQueue.global().async {
+                    _ = handler.captureAccountGeneration()
+                    captured.signal()
+                }
+                let result = captured.wait(timeout: .now() + 2)
+                otherThreadGotTheLock.update { $0 = result == .success }
+                return []
+            }
+        )
+
+        XCTAssertEqual(otherThreadGotTheLock.value, true, "The store was asked with the boundary's lock held")
+        XCTAssertFalse(handler.htmlFileExists(for: "gone"), "The answer is still used for the unlink")
+    }
+
     // MARK: - Attachment files
+
+    // Revert-check: the `DeletedRowFileReclamation.isRemovedWithItsRow` filter at the top of
+    // `AttachmentCacheActor.deleteFiles(at:…)`. Without it the user's original and its
+    // preview are removed with their row (no row names them, and they predate the delete),
+    // and the store is asked about them.
+    func testDeletedAttachmentFile_storedUnderALocalID_isLeftForTheOrphanSweep() async throws {
+        AttachmentPaths.setupDirectories()
+        let localID = "local_\(UUID().uuidString)"
+        let original = AttachmentPaths.originalPath(idOrUUID: localID, ext: "jpg")
+        let preview = AttachmentPaths.previewPath(idOrUUID: localID)
+        XCTAssertTrue(AttachmentPaths.saveData(Data("mine".utf8), to: original))
+        XCTAssertTrue(AttachmentPaths.saveData(Data("my preview".utf8), to: preview))
+        let downloaded = try makeAttachmentFile(named: "downloaded")
+        defer { [original, preview, downloaded].forEach { AttachmentPaths.deleteFile(at: $0) } }
+        let cache = AttachmentCacheActor()
+        let generation = try await unwrapped(cache.captureAccountGeneration())
+        let asked = LockedBox<[[String]]>([])
+
+        await cache.deleteFiles(
+            at: [original, preview, downloaded],
+            deletedAt: Date(),
+            expectedAccountGeneration: generation,
+            referencedPaths: { paths in
+                asked.update { $0.append(paths) }
+                return []
+            }
+        )
+
+        XCTAssertNotNil(AttachmentPaths.loadData(from: original))
+        XCTAssertNotNil(AttachmentPaths.loadData(from: preview))
+        XCTAssertNil(AttachmentPaths.loadData(from: downloaded))
+        XCTAssertEqual(asked.value, [[downloaded]])
+    }
+
+    func testIsRemovedWithItsRow_isFalseOnlyForAFileStoredUnderALocalID() {
+        XCTAssertFalse(DeletedRowFileReclamation.isRemovedWithItsRow(
+            AttachmentPaths.originalPath(idOrUUID: "local_1", ext: "jpg")
+        ))
+        XCTAssertFalse(DeletedRowFileReclamation.isRemovedWithItsRow(AttachmentPaths.previewPath(idOrUUID: "local_1")))
+        XCTAssertTrue(DeletedRowFileReclamation.isRemovedWithItsRow(
+            AttachmentPaths.originalPath(messageId: "m", attachmentId: "a", ext: "pdf")
+        ))
+        XCTAssertTrue(DeletedRowFileReclamation.isRemovedWithItsRow(
+            AttachmentPaths.previewPath(messageId: "m", attachmentId: "a")
+        ))
+        // A legacy ID-only path of a Gmail attachment, which a sibling row can still name:
+        // the stored-row check is what keeps that one.
+        XCTAssertTrue(DeletedRowFileReclamation.isRemovedWithItsRow(
+            AttachmentPaths.originalPath(idOrUUID: "ANGjdJ8w", ext: "pdf")
+        ))
+    }
 
     // Revert-check: the `referencedPaths` filter in `AttachmentCacheActor.deleteFileChunk`.
     // Unlink every path, as `deleteFile(at:)` does, and the file a sibling row still names

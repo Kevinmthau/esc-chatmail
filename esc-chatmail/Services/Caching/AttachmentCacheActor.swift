@@ -601,7 +601,9 @@ actor AttachmentCacheActor: MemoryWarningHandler {
     /// cannot land between a chunk's check of the generation and its unlinks, and a load
     /// waits for one chunk at most. Within a chunk a file is left where a stored row still
     /// names its path (a path can be shared by sibling messages), or where it was written
-    /// after the delete (`DeletedRowFileReclamation`).
+    /// after the delete (`DeletedRowFileReclamation`). A file stored under an ID the app made
+    /// is never taken here, and the store is not asked about it
+    /// (`DeletedRowFileReclamation.isRemovedWithItsRow`).
     ///
     /// - Parameters:
     ///   - deletedAt: When the deleting save was posted.
@@ -615,6 +617,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         referencedPaths: @Sendable ([String]) throws -> Set<String>
     ) async {
         let chunkSize = max(1, chunkSize)
+        let relativePaths = relativePaths.filter(DeletedRowFileReclamation.isRemovedWithItsRow)
         var start = 0
         while start < relativePaths.count {
             guard !Task.isCancelled else { return }
