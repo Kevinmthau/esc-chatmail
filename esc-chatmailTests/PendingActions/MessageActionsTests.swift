@@ -59,6 +59,7 @@ final class MessageActionsTests: XCTestCase {
         try saveViewContext()
 
         await messageActions.star(message: message)
+        viewContext.refreshAllObjects()
 
         XCTAssertTrue(message.labels?.contains(starredLabel) == true)
         XCTAssertNotNil(message.localModifiedAt)
@@ -78,6 +79,7 @@ final class MessageActionsTests: XCTestCase {
         try saveViewContext()
 
         await messageActions.unstar(message: message)
+        viewContext.refreshAllObjects()
 
         XCTAssertFalse(message.labels?.contains(starredLabel) == true)
         XCTAssertNotNil(message.localModifiedAt)
@@ -97,6 +99,7 @@ final class MessageActionsTests: XCTestCase {
         try saveViewContext()
 
         await messageActions.star(message: message)
+        viewContext.refreshAllObjects()
 
         let queuedActions = await pendingActionsManager.queuedSingleActions
         XCTAssertTrue(queuedActions.isEmpty)
@@ -122,6 +125,7 @@ final class MessageActionsTests: XCTestCase {
         // Deliberately un-wrapped and un-released: the local mutation must
         // complete while the unrelated sync run still owns the boundary.
         await messageActions.star(message: message)
+        viewContext.refreshAllObjects()
 
         XCTAssertTrue(message.labels?.contains(starredLabel) == true)
         XCTAssertNotNil(message.localModifiedAt)
@@ -148,6 +152,7 @@ final class MessageActionsTests: XCTestCase {
         await syncRunCoordinator.beginQuiescence()
 
         await messageActions.star(message: message)
+        viewContext.refreshAllObjects()
 
         XCTAssertFalse(message.labels?.contains(starredLabel) == true)
         XCTAssertNil(message.localModifiedAt)
@@ -240,6 +245,7 @@ final class MessageActionsTests: XCTestCase {
         }
         task.cancel()
         await task.value
+        viewContext.refreshAllObjects()
 
         XCTAssertNotNil(conversation.archivedAt)
         let queuedConversationActions = await pendingActionsManager.queuedConversationActions
@@ -255,10 +261,10 @@ final class MessageActionsTests: XCTestCase {
     /// Archive tapped during a reply send now runs right after the optimistic
     /// row exists (`ChatConversationExitActionPolicy`).
     ///
-    /// Revert-check: appending every non-empty `message.id` again in
-    /// `MessageActions.applyArchiveLocalChanges` (instead of
-    /// `gmailMessageIDForConversationAction`) queues the optimistic ID and
-    /// fails this test.
+    /// Revert-check: appending every non-empty `message.id` again in the
+    /// archive branch of `MessageActions.applyConversationWideMutation`
+    /// (instead of `gmailMessageIDForConversationAction`) queues the
+    /// optimistic ID and fails this test.
     func testArchiveConversation_withUnechoedOwnReply_queuesOnlyGmailMessageIDs() async throws {
         let fixture = try makeConversationWithUnechoedOwnReply(
             gmailMessageID: "gmail-archive-inbox",
@@ -266,6 +272,7 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await messageActions.archiveConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
 
         let queued = await pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
@@ -276,8 +283,9 @@ final class MessageActionsTests: XCTestCase {
     }
 
     /// Revert-check: appending every non-empty `message.id` again in
-    /// `MessageActions.applySpamLocalChanges` queues the optimistic ID and
-    /// fails this test.
+    /// the Report Spam branch of
+    /// `MessageActions.applyConversationWideMutation` queues the optimistic
+    /// ID and fails this test.
     func testReportSpamConversation_withUnechoedOwnReply_queuesOnlyGmailMessageIDs() async throws {
         let fixture = try makeConversationWithUnechoedOwnReply(
             gmailMessageID: "gmail-spam-inbox",
@@ -285,6 +293,7 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await messageActions.reportSpamConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
 
         let queued = await pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
@@ -305,7 +314,10 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await messageActions.archiveConversations(conversations: [archived.conversation])
+
+        viewContext.refreshAllObjects()
         await messageActions.reportSpamConversations(conversations: [reported.conversation])
+        viewContext.refreshAllObjects()
 
         let queued = await pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.archiveConversation, .reportSpam])
@@ -342,6 +354,289 @@ final class MessageActionsTests: XCTestCase {
         return (conversation, optimisticReply)
     }
 
+    // MARK: - Archive, Report Spam and star on a background context
+
+    /// A conversation with one INBOX message per date in `inboxDates`
+    /// (seconds since 1970, unread where listed) and one message that is not
+    /// in the inbox.
+    private func makeInboxConversation(
+        inboxDates: [TimeInterval],
+        unreadDates: Set<TimeInterval> = [],
+        idPrefix: String = "inbox"
+    ) throws -> (conversation: Conversation, inboxMessages: [Message], otherMessage: Message) {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let inboxLabel = try existingOrNewLabel(id: "INBOX")
+        let inboxMessages = inboxDates.map { date in
+            let builder = MessageBuilder()
+                .withId("\(idPrefix)-\(Int(date))")
+                .withDate(Date(timeIntervalSince1970: date))
+                .inConversation(conversation)
+            let message = (unreadDates.contains(date) ? builder.unread() : builder.read()).build(in: viewContext)
+            message.addToLabels(inboxLabel)
+            return message
+        }
+        let otherMessage = MessageBuilder()
+            .withId("\(idPrefix)-not-in-inbox")
+            .withDate(Date(timeIntervalSince1970: 0))
+            .read()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        try saveViewContext()
+        return (conversation, inboxMessages, otherMessage)
+    }
+
+    private func existingOrNewLabel(id: String) throws -> Label {
+        let request = Label.fetchRequest()
+        request.predicate = LabelPredicates.id(id)
+        if let label = try viewContext.fetch(request).first { return label }
+        return LabelBuilder().withId(id).build(in: viewContext)
+    }
+
+    private func labelIDs(of message: Message) -> Set<String> {
+        Set((message.labels ?? []).map(\.id))
+    }
+
+    /// Archiving a conversation takes INBOX off every message, stamps every
+    /// message (the one that was never in the inbox too), and marks the
+    /// conversation archived with an empty inbox rollup, in one save.
+    ///
+    /// Revert-check: stamping `localModifiedAt` only where INBOX was removed,
+    /// in the archive branch of `MessageActions.applyConversationWideMutation`,
+    /// leaves `otherMessage` unstamped; dropping
+    /// `applyArchivedConversationRollup` there leaves `archivedAt` nil.
+    func testArchiveConversation_takesInboxOffEveryMessageStampsThemAllAndArchivesTheConversation() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20, 30], unreadDates: [30])
+
+        await messageActions.archiveConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+
+        for message in fixture.inboxMessages + [fixture.otherMessage] {
+            XCTAssertFalse(labelIDs(of: message).contains("INBOX"), message.id)
+            XCTAssertNotNil(message.localModifiedAt, message.id)
+        }
+        XCTAssertNotNil(fixture.conversation.archivedAt)
+        XCTAssertFalse(fixture.conversation.hasInbox)
+        XCTAssertEqual(fixture.conversation.inboxUnreadCount, 0)
+        XCTAssertNil(fixture.conversation.latestInboxDate)
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        XCTAssertEqual(queued.first?.sourceConversationId, fixture.conversation.id)
+        XCTAssertEqual(
+            Set(queued.first?.messageIds ?? []),
+            ["inbox-10", "inbox-20", "inbox-30", "inbox-not-in-inbox"]
+        )
+    }
+
+    /// Report Spam adds SPAM to every message, the one outside the inbox
+    /// too, takes INBOX off, and archives the conversation.
+    ///
+    /// Revert-check: adding SPAM only where INBOX was removed, in the Report
+    /// Spam branch of `MessageActions.applyConversationWideMutation`, leaves
+    /// `otherMessage` without it.
+    func testReportSpamConversation_labelsEveryMessageSpamAndArchivesTheConversation() async throws {
+        _ = try existingOrNewLabel(id: "SPAM")
+        let fixture = try makeInboxConversation(inboxDates: [10, 20])
+
+        await messageActions.reportSpamConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+
+        for message in fixture.inboxMessages + [fixture.otherMessage] {
+            XCTAssertEqual(labelIDs(of: message), ["SPAM"], message.id)
+            XCTAssertNotNil(message.localModifiedAt, message.id)
+        }
+        XCTAssertNotNil(fixture.conversation.archivedAt)
+        XCTAssertFalse(fixture.conversation.hasInbox)
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
+        XCTAssertEqual(queued.first?.messageIds.count, 3)
+    }
+
+    /// A batch archives every conversation in one save and queues one
+    /// pending action naming the first conversation and all the messages.
+    ///
+    /// Revert-check: returning after the first conversation from the loop in
+    /// `MessageActions.applyConversationWideMutation` leaves the second in
+    /// the inbox and out of the queued action.
+    func testArchiveConversations_archivesEveryConversationAndQueuesOneAction() async throws {
+        let first = try makeInboxConversation(inboxDates: [10], idPrefix: "first")
+        let second = try makeInboxConversation(inboxDates: [20], idPrefix: "second")
+
+        await messageActions.archiveConversations(conversations: [first.conversation, second.conversation])
+        viewContext.refreshAllObjects()
+
+        XCTAssertNotNil(first.conversation.archivedAt)
+        XCTAssertNotNil(second.conversation.archivedAt)
+        XCTAssertFalse(labelIDs(of: second.inboxMessages[0]).contains("INBOX"))
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.count, 1)
+        XCTAssertEqual(queued.first?.sourceConversationId, first.conversation.id)
+        XCTAssertEqual(
+            Set(queued.first?.messageIds ?? []),
+            ["first-10", "first-not-in-inbox", "second-20", "second-not-in-inbox"]
+        )
+    }
+
+    /// The single-conversation archive leaves a conversation with no
+    /// messages alone, as it did on the view context.
+    ///
+    /// Revert-check: dropping the `!mutation.isBatch, messages.isEmpty`
+    /// return in `MessageActions.applyConversationWideMutation` archives it.
+    func testArchiveConversation_withNoMessages_leavesTheConversationAlone() async throws {
+        _ = try existingOrNewLabel(id: "INBOX")
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        try saveViewContext()
+
+        await messageActions.archiveConversation(conversation: conversation)
+        viewContext.refreshAllObjects()
+
+        XCTAssertNil(conversation.archivedAt)
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+    }
+
+    /// A conversation the view context has not saved yet has a temporary
+    /// objectID no background context can resolve. The action saves the view
+    /// context first, as its own save did when it ran there.
+    ///
+    /// Revert-check: dropping the `saveIfNeeded` in
+    /// `MessageActions.storedObjectIDs` leaves the conversation unarchived
+    /// and nothing queued.
+    func testArchiveConversation_unsavedConversation_isSavedThenArchived() async throws {
+        let inboxLabel = try existingOrNewLabel(id: "INBOX")
+        try saveViewContext()
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let message = MessageBuilder()
+            .withId("unsaved-chat-message")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.addToLabels(inboxLabel)
+        XCTAssertTrue(conversation.objectID.isTemporaryID)
+
+        await messageActions.archiveConversation(conversation: conversation)
+        viewContext.refreshAllObjects()
+
+        XCTAssertFalse(conversation.objectID.isTemporaryID)
+        XCTAssertNotNil(conversation.archivedAt)
+        XCTAssertFalse(labelIDs(of: message).contains("INBOX"))
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.first?.messageIds, ["unsaved-chat-message"])
+    }
+
+    /// The local change and the Gmail action go together: when the save
+    /// fails, nothing is queued.
+    ///
+    /// Revert-check: ignoring the result of `save` (the stack's
+    /// `saveIfNeeded`, from `MessageActions.makeBackgroundSave`) in
+    /// `MessageActions.applyConversationWideMutation` queues the action.
+    func testArchiveConversation_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10])
+        let actions = MessageActions(
+            coreDataStack: FailingSaveCoreDataStack(wrapping: messageActionsStack),
+            pendingActionsManager: pendingActionsManager,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.archiveConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+
+        XCTAssertNil(fixture.conversation.archivedAt)
+        XCTAssertTrue(labelIDs(of: fixture.inboxMessages[0]).contains("INBOX"))
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+    }
+
+    /// Archiving single messages, newest first, keeps the conversation's
+    /// rollup right at each step: the next-newest INBOX message becomes the
+    /// latest, the unread count follows, and the last archive empties it.
+    ///
+    /// Revert-check: dropping `NOT (SELF IN %@)` from
+    /// `MessageActions.storedInboxPredicate` counts the message just
+    /// archived, which the store still has in the inbox: the first archive
+    /// leaves the latest date at 30 and the last leaves `hasInbox` true.
+    func testArchiveMessage_recomputesTheConversationsInboxRollupAtEachStep() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20, 30], unreadDates: [10, 30])
+        let conversation = fixture.conversation
+        let (oldest, middle, newest) = (fixture.inboxMessages[0], fixture.inboxMessages[1], fixture.inboxMessages[2])
+
+        await messageActions.archive(message: newest)
+        viewContext.refreshAllObjects()
+        XCTAssertFalse(labelIDs(of: newest).contains("INBOX"))
+        XCTAssertNotNil(newest.localModifiedAt)
+        XCTAssertTrue(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 1)
+        XCTAssertEqual(conversation.latestInboxDate, Date(timeIntervalSince1970: 20))
+        XCTAssertNil(conversation.archivedAt)
+
+        await messageActions.archive(message: oldest)
+        viewContext.refreshAllObjects()
+        XCTAssertTrue(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertEqual(conversation.latestInboxDate, Date(timeIntervalSince1970: 20))
+
+        await messageActions.archive(message: middle)
+        viewContext.refreshAllObjects()
+        XCTAssertFalse(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertNil(conversation.latestInboxDate)
+
+        let queued = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queued.map { $0.type }, [.archive, .archive, .archive])
+        XCTAssertEqual(queued.map { $0.messageId }, ["inbox-30", "inbox-10", "inbox-20"])
+    }
+
+    /// Marking the newest INBOX message unread and read again goes through
+    /// the same bounded rollup: the changed message is counted from memory
+    /// and the rest from the store.
+    ///
+    /// Revert-check: dropping the loop over `changedMessages` in
+    /// `MessageActions.applyInboxRollup` loses the changed message: the
+    /// unread count stays 0 after the mark-unread, and the latest date drops
+    /// to 20.
+    func testMarkConversationAsUnread_thenRead_keepsTheRollupThroughTheBoundedQueries() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20, 30])
+        let conversation = fixture.conversation
+        let newest = fixture.inboxMessages[2]
+
+        await messageActions.markConversationAsUnread(conversation: conversation)
+        viewContext.refreshAllObjects()
+        XCTAssertTrue(newest.isUnread)
+        XCTAssertTrue(conversation.hasInbox)
+        XCTAssertEqual(conversation.inboxUnreadCount, 1)
+        XCTAssertEqual(conversation.latestInboxDate, Date(timeIntervalSince1970: 30))
+
+        await messageActions.markAsRead(message: newest)
+        viewContext.refreshAllObjects()
+        XCTAssertFalse(newest.isUnread)
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        XCTAssertEqual(conversation.latestInboxDate, Date(timeIntervalSince1970: 30))
+    }
+
+    /// The point of the move: archiving a message reads none of its labels
+    /// on the view context. There, reading the message's labels and removing
+    /// INBOX loaded the INBOX label and, through its inverse, every message
+    /// in the inbox.
+    ///
+    /// Revert-check: using `coreDataStack.viewContext` for the context in
+    /// `MessageActions.performArchive` fires the message's labels fault
+    /// here. (Asserting that no `Label` is registered afterwards does not
+    /// catch it: once INBOX is removed and saved nothing retains the label,
+    /// and the view context lets it go.)
+    func testArchiveMessage_readsNoLabelsOnTheViewContext() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20])
+        let messageID = fixture.inboxMessages[1].objectID
+        viewContext.reset()
+        let message = try XCTUnwrap(viewContext.existingObject(with: messageID) as? Message)
+        XCTAssertTrue(message.hasFault(forRelationshipNamed: "labels"))
+
+        await messageActions.archive(message: message)
+
+        XCTAssertTrue(message.hasFault(forRelationshipNamed: "labels"))
+        let queued = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queued.map { $0.messageId }, ["inbox-20"])
+    }
+
     func testStar_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
         _ = LabelBuilder().starred().build(in: viewContext)
         let message = MessageBuilder()
@@ -357,6 +652,7 @@ final class MessageActionsTests: XCTestCase {
         )
 
         await actions.star(message: message)
+        viewContext.refreshAllObjects()
 
         // The optimistic in-memory change may still apply, but a remote sync must
         // not be queued when we couldn't persist the change locally.
@@ -390,8 +686,8 @@ final class MessageActionsTests: XCTestCase {
             .inConversation(conversation)
             .build(in: viewContext)
         try saveViewContext()
-        let messageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDs = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         await messageActions.markMessagesAsReadBatch(
@@ -506,8 +802,8 @@ final class MessageActionsTests: XCTestCase {
         initialMessage.addToLabels(inboxLabel)
         try saveViewContext()
 
-        let messageIDsAtOpen = messageActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDsAtOpen = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         let laterMessage = MessageBuilder()
@@ -832,6 +1128,94 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
+    /// The chat-open snapshot names this conversation's unread INBOX messages
+    /// and nothing else: not another conversation's unread mail, and not the
+    /// read or non-INBOX messages of this one.
+    ///
+    /// Revert-check: dropping `conversation == %@` from
+    /// `MessagePredicates.unreadInInbox` adds "other-chat-unread".
+    func testSnapshotUnreadInboxMessageObjectIDs_namesOnlyThisConversationsUnreadInboxMessages() async throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let otherConversation = ConversationBuilder().visible().build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+
+        func message(_ id: String, unread: Bool, inInbox: Bool, in conversation: Conversation) -> Message {
+            let builder = MessageBuilder().withId(id).inConversation(conversation)
+            let message = (unread ? builder.unread() : builder.read()).build(in: viewContext)
+            if inInbox { message.addToLabels(inboxLabel) }
+            return message
+        }
+        let firstUnread = message("first-unread", unread: true, inInbox: true, in: conversation)
+        let secondUnread = message("second-unread", unread: true, inInbox: true, in: conversation)
+        _ = message("read-inbox", unread: false, inInbox: true, in: conversation)
+        _ = message("unread-not-in-inbox", unread: true, inInbox: false, in: conversation)
+        _ = message("other-chat-unread", unread: true, inInbox: true, in: otherConversation)
+        try saveViewContext()
+
+        let snapshot = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
+        )
+
+        XCTAssertEqual(Set(snapshot), [firstUnread.objectID, secondUnread.objectID])
+        XCTAssertEqual(snapshot.count, 2)
+    }
+
+    /// An unsaved conversation has a temporary objectID and no stored
+    /// messages; its snapshot is empty.
+    ///
+    /// HONEST SCOPE: this pins the answer, not the guard. Without the
+    /// `isTemporaryID` guard the fetch is asked about an ID the store has no
+    /// row for, and what Core Data does with that is not something the app
+    /// should depend on.
+    func testSnapshotUnreadInboxMessageObjectIDs_unsavedConversation_isEmpty() async throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        XCTAssertTrue(conversation.objectID.isTemporaryID)
+
+        let snapshot = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
+        )
+
+        XCTAssertEqual(snapshot, [])
+    }
+
+    /// A batch larger than one fetch chunk marks every message, recomputes
+    /// the unread count once, and queues one conversation action naming them
+    /// all in the order they were passed.
+    ///
+    /// Revert-check: making `MessageActions.fetchMessagesWithLabels` stop
+    /// after its first chunk leaves the last three messages unread and out
+    /// of the queued action.
+    func testMarkMessagesAsReadBatch_moreThanOneFetchChunk_marksEveryMessageAndQueuesOneAction() async throws {
+        let messageCount = MessageActions.markReadFetchChunkSize + 3
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(Int32(messageCount))
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+        let messages = (0..<messageCount).map { index in
+            let message = MessageBuilder()
+                .withId(String(format: "chunked-%04d", index))
+                .unread()
+                .inConversation(conversation)
+                .build(in: viewContext)
+            message.addToLabels(inboxLabel)
+            return message
+        }
+        try saveViewContext()
+
+        await messageActions.markMessagesAsReadBatch(
+            messageIDs: messages.map(\.objectID),
+            conversationID: conversation.objectID
+        )
+
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(messages.filter(\.isUnread).map(\.id), [])
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.count, 1)
+        XCTAssertEqual(queuedConversationActions.first?.messageIds, messages.map(\.id))
+    }
+
     func testExactUnreadInboxSnapshotDoesNotIncludeUnrelatedOrNonInboxMessages() throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -897,8 +1281,8 @@ final class MessageActionsTests: XCTestCase {
             },
             syncRunCoordinator: syncRunCoordinator
         )
-        let messageIDs = failingActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDs = await failingActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         await failingActions.markMessagesAsReadBatch(

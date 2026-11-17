@@ -18,15 +18,16 @@ import CoreData
 ///
 /// KNOWN GAPS. Where today's plan is the one the review calls a defect, the
 /// assertion that says so is wrapped in `XCTExpectFailure`, naming the review
-/// item and the plan measured (iOS 27.0 simulator, 2026-11-16).
-/// `XCTExpectFailure` is strict: once the fix lands the assertion passes, the
-/// test fails with "no failure was recorded", and the wrapper comes off in
-/// that fix's own change, which gives the assertion its `Revert-check:`. An
-/// assertion outside a wrapper holds today and must keep holding.
+/// item and the plan measured. `XCTExpectFailure` is strict: once the fix
+/// lands the assertion passes, the test fails with "no failure was recorded",
+/// and the wrapper comes off in that fix's own change, which gives the
+/// assertion its `Revert-check:`. No assertion in this suite is wrapped
+/// today: the transcript's and the unread snapshot's came off with the
+/// objectID predicates (review step 5). `ScaleHubFaultTests` still has some.
 ///
-/// What keeps a broken recorder from counting as an expected failure: every
-/// test unwraps the plan it is about, and checks what the fetch returned,
-/// before any wrapper.
+/// What keeps a broken recorder from passing for a good plan: every test
+/// unwraps the plan it is about, and checks what the fetch returned, before
+/// it asserts on the plan.
 final class ScaleQueryPlanTests: XCTestCase {
     private typealias Plan = SQLiteQueryPlanRecorder.Plan
 
@@ -65,53 +66,69 @@ final class ScaleQueryPlanTests: XCTestCase {
     }
 
     /// Review item `chat-transcript-uuid-join-offset-paging`. The transcript
-    /// filters on `conversation.id`, a join to an unindexed UUID. With no
-    /// statistics SQLite answers the page by walking every message in date
-    /// order (`SCAN t0 USING INDEX Z_Message_byInternalDateIndex`) and the
-    /// count by reading the whole table (`SCAN t0`).
+    /// used to filter on `conversation.id`, a join to an unindexed UUID, and
+    /// with no statistics SQLite answered the page by walking every message
+    /// in date order (`SCAN t0 USING INDEX Z_Message_byInternalDateIndex`)
+    /// and the count by reading the whole table (`SCAN t0`). The page loader
+    /// now looks the conversation up once and asks for its messages by
+    /// objectID, which SQLite answers from the conversation's own index.
     ///
-    /// The fix is the object form, `MessagePredicates.visibleInChat(conversation:)`,
-    /// for a conversation with a permanent ID. When it lands, name that
-    /// predicate in this test's `Revert-check:`.
+    /// Revert-check: returning `MessagePredicates.visibleInChat(conversationId:)`
+    /// for a saved conversation from `VirtualScrollState.transcriptPredicate`,
+    /// in place of `visibleInChat(conversationObjectID:)`, brings both scans
+    /// back.
     func testTranscriptPageAndCount_withoutStatistics_walkNoMessagesOutsideTheChat() async throws {
         let plans = try await transcriptPlans(statistics: .none)
 
-        XCTExpectFailure("chat-transcript-uuid-join-offset-paging: the page walks ZMESSAGE in date order") {
-            XCTAssertEqual(plans.page.scans(of: "ZMESSAGE"), [], "\(plans.page)")
-        }
-        XCTExpectFailure("chat-transcript-uuid-join-offset-paging: the count reads all of ZMESSAGE") {
-            XCTAssertEqual(plans.count.scans(of: "ZMESSAGE"), [], "\(plans.count)")
-        }
+        XCTAssertEqual(plans.page.scans(of: "ZMESSAGE"), [], "\(plans.page)")
+        XCTAssertEqual(plans.count.scans(of: "ZMESSAGE"), [], "\(plans.count)")
+        XCTAssertTrue(Self.isDrivenByTheConversation(plans.page), "\(plans.page)")
+        XCTAssertTrue(Self.isDrivenByTheConversation(plans.count), "\(plans.count)")
     }
 
-    /// With statistics SQLite finds the conversation first and reads only its
-    /// messages (`SEARCH t0 USING INDEX ZMESSAGE_ZCONVERSATION_INDEX`). That
-    /// holds today and must survive the model changes the review plans.
+    /// With statistics the plan is the same: the conversation's messages,
+    /// found through an index on the conversation, and no other message.
     ///
-    /// HONEST SCOPE: no one line of production code reverts this; it is the
-    /// planner's choice from the schema and the statistics. Dropping the
-    /// relationship's index, or a predicate SQLite cannot drive from the
-    /// conversation, is what it would catch. The plan still walks
-    /// ZCONVERSATION to find the UUID and sorts the chat's messages in a
-    /// temporary B-tree, which is the same review item's remaining cost.
+    /// Revert-check: none of its own. With statistics the UUID join this
+    /// replaced also read only the chat's messages
+    /// (`SEARCH t0 USING INDEX ZMESSAGE_ZCONVERSATION_INDEX`, after a walk of
+    /// ZCONVERSATION), so this is the test that must stay green when the
+    /// model's indexes change.
     func testTranscriptPageAndCount_withStatistics_walkNoMessagesOutsideTheChat() async throws {
         let plans = try await transcriptPlans(statistics: .analyzed)
 
         XCTAssertEqual(plans.page.scans(of: "ZMESSAGE"), [], "\(plans.page)")
         XCTAssertEqual(plans.count.scans(of: "ZMESSAGE"), [], "\(plans.count)")
+        XCTAssertTrue(Self.isDrivenByTheConversation(plans.page), "\(plans.page)")
+        XCTAssertTrue(Self.isDrivenByTheConversation(plans.count), "\(plans.count)")
+    }
+
+    /// The indexes that find a conversation's messages: the relationship's
+    /// own and the model's (conversation, date) fetch index.
+    private static let conversationIndexes: Set<String> = [
+        "ZMESSAGE_ZCONVERSATION_INDEX",
+        "Z_Message_byConversationAndDateIndex"
+    ]
+
+    /// Whether the plan reaches ZMESSAGE through an index on the
+    /// conversation and through no other index.
+    private static func isDrivenByTheConversation(_ plan: Plan) -> Bool {
+        let indexes = Set(plan.indexes(on: "ZMESSAGE"))
+        return !indexes.isEmpty && indexes.isSubset(of: conversationIndexes)
     }
 
     // MARK: - Unread snapshot at chat open
 
     /// Review item `chat-open-unread-snapshot`. Opening a chat snapshots its
-    /// unread INBOX messages (`MessageActions.snapshotUnreadInboxMessageObjectIDs`),
-    /// and SQLite drives that from the store-wide unread index, with or
-    /// without statistics: it probes every unread message in the mailbox
-    /// (26,408 in this store) to find the one in this chat.
+    /// unread INBOX messages (`MessageActions.snapshotUnreadInboxMessageObjectIDs`).
+    /// SQLite used to drive that from the store-wide unread index, with or
+    /// without statistics: it probed every unread message in the mailbox
+    /// (26,408 in this store) to find the one in this chat. It is now driven
+    /// by the conversation.
     ///
-    /// The fix is the object form of the predicate and, in the next model
-    /// version, no stand-alone unread index. When it lands, name the objectID
-    /// predicate in this test's `Revert-check:`.
+    /// Revert-check: `isUnread == YES` in place of `isUnread != NO` in
+    /// `MessagePredicates.unreadInInbox` brings
+    /// `SEARCH t0 USING INDEX Z_Message_byIsUnreadIndex` back.
     @MainActor
     func testUnreadSnapshot_isNotDrivenByTheMailboxWideUnreadIndex() async throws {
         for statistics in Self.bothStatistics {
@@ -122,11 +139,18 @@ final class ScaleQueryPlanTests: XCTestCase {
                 rollupMutationSerializer: ConversationRollupMutationSerializer(),
                 syncRunCoordinator: SyncRunCoordinator()
             )
+            let lookupContext = stack.newBackgroundContext()
+            let conversationID = try await lookupContext.perform {
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+                request.predicate = ConversationPredicates.id(manifest.ordinaryConversationID)
+                request.resultType = .managedObjectIDResultType
+                return try XCTUnwrap(try lookupContext.fetch(request).first)
+            }
 
             var snapshot: [NSManagedObjectID] = []
-            let plans = try SQLiteQueryPlanRecorder.record {
-                snapshot = actions.snapshotUnreadInboxMessageObjectIDs(
-                    conversationID: manifest.ordinaryConversationID
+            let plans = try await SQLiteQueryPlanRecorder.record {
+                snapshot = await actions.snapshotUnreadInboxMessageObjectIDs(
+                    conversationID: conversationID
                 )
             }
 
@@ -135,13 +159,11 @@ final class ScaleQueryPlanTests: XCTestCase {
             XCTAssertEqual(messagePlans.count, 1, "\(statistics):\n\(messagePlans)")
             let plan = try XCTUnwrap(messagePlans.first)
             XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)")
-
-            XCTExpectFailure("chat-open-unread-snapshot: SEARCH t0 USING INDEX Z_Message_byIsUnreadIndex (\(statistics))") {
-                XCTAssertFalse(
-                    plan.indexes(on: "ZMESSAGE").contains("Z_Message_byIsUnreadIndex"),
-                    "\(statistics): \(plan)"
-                )
-            }
+            XCTAssertFalse(
+                plan.indexes(on: "ZMESSAGE").contains("Z_Message_byIsUnreadIndex"),
+                "\(statistics): \(plan)"
+            )
+            XCTAssertTrue(Self.isDrivenByTheConversation(plan), "\(statistics): \(plan)")
         }
     }
 
