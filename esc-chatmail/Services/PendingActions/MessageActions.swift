@@ -159,43 +159,45 @@ final class MessageActions: ObservableObject {
     func snapshotUnreadInboxMessageObjectIDs(
         conversationID: NSManagedObjectID
     ) async -> [NSManagedObjectID] {
-        await startUnreadInboxSnapshot(conversationID: conversationID).messageIDs
+        await startUnreadInboxSnapshot(conversationID: conversationID).value
     }
 
-    /// Queues the snapshot's fetch before returning, so the caller can start
+    /// Starts the snapshot's fetch before returning, so the caller can start
     /// it in the turn a chat opens and await the IDs in a task of its own.
     ///
-    /// The fetch is put on the background context's queue here, with the
-    /// non-async `perform`, and needs nothing more from the main actor. When
-    /// the whole snapshot was awaited from a detached task it could not
-    /// start until the main actor was free again, which at chat open is
-    /// after the transcript's first layout, and a message saved meanwhile
-    /// was in the snapshot and was marked read with the rest. What is left
-    /// between the open and the fetch is one queue hop.
-    func startUnreadInboxSnapshot(conversationID: NSManagedObjectID) -> UnreadInboxSnapshot {
-        guard !conversationID.isTemporaryID else { return UnreadInboxSnapshot(messageIDs: []) }
+    /// The fetch runs in a detached task, which needs nothing from the main
+    /// actor: it goes to the background context's queue from the global
+    /// executor. When the whole snapshot was awaited through this
+    /// main-actor class it could not start until the main actor was free
+    /// again, which at chat open is after the transcript's first layout, and
+    /// a message saved meanwhile was in the snapshot and was marked read
+    /// with the rest. A plain `Task` here inherits the main actor and waits
+    /// for it in the same way. What is left between the open and the fetch
+    /// is the hop to that task and the hop to the context's queue.
+    func startUnreadInboxSnapshot(conversationID: NSManagedObjectID) -> Task<[NSManagedObjectID], Never> {
+        guard !conversationID.isTemporaryID else { return Task.detached { [] } }
 
-        let snapshot = UnreadInboxSnapshot()
         let context = coreDataStack.newBackgroundContext()
-        context.perform {
-            let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-            request.predicate = MessagePredicates.unreadInInbox(conversationObjectID: conversationID)
-            request.fetchBatchSize = 50
-            request.includesPendingChanges = false
-            request.resultType = .managedObjectIDResultType
+        return Task.detached(priority: .userInitiated) {
+            await context.perform {
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+                request.predicate = MessagePredicates.unreadInInbox(conversationObjectID: conversationID)
+                request.fetchBatchSize = 50
+                request.includesPendingChanges = false
+                request.resultType = .managedObjectIDResultType
 
-            do {
-                snapshot.fulfill(try context.fetch(request))
-            } catch {
-                Log.error(
-                    "Failed to snapshot unread INBOX message IDs for conversation",
-                    category: .coreData,
-                    error: error
-                )
-                snapshot.fulfill([])
+                do {
+                    return try context.fetch(request)
+                } catch {
+                    Log.error(
+                        "Failed to snapshot unread INBOX message IDs for conversation",
+                        category: .coreData,
+                        error: error
+                    )
+                    return []
+                }
             }
         }
-        return snapshot
     }
 
     /// Filters an exact insertion set down to unread INBOX messages.

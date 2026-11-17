@@ -582,15 +582,8 @@ extension VirtualScrollState {
                 conversationObjectID: knownConversationObjectID,
                 in: viewContext
             )
-        } else if let pageLoader {
-            page = await pageLoader(conversationId, range, makeBackgroundContext())
         } else {
-            page = await Self.loadMessagePage(
-                conversationId: conversationId,
-                range: range,
-                conversationObjectID: knownConversationObjectID,
-                in: makeBackgroundContext()
-            )
+            page = await pageLoader(conversationId, range, knownConversationObjectID, makeBackgroundContext())
         }
 
         // A chat pages many times and its conversation is one row: keep the

@@ -185,26 +185,13 @@ extension VirtualScrollState {
         }
     }
 
-    nonisolated static func loadMessagePage(
-        conversationId: String,
-        range: Range<Int>,
-        in context: NSManagedObjectContext
-    ) async -> VirtualScrollMessagePage {
-        await loadMessagePage(
-            conversationId: conversationId,
-            range: range,
-            conversationObjectID: nil,
-            in: context
-        )
-    }
-
     /// `conversationObjectID` is the conversation's permanent objectID where
     /// the caller already has it (the scroll state keeps the one its first
     /// load resolved). With it the load does not look the conversation up.
     nonisolated static func loadMessagePage(
         conversationId: String,
         range: Range<Int>,
-        conversationObjectID: NSManagedObjectID?,
+        conversationObjectID: NSManagedObjectID? = nil,
         in context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage {
         guard let conversationUUID = UUID(uuidString: conversationId) else {

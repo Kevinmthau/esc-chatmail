@@ -337,11 +337,12 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let stack = self.stack!
 
-        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             try? await Task.sleep(nanoseconds: 100_000_000)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -458,7 +459,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let (conversation, messages) = try makeConversationWithMessages(count: 3)
         let stack = self.stack!
         var loadCount = 0
-        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             loadCount += 1
             if loadCount == 1 {
                 try? await Task.sleep(nanoseconds: 500_000_000)
@@ -466,6 +467,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -577,11 +579,12 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let pause = RequestNumberPause(targetRequest: 3)
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await pause.waitIfNeeded()
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -634,11 +637,12 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let pause = RequestNumberPause(targetRequest: 3)
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await pause.waitIfNeeded()
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -892,7 +896,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt == 4 {
                 return VirtualScrollMessagePage(
@@ -904,6 +908,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -950,7 +955,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt == 1 {
                 return VirtualScrollMessagePage(messageIDs: [], totalCount: 2)
@@ -959,6 +964,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -986,7 +992,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt <= 2 {
                 return VirtualScrollMessagePage(messageIDs: [], totalCount: 2)
@@ -995,6 +1001,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1038,7 +1045,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt <= 2 {
                 return VirtualScrollMessagePage(
@@ -1051,6 +1058,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1096,7 +1104,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt == 3 || attempt == 5 {
                 return VirtualScrollMessagePage(
@@ -1109,6 +1117,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1161,7 +1170,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let attempts = InitialLoadAttemptCounter()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let attempt = await attempts.next()
             if attempt == 3 {
                 return VirtualScrollMessagePage(
@@ -1174,6 +1183,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1235,7 +1245,7 @@ final class VirtualScrollStateTests: XCTestCase {
 
         // Metadata fetches (empty ranges) pass through; each non-empty page
         // fetch parks until its call number is opened.
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1245,6 +1255,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1312,7 +1323,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let gates = PageLoadGates()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1329,6 +1340,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1388,7 +1400,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let gates = PageLoadGates()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1398,6 +1410,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1628,7 +1641,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let gates = PageLoadGates()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1638,6 +1651,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1689,7 +1703,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let gates = PageLoadGates()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1706,6 +1720,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1755,7 +1770,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let gates = PageLoadGates()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if !range.isEmpty {
                 let call = await gates.arrive()
                 while await !gates.isOpen(call), !Task.isCancelled {
@@ -1765,6 +1780,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1822,7 +1838,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let ranges = RangeRecorder()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await ranges.record(range)
             let attempt = await attempts.next()
             if attempt == 3 {
@@ -1832,6 +1848,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -1901,12 +1918,13 @@ final class VirtualScrollStateTests: XCTestCase {
         // metadata probe lands; the page load that follows it sees the full
         // store, the way a sync save committing between
         // loadTotalMessageCount and loadPage does.
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await ranges.record(range)
             let hiddenTailRowCount = await drift.hiddenTailRowCount(for: range)
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             guard hiddenTailRowCount > 0 else { return page }
@@ -1987,11 +2005,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 3)
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await pause.waitIfNeeded()
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2046,10 +2065,11 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 3)
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -2110,10 +2130,11 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 3)
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -2191,10 +2212,11 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 2)
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -2253,10 +2275,11 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let pause = RequestSequencePause(targetRequests: [3, 4])
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -2306,11 +2329,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 4)
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await pause.waitIfNeeded()
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2469,7 +2493,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             if range.isEmpty {
                 return VirtualScrollMessagePage(messageIDs: [], totalCount: 5)
@@ -2483,6 +2507,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2523,10 +2548,11 @@ final class VirtualScrollStateTests: XCTestCase {
         var publishedWindows: [[NSManagedObjectID]] = []
         var cancellable: AnyCancellable?
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -2623,12 +2649,13 @@ final class VirtualScrollStateTests: XCTestCase {
         let requestedRanges = RangeRecorder()
         let firstRequestPause = FirstRequestPause()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             await firstRequestPause.waitIfNeeded()
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2758,11 +2785,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let requestedRanges = RangeRecorder()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2806,11 +2834,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let requestedRanges = RangeRecorder()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2862,11 +2891,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let stack = self.stack!
         let requestedRanges = RangeRecorder()
 
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -2980,7 +3010,7 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let stack = self.stack!
 
-        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let delayedLoader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             if range.lowerBound > 0 {
                 try? await Task.sleep(nanoseconds: 150_000_000)
                 if Task.isCancelled {
@@ -2991,6 +3021,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -3353,11 +3384,12 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -3878,11 +3910,12 @@ final class VirtualScrollStateTests: XCTestCase {
         try viewContext.save()
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -4064,11 +4097,12 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -4215,7 +4249,7 @@ final class VirtualScrollStateTests: XCTestCase {
         let requestCounter = InitialLoadAttemptCounter()
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let requestNumber = await requestCounter.next()
             await requestedRanges.record(range)
             if requestNumber == 3 {
@@ -4228,6 +4262,7 @@ final class VirtualScrollStateTests: XCTestCase {
             return await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
         }
@@ -4270,11 +4305,12 @@ final class VirtualScrollStateTests: XCTestCase {
         let pause = RequestNumberPause(targetRequest: 2)
         let requestedRanges = RangeRecorder()
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             await requestedRanges.record(range)
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded()
@@ -4332,10 +4368,11 @@ final class VirtualScrollStateTests: XCTestCase {
         )
         let pause = MatchingRangePause(targetRange: 7..<12)
         let stack = self.stack!
-        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, context in
+        let loader: VirtualScrollState.MessagePageLoader = { conversationId, range, conversationObjectID, context in
             let page = await VirtualScrollState.loadMessagePage(
                 conversationId: conversationId,
                 range: range,
+                conversationObjectID: conversationObjectID,
                 in: context
             )
             await pause.waitIfNeeded(for: range)

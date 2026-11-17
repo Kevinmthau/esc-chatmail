@@ -897,15 +897,24 @@ final class MessageActionsTests: XCTestCase {
         }
     }
 
-    /// The chat-open snapshot's fetch is queued when it is asked for and
+    /// The chat-open snapshot's fetch is started when it is asked for and
     /// runs with no help from the main actor, which at chat open is laying
     /// the transcript out. A message saved after the fetch is not in it.
     ///
-    /// Revert-check: starting the fetch from `Task { @MainActor in … }` in
-    /// `MessageActions.startUnreadInboxSnapshot`, in place of the non-async
-    /// `context.perform`, leaves the snapshot unfulfilled for as long as
-    /// this test holds the main thread.
+    /// Revert-check: `Task` in place of `Task.detached` in
+    /// `MessageActions.startUnreadInboxSnapshot` inherits the main actor,
+    /// and no fetch runs for as long as this test holds the main thread.
     func testStartUnreadInboxSnapshot_fetchesWithoutTheMainActorAndLeavesOutALaterMessage() async throws {
+        let countingStack = FetchCountingMessageActionsStack(
+            wrapping: messageActionsStack,
+            coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator
+        )
+        let actions = MessageActions(
+            coreDataStack: countingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
         let conversation = ConversationBuilder().visible().build(in: viewContext)
         let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
         let unreadAtOpen = MessageBuilder().withId("unread-at-open").unread()
@@ -913,11 +922,11 @@ final class MessageActionsTests: XCTestCase {
         unreadAtOpen.addToLabels(inboxLabel)
         try saveViewContext()
 
-        let snapshot = messageActions.startUnreadInboxSnapshot(conversationID: conversation.objectID)
+        let snapshot = actions.startUnreadInboxSnapshot(conversationID: conversation.objectID)
         // No await between the call and here: nothing has run on the main
         // actor since the snapshot was asked for.
         XCTAssertTrue(
-            holdThisThread(until: { snapshot.isFulfilled }),
+            holdThisThread(until: { countingStack.fetchCount(ofEntity: "Message") >= 1 }),
             "The snapshot's fetch waited for the main actor"
         )
 
@@ -926,7 +935,7 @@ final class MessageActionsTests: XCTestCase {
         savedLater.addToLabels(inboxLabel)
         try saveViewContext()
 
-        let messageIDs = await snapshot.messageIDs
+        let messageIDs = await snapshot.value
         XCTAssertEqual(messageIDs, [unreadAtOpen.objectID])
     }
 

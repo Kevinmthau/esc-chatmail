@@ -179,12 +179,19 @@ final class ScaleQueryPlanTests: XCTestCase {
     /// Picks the rollup's statements out of a recording by their SQL. The
     /// recording also holds the action's own faults and its save, and none of
     /// those is a count or sorts by date.
+    ///
+    /// A recording is of the whole process, so the INBOX count is asked for
+    /// by its shape, not as "the count that is not the unread one": a count
+    /// of messages joined to their labels, in one SELECT. A transcript
+    /// page's count, which a task an earlier test left can add, reads the
+    /// labels in a subquery, and is driven by the conversation whatever the
+    /// rollup's count does.
     private func rollupPlans(in plans: [Plan], _ statistics: ScaleStoreTemplate.Statistics) throws -> RollupPlans {
         let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
         let counts = messagePlans.filter { $0.sql.hasPrefix("SELECT COUNT(") }
         return RollupPlans(
             inboxCount: try XCTUnwrap(
-                counts.first { !$0.sql.contains("ZISUNREAD") },
+                counts.first { !$0.sql.contains("ZISUNREAD") && Self.joinsLabelsInOneSelect($0) },
                 "\(statistics):\n\(messagePlans)"
             ),
             unreadCount: try XCTUnwrap(
@@ -196,6 +203,12 @@ final class ScaleQueryPlanTests: XCTestCase {
                 "\(statistics):\n\(messagePlans)"
             )
         )
+    }
+
+    /// Whether the statement joins messages to their labels and has no
+    /// subquery: the shape of `conversation == %@ AND ANY labels.id == %@`.
+    private static func joinsLabelsInOneSelect(_ plan: Plan) -> Bool {
+        plan.sql.contains("JOIN ZLABEL") && plan.sql.components(separatedBy: "SELECT").count == 2
     }
 
     private func assertDrivenByTheConversation(
@@ -333,6 +346,76 @@ final class ScaleQueryPlanTests: XCTestCase {
             for plan in newestInboxPlans {
                 assertDrivenByTheConversation(plan, statistics)
             }
+        }
+    }
+
+    // MARK: - A conversation-wide action the store already has
+
+    /// Review item `archive-spam-star-main-thread-viewcontext`, its repeat
+    /// swipe. A conversation the store already has Report Spam applied to is
+    /// left alone (`MessageActions.isAlreadyApplied`), and two counts decide
+    /// that: its messages still in INBOX, and its messages without SPAM. A
+    /// row is swiped a second time because it has not left the list yet,
+    /// which is the large chat, so both counts are asked about here in the
+    /// largest chat of the store. Each reaches ZMESSAGE only through an
+    /// index on the conversation, with or without statistics.
+    ///
+    /// Revert-check: with `conversation.id == %@` (the conversation's UUID)
+    /// in place of `conversation == %@` in the count of messages without
+    /// SPAM in `MessageActions.isAlreadyApplied`, a store without
+    /// statistics walks the whole message table for that count (`SCAN t0`),
+    /// joining each message to its conversation. With statistics the plan
+    /// stays the conversation's. The INBOX count is
+    /// `MessageActions.storedInboxPredicate`, whose revert the rollup's test
+    /// above names.
+    @MainActor
+    func testReportSpamConversation_reportedAgain_alreadyAppliedCounts_areDrivenByTheConversation() async throws {
+        for statistics in Self.bothStatistics {
+            let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let actionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+            let pendingActions = MockPendingActionsManager()
+            let actions = MessageActions(
+                coreDataStack: actionsStack,
+                pendingActionsManager: pendingActions,
+                rollupMutationSerializer: ConversationRollupMutationSerializer(),
+                syncRunCoordinator: SyncRunCoordinator()
+            )
+            let viewContext = actionsStack.viewContext
+            // The seeded mailbox has no SPAM label, and without one the store
+            // cannot say whether a report ran.
+            _ = LabelBuilder().spam().build(in: viewContext)
+            try viewContext.save()
+            let conversationRequest = Conversation.fetchRequest()
+            conversationRequest.predicate = ConversationPredicates.id(manifest.largestConversationID)
+            let conversation = try XCTUnwrap(try viewContext.fetch(conversationRequest).first)
+
+            await actions.reportSpamConversation(conversation: conversation)
+            let queuedByTheFirst = await pendingActions.queuedConversationActions
+            XCTAssertEqual(queuedByTheFirst.map { $0.type }, [.reportSpam], "\(statistics)")
+            XCTAssertEqual(queuedByTheFirst.first?.messageIds.count, manifest.largestConversationMessageCount, "\(statistics)")
+
+            let plans = try await SQLiteQueryPlanRecorder.record {
+                await actions.reportSpamConversation(conversation: conversation)
+            }
+
+            // The second report found the store already had it, which is
+            // both counts coming back zero: nothing more was queued.
+            let queued = await pendingActions.queuedConversationActions
+            XCTAssertEqual(queued.map { $0.type }, [.reportSpam], "\(statistics)")
+
+            // By their SQL: the INBOX count joins the labels, and the count
+            // of messages without SPAM reads them in a subquery.
+            let counts = plans.filter { $0.reads("ZMESSAGE") && $0.sql.hasPrefix("SELECT COUNT(") }
+            let inboxCount = try XCTUnwrap(
+                counts.first { Self.joinsLabelsInOneSelect($0) },
+                "\(statistics):\n\(counts)"
+            )
+            let withoutSpamCount = try XCTUnwrap(
+                counts.first { $0.sql.contains("(SELECT COUNT(") },
+                "\(statistics):\n\(counts)"
+            )
+            assertDrivenByTheConversation(inboxCount, statistics)
+            assertDrivenByTheConversation(withoutSpamCount, statistics)
         }
     }
 

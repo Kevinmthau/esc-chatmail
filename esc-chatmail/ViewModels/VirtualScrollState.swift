@@ -72,9 +72,14 @@ final class VirtualScrollState: ObservableObject {
         case end
     }
 
+    /// Loads one page of a chat's message IDs. `conversationObjectID` is the
+    /// conversation's permanent objectID once a load has resolved it, and
+    /// nil for a chat's first load: a loader hands it on to
+    /// `loadMessagePage`, which then does not look the conversation up.
     typealias MessagePageLoader = (
         _ conversationId: String,
         _ range: Range<Int>,
+        _ conversationObjectID: NSManagedObjectID?,
         _ context: NSManagedObjectContext
     ) async -> VirtualScrollMessagePage
 
@@ -203,8 +208,7 @@ final class VirtualScrollState: ObservableObject {
     let conversationId: String
     let viewContext: NSManagedObjectContext
     let makeBackgroundContext: () -> NSManagedObjectContext
-    /// A page loader a test put in place of `loadMessagePage`, or nil.
-    let pageLoader: MessagePageLoader?
+    let pageLoader: MessagePageLoader
 
     // Cache only lightweight row snapshots for the current window. Background
     // contexts fetch IDs, and the UI never stores `Message` instances here.
@@ -313,7 +317,7 @@ final class VirtualScrollState: ObservableObject {
         self.initialWindowPosition = initialWindowPosition
         self.viewContext = CoreDataStack.shared.viewContext
         self.makeBackgroundContext = { CoreDataStack.shared.newBackgroundContext() }
-        self.pageLoader = nil
+        self.pageLoader = VirtualScrollState.loadMessagePage
         startObservingViewContextChanges()
         loadInitialMessages()
     }
@@ -324,7 +328,7 @@ final class VirtualScrollState: ObservableObject {
         initialWindowPosition: InitialWindowPosition = .beginning,
         viewContext: NSManagedObjectContext,
         makeBackgroundContext: @escaping () -> NSManagedObjectContext,
-        pageLoader: MessagePageLoader? = nil,
+        pageLoader: @escaping MessagePageLoader = VirtualScrollState.loadMessagePage,
         autoLoad: Bool = true
     ) {
         self.conversationId = conversationId
