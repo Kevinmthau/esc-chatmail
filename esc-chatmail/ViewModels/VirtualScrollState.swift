@@ -8,15 +8,21 @@ struct VirtualScrollMessagePage: @unchecked Sendable {
     let messageIDs: [NSManagedObjectID]
     let totalCount: Int
     let fetchErrorDescription: String?
+    /// The conversation's permanent objectID, where the load had it or
+    /// looked it up. The scroll state keeps it, so its later page loads ask
+    /// for the messages by it without looking the conversation up again.
+    let conversationObjectID: NSManagedObjectID?
 
     init(
         messageIDs: [NSManagedObjectID],
         totalCount: Int,
-        fetchErrorDescription: String? = nil
+        fetchErrorDescription: String? = nil,
+        conversationObjectID: NSManagedObjectID? = nil
     ) {
         self.messageIDs = messageIDs
         self.totalCount = totalCount
         self.fetchErrorDescription = fetchErrorDescription
+        self.conversationObjectID = conversationObjectID
     }
 }
 
@@ -197,7 +203,8 @@ final class VirtualScrollState: ObservableObject {
     let conversationId: String
     let viewContext: NSManagedObjectContext
     let makeBackgroundContext: () -> NSManagedObjectContext
-    let pageLoader: MessagePageLoader
+    /// A page loader a test put in place of `loadMessagePage`, or nil.
+    let pageLoader: MessagePageLoader?
 
     // Cache only lightweight row snapshots for the current window. Background
     // contexts fetch IDs, and the UI never stores `Message` instances here.
@@ -306,7 +313,7 @@ final class VirtualScrollState: ObservableObject {
         self.initialWindowPosition = initialWindowPosition
         self.viewContext = CoreDataStack.shared.viewContext
         self.makeBackgroundContext = { CoreDataStack.shared.newBackgroundContext() }
-        self.pageLoader = VirtualScrollState.loadMessagePage
+        self.pageLoader = nil
         startObservingViewContextChanges()
         loadInitialMessages()
     }
@@ -317,7 +324,7 @@ final class VirtualScrollState: ObservableObject {
         initialWindowPosition: InitialWindowPosition = .beginning,
         viewContext: NSManagedObjectContext,
         makeBackgroundContext: @escaping () -> NSManagedObjectContext,
-        pageLoader: @escaping MessagePageLoader = VirtualScrollState.loadMessagePage,
+        pageLoader: MessagePageLoader? = nil,
         autoLoad: Bool = true
     ) {
         self.conversationId = conversationId

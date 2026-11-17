@@ -204,6 +204,129 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertEqual(page.totalCount, 1)
     }
 
+    /// The everyday send: the chat is saved and the reply just typed is not.
+    /// The pending page asks by the conversation's objectID with pending
+    /// changes included, which on a SQLite store is SQL for the saved rows
+    /// and the same predicate evaluated in memory for the unsaved ones. Both
+    /// must agree: the saved message and the unsaved reply, in order, and
+    /// not an unsaved message of another chat or one labelled spam.
+    ///
+    /// Revert-check: dropping `conversation == %@` from
+    /// `MessagePredicates.visibleInChat(conversationObjectID:)` pages the
+    /// other chat's messages in, saved and unsaved, and
+    /// `NONE labels.id IN %@` in place of its `SUBQUERY` lets the saved spam
+    /// message through.
+    func testLoadPendingMessagePage_sqliteStore_savedConversation_includesItsUnsavedMessages() async throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let context = sqliteStack.makeMainQueueViewContext()
+        let conversation = ConversationBuilder().visible().build(in: context)
+        let otherConversation = ConversationBuilder().visible().build(in: context)
+        let spam = LabelBuilder().spam().build(in: context)
+
+        func message(_ id: String, date: TimeInterval, in conversation: Conversation) -> Message {
+            MessageBuilder()
+                .withId(id)
+                .withDate(Date(timeIntervalSince1970: date))
+                .inConversation(conversation)
+                .build(in: context)
+        }
+        let saved = message("saved", date: 1, in: conversation)
+        _ = message("other-chat-saved", date: 2, in: otherConversation)
+        message("saved-spam", date: 3, in: conversation).labels = [spam]
+        try context.save()
+        XCTAssertFalse(conversation.objectID.isTemporaryID)
+
+        let optimistic = message("optimistic-reply", date: 4, in: conversation)
+        _ = message("other-chat-optimistic", date: 5, in: otherConversation)
+        message("unsaved-spam", date: 6, in: conversation).labels = [spam]
+        XCTAssertTrue(optimistic.objectID.isTemporaryID)
+
+        // Once looking the conversation up, as a chat's first page does, and
+        // once handed its objectID, as every later page is.
+        for knownConversationObjectID in [nil, conversation.objectID] {
+            let page = await VirtualScrollState.loadPendingMessagePage(
+                conversationId: conversation.id.uuidString,
+                range: 0..<10,
+                conversationObjectID: knownConversationObjectID,
+                in: context
+            )
+
+            XCTAssertNil(page.fetchErrorDescription)
+            XCTAssertEqual(page.messageIDs, [saved.objectID, optimistic.objectID])
+            XCTAssertEqual(page.totalCount, 2)
+            XCTAssertEqual(page.conversationObjectID, conversation.objectID)
+        }
+    }
+
+    /// A page load that is handed the conversation's objectID asks for the
+    /// messages by it and does not look the conversation up. Without it the
+    /// load looks the conversation up once and hands the ID back.
+    ///
+    /// Revert-check: dropping the `knownConversationObjectID` return at the
+    /// top of `VirtualScrollState.transcriptPredicate` makes the second load
+    /// fetch the conversation too.
+    func testLoadMessagePage_handedTheConversationObjectID_doesNotLookTheConversationUp() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 4)
+        let coordinator = stack.persistentContainer.persistentStoreCoordinator
+
+        let lookingUp = FetchCountingContext(coordinator: coordinator)
+        let lookedUp = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<10,
+            conversationObjectID: nil,
+            in: lookingUp
+        )
+        XCTAssertEqual(lookingUp.fetchCount(ofEntity: "Conversation"), 1)
+        XCTAssertEqual(lookedUp.conversationObjectID, conversation.objectID)
+
+        let handedTheID = FetchCountingContext(coordinator: coordinator)
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<10,
+            conversationObjectID: conversation.objectID,
+            in: handedTheID
+        )
+
+        XCTAssertEqual(handedTheID.fetchCount(ofEntity: "Conversation"), 0)
+        XCTAssertEqual(handedTheID.fetchCount(ofEntity: "Message"), 1)
+        XCTAssertNil(page.fetchErrorDescription)
+        XCTAssertEqual(page.messageIDs, messages.map(\.objectID))
+        XCTAssertEqual(page.messageIDs, lookedUp.messageIDs)
+        XCTAssertEqual(page.totalCount, 4)
+    }
+
+    /// A chat pages as it scrolls, and its conversation is one row: the
+    /// scroll state keeps the objectID its first page load resolved and
+    /// hands it to the loads after it.
+    ///
+    /// Revert-check: dropping the `cachedConversationObjectID` assignment in
+    /// `VirtualScrollState.loadPage` looks the conversation up for the
+    /// second page as well.
+    func testLoadPage_laterPages_reuseTheConversationObjectIDTheFirstResolved() async throws {
+        let (conversation, messages) = try makeConversationWithMessages(count: 6)
+        let contexts = FetchCountingContextFactory(
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            viewContext: viewContext,
+            makeBackgroundContext: { contexts.makeContext() },
+            autoLoad: false
+        )
+        defer { state.cleanup() }
+        XCTAssertNil(state.cachedConversationObjectID)
+
+        let firstPage = await state.loadPage(0..<3)
+        XCTAssertEqual(contexts.fetchCount(ofEntity: "Conversation"), 1)
+        XCTAssertEqual(state.cachedConversationObjectID, conversation.objectID)
+
+        let secondPage = await state.loadPage(3..<6)
+
+        XCTAssertEqual(contexts.fetchCount(ofEntity: "Conversation"), 1)
+        XCTAssertEqual(firstPage.messageIDs + secondPage.messageIDs, messages.map(\.objectID))
+        XCTAssertEqual(secondPage.totalCount, 6)
+    }
+
     func testInitialLoadCompletionStartsFalseAndPublishesAfterVisibleWindow() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 6)
         let configuration = VirtualScrollConfiguration(
