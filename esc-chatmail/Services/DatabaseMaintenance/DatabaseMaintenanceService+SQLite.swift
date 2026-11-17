@@ -1,19 +1,8 @@
 import Foundation
-import SQLite3
 
 // MARK: - SQLite Operations
 
 extension DatabaseMaintenanceService {
-
-    func performVacuum() async -> Bool {
-        guard let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
-            return false
-        }
-
-        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database vacuum") {
-            await Self.performSQLiteCommand("VACUUM", storeURL: storeURL, successMessage: "Database vacuum completed successfully", failureMessage: "Database vacuum failed")
-        }
-    }
 
     func performAnalyze() async -> Bool {
         guard let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
@@ -25,32 +14,27 @@ extension DatabaseMaintenanceService {
         }
     }
 
-    func rebuildIndexes() async -> Bool {
-        guard let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
-            return false
-        }
-
-        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database reindex") {
-            await Self.performSQLiteCommand("REINDEX", storeURL: storeURL, successMessage: "Database reindex completed successfully", failureMessage: "Database reindex failed")
-        }
-    }
-
+    /// Runs one statement on a connection of its own, and stops it when the
+    /// calling task is cancelled: a background task's expiration and a
+    /// sign-out's quiescence both cancel the maintenance run this is called
+    /// inside (`StoreMaintenanceCoordinator`).
     nonisolated private static func performSQLiteCommand(
         _ command: String,
         storeURL: URL,
         successMessage: String,
         failureMessage: String
     ) async -> Bool {
-        await Task.detached {
-            do {
-                let db = try SQLiteDatabase(path: storeURL.path)
-                try db.execute(command)
-                Log.info(successMessage, category: .coreData)
-                return true
-            } catch {
-                Log.error(failureMessage, category: .coreData, error: error)
-                return false
-            }
-        }.value
+        do {
+            let db = try SQLiteDatabase(path: storeURL.path)
+            try await db.executeUnlessCancelled(command)
+            Log.info(successMessage, category: .coreData)
+            return true
+        } catch SQLiteDatabase.DatabaseError.interrupted {
+            Log.info("\(command) stopped: the maintenance run was cancelled", category: .coreData)
+            return false
+        } catch {
+            Log.error(failureMessage, category: .coreData, error: error)
+            return false
+        }
     }
 }

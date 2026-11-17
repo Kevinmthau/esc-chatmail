@@ -13,8 +13,9 @@ final class BackgroundTaskRegistrySchedulerSpy {
     var submittedRequests: [BGTaskRequest] = []
     var pendingIdentifiers: Set<String> = []
     var pendingFetchCount = 0
+    var cancelledIdentifiers: [String] = []
 
-    /// A registry whose three scheduler seams record into this spy.
+    /// A registry whose four scheduler seams record into this spy.
     func makeRegistry() -> BackgroundTaskRegistry {
         BackgroundTaskRegistry(
             registerLaunchHandler: { [self] identifier, _ in
@@ -26,6 +27,9 @@ final class BackgroundTaskRegistrySchedulerSpy {
             pendingTaskIdentifiers: { [self] in
                 pendingFetchCount += 1
                 return pendingIdentifiers
+            },
+            cancelPendingTaskRequest: { [self] identifier in
+                cancelledIdentifiers.append(identifier)
             }
         )
     }

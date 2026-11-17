@@ -68,6 +68,7 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
 
         let foreground = await engine.triggerIncrementalSyncIfPossible(completion: { _ in
             XCTFail("A refused run must not complete")
+            return false
         })
         let background = await engine.performIncrementalSyncForBackground(budget: .appRefresh)
 
@@ -112,6 +113,7 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
 
         let foreground = await engine.triggerIncrementalSyncIfPossible(completion: { _ in
             XCTFail("A refused run must not complete")
+            return false
         })
         let background = await engine.performIncrementalSyncForBackground(budget: .appRefresh)
 
@@ -126,6 +128,7 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
         await coordinator.endRun(activeRun)
         let afterRun = await engine.triggerIncrementalSyncIfPossible(completion: { _ in
             XCTFail("A refused run must not complete")
+            return false
         })
         guard case .skippedInsufficientStorage = afterRun else {
             return XCTFail("Once the boundary is free the refusal is published, got \(afterRun)")

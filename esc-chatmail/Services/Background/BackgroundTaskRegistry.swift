@@ -22,6 +22,7 @@ final class BackgroundTaskRegistry {
     private let registerLaunchHandler: @Sendable (String, @escaping (BGTask) -> Void) -> Void
     private let submitTaskRequest: @Sendable (BGTaskRequest) throws -> Void
     private let pendingTaskIdentifiers: @Sendable () async -> Set<String>
+    private let cancelPendingTaskRequest: @Sendable (String) -> Void
 
     /// Internal (not private) only so tests can construct an instance with
     /// spy seams. Never build a second instance around the default real
@@ -50,11 +51,15 @@ final class BackgroundTaskRegistry {
                     continuation.resume(returning: Set(requests.map(\.identifier)))
                 }
             }
+        },
+        cancelPendingTaskRequest: @escaping @Sendable (String) -> Void = { identifier in
+            BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
         }
     ) {
         self.registerLaunchHandler = registerLaunchHandler
         self.submitTaskRequest = submitTaskRequest
         self.pendingTaskIdentifiers = pendingTaskIdentifiers
+        self.cancelPendingTaskRequest = cancelPendingTaskRequest
     }
 
     // MARK: - Registration
@@ -93,6 +98,20 @@ final class BackgroundTaskRegistry {
         }
 
         Log.debug("Registered background task: \(config.identifier)", category: .background)
+    }
+
+    /// Keeps a launch handler for an identifier the app no longer schedules,
+    /// and cancels the request an earlier build may have left with the
+    /// system. The handler completes the task at once. It has to exist:
+    /// `BGTaskScheduler` raises when it launches the app for an identifier
+    /// nothing registered. The identifier gets no configuration, so
+    /// `schedule(_:)` cannot submit it again.
+    func retire(_ identifier: String) {
+        registerLaunchHandler(identifier) { task in
+            task.setTaskCompleted(success: true)
+        }
+        cancelPendingTaskRequest(identifier)
+        Log.debug("Retired background task: \(identifier)", category: .background)
     }
 
     // MARK: - Scheduling
@@ -175,18 +194,64 @@ final class BackgroundTaskRegistry {
             return
         }
 
-        // Set expiration handler
-        task.expirationHandler = {
-            task.setTaskCompleted(success: false)
+        runTaskOperation(
+            identifier: identifier,
+            handler: handler,
+            installExpirationHandler: { expirationHandler in
+                task.expirationHandler = expirationHandler
+            },
+            onComplete: { success in
+                task.setTaskCompleted(success: success)
+            }
+        )
+    }
+
+    /// Runs a fired task's handler and completes the task exactly once, after
+    /// the handler has returned.
+    ///
+    /// Expiration cancels the handler's task and forces the result to
+    /// failure; it does not complete the task itself. It did: it called
+    /// `setTaskCompleted(false)` and left the handler running, uncancelled,
+    /// to complete the task a second time when it ended. A maintenance
+    /// handler holds the exclusive store run, so an expired one went on
+    /// holding it, across the suspension, until the app was next opened.
+    /// Completing only once the cancelled handler has unwound is also what
+    /// lets it release that run first: iOS may suspend the process as soon
+    /// as `setTaskCompleted` returns.
+    ///
+    /// The next request is submitted before the completion, for the same
+    /// reason.
+    ///
+    /// Closure-based, as `BackgroundSyncManager.runBackgroundTaskOperation`
+    /// is, because `BGTask` has no public initializer for a test to use.
+    func runTaskOperation(
+        identifier: String,
+        handler: @escaping () async -> Bool,
+        installExpirationHandler: (@escaping () -> Void) -> Void,
+        onComplete: @escaping (Bool) -> Void
+    ) {
+        let completionLatch = BackgroundTaskCompletionLatch(onComplete: onComplete)
+        let cancellationLatch = BackgroundTaskCancellationLatch()
+
+        // Installed before the worker exists. The cancellation latch
+        // remembers an expiration that arrives first.
+        installExpirationHandler {
+            completionLatch.expire()
+            cancellationLatch.expire()
         }
 
-        // Execute the handler
-        Task {
-            let success = await handler()
-            task.setTaskCompleted(success: success)
+        let worker = Task {
+            await handler()
+        }
+        cancellationLatch.install {
+            worker.cancel()
+        }
 
+        Task {
+            let success = await worker.value
             // Reschedule for next time
             self.schedule(identifier)
+            completionLatch.complete(success: success)
         }
     }
 
@@ -194,14 +259,8 @@ final class BackgroundTaskRegistry {
 
     /// Cancels a specific pending task
     func cancel(_ identifier: String) {
-        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+        cancelPendingTaskRequest(identifier)
         Log.debug("Cancelled background task: \(identifier)", category: .background)
-    }
-
-    /// Cancels all pending tasks
-    func cancelAll() {
-        BGTaskScheduler.shared.cancelAllTaskRequests()
-        Log.debug("Cancelled all background tasks", category: .background)
     }
 
     /// Returns all registered task identifiers

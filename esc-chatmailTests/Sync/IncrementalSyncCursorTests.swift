@@ -91,9 +91,13 @@ final class IncrementalSyncCursorTests: XCTestCase {
     }
 
     /// A run keeps its defaults-backed state in the store it was given: the reconciliation
-    /// time, the last-success time, the alias-refresh time and the cleanup schedule.
+    /// time, the last-success time and the alias-refresh time.
     /// `UserDefaults.standard` is only read here, never written: in a Mac test host it is the
     /// preferences of the Mac app the user runs, and this suite is in `Mac.xctestplan`.
+    ///
+    /// The cleanup schedule is written by neither: the 6-hour store-wide passes that mark it
+    /// are a run of their own, asked for after the sync's run has ended
+    /// (`DataCleanupService.runStoreMaintenanceIfDue`), and no longer part of this one.
     ///
     /// Revert-check: writing `UserDefaults.standard` from
     /// `IncrementalSyncOrchestrator.recordReconciliationTime` fails this twice over: the
@@ -145,9 +149,9 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0)
         XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey), 0)
         XCTAssertGreaterThan(defaults.double(forKey: "sendAsAliasesLastRefresh.\(Self.myEmail)"), 0)
-        XCTAssertGreaterThan(
-            defaults.double(forKey: DataCleanupService.IncrementalCleanupSchedule.lastRunTimeKey),
-            0
+        XCTAssertNil(
+            defaults.object(forKey: DataCleanupService.IncrementalCleanupSchedule.lastRunTimeKey),
+            "The store-wide passes, and their cadence, are not part of a sync's run"
         )
         XCTAssertEqual(standardSnapshot(), standardBefore, "The run must not write the standard defaults")
     }

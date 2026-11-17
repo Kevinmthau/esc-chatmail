@@ -3,8 +3,9 @@ import CoreData
 
 extension Notification.Name {
     /// Posted when one of `DataCleanupService`'s cleanup runs ends
-    /// (`runFullCleanup`, `runIncrementalCleanup`, `runMaintenanceCleanup`),
-    /// whatever came of it, after the run's own saves.
+    /// (`runFullCleanup`, `runIncrementalCleanup`, `runMaintenanceCleanup`,
+    /// which `runStoreMaintenanceIfDue` ends in), whatever came of it, after
+    /// the run's own saves.
     ///
     /// Those runs are the only writers of two things that are read to decide
     /// who a reply goes to: the contact links (adopted in the first step of
@@ -14,8 +15,9 @@ extension Notification.Name {
     /// it is posted only by a sync run that succeeded. The daily database
     /// cleanup task (`DatabaseMaintenanceService.performCleanup`) runs the
     /// maintenance passes outside any sync, on the Mac while the app is open,
-    /// and the first initial sync runs the full cleanup before work that can
-    /// then fail.
+    /// the 6-hour maintenance runs after the sync that found it due has
+    /// posted, and the first initial sync runs the full cleanup before work
+    /// that can then fail.
     ///
     /// It can come from any thread.
     static let conversationCleanupFinished = Notification.Name("com.esc.inboxchat.conversationCleanupFinished")
@@ -27,7 +29,7 @@ extension Notification.Name {
 /// - `DataCleanupService.swift` - Core structure and orchestration
 /// - `DataCleanupService+Migration.swift` - Archive model migration
 /// - `DataCleanupService+ContactUnification.swift` - One chat per contact when their linked addresses change
-/// - `DataCleanupService+DuplicateRemoval.swift` - Duplicate message/conversation removal
+/// - `DataCleanupService+DuplicateRemoval.swift` - Duplicate conversation removal
 /// - `DataCleanupService+EntityCleanup.swift` - Empty entity and draft cleanup
 struct DataCleanupService: Sendable {
 
@@ -66,9 +68,23 @@ struct DataCleanupService: Sendable {
         case saveFailed
     }
 
+    /// What became of a request for the 6-hour store maintenance
+    /// (`runStoreMaintenanceIfDue`).
+    enum DueStoreMaintenanceOutcome: Equatable, Sendable {
+        /// The cadence was not due. Nothing ran.
+        case notDue
+        /// The cadence was due and the passes did not start: another
+        /// maintenance run was active, the task was cancelled while it
+        /// waited, or an account transition began. The cadence stays due.
+        case notAdmitted
+        /// The passes ran, and ended this way. Only `.completed` marked the
+        /// cadence.
+        case finished(MaintenanceRunOutcome)
+    }
+
     /// Which conversations `fixAndMergeIncorrectParticipantHashes` reads.
     enum ParticipantHashRepairScope: Sendable {
-        /// Every active conversation: the 6-hour maintenance run.
+        /// Every active conversation: the store-wide maintenance run.
         case activeConversations
         /// The conversations, active or archived, that have a participant row
         /// for one of these normalized addresses: a change in the addresses a
@@ -179,7 +195,7 @@ struct DataCleanupService: Sendable {
 
     // MARK: - Orchestration
 
-    /// Runs full cleanup including duplicate removal.
+    /// Runs full cleanup, including duplicate-conversation removal.
     /// - Parameter context: The Core Data context
     func runFullCleanup(in context: NSManagedObjectContext) async {
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
@@ -191,7 +207,6 @@ struct DataCleanupService: Sendable {
             await decodeRFC2047HeaderTextIfNeeded(in: context)
             await repairAddressShapedPersonDisplayNamesIfNeeded(in: context)
             await peelQuoteWrappedDisplayNamesIfNeeded(in: context)
-            await removeDuplicateMessages(in: context)
             await removeDuplicateConversations(in: context)
             await mergeActiveConversationDuplicates(in: context)
             _ = await context.performSaveIfNeeded(
@@ -201,22 +216,20 @@ struct DataCleanupService: Sendable {
         announceCleanupFinished()
     }
 
-    /// Runs incremental cleanup (no duplicate message check).
+    /// Runs the cleanup every incremental sync makes inside its own run: the
+    /// flag-gated migrations, in one cleanup-sensitive hold. In steady state
+    /// each is a no-op, so the hold costs a save of nothing.
     ///
-    /// The flag-gated migrations share one cleanup-sensitive hold; in steady
-    /// state each is a no-op, so that hold costs a save of nothing. The 6-hour
-    /// store-wide maintenance then takes the gate once per pass
-    /// (`runMaintenancePassesCooperatively`) rather than around the whole run:
-    /// optimistic-send creation queues on the same gate, and one hold spanning
-    /// every store-wide pass kept a reply's bubble from appearing until all of
-    /// them finished. The cadence is marked only after the last pass, so a run
-    /// interrupted between passes, or one in which a pass's save failed,
-    /// retries at the next sync.
+    /// The store-wide maintenance passes are not run here. They ran here,
+    /// when their 6-hour cadence was due, before the sync posted
+    /// `.syncCompleted`: the sync that met the cadence held its run, and
+    /// everything waiting on its completion, for all of them. They are a run
+    /// of their own now, started once the sync's run has ended
+    /// (`runStoreMaintenanceIfDue`).
     /// - Parameter context: The Core Data context
     func runIncrementalCleanup(in context: NSManagedObjectContext) async {
-        // On every way out, after the last save of the run: the hold below
-        // adopts contact links and can rewrite participant rows whether or
-        // not the store-wide passes are due.
+        // After the hold's save: it adopts contact links and can rewrite
+        // participant rows.
         defer { announceCleanupFinished() }
         await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
             // First: it adopts the linked addresses every later pass of this
@@ -230,25 +243,11 @@ struct DataCleanupService: Sendable {
             await peelQuoteWrappedDisplayNamesIfNeeded(in: context)
             // Not checked: each flag-gated migration latches its flag only
             // after its own save succeeds, so a failure here (logged by the
-            // hold) leaves it to retry at the next sync, and it has no bearing
-            // on the store-wide cadence below.
+            // hold) leaves it to retry at the next sync.
             _ = await settleCleanupSensitiveHold(
                 in: context,
                 caller: "DataCleanupService.runIncrementalCleanup"
             )
-        }
-
-        guard IncrementalCleanupSchedule.isDue(defaults: maintenanceScheduleDefaults) else {
-            Log.debug("Skipping incremental cleanup; cadence not due", category: .coreData)
-            return
-        }
-        switch await runMaintenancePassesCooperatively(in: context) {
-        case .completed:
-            IncrementalCleanupSchedule.markRun(defaults: maintenanceScheduleDefaults)
-        case .cancelled:
-            Log.debug("Maintenance cleanup stopped between passes; will retry next sync", category: .coreData)
-        case .saveFailed:
-            Log.warning("Maintenance cleanup rolled back a failed pass; will retry next sync", category: .coreData)
         }
     }
 
@@ -257,6 +256,60 @@ struct DataCleanupService: Sendable {
     func runIncrementalCleanup() async {
         let context = coreDataStack.newBackgroundContext()
         await runIncrementalCleanup(in: context)
+    }
+
+    /// Runs the store-wide maintenance passes if their 6-hour cadence is due,
+    /// as an exclusive maintenance run of its own.
+    ///
+    /// Call it after a sync's run has ended, never from inside one: it takes
+    /// the exclusive run, and a holder of a run or a lease that waited for
+    /// that would never be released. It waits behind a run that is active
+    /// and gives up if another maintenance run is, or if an account
+    /// transition has started; the cadence then stays due for the next sync.
+    /// Cancelling the calling task, or an account transition's quiescence,
+    /// stops the run between two passes.
+    @discardableResult
+    func runStoreMaintenanceIfDue(
+        exclusiveRunner: StoreMaintenanceCoordinator = .shared
+    ) async -> DueStoreMaintenanceOutcome {
+        // Asked here as well as inside the run, so that the sync that finds
+        // nothing due, which is nearly every sync, takes no run at all.
+        guard IncrementalCleanupSchedule.isDue(defaults: maintenanceScheduleDefaults) else {
+            return .notDue
+        }
+        let outcome = await exclusiveRunner.resultOfExclusiveRun(operationName: "store maintenance") { [self] in
+            await runStoreMaintenanceIfDue(in: coreDataStack.newBackgroundContext())
+        }
+        return outcome ?? .notAdmitted
+    }
+
+    /// The passes and their cadence, for a caller that already owns the
+    /// store: `runStoreMaintenanceIfDue(exclusiveRunner:)` inside its
+    /// exclusive run, and tests.
+    ///
+    /// Each pass takes the cleanup-sensitive gate on its own
+    /// (`runMaintenancePassesCooperatively`) rather than around the whole
+    /// run: optimistic-send creation queues on the same gate, and one hold
+    /// spanning every store-wide pass kept a reply's bubble from appearing
+    /// until all of them finished. The cadence is marked only after the last
+    /// pass, so a run interrupted between passes, or one in which a pass's
+    /// save failed, is due again at the next sync.
+    func runStoreMaintenanceIfDue(in context: NSManagedObjectContext) async -> DueStoreMaintenanceOutcome {
+        guard IncrementalCleanupSchedule.isDue(defaults: maintenanceScheduleDefaults) else {
+            Log.debug("Skipping store maintenance; cadence not due", category: .coreData)
+            return .notDue
+        }
+        // Announces when it ends, whatever came of it.
+        let outcome = await runMaintenanceCleanup(in: context)
+        switch outcome {
+        case .completed:
+            IncrementalCleanupSchedule.markRun(defaults: maintenanceScheduleDefaults)
+        case .cancelled:
+            Log.debug("Store maintenance stopped between passes; will retry after the next sync", category: .coreData)
+        case .saveFailed:
+            Log.warning("Store maintenance rolled back a failed pass; will retry after the next sync", category: .coreData)
+        }
+        return .finished(outcome)
     }
 
     /// Runs the heavier store-wide maintenance tasks.
@@ -282,7 +335,6 @@ struct DataCleanupService: Sendable {
     /// be released between them.
     private func maintenancePasses() -> [(name: String, run: @Sendable (NSManagedObjectContext) async -> Void)] {
         [
-            ("removeDuplicateMessages", { await removeDuplicateMessages(in: $0) }),
             ("removeDuplicateConversations", { await removeDuplicateConversations(in: $0) }),
             ("mergeActiveConversationDuplicates", { await mergeActiveConversationDuplicates(in: $0) }),
             ("fixAndMergeIncorrectParticipantHashes", { await fixAndMergeIncorrectParticipantHashes(in: $0) }),

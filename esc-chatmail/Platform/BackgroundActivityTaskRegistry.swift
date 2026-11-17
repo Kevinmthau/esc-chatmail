@@ -6,15 +6,15 @@ import IOKit.ps
 /// built on `BGTaskScheduler`, which macOS does not have.
 typealias PlatformBackgroundTaskRegistry = BackgroundActivityTaskRegistry
 
-/// Runs the registered maintenance jobs (vacuum, analyze, cleanup) as
+/// Runs the registered maintenance jobs (analyze, cleanup) as
 /// `NSBackgroundActivityScheduler` activities, which the system starts when
 /// energy, thermal state and CPU load suit it.
 ///
 /// Each job is a one-shot activity aimed at a persisted due date, re-armed a
 /// full interval out after every run. A repeating activity would restart its
 /// clock at every launch, because nothing about it survives a quit;
-/// `BackgroundActivitySchedulePolicy` explains why that would keep the weekly
-/// vacuum from ever running and owns the timing rules.
+/// `BackgroundActivitySchedulePolicy` explains why that would keep a weekly
+/// job from ever running and owns the timing rules.
 ///
 /// MainActor-isolated: registration and scheduling run on the main thread,
 /// and the activity block, which the system calls on a background queue, hops
@@ -60,6 +60,13 @@ final class BackgroundActivityTaskRegistry: BackgroundTaskRegistering {
     ) {
         registrations[config.identifier] = Registration(config: config, handler: handler)
         Log.debug("Registered background activity: \(config.identifier)", category: .background)
+    }
+
+    /// An activity lives only in this process and nothing here registered
+    /// one for a retired identifier, so all that is left of the job is the
+    /// due date an earlier build stored.
+    func retire(_ identifier: String) {
+        defaults.removeObject(forKey: Self.dueDateKeyPrefix + identifier)
     }
 
     func scheduleIfNotPending(_ identifiers: [String]) async {

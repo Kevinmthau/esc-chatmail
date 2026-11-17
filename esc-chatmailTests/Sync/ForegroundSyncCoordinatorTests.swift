@@ -166,6 +166,57 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
 
+    // Revert-check: the Bool `ForegroundSyncCoordinator.scheduleImmediateFollowUp`
+    // returns, which the completion hands back to the engine. The engine
+    // leaves the 6-hour store maintenance to the last run of a chain
+    // (`SyncEngine.triggerIncrementalSyncIfPossible`): answer true where no
+    // continuation was queued (the limit, here) and a mailbox whose cursor is
+    // held never runs the maintenance after a foreground sync; answer false
+    // where one was and the maintenance takes the exclusive run ahead of the
+    // continuation, which then waits for every store-wide pass.
+    func testCompletion_answersWhetherAContinuationWasQueued() async {
+        let syncEngine = MockForegroundSyncEngine()
+        let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)
+        let coordinator = ForegroundSyncCoordinator(
+            syncEngine: syncEngine,
+            authSession: authSession,
+            periodicInterval: 3_600,
+            minimumSyncGap: 3_600,
+            maxImmediateFollowUpRuns: 1
+        )
+        defer { coordinator.stop(reason: "testCleanup") }
+
+        let firstSliceStarted = expectation(description: "first history slice")
+        let continuationStarted = expectation(description: "history continuation")
+        syncEngine.onTriggerIncrementalSyncIfPossible = {
+            switch syncEngine.triggerIncrementalSyncIfPossibleCalls {
+            case 1: firstSliceStarted.fulfill()
+            case 2: continuationStarted.fulfill()
+            default: break
+            }
+            return .started
+        }
+        coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
+        await fulfillment(of: [firstSliceStarted], timeout: 1.0)
+
+        XCTAssertTrue(
+            syncEngine.completeRequest(at: 0, needsFollowUp: true),
+            "A continuation was queued: the run boundary is left to it"
+        )
+        await fulfillment(of: [continuationStarted], timeout: 1.0)
+
+        XCTAssertFalse(
+            syncEngine.completeRequest(at: 1, needsFollowUp: true),
+            "The limit is reached and nothing was queued: this run is the last of its chain"
+        )
+        XCTAssertFalse(
+            syncEngine.completeRequest(at: 1, needsFollowUp: false),
+            "A run that needs no follow-up queues none"
+        )
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
+    }
+
     func testImmediateHistoryContinuationStopsAfterDefaultThreeFollowUps() async {
         let syncEngine = MockForegroundSyncEngine()
         let authSession = MockForegroundSyncAuthSession(isAuthenticated: true)

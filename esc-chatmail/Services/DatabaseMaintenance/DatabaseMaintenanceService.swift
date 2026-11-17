@@ -8,13 +8,24 @@ final class DatabaseMaintenanceService: ObservableObject {
     static let shared = DatabaseMaintenanceService()
 
     // Task identifiers
-    static let vacuumTaskIdentifier = "com.esc.inboxchat.database.vacuum"
     static let analyzeTaskIdentifier = "com.esc.inboxchat.database.analyze"
     static let cleanupTaskIdentifier = "com.esc.inboxchat.database.cleanup"
+    /// The weekly VACUUM's identifier. The task is retired: nothing schedules
+    /// it and no VACUUM runs (`docs/scalability-review.md`,
+    /// `weekly-full-vacuum-wal`). That review measured the weekly rewrite of
+    /// the whole file through the WAL: it freed almost nothing, on a store
+    /// that already vacuums incrementally, and needed about twice the
+    /// store's size in free disk to do it.
+    ///
+    /// The identifier is still registered, and still listed in `Info.plist`
+    /// (`BGTaskSchedulerPermittedIdentifiers`): a device that ran an earlier
+    /// build can have a request for it waiting with the system, and
+    /// `BGTaskScheduler` raises when it launches the app for an identifier
+    /// with no handler. Keep `retire` and the `Info.plist` entry for at least
+    /// one release after the build that stopped scheduling it.
+    static let retiredVacuumTaskIdentifier = "com.esc.inboxchat.database.vacuum"
 
-    @Published var isPerformingMaintenance = false
     @Published var lastMaintenanceDate: Date?
-    @Published var maintenanceProgress: Double = 0.0
 
     // Internal for extension access
     let coreDataStack = CoreDataStack.shared
@@ -39,17 +50,8 @@ final class DatabaseMaintenanceService: ObservableObject {
     // MARK: - Background Task Registration
 
     func registerBackgroundTasks() {
-        // Register vacuum task (runs weekly, requires power)
-        taskRegistry.register(
-            config: .weeklyProcessing(
-                identifier: Self.vacuumTaskIdentifier,
-                requiresNetwork: false,
-                requiresPower: true
-            ),
-            handler: { [weak self] in
-                await self?.performVacuum() ?? false
-            }
-        )
+        // A handler that does nothing, and the pending request cancelled.
+        taskRegistry.retire(Self.retiredVacuumTaskIdentifier)
 
         // Register analyze task (runs daily)
         taskRegistry.register(
@@ -76,57 +78,20 @@ final class DatabaseMaintenanceService: ObservableObject {
         )
     }
 
-    /// Submits the three maintenance requests, skipping any still pending with
+    /// Submits the two maintenance requests, skipping any still pending with
     /// the system. This runs on every cold launch, and a `BGTaskScheduler`
     /// submit with a pending identifier REPLACES that request — unconditional
     /// re-submits pushed cleanup/analyze eligibility past every overnight
-    /// window for a user who launches daily (and vacuum's for anyone launching
-    /// within its week), so the cleanup task never ran at all.
+    /// window for a user who launches daily, so the cleanup task never ran at
+    /// all.
     /// On the Mac a pending activity lives only in this process, so the
     /// registry instead resumes each job's persisted due date
     /// (`BackgroundActivitySchedulePolicy`).
     func scheduleMaintenanceTasks() async {
         await taskRegistry.scheduleIfNotPending([
-            Self.vacuumTaskIdentifier,
             Self.analyzeTaskIdentifier,
             Self.cleanupTaskIdentifier
         ])
-    }
-
-    // MARK: - Full Maintenance Orchestration
-
-    func performFullMaintenance() async -> Bool {
-        await MainActor.run {
-            isPerformingMaintenance = true
-            maintenanceProgress = 0.0
-        }
-
-        defer {
-            Task { @MainActor in
-                isPerformingMaintenance = false
-                maintenanceProgress = 1.0
-                lastMaintenanceDate = Date()
-                saveLastMaintenanceDate()
-            }
-        }
-
-        // Step 1: Cleanup old data
-        await MainActor.run { maintenanceProgress = 0.1 }
-        let cleanupSuccess = await performCleanup()
-
-        // Step 2: Analyze database
-        await MainActor.run { maintenanceProgress = 0.4 }
-        let analyzeSuccess = await performAnalyze()
-
-        // Step 3: Vacuum database
-        await MainActor.run { maintenanceProgress = 0.7 }
-        let vacuumSuccess = await performVacuum()
-
-        // Step 4: Rebuild indexes
-        await MainActor.run { maintenanceProgress = 0.9 }
-        let indexSuccess = await rebuildIndexes()
-
-        return cleanupSuccess && analyzeSuccess && vacuumSuccess && indexSuccess
     }
 
     // MARK: - Persistence

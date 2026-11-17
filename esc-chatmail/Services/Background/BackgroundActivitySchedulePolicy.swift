@@ -7,16 +7,16 @@ import Foundation
 ///
 /// An `NSBackgroundActivityScheduler` activity lives only as long as the
 /// process, so a repeating activity's clock would restart at every launch: a
-/// user who quits and relaunches more often than once a week would never see
-/// the weekly vacuum run. That is the Mac form of the iOS bug where
+/// user who quits and relaunches more often than a job's interval would
+/// never see that job run. That is the Mac form of the iOS bug where
 /// re-submitting a pending `BGTaskScheduler` request pushed its
 /// `earliestBeginDate` out again (`BackgroundTaskRegistry.scheduleIfNotPending`).
 /// So each job keeps a persisted due date, and each launch schedules a one-shot
 /// activity for whatever is left of it.
 enum BackgroundActivitySchedulePolicy {
     /// No job runs sooner than this after it is scheduled, so a launch or a
-    /// re-arm never starts a vacuum or analyze while the first sync is busy
-    /// with the same store.
+    /// re-arm never starts an analyze or a cleanup while the first sync is
+    /// busy with the same store.
     static let minimumDelay: TimeInterval = 15 * 60
 
     /// The most the system may move a run away from its nominal time.
@@ -58,7 +58,8 @@ enum BackgroundActivitySchedulePolicy {
 
     /// Whether a due activity should hand its turn back to the system instead
     /// of running. `requiresExternalPower` is the Mac reading of the iOS
-    /// `BGProcessingTaskRequest` flag the weekly vacuum sets: wait for AC power.
+    /// `BGProcessingTaskRequest` flag of the same name: wait for AC power. No
+    /// job sets it since the weekly vacuum was retired.
     static func shouldDefer(
         systemRequestsDeferral: Bool,
         requiresExternalPower: Bool,

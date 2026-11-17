@@ -2,8 +2,13 @@ import Foundation
 
 @MainActor
 protocol ForegroundSyncPerforming: AnyObject {
+    /// - Parameter completion: called once a started run has succeeded, with
+    ///   whether the run left work for a follow-up. It answers whether the
+    ///   caller queued that follow-up to run at once. The engine then leaves
+    ///   the run boundary to it and asks for nothing of its own after this
+    ///   run (`SyncEngine.runStoreMaintenanceAfterSync()`).
     func triggerIncrementalSyncIfPossible(
-        completion: @escaping @MainActor @Sendable (Bool) -> Void
+        completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult
     func waitForCurrentSyncToComplete() async
 }
@@ -248,8 +253,8 @@ final class ForegroundSyncCoordinator {
 
         switch await syncEngine.triggerIncrementalSyncIfPossible(
             completion: { [weak self] needsFollowUp in
-                guard needsFollowUp else { return }
-                self?.scheduleImmediateFollowUp(
+                guard needsFollowUp, let self else { return false }
+                return self.scheduleImmediateFollowUp(
                     after: reason,
                     remainingImmediateFollowUps: remainingImmediateFollowUps
                 )
@@ -272,17 +277,23 @@ final class ForegroundSyncCoordinator {
         }
     }
 
+    /// - Returns: whether a continuation was queued. False where the rest
+    ///   is left to the periodic loop, and the engine reads that as the end
+    ///   of this chain of runs: a run that still needs a follow-up but gets
+    ///   none at once (a cursor held by a message that keeps failing asks
+    ///   for one after every run) must not keep the store maintenance
+    ///   waiting for a continuation that is not coming.
     private func scheduleImmediateFollowUp(
         after reason: String,
         remainingImmediateFollowUps: Int
-    ) {
+    ) -> Bool {
         guard authSession.canAccessMailbox, periodicTask != nil else {
             log.debug("Not scheduling foreground sync continuation outside an active session")
-            return
+            return false
         }
         guard remainingImmediateFollowUps > 0 else {
             log.warning("Foreground sync reached its immediate continuation limit; leaving durable progress for the periodic loop")
-            return
+            return false
         }
 
         triggerSync(
@@ -290,5 +301,6 @@ final class ForegroundSyncCoordinator {
             force: true,
             remainingImmediateFollowUps: remainingImmediateFollowUps - 1
         )
+        return true
     }
 }

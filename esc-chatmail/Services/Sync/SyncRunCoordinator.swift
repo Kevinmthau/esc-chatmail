@@ -57,6 +57,9 @@ actor SyncRunCoordinator {
     private var isQuiescing = false
     private var quiescenceAcquisitionWaiters: [CheckedContinuation<Void, Never>] = []
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
+    /// Waiters of `acquireRunWithTask`, keyed so that the cancellation of one
+    /// can resume it alone (`parkUntilIdleOrCancelled()`).
+    private var cancellableIdleWaiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var workWaitingObservers: [CheckedContinuation<Void, Never>] = []
     /// Resumed only once the exclusive run and every non-exclusive lease have
     /// been released, so account teardown waits for both.
@@ -130,6 +133,48 @@ actor SyncRunCoordinator {
         }
     }
 
+    /// `acquireRun(kind:for:)` for work that can be cancelled: the task
+    /// `taskBuilder` makes is registered with the run in the turn the run is
+    /// taken, so `beginQuiescence()` finds either no run or a run it can
+    /// cancel. Store maintenance takes its run this way. Taken through
+    /// `acquireRun`, with no task, a sign-out waited for the whole of a
+    /// maintenance operation before it could start.
+    ///
+    /// Cancelling shortens the drain and does not replace it: the caller
+    /// still awaits the task and ends the run, and quiescence still waits
+    /// for that.
+    ///
+    /// The wait for the boundary ends when the calling task is cancelled,
+    /// and the answer is then nil with no task built. `acquireRun` waits for
+    /// the run ahead of it to end before it looks at the cancellation. Here
+    /// the caller can be a fired background task's handler, and the task is
+    /// completed only once that handler has returned
+    /// (`BackgroundTaskRegistry.runTaskOperation`): parked behind a sync, an
+    /// expired maintenance task stayed uncompleted for as long as the sync
+    /// ran.
+    func acquireRunWithTask(
+        kind: SyncRunKind,
+        for request: AccountWorkRequest,
+        taskBuilder: (SyncRun) -> Task<Void, Error>
+    ) async -> SyncRunTask? {
+        while true {
+            guard !Task.isCancelled,
+                  !isQuiescing,
+                  request.generation == accountGeneration else {
+                return nil
+            }
+
+            if activeRun == nil {
+                let run = SyncRun(id: UUID(), kind: kind)
+                let task = taskBuilder(run)
+                activeRun = ActiveRun(run: run, task: task)
+                return SyncRunTask(run: run, task: task)
+            }
+
+            await parkUntilIdleOrCancelled()
+        }
+    }
+
     /// Grants a non-exclusive, account-scoped lease. Unlike `acquireRun`, this
     /// never waits for the single-flight boundary, so an optimistic local
     /// mutation and its durable enqueue are not serialized behind an unrelated
@@ -196,7 +241,7 @@ actor SyncRunCoordinator {
     /// Observable synchronization point for callers/tests that must know work
     /// has actually parked behind the account boundary before transitioning it.
     func waitUntilWorkIsWaiting() async {
-        guard idleWaiters.isEmpty else { return }
+        guard idleWaiters.isEmpty, cancellableIdleWaiters.isEmpty else { return }
 
         await withCheckedContinuation { continuation in
             workWaitingObservers.append(continuation)
@@ -276,18 +321,52 @@ actor SyncRunCoordinator {
     private func parkUntilIdle() async {
         await withCheckedContinuation { continuation in
             idleWaiters.append(continuation)
-            let observers = workWaitingObservers
-            workWaitingObservers.removeAll(keepingCapacity: false)
-            observers.forEach { $0.resume() }
+            resumeWorkWaitingObservers()
         }
+    }
+
+    /// `parkUntilIdle()` for a caller that gives up when its task is
+    /// cancelled. It returns when the boundary opens or the task is
+    /// cancelled, whichever is first, and the caller looks at
+    /// `Task.isCancelled` to tell which.
+    private func parkUntilIdleOrCancelled() async {
+        let waiterID = UUID()
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                // Runs synchronously on this actor, so the cancellation hop
+                // below can only arrive after this has installed the waiter.
+                // A cancellation from before it is seen here.
+                guard !Task.isCancelled else {
+                    continuation.resume()
+                    return
+                }
+                cancellableIdleWaiters[waiterID] = continuation
+                resumeWorkWaitingObservers()
+            }
+        } onCancel: {
+            Task { await self.resumeCancelledIdleWaiter(waiterID) }
+        }
+    }
+
+    /// Removes the waiter as it resumes it: the boundary opening later must
+    /// not resume the same continuation again.
+    private func resumeCancelledIdleWaiter(_ waiterID: UUID) {
+        cancellableIdleWaiters.removeValue(forKey: waiterID)?.resume()
+    }
+
+    private func resumeWorkWaitingObservers() {
+        let observers = workWaitingObservers
+        workWaitingObservers.removeAll(keepingCapacity: false)
+        observers.forEach { $0.resume() }
     }
 
     private func resumeIdleWaitersIfAvailable() {
         guard activeRun == nil, !isQuiescing else { return }
-        guard !idleWaiters.isEmpty else { return }
+        guard !idleWaiters.isEmpty || !cancellableIdleWaiters.isEmpty else { return }
 
-        let waiters = idleWaiters
+        let waiters = idleWaiters + cancellableIdleWaiters.values
         idleWaiters.removeAll(keepingCapacity: false)
+        cancellableIdleWaiters.removeAll(keepingCapacity: false)
         waiters.forEach { $0.resume() }
     }
 }

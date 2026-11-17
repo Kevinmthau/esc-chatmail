@@ -25,4 +25,12 @@ enum BackgroundMailboxSyncBudget: Equatable, Sendable {
     var allowsExpensiveRecovery: Bool {
         self == .processing
     }
+
+    /// Whether the 6-hour store-wide maintenance may follow this task's
+    /// sync. An app refresh has about half a minute, and the passes read
+    /// every active conversation: they wait for a processing task or for
+    /// the next foreground sync.
+    var allowsStoreMaintenance: Bool {
+        self == .processing
+    }
 }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// The surface `DatabaseMaintenanceService` schedules its vacuum, analyze and
+/// The surface `DatabaseMaintenanceService` schedules its analyze and
 /// cleanup jobs through, so the jobs stay platform-neutral while the scheduler
 /// underneath is not: `BackgroundTaskRegistry` submits `BGTaskScheduler`
 /// requests on iOS, and `BackgroundActivityTaskRegistry` runs
@@ -26,4 +26,10 @@ protocol BackgroundTaskRegistering: AnyObject {
     /// user who launches more often than the interval would never see the
     /// job run.
     func scheduleIfNotPending(_ identifiers: [String]) async
+
+    /// Takes a job the app no longer runs out of the schedule: whatever is
+    /// waiting for `identifier` is cancelled, and a run of it that the system
+    /// starts anyway does nothing and finishes at once. Call it in place of
+    /// `register` for that identifier, at the point `register` was called.
+    func retire(_ identifier: String)
 }

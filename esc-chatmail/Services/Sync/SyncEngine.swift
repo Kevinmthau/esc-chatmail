@@ -98,6 +98,26 @@ final class SyncEngine: ObservableObject, Sendable {
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
     private let availableStorageBytes: @Sendable () -> Int64?
+    /// Runs the store-wide maintenance passes, if their 6-hour cadence is
+    /// due, as a run of their own (`DataCleanupService.runStoreMaintenanceIfDue`),
+    /// after an incremental run that succeeded.
+    ///
+    /// Only ever called once `runSyncTask` has ended the sync's run. The
+    /// passes take the exclusive run themselves, so from inside a run they
+    /// would wait for a boundary their own caller holds. They ran inside
+    /// the sync's run, ahead of `.syncCompleted`: every six hours one sync
+    /// kept its run, its progress and everything waiting on it for all of
+    /// them. Whoever was waiting for the sync
+    /// (`waitForCurrentSyncToComplete()`) is released before they start.
+    ///
+    /// Not called after a run whose follow-up is about to run: in the
+    /// foreground where the caller queued a continuation, in a processing
+    /// task where the run needs one. The follow-up is new mail, and it
+    /// would wait behind the passes for the exclusive run.
+    ///
+    /// Internal (not private) only so a test can ask for the maintenance
+    /// without a scripted sync in front of it.
+    let runStoreMaintenanceAfterSync: @Sendable () async -> Void
 
     private let log = LogCategory.sync.logger
 
@@ -113,7 +133,8 @@ final class SyncEngine: ObservableObject, Sendable {
             coreDataStack: CoreDataStack.shared,
             attachmentDownloader: AttachmentDownloader.shared,
             networkMonitor: NetworkMonitorService(),
-            syncRunCoordinator: .shared
+            syncRunCoordinator: .shared,
+            storeMaintenanceCoordinator: .shared
         )
     }
 
@@ -132,7 +153,8 @@ final class SyncEngine: ObservableObject, Sendable {
         networkMonitor: NetworkMonitorService,
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
-        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() }
+        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
+        storeMaintenanceCoordinator: StoreMaintenanceCoordinator? = nil
     ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
@@ -145,6 +167,18 @@ final class SyncEngine: ObservableObject, Sendable {
         self.syncRunCoordinator = syncRunCoordinator
         self.clock = clock
         self.availableStorageBytes = availableStorageBytes
+        // The maintenance takes its exclusive run on the coordinator this
+        // engine's own runs use. The shared engine is given the shared
+        // maintenance coordinator, which the daily database tasks also go
+        // through, so only one of them runs at a time. An engine built
+        // around a coordinator of its own gets one built on that: on the
+        // shared one its passes held the process-wide boundary and were not
+        // kept out of this engine's next run.
+        let exclusiveRunner = storeMaintenanceCoordinator
+            ?? StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+        self.runStoreMaintenanceAfterSync = {
+            await dataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner: exclusiveRunner)
+        }
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
             messageFetcher: messageFetcher,
@@ -203,7 +237,7 @@ final class SyncEngine: ObservableObject, Sendable {
     }
 
     func triggerIncrementalSyncIfPossible(
-        completion: @escaping @MainActor @Sendable (Bool) -> Void
+        completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult {
         let resultRecorder = IncrementalSyncResultRecorder()
         switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
@@ -218,7 +252,14 @@ final class SyncEngine: ObservableObject, Sendable {
                       let result = await resultRecorder.recordedResult() else {
                     return
                 }
-                completion(result.needsFollowUp)
+                let continuationQueued = completion(result.needsFollowUp)
+                // The continuation is the rest of the mail this run did not
+                // reach. Asked for now, the maintenance took the exclusive
+                // run ahead of it, and the continuation waited for every
+                // store-wide pass. The last run of the chain asks instead:
+                // the one that needs no follow-up, or gets none at once.
+                guard !continuationQueued else { return }
+                await self.runStoreMaintenanceAfterSync()
             }
             return .started
         case .alreadyInProgress:
@@ -256,6 +297,20 @@ final class SyncEngine: ObservableObject, Sendable {
             guard outcome == .succeeded,
                   let result = await resultRecorder.recordedResult() else {
                 return .failed
+            }
+            // A processing task has the time for the store-wide passes and
+            // an app refresh does not. Awaited here, inside the background
+            // task's own worker, so its expiration cancels them.
+            //
+            // Not after a run that needs a follow-up. The caller schedules
+            // the catch-up only once this returns, and schedules nothing
+            // for a task that has expired by then
+            // (`BackgroundSyncManager.performAuthoritativeSync`): an
+            // expiration during a pass lost the catch-up of a run that had
+            // already committed. The cadence stays due for the next run
+            // that finishes its history.
+            if budget.allowsStoreMaintenance, !result.needsFollowUp {
+                await runStoreMaintenanceAfterSync()
             }
             return result.needsFollowUp ? .needsFollowUp : .completed
         case .alreadyInProgress:
