@@ -17,7 +17,26 @@ import Foundation
 ///
 /// A read that fails is not an answer of "no row": the caller removes nothing, and the
 /// daily orphan sweeps take the files later.
+///
+/// And an attachment file stored under an ID the app made is not removed with its row at
+/// all (`isRemovedWithItsRow`); the orphan sweep takes it once no row names it.
 enum DeletedRowFileReclamation {
+    /// Whether a deleted attachment row's file is removed with the row. Not where it is stored
+    /// under an ID the app made (`AttachmentPaths.isStoredUnderLocalID`): what the user added
+    /// to a message, a forward's copy, or the preview of one.
+    ///
+    /// Such a file cannot be downloaded again, and the rows that delete it most often are an
+    /// optimistic send's, when sync replaces them with the sent message
+    /// (`MessagePersister.handoffOptimisticAttachmentStorage` and the ambiguous rows next to
+    /// it). That replacement deliberately leaves the old files in place for the orphan sweep,
+    /// because Quick Look keeps the URL it was given and may have one of them open; removed
+    /// with the row, an open preview of a photo just sent lost its file. The orphan sweep
+    /// also knows what this removal cannot: the files an unsaved draft holds (the compose
+    /// leases) and those written within its grace period.
+    static func isRemovedWithItsRow(_ relativePath: String) -> Bool {
+        !AttachmentPaths.isStoredUnderLocalID(relativePath)
+    }
+
     /// The message IDs among `ids` that a stored `Message` row has.
     static func liveMessageIDs(
         among ids: Set<String>,

@@ -258,6 +258,11 @@ final class CacheCoordinator {
         deletedAt: Date = Date()
     ) -> CacheInvalidationPlan {
         var plan = CacheInvalidationPlan(deletedAt: deletedAt)
+        // The attachment IDs that have an identity in the plan, whichever message it names.
+        // Kept beside the plan so the check below is a lookup: inside a save notification
+        // every cascade-deleted attachment has lost its message and asks it, and a scan of
+        // the identities there made a delete of n attachments n² comparisons inside the save.
+        var identifiedAttachmentIDs: Set<String> = []
 
         for object in updatedObjects {
             guard let person = object as? Person else { continue }
@@ -292,7 +297,12 @@ final class CacheCoordinator {
                    !message.hasFault(forRelationshipNamed: "attachments"),
                    let attachments = message.value(forKey: "attachments") as? Set<NSManagedObject> {
                     for attachment in attachments {
-                        collectDeletedAttachment(attachment, messageId: messageId, into: &plan)
+                        collectDeletedAttachment(
+                            attachment,
+                            messageId: messageId,
+                            into: &plan,
+                            identifiedAttachmentIDs: &identifiedAttachmentIDs
+                        )
                     }
                 }
                 continue
@@ -302,7 +312,8 @@ final class CacheCoordinator {
                 collectDeletedAttachment(
                     attachment,
                     messageId: messageId(ofDeleted: attachment),
-                    into: &plan
+                    into: &plan,
+                    identifiedAttachmentIDs: &identifiedAttachmentIDs
                 )
             }
         }
@@ -310,10 +321,15 @@ final class CacheCoordinator {
         return plan
     }
 
+    /// - Parameter identifiedAttachmentIDs: The attachment IDs `plan` already has an identity
+    ///   for, with or without a message. Every insertion of an identity adds its ID here, and
+    ///   removing the nil-message identity never takes one out: it is replaced, in the same
+    ///   call, by the message's own.
     private nonisolated static func collectDeletedAttachment(
         _ attachment: NSManagedObject,
         messageId: String?,
-        into plan: inout CacheInvalidationPlan
+        into plan: inout CacheInvalidationPlan,
+        identifiedAttachmentIDs: inout Set<String>
     ) {
         if let localURL = storedString("localURL", of: attachment) {
             plan.attachmentPathsToDelete.insert(localURL)
@@ -332,7 +348,8 @@ final class CacheCoordinator {
             plan.attachmentIdentitiesToInvalidate.insert(
                 CacheInvalidationPlan.AttachmentIdentity(messageId: messageId, attachmentId: attachmentId)
             )
-        } else if !plan.attachmentIdentitiesToInvalidate.contains(where: { $0.attachmentId == attachmentId }) {
+            identifiedAttachmentIDs.insert(attachmentId)
+        } else if identifiedAttachmentIDs.insert(attachmentId).inserted {
             // A nil message evicts every message's entry for this attachment ID
             // (`AttachmentCacheActor.removeFromCache`): wider than needed, and only a cache.
             plan.attachmentIdentitiesToInvalidate.insert(

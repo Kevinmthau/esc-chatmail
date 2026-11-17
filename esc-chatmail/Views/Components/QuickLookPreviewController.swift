@@ -66,10 +66,21 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
     ) async -> TopPresentableViewController.Outcome {
         let controller = QuickLookPreviewController(presentation: presentation)
         controller.onDismiss = onDismiss
+        // Before it can be shown: its share button hands on the files it shows.
+        QuickLookBackupMark.handOver(controller.previewedFileURLs)
         let outcome = await present(controller)
-        guard outcome == .presented else { return outcome }
+        guard outcome == .presented else {
+            QuickLookBackupMark.takeBack(controller.previewedFileURLs)
+            return outcome
+        }
         presentedControllers.add(controller)
         return outcome
+    }
+
+    /// The stored files this controller pages through, whose backup mark is off while it is
+    /// on screen (`QuickLookBackupMark`).
+    var previewedFileURLs: [URL] {
+        previewItems.compactMap(\.previewItemURL)
     }
 
     /// Dismisses every Quick Look `present` showed that is still on screen, along
@@ -84,6 +95,8 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
     static func dismissAll() {
         for controller in presentedControllers.allObjects {
             controller.presentingViewController?.dismiss(animated: false)
+            // Quick Look is not asked to report a dismissal it did not make.
+            QuickLookBackupMark.takeBack(controller.previewedFileURLs)
         }
         presentedControllers.removeAllObjects()
     }
@@ -101,6 +114,7 @@ final class QuickLookPreviewController: QLPreviewController, QLPreviewController
     // MARK: - QLPreviewControllerDelegate
 
     func previewControllerDidDismiss(_ controller: QLPreviewController) {
+        QuickLookBackupMark.takeBack(previewedFileURLs)
         onDismiss?()
     }
 }

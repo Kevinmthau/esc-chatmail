@@ -273,6 +273,67 @@ final class QuickLookPreviewControllerTests: XCTestCase {
         await waitUntil { rootViewController.presentedViewController == nil }
     }
 
+    /// Quick Look's share button hands on the stored file itself, so a download is shown
+    /// without the mark that leaves it out of device backups, and has it again once Quick
+    /// Look is gone (`QuickLookBackupMark`).
+    ///
+    /// Revert-check, three of them: the `handOver` in `QuickLookPreviewController.present`
+    /// (the file is still marked when Quick Look is shown), the `takeBack` in
+    /// `previewControllerDidDismiss` (it is unmarked after Quick Look closes), and the
+    /// `takeBack` where nothing was presented (it is unmarked after a presentation that never
+    /// appeared).
+    func testPresent_showsADownloadWithoutItsBackupMark_andMarksItAgainWhenQuickLookCloses() async throws {
+        let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
+        let message = MessageBuilder()
+            .withId("quick-look-backup-mark-\(UUID().uuidString)")
+            .withAttachments()
+            .build(in: context)
+        let attachmentID = "quick-look-backup-mark"
+        let path = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "pdf"
+        )
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("shared.pdf")
+            .withMimeType("application/pdf")
+            .withLocalURL(path)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+
+        AttachmentPaths.setupDirectories()
+        XCTAssertTrue(AttachmentPaths.saveData(Data("shared".utf8), to: path))
+        defer { AttachmentPaths.deleteFile(at: path) }
+        let url = try XCTUnwrap(AttachmentPaths.fullURL(for: path))
+        XCTAssertTrue(BackupExclusion.isExcluded(url), "Precondition: a download is marked when written")
+        let presentation = try XCTUnwrap(
+            QuickLookPresentation(attachments: [attachment], selectedAttachment: attachment)
+        )
+
+        var markedWhenShown: Bool?
+        var shown: QuickLookPreviewController?
+        let outcome = await QuickLookPreviewController.present(presentation, onDismiss: {}) { controller in
+            markedWhenShown = BackupExclusion.isExcluded(url)
+            shown = controller as? QuickLookPreviewController
+            return .presented
+        }
+
+        XCTAssertEqual(outcome, .presented)
+        XCTAssertEqual(markedWhenShown, false, "Quick Look was shown a file whose copies are left out of backups")
+        let controller = try XCTUnwrap(shown)
+        controller.previewControllerDidDismiss(controller)
+        XCTAssertTrue(BackupExclusion.isExcluded(url), "The mark did not go back when Quick Look closed")
+
+        let notShown = await QuickLookPreviewController.present(presentation, onDismiss: {}) { _ in
+            .noPresenter
+        }
+        XCTAssertEqual(notShown, .noPresenter)
+        XCTAssertTrue(BackupExclusion.isExcluded(url), "The mark did not go back after nothing was presented")
+    }
+
     func testPreviewIndexIsClampedToSnapshotBounds() {
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(-1, itemCount: 2), 0)
         XCTAssertEqual(QuickLookPreviewController.clampedPreviewIndex(0, itemCount: 2), 0)

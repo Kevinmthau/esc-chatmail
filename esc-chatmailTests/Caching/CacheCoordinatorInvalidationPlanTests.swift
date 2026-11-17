@@ -157,6 +157,42 @@ final class CacheCoordinatorInvalidationPlanTests: XCTestCase {
         )
     }
 
+    /// Inside a save notification every cascade-deleted attachment has lost its message, so
+    /// the same attachment ID can come with its message and without it, and many attachments
+    /// can share an ID with none. One identity each, the message's where any row gave it,
+    /// whichever order the set is walked in.
+    ///
+    /// HONEST SCOPE: this pins which identities the plan keeps, not what keeping them costs.
+    /// The scan of the plan's identities that `identifiedAttachmentIDs` replaced in
+    /// `CacheCoordinator.collectDeletedAttachment` gave the same set, in n² comparisons
+    /// inside the save, so reverting it fails nothing here; no test in the suite asserts a
+    /// time.
+    func testDeletedAttachments_withAndWithoutTheirMessage_keepOneIdentityPerID() {
+        let message = MessageBuilder().withId("msg-identities").build(in: context)
+        let withMessage = AttachmentBuilder()
+            .withId("att-shared")
+            .forMessage(message)
+            .build(in: context)
+        let messageCut = AttachmentBuilder().withId("att-shared").build(in: context)
+        let loose = (0..<3).map { _ in AttachmentBuilder().withId("att-loose").build(in: context) }
+
+        let plan = computePlan(deleted: [withMessage, messageCut] + loose)
+
+        XCTAssertEqual(
+            plan.attachmentIdentitiesToInvalidate,
+            [
+                CacheCoordinator.CacheInvalidationPlan.AttachmentIdentity(
+                    messageId: "msg-identities",
+                    attachmentId: "att-shared"
+                ),
+                CacheCoordinator.CacheInvalidationPlan.AttachmentIdentity(
+                    messageId: nil,
+                    attachmentId: "att-loose"
+                )
+            ]
+        )
+    }
+
     /// GAP: an *updated* attachment (e.g. download state change) is not acted on
     /// — only deletes reclaim attachment files/cache entries.
     func testUpdatedAttachment_isNotCollected() {

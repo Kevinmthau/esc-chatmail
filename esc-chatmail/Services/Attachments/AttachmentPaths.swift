@@ -41,6 +41,19 @@ struct AttachmentPaths {
     /// received message stored as one. Such a file can be downloaded again.
     private static let remoteStoragePrefix = "remote_"
 
+    /// The start of the file name of every attachment stored under an ID the app made
+    /// (`local_<UUID>`): an attachment the user added to a message, the copy a forward makes
+    /// of one, and the preview of each. A legacy `local_inline_` file of a received message
+    /// starts the same way.
+    private static let localStoragePrefix = "local_"
+
+    /// Whether the file at `relativePath`, in `Attachments` or `Previews`, is stored under an
+    /// ID the app made: what the user added to a message, a forward's copy of it, or the
+    /// preview of either. Such a file cannot be downloaded again. Read from the name alone.
+    static func isStoredUnderLocalID(_ relativePath: String) -> Bool {
+        (relativePath as NSString).lastPathComponent.hasPrefix(localStoragePrefix)
+    }
+
     /// Whether the file at `relativePath` is an attachment the app can download again.
     /// Read from the name alone, so a sweep can ask it of a file with no row at hand.
     /// A `local_` original of an attachment the user added answers false; so does a file
