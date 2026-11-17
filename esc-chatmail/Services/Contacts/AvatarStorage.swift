@@ -6,15 +6,19 @@ import UIKit
 /// Stores avatar images as binary files on disk instead of base64 strings in Core Data.
 /// This reduces database bloat by ~33% and improves query performance.
 actor AvatarStorage {
-    static let shared = AvatarStorage()
+    static let shared = AvatarStorage(
+        avatarsDirectory: (
+            FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+                ?? FileManager.default.temporaryDirectory
+        ).appendingPathComponent("Avatars")
+    )
 
     private nonisolated let avatarsDirectory: URL
     private let fileManager = FileManager.default
 
-    private init() {
-        let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-            ?? FileManager.default.temporaryDirectory
-        self.avatarsDirectory = documentsPath.appendingPathComponent("Avatars")
+    /// The app uses `shared`. A test gives a directory of its own.
+    init(avatarsDirectory: URL) {
+        self.avatarsDirectory = avatarsDirectory
         Self.createDirectoryIfNeeded(at: avatarsDirectory)
     }
 
@@ -23,6 +27,9 @@ actor AvatarStorage {
         if !fm.fileExists(atPath: directory.path) {
             FileSystemErrorHandler.createDirectory(at: directory, category: .general)
         }
+        // Contact photos are fetched again. Marked on every call: `deleteAllAvatars` makes
+        // the directory again, and the mark is the directory's own (`BackupExclusion`).
+        BackupExclusion.exclude(directory)
     }
 
     // MARK: - Public API

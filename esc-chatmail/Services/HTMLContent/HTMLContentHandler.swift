@@ -138,7 +138,17 @@ final class HTMLContentHandler: @unchecked Sendable {
             if !FileManager.default.fileExists(atPath: messagesDirectory.path) {
                 FileSystemErrorHandler.createDirectory(at: messagesDirectory, category: .general)
             }
+            excludeMessagesDirectoryFromBackup()
         }
+    }
+
+    /// Message bodies can be fetched again, and at a large mailbox they are gigabytes. Called
+    /// wherever the directory is created or found, because the mark is the directory's own:
+    /// a directory made again after a sign-out has none, and neither has one from a build
+    /// before the mark (`BackupExclusion`). The bodies stay where they are: the verdict and
+    /// preview passes read them as stored state, so they must never become purgeable.
+    private func excludeMessagesDirectoryFromBackup() {
+        BackupExclusion.exclude(messagesDirectory)
     }
 
     /// Ensures the Messages directory exists. Call after cleanup operations that may delete it.
@@ -209,6 +219,7 @@ final class HTMLContentHandler: @unchecked Sendable {
                 at: messagesDirectory,
                 withIntermediateDirectories: true
             )
+            excludeMessagesDirectoryFromBackup()
             clearCaches()
         })
     }
@@ -257,6 +268,7 @@ final class HTMLContentHandler: @unchecked Sendable {
                             at: messagesDirectory,
                             withIntermediateDirectories: true
                         )
+                        excludeMessagesDirectoryFromBackup()
                         try html.write(to: fileURL, atomically: true, encoding: .utf8)
                     }
                     cacheHTML(html, for: fileURL)

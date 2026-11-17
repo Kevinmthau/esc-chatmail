@@ -123,6 +123,38 @@ final class ForwardDraftMaintenanceTests: XCTestCase {
         return path
     }
 
+    // Revert-check: `AttachmentPaths.applyBackupPolicy(toFileAt:)` after the copy in
+    // `ComposeAttachmentManager.copyAttachmentForForward`. Without it the copy keeps the
+    // mark `copyItem` brought from the downloaded file, and a restored device has the
+    // forward's draft without its attachment.
+    func testForwardCopyOfADownloadedAttachment_isBackedUp_thoughItsSourceIsNot() throws {
+        let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
+        let manager = ComposeAttachmentManager(viewContext: context, leaseRegistry: ComposeAttachmentLeaseRegistry())
+        AttachmentPaths.setupDirectories()
+        let downloadedPath = AttachmentPaths.originalPath(
+            messageId: "forward-source-\(UUID().uuidString)",
+            attachmentId: "att-1",
+            ext: "pdf"
+        )
+        XCTAssertTrue(AttachmentPaths.saveData(Data("source-pdf".utf8), to: downloadedPath))
+        defer {
+            manager.clear()
+            AttachmentPaths.deleteFile(at: downloadedPath)
+        }
+        let downloadedURL = try XCTUnwrap(AttachmentPaths.fullURL(for: downloadedPath))
+        XCTAssertTrue(BackupExclusion.isExcluded(downloadedURL), "A downloaded attachment is left out of backups")
+
+        let copied = try XCTUnwrap(manager.copyAttachmentForForward(snapshot(path: downloadedPath)))
+
+        let copiedURL = try XCTUnwrap(AttachmentPaths.fullURL(for: copied.localURL))
+        XCTAssertEqual(try Data(contentsOf: copiedURL), Data("source-pdf".utf8))
+        XCTAssertFalse(
+            BackupExclusion.isExcluded(copiedURL),
+            "The forward's copy cannot be downloaded again, so it must stay in backups"
+        )
+    }
+
     private func snapshot(path: String, preview: String? = nil) -> ForwardAttachmentSnapshot {
         .init(filename: "report.pdf", mimeType: "application/pdf", byteSize: 10,
               localURL: path, previewURL: preview, width: 0, height: 0, pageCount: 1)

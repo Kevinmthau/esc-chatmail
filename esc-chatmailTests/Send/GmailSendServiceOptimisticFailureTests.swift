@@ -1125,6 +1125,11 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(durableAttachment.state, .downloaded)
         XCTAssertEqual(AttachmentPaths.loadData(from: remoteOriginalPath), originalData)
         XCTAssertEqual(AttachmentPaths.loadData(from: remotePreviewPath), previewData)
+        // Revert-check: `AttachmentPaths.applyBackupPolicy(toFileAt:)` after the copy in
+        // `handoffOptimisticAttachmentStorage`. The echo's copy can be downloaded again
+        // and is left out of backups; the original it was copied from stays in them.
+        XCTAssertTrue(BackupExclusion.isExcluded(try XCTUnwrap(AttachmentPaths.fullURL(for: remoteOriginalPath))))
+        XCTAssertFalse(BackupExclusion.isExcluded(try XCTUnwrap(AttachmentPaths.fullURL(for: localOriginalPath))))
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: activePreviewURL.path))
         XCTAssertEqual(try Data(contentsOf: activePreviewURL), originalData)
