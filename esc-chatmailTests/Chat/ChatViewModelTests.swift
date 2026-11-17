@@ -3016,6 +3016,9 @@ final class ChatViewModelTests: XCTestCase {
         await fixture.viewModel.waitForConversationExitActions()
         let queued = await fixture.pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        // The archive saves on a background context, and this stack's view
+        // context does not merge saves by itself.
+        fixture.conversation.managedObjectContext?.refreshAllObjects()
         XCTAssertNotNil(fixture.conversation.archivedAt)
     }
 
@@ -3055,6 +3058,9 @@ final class ChatViewModelTests: XCTestCase {
         await viewModel.waitForConversationExitActions()
         let queued = await fixture.pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        // The archive saves on a background context, and this stack's view
+        // context does not merge saves by itself.
+        fixture.conversation.managedObjectContext?.refreshAllObjects()
         XCTAssertNotNil(fixture.conversation.archivedAt)
     }
 

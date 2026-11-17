@@ -42,7 +42,8 @@ enum OutboundSendDeliveryState: Equatable, Sendable {
     case notSent
     case deliveryUnknown
 
-    @MainActor
+    /// Reads only the message's own attributes, so it is not tied to the main
+    /// actor: call it on the queue of the context that owns `message`.
     static func localOptimisticMessageID(for message: Message) -> String? {
         guard message.isFromMe,
               let rfcMessageID = message.messageIdValue,
