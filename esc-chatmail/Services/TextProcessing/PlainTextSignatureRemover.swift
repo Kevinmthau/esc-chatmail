@@ -171,7 +171,7 @@ enum PlainTextSignatureRemover {
     // MARK: - Public API
 
     static func removeSignature(from text: String) -> String {
-        let normalized = TextProcessing.normalizeLineEndings(text)
+        let normalized = withoutTrailingLegalDisclaimer(TextProcessing.normalizeLineEndings(text))
         let trimmed = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
@@ -511,6 +511,15 @@ enum PlainTextSignatureRemover {
         return remainder.isEmpty || matchesRegex(standaloneContactLabelPattern, in: remainder) ||
             remainder.range(of: #"^(?:tel|phone|mobile|office|direct|fax|cell)$"#, options: [.regularExpression, .caseInsensitive]) != nil ||
             isStrictSupportLine(remainder)
+    }
+
+    /// A disclaimer worded unlike every hard indicator still ends the message
+    /// (`LegalDisclaimerPolicy`). It goes first, so a contact signature it followed is
+    /// the tail the passes after it look at.
+    private static func withoutTrailingLegalDisclaimer(_ text: String) -> String {
+        let lines = text.components(separatedBy: "\n")
+        guard let start = LegalDisclaimerPolicy.trailingDisclaimerStartLine(in: lines) else { return text }
+        return lines[..<start].joined(separator: "\n")
     }
 
     // MARK: - Line Evaluation

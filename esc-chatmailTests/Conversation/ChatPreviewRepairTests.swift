@@ -201,6 +201,33 @@ final class ChatPreviewRepairTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    // Revert-check: CacheVersioning.chatPreviewDerivationVersion "2026-11-17-trailing-legal-disclaimer-v1"
+    // re-derives a preview the MVPN version already completed; the trailing disclaimer pass
+    // changes only the saved preview, never the canonical HTML bytes.
+    func testRepairPersistedChatPreviews_trailingLegalDisclaimerVersion_rederivesLeakedPreviewWithoutChangingCanonicalHTML() async throws {
+        let received = try message("001")
+        let disclaimer = "This communication is confidential and intended solely for the use of the addressee(s). " +
+            "If you are not an addressee, please notify the sender and delete this message."
+        let disclaimerHTML = "<p>Please find the summary attached.</p><p>Thanks</p><p>Robin</p><p>\(disclaimer)</p>"
+        let canonicalURL = try XCTUnwrap(handler.saveHTML(disclaimerHTML, for: "001"))
+        received.bodyStorageURI = canonicalURL.absoluteString
+        received.chatPreviewText = "Please find the summary attached.\n\nThanks\nRobin\n\n" + disclaimer
+        let canonicalData = try Data(contentsOf: canonicalURL)
+        try viewContext.save()
+        flags.set(true, forKey: "chatPreviewRepair.2026-10-27-signature-mvpn-inline-v1")
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+        XCTAssertTrue(flags.bool(forKey: ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey))
+        viewContext.refreshAllObjects()
+
+        XCTAssertEqual(received.chatPreviewText, "Please find the summary attached.\n\nThanks\n\nRobin")
+        XCTAssertEqual(handler.loadHTML(for: "001"), disclaimerHTML)
+        XCTAssertEqual(try Data(contentsOf: canonicalURL), canonicalData)
+        withExtendedLifetime(repair) {}
+    }
+
     func testRepeatedFooterVersionRepairsPreviouslyCompletedPreviewWithoutChangingSource() async throws {
         let received = try message("001")
         let source = RepeatedCorporateSignatureFixture.html()

@@ -15,7 +15,8 @@ import SwiftSoup
 ///    siblings at every ancestor level.
 /// 4. (Optional, mode = .quotedAndSignatures) Signature wrappers
 ///    (gmail_signature, ms-outlook-signature) and footer/unsubscribe
-///    sections.
+///    sections, then a trailing legal disclaimer (`+LegalDisclaimers`), the
+///    signature text markers and a trailing contact signature.
 ///
 /// `HTMLQuoteRemover.removeQuotes(from:mode:)` delegates here for the public
 /// quote-removal path.
@@ -68,6 +69,7 @@ enum EmailDOMQuoteRemover {
                 try removeFooterContainers(in: document)
             }
             if mode == .quotedAndSignatures {
+                try truncateTrailingLegalDisclaimer(in: document)
                 try truncateAtSignatureMarkers(in: document)
                 try truncateTrailingContactSignature(in: document)
             }

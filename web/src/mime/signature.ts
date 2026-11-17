@@ -22,6 +22,7 @@ import {
   isSignatureSupportLine,
   isTrailingSignatureContactLine,
 } from './html'
+import { trailingLegalDisclaimerStartLine } from './legalDisclaimer'
 import { isListItem, normalizeLineEndings } from './text'
 
 const TRAILING_SCAN_LINE_LIMIT = 80
@@ -179,9 +180,19 @@ const ORGANIZATION_KEYWORDS = [
 const SINGLE_NAME_PATTERN = /^[A-Z][A-Za-z'-]{1,31}$/
 const MULTI_WORD_NAME_PATTERN = /^[A-Z][A-Za-z'.-]{1,31}(?:\s+[A-Z][A-Za-z'.-]{1,31}){1,3}$/
 
+// A disclaimer worded unlike every hard indicator still ends the message
+// (legalDisclaimer.ts). It goes first, so a contact signature it followed is the tail
+// the passes after it look at.
+function withoutTrailingLegalDisclaimer(text: string): string {
+  const lines = text.split('\n')
+  const start = trailingLegalDisclaimerStartLine(lines)
+  if (start === null) return text
+  return lines.slice(0, start).join('\n')
+}
+
 /** Removes trailing signature blocks and boilerplate from plain text. */
 export function removeSignature(text: string): string {
-  const normalized = normalizeLineEndings(text)
+  const normalized = withoutTrailingLegalDisclaimer(normalizeLineEndings(text))
   const trimmed = normalized.trim()
   if (trimmed.length === 0) return ''
 
