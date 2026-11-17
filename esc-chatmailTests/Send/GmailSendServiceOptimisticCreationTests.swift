@@ -499,6 +499,54 @@ final class GmailSendServiceOptimisticCreationTests: XCTestCase {
         XCTAssertFalse(context.hasChanges)
     }
 
+    /// The view context learns of another context's save by merging it, so a
+    /// conversation that the launch repair, a cleanup pass or an Archive has
+    /// just archived on a context of its own can still read as active here.
+    /// The send reads the store's archive state before it chooses, whoever
+    /// wrote it, and reactivates the conversation. Reading the view
+    /// context's stale copy it anchored to the conversation as it was and
+    /// was archived with it when the merge landed.
+    ///
+    /// Revert-check: dropping `adoptStoredArchiveState` from
+    /// `GmailSendService.createOptimisticMessage` has the send choose the
+    /// conversation as an active one (this suite's view context merges no
+    /// save by itself), and the store keeps it archived with the send in it.
+    func testCreateOptimisticMessage_conversationArchivedOnAnotherContext_readsTheStoreAndReactivates() async throws {
+        let context: NSManagedObjectContext = viewContext
+        let recipient = "friend@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let conversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .visible()
+            .build(in: context)
+        try saveViewContext()
+        let conversationID = conversation.objectID
+
+        let archivingContext = coreDataStack.newBackgroundContext()
+        try await archivingContext.perform {
+            let stored = try XCTUnwrap(try archivingContext.existingObject(with: conversationID) as? Conversation)
+            stored.archivedAt = Date()
+            try archivingContext.save()
+        }
+        XCTAssertNil(conversation.archivedAt, "The view context was not meant to have the archive yet")
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "hello again",
+            optimisticConversation: .participantHash(participantHash)
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(message.conversation?.objectID, conversationID)
+        XCTAssertNil(conversation.archivedAt)
+        XCTAssertFalse(context.hasChanges)
+        let readingContext = coreDataStack.newBackgroundContext()
+        let storedArchivedAt = try await readingContext.perform {
+            try XCTUnwrap(try readingContext.existingObject(with: conversationID) as? Conversation).archivedAt
+        }
+        XCTAssertNil(storedArchivedAt, "The send was archived with the conversation")
+    }
+
     func testCreateOptimisticMessage_withOptimisticConversationReferenceReusesExistingConversation() async throws {
         let context: NSManagedObjectContext = viewContext
         let conversation = ConversationBuilder()

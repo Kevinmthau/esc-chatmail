@@ -141,29 +141,32 @@ actor ConversationRollupMutationSerializer {
         )
     }
 
-    /// A mutation that takes its conversations' turns and the
-    /// cleanup-sensitive gate together, for an action that changes whether a
-    /// conversation is archived (`MessageActions`' Archive and Report Spam).
+    /// The turns of the conversations an optimistic send may anchor to, for
+    /// a caller that already holds the cleanup-sensitive gate
+    /// (`GmailSendService.createOptimisticMessage`).
     ///
-    /// Optimistic-send creation picks its conversation on the view context
-    /// inside that gate, and reactivates one it finds archived. An archive
-    /// that saves on a background context is not on the view context until
-    /// its save has merged, so a send created meanwhile anchored to the
-    /// conversation as it was and was archived with it. Holding the gate
-    /// puts the send wholly before the archive or wholly after it.
+    /// Archive and Report Spam change a conversation on a background context
+    /// inside that conversation's turn. A send that chose the conversation
+    /// while one of them was still running read it as it was, anchored to
+    /// it, and was archived with it. Inside the turn the send runs wholly
+    /// before the action or wholly after it, and only a send to a
+    /// conversation being archived waits for the archive.
     ///
-    /// Both sets of keys are taken in one actor turn, so two callers cannot
-    /// each hold half. What can deadlock is nesting: an operation that holds
-    /// the gate must not ask for a conversation's turn, and one that holds a
-    /// conversation's turn must not ask for the gate, because a caller of
-    /// this method queued between the two waits on the first and is waited
-    /// on by the second. No operation nests them today.
-    func performCleanupSensitiveMutation<Value: Sendable>(
-        conversationKeys: Set<String>,
-        operation: @escaping @Sendable () async -> Value
-    ) async -> Value {
-        await perform(
-            conversationKeys: conversationKeys.union([Self.cleanupSensitiveMutationKey]),
+    /// The order is the gate, then the turn, and it is one-way: an operation
+    /// that holds a conversation's turn must never ask for the gate, because
+    /// a send that holds the gate and waits for that turn is then waited on
+    /// by it. For the same reason nothing may ask for the gate and a
+    /// conversation's turn in one call: queued behind a send's gate, it is
+    /// ahead of that send's turn. Both fail silently, as a hang. No holder
+    /// of a conversation's turn asks for the gate today.
+    func performThrowingAnchoredSendMutation<Value: Sendable>(
+        conversationIDs: Set<NSManagedObjectID>,
+        onEnqueued: (@Sendable () async -> Void)? = nil,
+        operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        try await performThrowing(
+            conversationKeys: Self.conversationKeys(for: conversationIDs),
+            onEnqueued: onEnqueued,
             operation: operation
         )
     }

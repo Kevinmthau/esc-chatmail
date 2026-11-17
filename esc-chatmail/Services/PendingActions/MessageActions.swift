@@ -587,15 +587,18 @@ final class MessageActions: ObservableObject {
                 return
             }
 
-            // The conversations' turns and the cleanup-sensitive gate
-            // together: a send's optimistic row is created inside that gate,
-            // on the view context, which does not have this archive until
-            // its save has merged. See
-            // `ConversationRollupMutationSerializer.performCleanupSensitiveMutation(conversationKeys:operation:)`.
+            // The conversations' turns only, never the cleanup-sensitive
+            // gate: the gate is every send's, draft save's and cleanup
+            // pass's, and an action that held it kept all of them waiting
+            // for as long as it ran, and itself waited for a whole cleanup.
+            // A send to one of these conversations takes that conversation's
+            // turn inside the gate, so it runs wholly before this or wholly
+            // after it, and reads the store's archive state when it does
+            // (`GmailSendService.createOptimisticMessage`). A holder of a
+            // conversation's turn must never ask for the gate: see
+            // `ConversationRollupMutationSerializer.performThrowingAnchoredSendMutation(conversationIDs:onEnqueued:operation:)`.
             let conversationKeys = Self.conversationKeys(for: conversationIDs)
-            await self.rollupMutationSerializer.performCleanupSensitiveMutation(
-                conversationKeys: conversationKeys
-            ) { [weak self] in
+            await self.rollupMutationSerializer.perform(conversationKeys: conversationKeys) { [weak self] in
                 guard let self else { return }
                 guard let outcome = await self.saveConversationWideMutation(
                     mutation,
@@ -604,9 +607,6 @@ final class MessageActions: ObservableObject {
                     Log.error("Not queuing \(mutation.operation): nothing was saved", category: .message)
                     return
                 }
-                // Before the gate is released: whoever takes it next reads
-                // these conversations on the view context.
-                await self.refreshOnViewContext(conversationIDs)
                 guard outcome.changedConversationCount > 0 else {
                     Log.info("Nothing to \(mutation.operation): no conversation still needed it", category: .message)
                     return
@@ -625,26 +625,6 @@ final class MessageActions: ObservableObject {
                     within: syncRun
                 )
             }
-        }
-    }
-
-    /// Brings the view context's copies of these conversations up to the
-    /// store, keeping any change the view context has not saved.
-    ///
-    /// The view context gets a background save by merging it, a main-queue
-    /// block of its own that nothing here can wait for. A conversation-wide
-    /// action does this itself, while it still holds the cleanup-sensitive
-    /// gate, so that the next holder (a send choosing its conversation)
-    /// finds `archivedAt` set and reactivates the conversation, as it did
-    /// when the archive ran on the view context. For the seconds a long
-    /// archive took, the view context's `archivedAt` was still nil, and a
-    /// New Message to the same people anchored to the conversation and was
-    /// archived with it.
-    private func refreshOnViewContext(_ conversationIDs: [NSManagedObjectID]) {
-        let viewContext = coreDataStack.viewContext
-        for conversationID in conversationIDs {
-            guard let conversation = viewContext.registeredObject(for: conversationID) else { continue }
-            viewContext.refresh(conversation, mergeChanges: true)
         }
     }
 

@@ -726,21 +726,60 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedSingleActions.isEmpty)
     }
 
-    /// A send creates its optimistic row inside the cleanup-sensitive gate,
-    /// on the view context, and reactivates a conversation it finds
-    /// archived. While an archive is saving on its background context the
-    /// view context still has `archivedAt` nil, so a send created then
-    /// anchored to the conversation and was archived with it. The archive
-    /// holds the gate, and brings the view context's conversation up to the
-    /// store before it lets the gate go.
+    /// Archive takes its conversations' turns and not the cleanup-sensitive
+    /// gate, which every send, draft save and cleanup pass queues on. Here
+    /// something else holds the gate, as a full cleanup does for the whole
+    /// of its run at the end of an initial sync, and the archive is done
+    /// while it is still held.
     ///
-    /// Revert-check: `perform(conversationKeys:)` in place of
-    /// `performCleanupSensitiveMutation(conversationKeys:)` in
-    /// `MessageActions.performConversationWideMutation` runs the gated
-    /// block while the archive is still saving, and dropping
-    /// `refreshOnViewContext` there has the block read a nil `archivedAt`
-    /// (this suite's view context merges no save by itself).
-    func testArchiveConversation_holdsTheCleanupSensitiveGateUntilTheViewContextHasTheArchive() async throws {
+    /// Revert-check: asking for the gate with the conversations' turns in
+    /// `MessageActions.performConversationWideMutation` leaves the archive
+    /// queued behind the holder, and the wait for it times out.
+    func testArchiveConversation_whileSomethingElseHoldsTheCleanupSensitiveGate_doesNotWaitForIt() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10])
+        let conversation = fixture.conversation
+        let actions = self.messageActions!
+        let serializer = self.rollupMutationSerializer!
+
+        let gateIsHeld = AccountBoundaryFlag()
+        let releaseGate = AccountBoundaryFlag()
+        let cleanup = Task {
+            await serializer.performCleanupSensitiveMutation(
+                onEnqueued: { gateIsHeld.set() },
+                operation: {
+                    while !releaseGate.isSet {
+                        try? await Task.sleep(nanoseconds: 5_000_000)
+                    }
+                }
+            )
+        }
+        await waitUntil { gateIsHeld.isSet }
+
+        let archiveFinished = AccountBoundaryFlag()
+        let archive = Task { @MainActor in
+            await actions.archiveConversation(conversation: conversation)
+            archiveFinished.set()
+        }
+        await waitUntil { archiveFinished.isSet }
+        XCTAssertFalse(releaseGate.isSet)
+
+        releaseGate.set()
+        await cleanup.value
+        await archive.value
+        viewContext.refreshAllObjects()
+        XCTAssertNotNil(conversation.archivedAt)
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+    }
+
+    /// The other direction: while an archive is still saving, the gate is
+    /// free, so a send or a draft save in any other chat is not kept
+    /// waiting for it.
+    ///
+    /// Revert-check: asking for the gate with the conversations' turns in
+    /// `MessageActions.performConversationWideMutation` queues the gated
+    /// block behind the archive, and the wait for it times out.
+    func testArchiveConversation_whileItIsSaving_leavesTheCleanupSensitiveGateFree() async throws {
         let fixture = try makeInboxConversation(inboxDates: [10])
         let blockingStack = BlockingSaveCoreDataStack(wrapping: messageActionsStack)
         let actions = MessageActions(
@@ -750,8 +789,6 @@ final class MessageActionsTests: XCTestCase {
             syncRunCoordinator: syncRunCoordinator
         )
         let conversation = fixture.conversation
-        let conversationID = conversation.objectID
-        let viewContext = self.viewContext!
         let serializer = self.rollupMutationSerializer!
 
         let archive = Task { @MainActor in
@@ -759,34 +796,105 @@ final class MessageActionsTests: XCTestCase {
         }
         await waitUntil { blockingStack.saveHasStarted }
 
-        // What a send's optimistic creation does: take the gate, then read
-        // the conversation on the view context.
-        let sendIsQueued = AccountBoundaryFlag()
-        let sendRan = AccountBoundaryFlag()
-        let send = Task {
-            await serializer.performCleanupSensitiveMutation(
-                onEnqueued: { sendIsQueued.set() },
-                operation: {
-                    sendRan.set()
-                    return await MainActor.run {
-                        (viewContext.registeredObject(for: conversationID) as? Conversation)?.archivedAt
-                    }
-                }
-            )
+        let gatedBlockRan = AccountBoundaryFlag()
+        let gatedBlock = Task {
+            await serializer.performCleanupSensitiveMutation(operation: { gatedBlockRan.set() })
         }
-        await waitUntil { sendIsQueued.isSet }
-        // Long against the actor hops an ungated block needs to run.
-        try await Task.sleep(nanoseconds: 100_000_000)
-        XCTAssertFalse(sendRan.isSet, "The send's block ran while the archive was still saving")
+        await waitUntil { gatedBlockRan.isSet }
 
         blockingStack.releaseSaves()
         await archive.value
-        let archivedAtTheSendRead = await send.value
-
-        XCTAssertTrue(sendRan.isSet)
-        XCTAssertNotNil(archivedAtTheSendRead)
+        await gatedBlock.value
         let queued = await pendingActionsManager.queuedConversationActions
         XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+    }
+
+    /// A send to the conversation being archived is the one thing that does
+    /// wait for the archive. It takes the conversation's turn inside the
+    /// gate, so it runs wholly after the archive, reads the store's archive
+    /// state there, and reactivates the conversation, as it did when the
+    /// archive ran on the view context. Created while the archive was still
+    /// saving, it read the conversation as active, anchored to it, and was
+    /// archived with it.
+    ///
+    /// Revert-check: creating the message in
+    /// `GmailSendService.createOptimisticMessage` without
+    /// `performThrowingAnchoredSendMutation` never queues the send for the
+    /// turn, and the wait for `sendIsQueued` times out. Dropping
+    /// `adoptStoredArchiveState` there has the send read a nil `archivedAt`
+    /// (this suite's view context merges no save by itself) and leaves the
+    /// conversation archived with the send in it.
+    func testArchiveConversation_sendToItWhileItIsSaving_takesItsTurnAfterTheArchiveAndReactivates() async throws {
+        let recipient = "friend@example.com"
+        let participantHash = calculateParticipantHash(from: [normalizedEmail(recipient)])
+        let conversation = ConversationBuilder()
+            .withParticipantHash(participantHash)
+            .visible()
+            .build(in: viewContext)
+        let received = MessageBuilder()
+            .withId("received")
+            .inConversation(conversation)
+            .build(in: viewContext)
+        received.addToLabels(try existingOrNewLabel(id: "INBOX"))
+        try saveViewContext()
+        let conversationID = conversation.objectID
+
+        let blockingStack = BlockingSaveCoreDataStack(wrapping: messageActionsStack)
+        let actions = MessageActions(
+            coreDataStack: blockingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+        let sendIsQueued = AccountBoundaryFlag()
+        let sendService = GmailSendService(
+            viewContext: viewContext,
+            conversationMutationSerializer: rollupMutationSerializer,
+            anchorTurnDidEnqueue: { sendIsQueued.set() }
+        )
+
+        let archive = Task { @MainActor in
+            await actions.archiveConversation(conversation: conversation)
+        }
+        await waitUntil { blockingStack.saveHasStarted }
+        let send = Task { @MainActor in
+            try await sendService.createOptimisticMessage(
+                to: [recipient],
+                body: "sent during the archive",
+                optimisticConversation: .participantHash(participantHash)
+            )
+        }
+        await waitUntil { sendIsQueued.isSet }
+        // Queued behind an archive that cannot finish yet: nothing of the
+        // send exists.
+        XCTAssertEqual(conversation.messages?.count, 1)
+
+        blockingStack.releaseSaves()
+        await archive.value
+        let handle = try await send.value
+
+        let sent = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(sent.conversation?.objectID, conversationID)
+        XCTAssertNil(conversation.archivedAt)
+        let stored = try await storedArchiveState(of: conversationID, inboxMessageID: received.objectID)
+        XCTAssertNil(stored.archivedAt, "The send was archived with the conversation")
+        XCTAssertFalse(stored.messageIsInInbox, "The archive did not run")
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+    }
+
+    /// What the store has for a conversation's `archivedAt` and for whether
+    /// one of its messages still carries INBOX, read on a context of its own.
+    private func storedArchiveState(
+        of conversationID: NSManagedObjectID,
+        inboxMessageID: NSManagedObjectID
+    ) async throws -> (archivedAt: Date?, messageIsInInbox: Bool) {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let conversation = try XCTUnwrap(try context.existingObject(with: conversationID) as? Conversation)
+            let message = try XCTUnwrap(try context.existingObject(with: inboxMessageID) as? Message)
+            return (conversation.archivedAt, message.labels?.contains(where: { $0.id == "INBOX" }) == true)
+        }
     }
 
     /// The chat-open snapshot's fetch is queued when it is asked for and
