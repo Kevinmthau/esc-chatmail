@@ -527,7 +527,8 @@ final class MessageActionsTests: XCTestCase {
     /// The local change and the Gmail action go together: when the save
     /// fails, nothing is queued.
     ///
-    /// Revert-check: ignoring the result of `saveIfNeeded` in
+    /// Revert-check: ignoring the result of `save` (the stack's
+    /// `saveIfNeeded`, from `MessageActions.makeBackgroundSave`) in
     /// `MessageActions.applyConversationWideMutation` queues the action.
     func testArchiveConversation_doesNotQueuePendingActionWhenLocalSaveFails() async throws {
         let fixture = try makeInboxConversation(inboxDates: [10])

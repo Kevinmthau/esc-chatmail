@@ -464,7 +464,7 @@ final class MessageActions: ObservableObject {
     /// nothing was saved (the message is gone, is not in the inbox, or a
     /// read or the save failed).
     private func performArchive(messageID: NSManagedObjectID) async -> String? {
-        let coreDataStack = self.coreDataStack
+        let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             guard let message = try? context.existingObject(with: messageID) as? Message,
@@ -480,7 +480,7 @@ final class MessageActions: ObservableObject {
                 context.rollback()
                 return nil
             }
-            guard coreDataStack.saveIfNeeded(context: context, caller: "archive message") else {
+            guard save(context, "archive message") else {
                 Log.error("Not queuing archive: local save failed", category: .message)
                 context.rollback()
                 return nil
@@ -602,14 +602,14 @@ final class MessageActions: ObservableObject {
         _ mutation: ConversationWideMutation,
         to conversationIDs: [NSManagedObjectID]
     ) async -> [String]? {
-        let coreDataStack = self.coreDataStack
+        let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             Self.applyConversationWideMutation(
                 mutation,
                 to: conversationIDs,
                 in: context,
-                savingWith: coreDataStack
+                savingWith: save
             )
         }
     }
@@ -625,7 +625,7 @@ final class MessageActions: ObservableObject {
         _ mutation: ConversationWideMutation,
         to conversationIDs: [NSManagedObjectID],
         in context: NSManagedObjectContext,
-        savingWith coreDataStack: any MessageActionsCoreDataStacking
+        savingWith save: BackgroundSave
     ) -> [String]? {
         let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: mutation.operation)
         let spamLabel = mutation.kind == .reportSpam
@@ -696,7 +696,7 @@ final class MessageActions: ObservableObject {
             applyArchivedConversationRollup(to: conversation, at: modificationDate)
         }
 
-        guard coreDataStack.saveIfNeeded(context: context, caller: mutation.operation) else {
+        guard save(context, mutation.operation) else {
             context.rollback()
             return nil
         }
@@ -714,6 +714,28 @@ final class MessageActions: ObservableObject {
     }
 
     // MARK: - Helpers
+
+    /// The stack's `saveIfNeeded`, for a block that runs on a background
+    /// context's queue: the context to save and the caller's name.
+    private typealias BackgroundSave = @Sendable (NSManagedObjectContext, String) -> Bool
+
+    /// Makes the save a background `perform` block calls, so that the block
+    /// captures this closure and not the stack.
+    ///
+    /// `nonisolated(unsafe)`: the stack is held as
+    /// `any MessageActionsCoreDataStacking`, which is not `Sendable`, and a
+    /// `perform` block that captures it bare is an error under Swift 6.2
+    /// (CI's Xcode 26) and nothing under Swift 6.4 (this Mac's Xcode 27),
+    /// which is how the first version of this path passed here and failed
+    /// both CI builds. The one thing the closure does with the stack is call
+    /// `saveIfNeeded`, which does all of its work inside the given context's
+    /// own `performAndWait` and so may be called from any queue.
+    private func makeBackgroundSave() -> BackgroundSave {
+        nonisolated(unsafe) let coreDataStack = self.coreDataStack
+        return { context, caller in
+            coreDataStack.saveIfNeeded(context: context, caller: caller)
+        }
+    }
 
     /// The objectIDs of `objects`, as a background context can resolve them,
     /// or nil when it could not.
@@ -997,7 +1019,7 @@ final class MessageActions: ObservableObject {
         isStarred: Bool,
         actionType: PendingAction.ActionType
     ) async -> String? {
-        let coreDataStack = self.coreDataStack
+        let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             guard let message = try? context.existingObject(with: messageID) as? Message else {
@@ -1017,7 +1039,7 @@ final class MessageActions: ObservableObject {
             }
 
             message.localModifiedAt = Date()
-            guard coreDataStack.saveIfNeeded(context: context, caller: "\(actionType.rawValue) message") else {
+            guard save(context, "\(actionType.rawValue) message") else {
                 Log.error("Not queuing \(actionType.rawValue): local save failed", category: .message)
                 context.rollback()
                 return nil
