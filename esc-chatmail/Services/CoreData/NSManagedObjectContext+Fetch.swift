@@ -230,12 +230,48 @@ enum MessagePredicates {
         )
     }
 
-    /// See `visibleInChat(conversation:)`.
+    /// `visibleInChat(conversation:)` for a caller that holds the
+    /// conversation's objectID and not the object, such as a page load on a
+    /// background context. The ID must be permanent: a temporary ID names a
+    /// conversation the store has no row for yet, so SQLite cannot find its
+    /// messages by it. `visibleInChat(conversationId:)` is the form for those.
+    static func visibleInChat(conversationObjectID: NSManagedObjectID) -> NSPredicate {
+        NSPredicate(
+            format: "conversation == %@ AND SUBQUERY(labels, $label, $label.id IN %@).@count == 0",
+            conversationObjectID,
+            chatExcludedLabelIDs
+        )
+    }
+
+    /// See `visibleInChat(conversation:)`. This form joins every message to
+    /// its conversation to compare a UUID no index covers, and on a store
+    /// without SQLite statistics that walks the whole message table
+    /// (`docs/scalability-review.md`, `chat-transcript-uuid-join-offset-paging`).
+    /// Use it only where the conversation has no permanent objectID yet.
     static func visibleInChat(conversationId: UUID) -> NSPredicate {
         NSPredicate(
             format: "conversation.id == %@ AND SUBQUERY(labels, $label, $label.id IN %@).@count == 0",
             conversationId as CVarArg,
             chatExcludedLabelIDs
+        )
+    }
+
+    /// The unread INBOX messages of one conversation, which is what opening a
+    /// chat marks read and what the conversation's unread count counts.
+    ///
+    /// `isUnread != NO`, not `isUnread == YES`, is deliberate. With the
+    /// equality SQLite drives the fetch from the store-wide
+    /// `byIsUnreadIndex`, with or without statistics: it visits every unread
+    /// message in the mailbox to find the few in this conversation
+    /// (`docs/scalability-review.md`, `chat-open-unread-snapshot`). SQLite
+    /// never drives a search from an inequality, so this spelling leaves it
+    /// the conversation's own index. `isUnread` is not optional, so the two
+    /// select the same rows. `ScaleQueryPlanTests` pins the plan.
+    static func unreadInInbox(conversationObjectID: NSManagedObjectID) -> NSPredicate {
+        NSPredicate(
+            format: "conversation == %@ AND isUnread != NO AND ANY labels.id == %@",
+            conversationObjectID,
+            "INBOX"
         )
     }
 

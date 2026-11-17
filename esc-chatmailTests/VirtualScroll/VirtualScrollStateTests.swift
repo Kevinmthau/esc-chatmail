@@ -103,6 +103,107 @@ final class VirtualScrollStateTests: XCTestCase {
         XCTAssertTrue(page.messageIDs.isEmpty)
     }
 
+    /// The page loader on a real SQLite store, where the predicate is SQL and
+    /// not evaluated in memory: the conversation's own messages, in
+    /// (date, id) order across a tie, with another chat's messages and this
+    /// chat's spam left out, and a count that agrees.
+    ///
+    /// Revert-check: dropping `conversation == %@` from
+    /// `MessagePredicates.visibleInChat(conversationObjectID:)`, which
+    /// `VirtualScrollState.transcriptPredicate` returns for a saved
+    /// conversation, pages the other chat's messages in too.
+    func testLoadMessagePage_sqliteStore_pagesOnlyTheConversationsVisibleMessagesInOrder() async throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let context = sqliteStack.makeMainQueueViewContext()
+        let conversation = ConversationBuilder().visible().build(in: context)
+        let otherConversation = ConversationBuilder().visible().build(in: context)
+        let spam = LabelBuilder().spam().build(in: context)
+
+        func message(_ id: String, date: TimeInterval, in conversation: Conversation) -> Message {
+            MessageBuilder()
+                .withId(id)
+                .withDate(Date(timeIntervalSince1970: date))
+                .inConversation(conversation)
+                .build(in: context)
+        }
+        let first = message("a-first", date: 1, in: conversation)
+        _ = message("other-chat", date: 2, in: otherConversation)
+        let tiedLater = message("tied-b", date: 3, in: conversation)
+        let tiedEarlier = message("tied-a", date: 3, in: conversation)
+        message("spam", date: 4, in: conversation).labels = [spam]
+        let last = message("z-last", date: 5, in: conversation)
+        try context.save()
+
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<10,
+            in: sqliteStack.newBackgroundContext()
+        )
+
+        XCTAssertNil(page.fetchErrorDescription)
+        XCTAssertEqual(
+            page.messageIDs,
+            [first, tiedEarlier, tiedLater, last].map(\.objectID)
+        )
+        XCTAssertEqual(page.totalCount, 4)
+    }
+
+    /// A conversation the store has no row for has no stored messages: the
+    /// page is empty and is not an error.
+    ///
+    /// HONEST SCOPE: the UUID predicate this replaced also found nothing
+    /// here. The test pins that the lookup's "no such conversation" answer
+    /// stays an empty page and never becomes a fetch error.
+    func testLoadMessagePage_conversationNotInStore_returnsEmptyPageWithoutError() async throws {
+        _ = try makeConversationWithMessages(count: 3)
+
+        let page = await VirtualScrollState.loadMessagePage(
+            conversationId: UUID().uuidString,
+            range: 0..<10,
+            in: stack.newBackgroundContext()
+        )
+
+        XCTAssertNil(page.fetchErrorDescription)
+        XCTAssertEqual(page.messageIDs, [])
+        XCTAssertEqual(page.totalCount, 0)
+    }
+
+    /// A newly composed chat: neither the conversation nor its first message
+    /// is saved, so the conversation's objectID is temporary. The pending
+    /// page shows the message, and no message of a saved chat.
+    ///
+    /// HONEST SCOPE: this passes without the `isTemporaryID` guard in
+    /// `VirtualScrollState.transcriptPredicate` (iOS 27.0 simulator,
+    /// 2026-11-17): asked about a temporary ID on the context that holds it,
+    /// Core Data matched the unsaved message in memory. The guard keeps the
+    /// app from depending on that, and this test pins the answer either way.
+    func testLoadPendingMessagePage_unsavedConversation_returnsItsUnsavedMessages() async throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let context = sqliteStack.makeMainQueueViewContext()
+        _ = MessageBuilder()
+            .withId("saved-elsewhere")
+            .inConversation(ConversationBuilder().visible().build(in: context))
+            .build(in: context)
+        try context.save()
+
+        let conversation = ConversationBuilder().visible().build(in: context)
+        let optimistic = MessageBuilder()
+            .withId("optimistic")
+            .inConversation(conversation)
+            .build(in: context)
+        XCTAssertTrue(conversation.objectID.isTemporaryID)
+
+        let page = await VirtualScrollState.loadPendingMessagePage(
+            conversationId: conversation.id.uuidString,
+            range: 0..<10,
+            in: context
+        )
+
+        XCTAssertNil(page.fetchErrorDescription)
+        XCTAssertEqual(page.messageIDs, [optimistic.objectID])
+        XCTAssertEqual(page.totalCount, 1)
+    }
+
     func testInitialLoadCompletionStartsFalseAndPublishesAfterVisibleWindow() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 6)
         let configuration = VirtualScrollConfiguration(

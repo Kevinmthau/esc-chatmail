@@ -433,7 +433,7 @@ extension VirtualScrollState {
     /// compare objectIDs instead of faulting each inserted message's
     /// Conversation row for its UUID. Temporary IDs (optimistic unsaved
     /// conversations) are not cached — they change identity on save.
-    private func currentConversationObjectID() -> NSManagedObjectID? {
+    func currentConversationObjectID() -> NSManagedObjectID? {
         if let cachedConversationObjectID {
             return cachedConversationObjectID
         }

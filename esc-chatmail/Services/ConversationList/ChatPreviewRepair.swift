@@ -375,10 +375,17 @@ struct ChatPreviewRepair {
     ) throws -> RetryScope {
         // A record can outlive its conversation, so pending is checked first.
         guard !pendingConversationIDs.contains(entry.id) else { return .pending }
-        let existing = Conversation.fetchRequest()
+        // The rows are asked for by the conversation's objectID, not by
+        // `conversation.id`: that form joins every message to its
+        // conversation, and without SQLite statistics it reads the whole
+        // message table (`docs/scalability-review.md`,
+        // `chat-transcript-uuid-join-offset-paging`).
+        let existing = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
         existing.predicate = NSPredicate(format: "id == %@", entry.id as CVarArg)
-        if try context.count(for: existing) > 0 {
-            return .rows(NSPredicate(format: "conversation.id == %@", entry.id as CVarArg))
+        existing.resultType = .managedObjectIDResultType
+        existing.fetchLimit = 1
+        if let conversationObjectID = try context.fetch(existing).first {
+            return .rows(NSPredicate(format: "conversation == %@", conversationObjectID))
         }
         guard let participantHash = entry.participantHash else { return .gone }
         let survivors = NSFetchRequest<NSDictionary>(entityName: "Conversation")

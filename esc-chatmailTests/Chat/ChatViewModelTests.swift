@@ -953,8 +953,8 @@ final class ChatViewModelTests: XCTestCase {
             conversation: conversation,
             chatDependencies: chatDependencies
         )
-        let initialUnreadSnapshot = messageActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let initialUnreadSnapshot = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         let laterMessage = MessageBuilder()

@@ -129,14 +129,12 @@ final class MessageActions: ObservableObject {
 
     func markConversationAsRead(conversation: Conversation) async {
         await performAccountWork { syncRun in
-            let context = self.coreDataStack.viewContext
-            let unreadInboxMessageIDs = self.snapshotUnreadInboxMessageObjectIDs(
-                for: conversation,
-                context: context
+            let conversationID = conversation.objectID
+            let unreadInboxMessageIDs = await self.snapshotUnreadInboxMessageObjectIDs(
+                conversationID: conversationID
             )
             guard !unreadInboxMessageIDs.isEmpty else { return }
 
-            let conversationID = conversation.objectID
             let conversationKey = conversationID.uriRepresentation().absoluteString
             await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
                 await self?.performMarkMessagesAsReadBatch(
@@ -149,19 +147,39 @@ final class MessageActions: ObservableObject {
     }
 
     /// Snapshots the unread message IDs that should be cleared when a chat opens.
-    /// Capturing these IDs on the main context avoids racing newer arrivals.
-    func snapshotUnreadInboxMessageObjectIDs(conversationID: UUID) -> [NSManagedObjectID] {
-        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-        request.predicate = NSPredicate(
-            format: "conversation.id == %@ AND isUnread == YES AND ANY labels.id == %@",
-            conversationID as CVarArg,
-            "INBOX"
-        )
-        request.fetchBatchSize = 50
-        request.includesPendingChanges = false
-        request.resultType = .managedObjectIDResultType
+    /// Marking exactly these IDs, and not "whatever is unread" at the time
+    /// the mark runs, is what keeps a later arrival unread.
+    ///
+    /// The fetch runs on a background context and reads the store only: it
+    /// used to run on the main-queue view context at every chat open, driven
+    /// by an index over every unread message in the mailbox
+    /// (`docs/scalability-review.md`, `chat-open-unread-snapshot`).
+    /// `MessagePredicates.unreadInInbox` says how the predicate avoids that
+    /// index. An unsaved conversation has no stored messages to snapshot.
+    func snapshotUnreadInboxMessageObjectIDs(
+        conversationID: NSManagedObjectID
+    ) async -> [NSManagedObjectID] {
+        guard !conversationID.isTemporaryID else { return [] }
 
-        return (try? coreDataStack.viewContext.fetch(request)) ?? []
+        let context = coreDataStack.newBackgroundContext()
+        return await context.perform {
+            let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+            request.predicate = MessagePredicates.unreadInInbox(conversationObjectID: conversationID)
+            request.fetchBatchSize = 50
+            request.includesPendingChanges = false
+            request.resultType = .managedObjectIDResultType
+
+            do {
+                return try context.fetch(request)
+            } catch {
+                Log.error(
+                    "Failed to snapshot unread INBOX message IDs for conversation",
+                    category: .coreData,
+                    error: error
+                )
+                return []
+            }
+        }
     }
 
     /// Filters an exact insertion set down to unread INBOX messages.
@@ -327,8 +345,9 @@ final class MessageActions: ObservableObject {
             let modificationDate = Date()
             var sourceConversationId: UUID?
 
+            let messagesByID = Self.fetchMessagesWithLabels(messageIDs, in: context)
             for messageID in messageIDs {
-                guard let message = try? context.existingObject(with: messageID) as? Message else { continue }
+                guard let message = messagesByID[messageID] else { continue }
                 guard message.isUnread,
                       message.conversation?.objectID == conversationID,
                       message.labels?.contains(where: { $0.id == "INBOX" }) == true else {
@@ -700,27 +719,6 @@ final class MessageActions: ObservableObject {
         }
     }
 
-    private func snapshotUnreadInboxMessageObjectIDs(
-        for conversation: Conversation,
-        context: NSManagedObjectContext
-    ) -> [NSManagedObjectID] {
-        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            NSPredicate(format: "conversation == %@", conversation),
-            NSPredicate(format: "ANY labels.id == %@", "INBOX"),
-            NSPredicate(format: "isUnread == YES")
-        ])
-        request.fetchBatchSize = 50
-        request.resultType = .managedObjectIDResultType
-
-        do {
-            return try context.fetch(request)
-        } catch {
-            Log.error("Failed to snapshot unread INBOX message IDs for conversation", category: .coreData, error: error)
-            return []
-        }
-    }
-
     private func updateConversationInboxStatus(_ conversation: Conversation) {
         let context = coreDataStack.viewContext
         let inboxMessages = fetchInboxMessages(for: conversation, context: context)
@@ -764,12 +762,53 @@ final class MessageActions: ObservableObject {
         conversation: Conversation
     ) throws -> Int {
         let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            NSPredicate(format: "conversation == %@", conversation),
-            NSPredicate(format: "ANY labels.id == %@", "INBOX"),
-            NSPredicate(format: "isUnread == YES")
-        ])
+        request.predicate = MessagePredicates.unreadInInbox(conversationObjectID: conversation.objectID)
         return try context.count(for: request)
+    }
+
+    /// How many messages one `SELF IN` fetch of a mark-read batch names.
+    nonisolated static let markReadFetchChunkSize = 500
+
+    /// The messages of a mark-read batch that the store still has, by
+    /// objectID, with their labels loaded. Call inside `context.perform`.
+    ///
+    /// One fetch per chunk, with the labels prefetched, replaces a row fault
+    /// and a labels fault for every message: a newsletter chat opened with
+    /// 5,000 unread took about 10,000 single-row round trips before its
+    /// badge cleared (`docs/scalability-review.md`,
+    /// `chat-open-unread-snapshot`). A chunk whose fetch fails marks nothing,
+    /// as a message that could not be loaded did before.
+    nonisolated private static func fetchMessagesWithLabels(
+        _ messageIDs: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) -> [NSManagedObjectID: Message] {
+        var messagesByID: [NSManagedObjectID: Message] = [:]
+        messagesByID.reserveCapacity(messageIDs.count)
+
+        var chunkStart = 0
+        while chunkStart < messageIDs.count {
+            let chunkEnd = min(chunkStart + markReadFetchChunkSize, messageIDs.count)
+            let chunk = Array(messageIDs[chunkStart..<chunkEnd])
+            chunkStart = chunkEnd
+
+            let request = NSFetchRequest<Message>(entityName: "Message")
+            request.predicate = NSPredicate(format: "SELF IN %@", chunk)
+            request.relationshipKeyPathsForPrefetching = ["labels"]
+            request.returnsObjectsAsFaults = false
+
+            do {
+                for message in try context.fetch(request) {
+                    messagesByID[message.objectID] = message
+                }
+            } catch {
+                Log.error(
+                    "Failed to load a chunk of messages to mark as read",
+                    category: .coreData,
+                    error: error
+                )
+            }
+        }
+        return messagesByID
     }
 
     private func fetchLabel(id: String, in context: NSManagedObjectContext, operation: String) -> Label? {

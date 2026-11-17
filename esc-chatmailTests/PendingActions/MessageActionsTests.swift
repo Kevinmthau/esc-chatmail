@@ -390,8 +390,8 @@ final class MessageActionsTests: XCTestCase {
             .inConversation(conversation)
             .build(in: viewContext)
         try saveViewContext()
-        let messageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDs = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         await messageActions.markMessagesAsReadBatch(
@@ -506,8 +506,8 @@ final class MessageActionsTests: XCTestCase {
         initialMessage.addToLabels(inboxLabel)
         try saveViewContext()
 
-        let messageIDsAtOpen = messageActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDsAtOpen = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         let laterMessage = MessageBuilder()
@@ -832,6 +832,94 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
+    /// The chat-open snapshot names this conversation's unread INBOX messages
+    /// and nothing else: not another conversation's unread mail, and not the
+    /// read or non-INBOX messages of this one.
+    ///
+    /// Revert-check: dropping `conversation == %@` from
+    /// `MessagePredicates.unreadInInbox` adds "other-chat-unread".
+    func testSnapshotUnreadInboxMessageObjectIDs_namesOnlyThisConversationsUnreadInboxMessages() async throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let otherConversation = ConversationBuilder().visible().build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+
+        func message(_ id: String, unread: Bool, inInbox: Bool, in conversation: Conversation) -> Message {
+            let builder = MessageBuilder().withId(id).inConversation(conversation)
+            let message = (unread ? builder.unread() : builder.read()).build(in: viewContext)
+            if inInbox { message.addToLabels(inboxLabel) }
+            return message
+        }
+        let firstUnread = message("first-unread", unread: true, inInbox: true, in: conversation)
+        let secondUnread = message("second-unread", unread: true, inInbox: true, in: conversation)
+        _ = message("read-inbox", unread: false, inInbox: true, in: conversation)
+        _ = message("unread-not-in-inbox", unread: true, inInbox: false, in: conversation)
+        _ = message("other-chat-unread", unread: true, inInbox: true, in: otherConversation)
+        try saveViewContext()
+
+        let snapshot = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
+        )
+
+        XCTAssertEqual(Set(snapshot), [firstUnread.objectID, secondUnread.objectID])
+        XCTAssertEqual(snapshot.count, 2)
+    }
+
+    /// An unsaved conversation has a temporary objectID and no stored
+    /// messages; its snapshot is empty.
+    ///
+    /// HONEST SCOPE: this pins the answer, not the guard. Without the
+    /// `isTemporaryID` guard the fetch is asked about an ID the store has no
+    /// row for, and what Core Data does with that is not something the app
+    /// should depend on.
+    func testSnapshotUnreadInboxMessageObjectIDs_unsavedConversation_isEmpty() async throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        XCTAssertTrue(conversation.objectID.isTemporaryID)
+
+        let snapshot = await messageActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
+        )
+
+        XCTAssertEqual(snapshot, [])
+    }
+
+    /// A batch larger than one fetch chunk marks every message, recomputes
+    /// the unread count once, and queues one conversation action naming them
+    /// all in the order they were passed.
+    ///
+    /// Revert-check: making `MessageActions.fetchMessagesWithLabels` stop
+    /// after its first chunk leaves the last three messages unread and out
+    /// of the queued action.
+    func testMarkMessagesAsReadBatch_moreThanOneFetchChunk_marksEveryMessageAndQueuesOneAction() async throws {
+        let messageCount = MessageActions.markReadFetchChunkSize + 3
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(Int32(messageCount))
+            .build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+        let messages = (0..<messageCount).map { index in
+            let message = MessageBuilder()
+                .withId(String(format: "chunked-%04d", index))
+                .unread()
+                .inConversation(conversation)
+                .build(in: viewContext)
+            message.addToLabels(inboxLabel)
+            return message
+        }
+        try saveViewContext()
+
+        await messageActions.markMessagesAsReadBatch(
+            messageIDs: messages.map(\.objectID),
+            conversationID: conversation.objectID
+        )
+
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(messages.filter(\.isUnread).map(\.id), [])
+        XCTAssertEqual(conversation.inboxUnreadCount, 0)
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedConversationActions.count, 1)
+        XCTAssertEqual(queuedConversationActions.first?.messageIds, messages.map(\.id))
+    }
+
     func testExactUnreadInboxSnapshotDoesNotIncludeUnrelatedOrNonInboxMessages() throws {
         let conversation = ConversationBuilder()
             .visible()
@@ -897,8 +985,8 @@ final class MessageActionsTests: XCTestCase {
             },
             syncRunCoordinator: syncRunCoordinator
         )
-        let messageIDs = failingActions.snapshotUnreadInboxMessageObjectIDs(
-            conversationID: conversation.id
+        let messageIDs = await failingActions.snapshotUnreadInboxMessageObjectIDs(
+            conversationID: conversation.objectID
         )
 
         await failingActions.markMessagesAsReadBatch(

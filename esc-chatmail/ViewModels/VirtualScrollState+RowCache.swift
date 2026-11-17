@@ -105,7 +105,14 @@ extension VirtualScrollState {
         guard let conversationUUID = UUID(uuidString: conversationId) else { return nil }
 
         let request = NSFetchRequest<Message>(entityName: "Message")
-        request.predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
+        // `currentConversationObjectID` caches permanent IDs only, so an
+        // unsaved conversation keeps the UUID form.
+        if let conversationObjectID = currentConversationObjectID(),
+           !conversationObjectID.isTemporaryID {
+            request.predicate = MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID)
+        } else {
+            request.predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
+        }
         request.sortDescriptors = Self.messageSortDescriptors
         request.fetchOffset = index
         request.fetchLimit = 1
@@ -187,17 +194,24 @@ extension VirtualScrollState {
             return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
         }
 
-        let predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
-        nonisolated(unsafe) let safePredicate = predicate
-
         return await context.perform {
             do {
+                // This load reads the store only, and a conversation the
+                // store has no row for has no stored messages either.
+                guard let predicate = try transcriptPredicate(
+                    conversationUUID: conversationUUID,
+                    includesPendingChanges: false,
+                    in: context
+                ) else {
+                    return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
+                }
+
                 let messageIDs: [NSManagedObjectID]
                 if range.isEmpty {
                     messageIDs = []
                 } else {
                     let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
-                    request.predicate = safePredicate
+                    request.predicate = predicate
                     request.sortDescriptors = messageSortDescriptors
                     request.fetchOffset = range.lowerBound
                     request.fetchLimit = range.count
@@ -210,7 +224,7 @@ extension VirtualScrollState {
                 // Keep count() on the background context so window sizing stays cheap and
                 // the main actor only resolves the IDs it actually needs to render.
                 let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                countRequest.predicate = safePredicate
+                countRequest.predicate = predicate
                 countRequest.includesPendingChanges = false
                 let totalCount = try context.count(for: countRequest)
 
@@ -237,17 +251,23 @@ extension VirtualScrollState {
             return VirtualScrollMessagePage(messageIDs: [], totalCount: 0)
         }
 
-        let predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
-        nonisolated(unsafe) let safePredicate = predicate
-
         return await context.perform {
             do {
+                // With pending changes in play, a conversation this lookup
+                // cannot name (one deleted but not yet saved, say) keeps the
+                // UUID form and whatever it selected before.
+                let predicate = try transcriptPredicate(
+                    conversationUUID: conversationUUID,
+                    includesPendingChanges: true,
+                    in: context
+                ) ?? MessagePredicates.visibleInChat(conversationId: conversationUUID)
+
                 let messages: [Message]
                 if range.isEmpty {
                     messages = []
                 } else {
                     let request = NSFetchRequest<Message>(entityName: "Message")
-                    request.predicate = safePredicate
+                    request.predicate = predicate
                     request.sortDescriptors = messageSortDescriptors
                     request.fetchOffset = range.lowerBound
                     request.fetchLimit = range.count
@@ -257,7 +277,7 @@ extension VirtualScrollState {
                 }
 
                 let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
-                countRequest.predicate = safePredicate
+                countRequest.predicate = predicate
                 countRequest.includesPendingChanges = true
                 let totalCount = try context.count(for: countRequest)
 
@@ -273,6 +293,41 @@ extension VirtualScrollState {
                 )
             }
         }
+    }
+
+    /// The transcript's predicate for the conversation with this UUID, or nil
+    /// when `context` finds no such conversation. Call inside
+    /// `context.perform`.
+    ///
+    /// The conversation is looked up once, by its UUID, and the messages are
+    /// then asked for by its objectID, which SQLite answers from the
+    /// conversation's own message index whatever statistics the store has.
+    /// Filtering messages on `conversation.id` instead joins every message to
+    /// its conversation, and without statistics SQLite reads the whole
+    /// message table for a page and again for its count
+    /// (`docs/scalability-review.md`, `chat-transcript-uuid-join-offset-paging`).
+    ///
+    /// A conversation that is not saved yet has a temporary objectID, which
+    /// names no row; it keeps the UUID form, which also matches its unsaved
+    /// messages. (Core Data did answer the object form for a temporary ID on
+    /// the context that holds it when this was written, but nothing says it
+    /// must, and a background context cannot resolve one at all.)
+    nonisolated static func transcriptPredicate(
+        conversationUUID: UUID,
+        includesPendingChanges: Bool,
+        in context: NSManagedObjectContext
+    ) throws -> NSPredicate? {
+        let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+        request.predicate = ConversationPredicates.id(conversationUUID)
+        request.resultType = .managedObjectIDResultType
+        request.fetchLimit = 1
+        request.includesPendingChanges = includesPendingChanges
+
+        guard let conversationObjectID = try context.fetch(request).first else { return nil }
+        guard !conversationObjectID.isTemporaryID else {
+            return MessagePredicates.visibleInChat(conversationId: conversationUUID)
+        }
+        return MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID)
     }
 
     nonisolated private static var messageSortDescriptors: [NSSortDescriptor] {
