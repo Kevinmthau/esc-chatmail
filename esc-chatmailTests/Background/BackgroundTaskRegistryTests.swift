@@ -102,5 +102,135 @@ final class BackgroundTaskRegistryTests: XCTestCase {
 
         XCTAssertTrue(spy.submittedRequests.isEmpty)
     }
+
+    // MARK: - A fired task
+
+    // Revert-check: `BackgroundTaskRegistry.runTaskOperation`. Its
+    // expiration handler cancels the handler's task (drop
+    // `cancellationLatch.expire()` and the handler never sees the
+    // cancellation, so it runs to its own deadline) and leaves the completion
+    // to the handler's return (complete from the expiration handler, as the
+    // code before did, and the task is completed twice, the first time while
+    // the handler still runs).
+    func testRunTaskOperation_expiration_cancelsTheHandlerAndCompletesOnceAfterItReturns() async {
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
+        registry.register(config: .dailyProcessing(identifier: "task.expiring"), handler: { true })
+        let run = FiredTaskRecorder()
+        let handlerStarted = expectation(description: "handler started")
+        let completed = expectation(description: "task completed")
+        var expire: (() -> Void)?
+
+        registry.runTaskOperation(
+            identifier: "task.expiring",
+            handler: {
+                handlerStarted.fulfill()
+                // Stands in for a maintenance pass: it stops when it is
+                // cancelled, and reports success anyway.
+                let deadline = Date().addingTimeInterval(5)
+                while !Task.isCancelled, Date() < deadline {
+                    try? await Task.sleep(nanoseconds: 2_000_000)
+                }
+                run.handlerReturned(sawCancellation: Task.isCancelled)
+                return true
+            },
+            installExpirationHandler: { expire = $0 },
+            onComplete: { success in
+                run.completed(success: success)
+                completed.fulfill()
+            }
+        )
+        await fulfillment(of: [handlerStarted], timeout: 2)
+        XCTAssertTrue(run.completions.isEmpty)
+
+        expire?()
+        XCTAssertTrue(
+            run.completions.isEmpty || run.didHandlerReturn,
+            "Expiration must not complete the task while its handler still runs"
+        )
+        await fulfillment(of: [completed], timeout: 4)
+
+        XCTAssertTrue(run.sawCancellation, "Expiration cancels the handler's task")
+        XCTAssertEqual(run.completions, [false], "Completed once, and an expired task is a failed one")
+        XCTAssertTrue(run.handlerReturnedBeforeCompletion)
+    }
+
+    // Revert-check: the order of `self.schedule(identifier)` and
+    // `completionLatch.complete(success:)` in `runTaskOperation`. iOS may
+    // suspend the process as soon as the task is completed, so the next
+    // request has to be with the system by then.
+    func testRunTaskOperation_handlerFinishes_rearmsBeforeItCompletes() async {
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
+        registry.register(config: .dailyProcessing(identifier: "task.finishing"), handler: { true })
+        let run = FiredTaskRecorder()
+        let completed = expectation(description: "task completed")
+
+        registry.runTaskOperation(
+            identifier: "task.finishing",
+            handler: { true },
+            installExpirationHandler: { _ in },
+            onComplete: { success in
+                run.completed(success: success, submittedSoFar: spy.submittedRequests.map(\.identifier))
+                completed.fulfill()
+            }
+        )
+        await fulfillment(of: [completed], timeout: 2)
+
+        XCTAssertEqual(run.completions, [true])
+        XCTAssertEqual(run.submittedAtCompletion, ["task.finishing"])
+    }
+
+    // Revert-check: `BackgroundTaskRegistry.retire`. It registers a launch
+    // handler and cancels the waiting request, and gives the identifier no
+    // configuration, so no schedule call can submit it again.
+    func testRetire_keepsALaunchHandlerCancelsThePendingRequestAndCannotBeScheduled() async {
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
+
+        registry.retire("task.retired")
+        registry.schedule("task.retired")
+        await registry.scheduleIfNotPending(["task.retired"])
+        registry.scheduleAll()
+
+        XCTAssertEqual(spy.registeredIdentifiers, ["task.retired"])
+        XCTAssertEqual(spy.cancelledIdentifiers, ["task.retired"])
+        XCTAssertTrue(spy.submittedRequests.isEmpty)
+    }
+}
+
+/// What a fired task's handler and completion did, in order.
+///
+/// `@unchecked Sendable`: every read and write is made under `lock`.
+private final class FiredTaskRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completionResults: [Bool] = []
+    private var handlerDidReturn = false
+    private var handlerSawCancellation = false
+    private var returnedBeforeCompletion = false
+    private var submitted: [String] = []
+
+    func handlerReturned(sawCancellation: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        handlerDidReturn = true
+        handlerSawCancellation = sawCancellation
+    }
+
+    func completed(success: Bool, submittedSoFar: [String] = []) {
+        lock.lock()
+        defer { lock.unlock() }
+        if completionResults.isEmpty {
+            returnedBeforeCompletion = handlerDidReturn
+            submitted = submittedSoFar
+        }
+        completionResults.append(success)
+    }
+
+    var completions: [Bool] { lock.lock(); defer { lock.unlock() }; return completionResults }
+    var didHandlerReturn: Bool { lock.lock(); defer { lock.unlock() }; return handlerDidReturn }
+    var sawCancellation: Bool { lock.lock(); defer { lock.unlock() }; return handlerSawCancellation }
+    var handlerReturnedBeforeCompletion: Bool { lock.lock(); defer { lock.unlock() }; return returnedBeforeCompletion }
+    var submittedAtCompletion: [String] { lock.lock(); defer { lock.unlock() }; return submitted }
 }
 #endif

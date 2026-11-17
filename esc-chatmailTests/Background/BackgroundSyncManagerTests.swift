@@ -116,6 +116,10 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(budgets.map(\.historyPageSize), [100, 500])
         XCTAssertFalse(BackgroundMailboxSyncBudget.appRefresh.allowsExpensiveRecovery)
         XCTAssertTrue(BackgroundMailboxSyncBudget.processing.allowsExpensiveRecovery)
+        // The 6-hour store-wide passes follow a processing task's sync and
+        // never an app refresh's, which has about half a minute.
+        XCTAssertFalse(BackgroundMailboxSyncBudget.appRefresh.allowsStoreMaintenance)
+        XCTAssertTrue(BackgroundMailboxSyncBudget.processing.allowsStoreMaintenance)
     }
 
     func testModelV3Executor_incompleteHistorySchedulesCatchUpAndFailsTask() async {

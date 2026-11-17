@@ -147,6 +147,85 @@ final class SyncRunCoordinatorTests: XCTestCase {
         }
     }
 
+    // Revert-check: `SyncRunCoordinator.acquireRunWithTask`, which registers
+    // the task with the run it takes. A run taken with `acquireRun` has no
+    // task, and quiescence then cancels nothing.
+    func testAcquireRunWithTask_waitsForTheBoundaryThenQuiescenceCancelsItsTask() async throws {
+        let coordinator = SyncRunCoordinator()
+        let beganRun = await coordinator.beginRun(kind: .foregroundIncremental)
+        let activeRun = try XCTUnwrap(beganRun)
+        let madeRequest = await coordinator.makeAccountWorkRequest()
+        let request = try XCTUnwrap(madeRequest)
+        let builtTask = LockedFlag()
+
+        let acquisition = Task {
+            await coordinator.acquireRunWithTask(kind: .maintenance, for: request) { _ in
+                builtTask.set()
+                return Task {
+                    // Long enough to outlast the test, short enough that a
+                    // task nothing cancels fails it and does not hang it.
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+            }
+        }
+        await coordinator.waitUntilWorkIsWaiting()
+        XCTAssertFalse(builtTask.isSet, "The task is built only once the run is taken")
+
+        await coordinator.endRun(activeRun)
+        let acquired = await acquisition.value
+        let maintenance = try XCTUnwrap(acquired)
+        let activeKind = await coordinator.activeRunKind()
+        XCTAssertEqual(activeKind, .maintenance)
+
+        let quiescenceTask = Task {
+            await coordinator.beginQuiescence()
+        }
+        do {
+            try await maintenance.task.value
+            XCTFail("Account teardown must cancel a maintenance run's task")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+        await coordinator.endRun(maintenance.run)
+        await quiescenceTask.value
+        await coordinator.endQuiescence()
+    }
+
+    // Revert-check: the `request.generation == accountGeneration` guard in
+    // `SyncRunCoordinator.acquireRunWithTask`. Work queued for one account
+    // must not build its task on the next account's store.
+    func testAcquireRunWithTask_accountTransitionWhileWaiting_buildsNoTask() async throws {
+        let coordinator = SyncRunCoordinator()
+        let beganRun = await coordinator.beginRun(kind: .foregroundIncremental)
+        let activeRun = try XCTUnwrap(beganRun)
+        let madeRequest = await coordinator.makeAccountWorkRequest()
+        let request = try XCTUnwrap(madeRequest)
+        let builtTask = LockedFlag()
+
+        let acquisition = Task {
+            await coordinator.acquireRunWithTask(kind: .maintenance, for: request) { _ in
+                builtTask.set()
+                return Task {}
+            }
+        }
+        await coordinator.waitUntilWorkIsWaiting()
+        let quiescenceTask = Task {
+            await coordinator.beginQuiescence()
+        }
+        while await coordinator.makeAccountWorkRequest() != nil {
+            await Task.yield()
+        }
+        await coordinator.endRun(activeRun)
+        await quiescenceTask.value
+        await coordinator.endQuiescence()
+
+        let acquired = await acquisition.value
+        XCTAssertNil(acquired)
+        XCTAssertFalse(builtTask.isSet)
+    }
+
     func testConcurrentQuiescenceOwnersAreSerializedWithoutReopeningRunBoundary() async {
         let coordinator = SyncRunCoordinator()
         await coordinator.beginQuiescence()

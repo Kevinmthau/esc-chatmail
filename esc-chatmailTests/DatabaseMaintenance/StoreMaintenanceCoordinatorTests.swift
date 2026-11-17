@@ -132,6 +132,86 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
         XCTAssertFalse(succeeded)
         XCTAssertFalse(didRunOperation)
     }
+
+    // MARK: - Cancelling a running operation
+
+    // Revert-check: `acquireRunWithTask` in
+    // `StoreMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle`. Taken
+    // with `acquireRun`, the run has no task, `beginQuiescence()` has nothing
+    // to cancel, and a sign-out waits for the whole operation: here the
+    // operation runs to its own deadline and never sees a cancellation.
+    func testBeginQuiescence_cancelsTheRunningOperationAndWaitsForItToEnd() async {
+        let syncRunCoordinator = SyncRunCoordinator()
+        let coordinator = StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+        let operationStarted = expectation(description: "maintenance operation started")
+        let sawCancellation = AsyncFlag()
+        let operationEnded = AsyncFlag()
+
+        let maintenance = Task {
+            await coordinator.runExclusivelyWhenStoreIsIdle(operationName: "test cleanup") {
+                operationStarted.fulfill()
+                if await Self.waitForCancellation(deadline: 5) {
+                    await sawCancellation.set()
+                }
+                await operationEnded.set()
+                return true
+            }
+        }
+        await fulfillment(of: [operationStarted], timeout: 2)
+
+        await syncRunCoordinator.beginQuiescence()
+
+        let endedBeforeQuiescenceReturned = await operationEnded.value
+        XCTAssertTrue(endedBeforeQuiescenceReturned, "Quiescence still drains the run it cancelled")
+        let cancelled = await sawCancellation.value
+        XCTAssertTrue(cancelled, "An account transition cancels a running maintenance operation")
+        let isRunning = await syncRunCoordinator.isRunning()
+        XCTAssertFalse(isRunning)
+        await syncRunCoordinator.endQuiescence()
+        _ = await maintenance.value
+    }
+
+    // Revert-check: the `withTaskCancellationHandler` in
+    // `StoreMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle`. The
+    // operation runs in a task of its own, so without the handler the
+    // cancellation of the caller, which is how a background task's
+    // expiration arrives, stops nothing.
+    func testCancellingTheCaller_cancelsTheRunningOperation() async {
+        let syncRunCoordinator = SyncRunCoordinator()
+        let coordinator = StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+        let operationStarted = expectation(description: "maintenance operation started")
+        let sawCancellation = AsyncFlag()
+
+        let maintenance = Task {
+            await coordinator.runExclusivelyWhenStoreIsIdle(operationName: "test cleanup") {
+                operationStarted.fulfill()
+                if await Self.waitForCancellation(deadline: 5) {
+                    await sawCancellation.set()
+                }
+                return true
+            }
+        }
+        await fulfillment(of: [operationStarted], timeout: 2)
+
+        maintenance.cancel()
+        _ = await maintenance.value
+
+        let cancelled = await sawCancellation.value
+        XCTAssertTrue(cancelled)
+        let isRunning = await syncRunCoordinator.isRunning()
+        XCTAssertFalse(isRunning, "The run is ended once the cancelled operation has returned")
+    }
+
+    /// Stands in for a maintenance operation's work: returns true as soon as
+    /// its task is cancelled, false if `deadline` seconds pass first.
+    nonisolated private static func waitForCancellation(deadline: TimeInterval) async -> Bool {
+        let end = Date().addingTimeInterval(deadline)
+        while Date() < end {
+            if Task.isCancelled { return true }
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+        return Task.isCancelled
+    }
 }
 
 private actor AsyncGate {

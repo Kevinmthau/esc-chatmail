@@ -520,6 +520,9 @@ final class IncrementalSyncOrchestrator {
                 detail: "rollups=\(modifiedConversations.count) names=\(displayNameOnlyConversations.count)"
             )
 
+            // The flag-gated migrations only. The store-wide maintenance
+            // passes are a run of their own, which `SyncEngine` starts once
+            // this run has ended (`runStoreMaintenanceAfterSync()`).
             let cleanupTimer = timing.start("incrementalCleanup")
             await dataCleanupService.runIncrementalCleanup()
             timing.finish(cleanupTimer)

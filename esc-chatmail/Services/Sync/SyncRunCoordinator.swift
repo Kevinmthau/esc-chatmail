@@ -130,6 +130,39 @@ actor SyncRunCoordinator {
         }
     }
 
+    /// `acquireRun(kind:for:)` for work that can be cancelled: the task
+    /// `taskBuilder` makes is registered with the run in the turn the run is
+    /// taken, so `beginQuiescence()` finds either no run or a run it can
+    /// cancel. Store maintenance takes its run this way. Taken through
+    /// `acquireRun`, with no task, a sign-out waited for the whole of a
+    /// maintenance operation before it could start.
+    ///
+    /// Cancelling shortens the drain and does not replace it: the caller
+    /// still awaits the task and ends the run, and quiescence still waits
+    /// for that.
+    func acquireRunWithTask(
+        kind: SyncRunKind,
+        for request: AccountWorkRequest,
+        taskBuilder: (SyncRun) -> Task<Void, Error>
+    ) async -> SyncRunTask? {
+        while true {
+            guard !Task.isCancelled,
+                  !isQuiescing,
+                  request.generation == accountGeneration else {
+                return nil
+            }
+
+            if activeRun == nil {
+                let run = SyncRun(id: UUID(), kind: kind)
+                let task = taskBuilder(run)
+                activeRun = ActiveRun(run: run, task: task)
+                return SyncRunTask(run: run, task: task)
+            }
+
+            await parkUntilIdle()
+        }
+    }
+
     /// Grants a non-exclusive, account-scoped lease. Unlike `acquireRun`, this
     /// never waits for the single-flight boundary, so an optimistic local
     /// mutation and its durable enqueue are not serialized behind an unrelated

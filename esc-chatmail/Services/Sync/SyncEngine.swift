@@ -98,6 +98,10 @@ final class SyncEngine: ObservableObject, Sendable {
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
     private let availableStorageBytes: @Sendable () -> Int64?
+    /// Runs the 6-hour store maintenance if it is due, as a run of its own
+    /// (`DataCleanupService.runStoreMaintenanceIfDue`). Called only after an
+    /// incremental run has ended; see `runStoreMaintenanceAfterSync()`.
+    private let runDueStoreMaintenance: @Sendable () async -> Void
 
     private let log = LogCategory.sync.logger
 
@@ -132,7 +136,8 @@ final class SyncEngine: ObservableObject, Sendable {
         networkMonitor: NetworkMonitorService,
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
-        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() }
+        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
+        runDueStoreMaintenance: (@Sendable () async -> Void)? = nil
     ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
@@ -145,6 +150,9 @@ final class SyncEngine: ObservableObject, Sendable {
         self.syncRunCoordinator = syncRunCoordinator
         self.clock = clock
         self.availableStorageBytes = availableStorageBytes
+        self.runDueStoreMaintenance = runDueStoreMaintenance ?? {
+            await dataCleanupService.runStoreMaintenanceIfDue()
+        }
 
         self.initialSyncOrchestrator = InitialSyncOrchestrator(
             messageFetcher: messageFetcher,
@@ -219,6 +227,7 @@ final class SyncEngine: ObservableObject, Sendable {
                     return
                 }
                 completion(result.needsFollowUp)
+                await self.runStoreMaintenanceAfterSync()
             }
             return .started
         case .alreadyInProgress:
@@ -257,6 +266,12 @@ final class SyncEngine: ObservableObject, Sendable {
                   let result = await resultRecorder.recordedResult() else {
                 return .failed
             }
+            // A processing task has the time for the store-wide passes and
+            // an app refresh does not. Awaited here, inside the background
+            // task's own worker, so its expiration cancels them.
+            if budget.allowsStoreMaintenance {
+                await runStoreMaintenanceAfterSync()
+            }
             return result.needsFollowUp ? .needsFollowUp : .completed
         case .alreadyInProgress:
             let activeKind = await syncRunCoordinator.activeRunKind()
@@ -267,6 +282,20 @@ final class SyncEngine: ObservableObject, Sendable {
         case .skippedInsufficientStorage:
             return .deferredForInsufficientStorage
         }
+    }
+
+    /// Runs the store-wide maintenance passes, if they are due, after an
+    /// incremental run that succeeded.
+    ///
+    /// Only ever called once `runSyncTask` has ended the sync's run. The
+    /// passes take the exclusive run themselves, so from inside a run they
+    /// would wait for a boundary their own caller holds. They ran inside
+    /// the sync's run, ahead of `.syncCompleted`: every six hours one sync
+    /// kept its run, its progress and everything waiting on it for all of
+    /// them. Whoever was waiting for the sync
+    /// (`waitForCurrentSyncToComplete()`) is released before they start.
+    private func runStoreMaintenanceAfterSync() async {
+        await runDueStoreMaintenance()
     }
 
     func waitForCurrentSyncToComplete() async {

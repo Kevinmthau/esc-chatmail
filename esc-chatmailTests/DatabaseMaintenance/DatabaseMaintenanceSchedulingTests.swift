@@ -12,8 +12,7 @@ import BackgroundTasks
 @MainActor
 final class DatabaseMaintenanceSchedulingTests: XCTestCase {
 
-    private static let allMaintenanceIdentifiers = [
-        DatabaseMaintenanceService.vacuumTaskIdentifier,
+    private static let scheduledMaintenanceIdentifiers = [
         DatabaseMaintenanceService.analyzeTaskIdentifier,
         DatabaseMaintenanceService.cleanupTaskIdentifier
     ]
@@ -22,27 +21,56 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
         DatabaseMaintenanceService(taskRegistry: spy.makeRegistry())
     }
 
-    func testInit_registersAllThreeMaintenanceTasks() {
+    // Revert-check: the `taskRegistry.retire(Self.retiredVacuumTaskIdentifier)`
+    // call in `DatabaseMaintenanceService.registerBackgroundTasks()`. A device
+    // that ran a build which scheduled the weekly vacuum can have a request
+    // for it waiting, and `BGTaskScheduler` raises when it launches the app
+    // for an identifier with no launch handler: the identifier must still be
+    // registered, and the waiting request cancelled.
+    func testInit_registersBothMaintenanceTasks_andKeepsAHandlerForTheRetiredVacuum() {
         let spy = BackgroundTaskRegistrySchedulerSpy()
         _ = makeService(spy: spy)
 
         XCTAssertEqual(
             spy.registeredIdentifiers.sorted(),
-            Self.allMaintenanceIdentifiers.sorted()
+            (Self.scheduledMaintenanceIdentifiers + [DatabaseMaintenanceService.retiredVacuumTaskIdentifier]).sorted()
+        )
+        XCTAssertEqual(
+            spy.cancelledIdentifiers,
+            [DatabaseMaintenanceService.retiredVacuumTaskIdentifier],
+            "The request an earlier build left with the system is cancelled"
+        )
+    }
+
+    // Revert-check: register the vacuum identifier with
+    // `register(config:handler:)` again in place of `retire`. `retire` gives
+    // the identifier no configuration, so no schedule call can submit it,
+    // whichever list it is named in.
+    func testScheduleMaintenanceTasks_neverSubmitsTheRetiredVacuum() async {
+        let spy = BackgroundTaskRegistrySchedulerSpy()
+        let registry = spy.makeRegistry()
+        let service = DatabaseMaintenanceService(taskRegistry: registry)
+
+        await service.scheduleMaintenanceTasks()
+        registry.schedule(DatabaseMaintenanceService.retiredVacuumTaskIdentifier)
+        registry.scheduleAll()
+
+        XCTAssertFalse(
+            spy.submittedRequests.map(\.identifier).contains(DatabaseMaintenanceService.retiredVacuumTaskIdentifier)
         )
     }
 
     // Revert-check: fails if `DatabaseMaintenanceService.scheduleMaintenanceTasks()`
     // reverts to unconditional `taskRegistry.schedule(_:)` calls instead of
     // routing through `BackgroundTaskRegistry.scheduleIfNotPending(_:)`. The
-    // unguarded shape re-submitted (and thereby REPLACED) all three pending
-    // requests on every cold launch, so a user who launches daily perpetually
-    // reset the 24h/7d `earliestBeginDate` clocks and no maintenance task ever
+    // unguarded shape re-submitted (and thereby REPLACED) every pending
+    // request on every cold launch, so a user who launches daily perpetually
+    // reset the 24h `earliestBeginDate` clocks and no maintenance task ever
     // became eligible to fire.
     func testScheduleMaintenanceTasks_allRequestsStillPending_replacesNothing() async {
         let spy = BackgroundTaskRegistrySchedulerSpy()
         let service = makeService(spy: spy)
-        spy.pendingIdentifiers = Set(Self.allMaintenanceIdentifiers)
+        spy.pendingIdentifiers = Set(Self.scheduledMaintenanceIdentifiers)
 
         await service.scheduleMaintenanceTasks()
 
@@ -50,10 +78,10 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
             spy.submittedRequests.isEmpty,
             "A cold launch must not replace still-pending maintenance requests"
         )
-        XCTAssertEqual(spy.pendingFetchCount, 1, "One pending fetch serves all three identifiers")
+        XCTAssertEqual(spy.pendingFetchCount, 1, "One pending fetch serves both identifiers")
     }
 
-    func testScheduleMaintenanceTasks_noRequestsPending_submitsAllThree() async {
+    func testScheduleMaintenanceTasks_noRequestsPending_submitsBoth() async {
         let spy = BackgroundTaskRegistrySchedulerSpy()
         let service = makeService(spy: spy)
 
@@ -61,7 +89,7 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
 
         XCTAssertEqual(
             spy.submittedRequests.map(\.identifier).sorted(),
-            Self.allMaintenanceIdentifiers.sorted()
+            Self.scheduledMaintenanceIdentifiers.sorted()
         )
     }
 
@@ -73,11 +101,8 @@ final class DatabaseMaintenanceSchedulingTests: XCTestCase {
         await service.scheduleMaintenanceTasks()
 
         XCTAssertEqual(
-            spy.submittedRequests.map(\.identifier).sorted(),
-            [
-                DatabaseMaintenanceService.cleanupTaskIdentifier,
-                DatabaseMaintenanceService.vacuumTaskIdentifier
-            ].sorted()
+            spy.submittedRequests.map(\.identifier),
+            [DatabaseMaintenanceService.cleanupTaskIdentifier]
         )
     }
 }

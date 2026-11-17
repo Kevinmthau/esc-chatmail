@@ -17,6 +17,8 @@ extension DatabaseMaintenanceService {
         let context = coreDataStack.newBackgroundContext()
         let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
 
+        guard !Task.isCancelled else { return false }
+
         // Best-effort, isolated from the rest of cleanup: a purge failure must
         // not abort attachment cleanup below (which bails on the first false).
         await context.perform {
@@ -65,11 +67,23 @@ extension DatabaseMaintenanceService {
             return false
         }
 
+        // The two file sweeps list whole directories. A run that was
+        // cancelled (a background task's expiration, a sign-out's
+        // quiescence) leaves them to the next one: an orphan file costs disk
+        // space and nothing else.
+        guard !Task.isCancelled else {
+            Log.info("Database cleanup cancelled before its orphan-file sweeps", category: .coreData)
+            return false
+        }
         await Self.cleanupOrphanedHTMLFiles(
             in: context,
             htmlContentHandler: htmlContentHandler,
             expectedGeneration: htmlAccountGeneration
         )
+        guard !Task.isCancelled else {
+            Log.info("Database cleanup cancelled before its attachment-file sweep", category: .coreData)
+            return false
+        }
         await AttachmentDownloader.shared.cleanupOrphanedFiles()
         return true
     }
