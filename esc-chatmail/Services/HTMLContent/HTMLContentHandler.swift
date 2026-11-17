@@ -119,16 +119,12 @@ final class HTMLContentHandler: @unchecked Sendable {
         self.directoryKey = self.messagesDirectory.standardizedFileURL.path
         self.accountBoundary = HTMLContentAccountBoundaryRegistry.boundary(for: self.directoryKey)
         self.deleteHTMLFiles = deleteHTMLFiles ?? { directory in
-            guard FileManager.default.fileExists(atPath: directory.path) else {
-                return
-            }
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil
+            // One rename, however many bodies there are; the unlinks follow in the
+            // background and nothing waits for them (`RetiredAccountDirectory`).
+            // `reopenAccountWork` makes the directory again.
+            RetiredAccountDirectory.removeInBackground(
+                try RetiredAccountDirectory.takeOutOfUse(directory)
             )
-            for fileURL in contents {
-                try FileManager.default.removeItem(at: fileURL)
-            }
         }
         createMessagesDirectoryIfNeeded()
     }
@@ -199,6 +195,12 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     /// Removes canonical HTML after `closeAccountWork()` has rejected all new
     /// readers and writers. Await completion before reopening account work.
+    ///
+    /// What is awaited is one rename of the Messages directory to a tombstone, not the
+    /// removal of its files, which goes on in the background after this returns
+    /// (`RetiredAccountDirectory`). Until `reopenAccountWork()` there is no Messages
+    /// directory. `hasStoredHTMLFiles()` does not count a tombstone: no body in one can be
+    /// reached by a message of the next account.
     func deleteAllHTMLFromClosedAccount() async throws {
         #if os(macOS)
         // Outside the App Sandbox this is the user's real ~/Documents/Messages.

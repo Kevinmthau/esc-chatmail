@@ -105,6 +105,13 @@ struct LocalMailboxStoreInspection: Equatable, Sendable {
     let hasAccountScopedMailboxData: Bool
 }
 
+/// Whether another account's files are in the directories a mailbox keeps outside its store.
+///
+/// It looks in the live directories only. A directory a cleanup has taken out of use is a
+/// tombstone beside them until a background task has removed it
+/// (`RetiredAccountDirectory`), and a tombstone is deliberately not counted: nothing the
+/// next account stores can lead into one, and counting it would make the sign-in that
+/// follows a sign-out reset the store a second time.
 enum AccountScopedMailboxFileInspector {
     static func hasStoredFiles(fileManager: FileManager = .default) -> Bool {
         guard let appSupportDirectory = fileManager.urls(
@@ -911,25 +918,45 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         guard let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             throw CocoaError(.fileNoSuchFile)
         }
+        try retireAttachmentDirectories(
+            appSupportDirectory: appSupportURL,
+            cachesDirectory: fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first,
+            fileManager: fileManager
+        )
+    }
 
-        // Clear Attachments directory
-        let attachmentsURL = appSupportURL.appendingPathComponent("Attachments")
-        if fileManager.fileExists(atPath: attachmentsURL.path) {
-            try fileManager.removeItem(at: attachmentsURL)
+    /// Takes the attachment folders out of use: `Attachments`, `Previews` and the legacy
+    /// attachment cache. Each is one rename to a tombstone that a background task removes
+    /// (`RetiredAccountDirectory`), where this used to unlink every file with the
+    /// auth-transition gate held. `reopenDownloads` makes the two folders again.
+    ///
+    /// Every folder is tried even when one fails, and the first error is thrown at the
+    /// end: the durable cleanup then keeps its reset marker, as it did when a removal failed.
+    nonisolated static func retireAttachmentDirectories(
+        appSupportDirectory: URL,
+        cachesDirectory: URL?,
+        fileManager: FileManager = .default,
+        removeTombstone: (URL?) -> Void = RetiredAccountDirectory.removeInBackground
+    ) throws {
+        var directories = [
+            appSupportDirectory.appendingPathComponent(AttachmentPaths.attachmentsFolder, isDirectory: true),
+            appSupportDirectory.appendingPathComponent(AttachmentPaths.previewsFolder, isDirectory: true)
+        ]
+        if let cachesDirectory {
+            directories.append(
+                cachesDirectory.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder, isDirectory: true)
+            )
         }
-
-        // Clear Previews directory
-        let previewsURL = appSupportURL.appendingPathComponent("Previews")
-        if fileManager.fileExists(atPath: previewsURL.path) {
-            try fileManager.removeItem(at: previewsURL)
-        }
-
-        // Clear any cache directories
-        if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            let attachmentCacheURL = cacheURL.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder)
-            if fileManager.fileExists(atPath: attachmentCacheURL.path) {
-                try fileManager.removeItem(at: attachmentCacheURL)
+        var firstError: Error?
+        for directory in directories {
+            do {
+                removeTombstone(try RetiredAccountDirectory.takeOutOfUse(directory, fileManager: fileManager))
+            } catch {
+                firstError = firstError ?? error
             }
+        }
+        if let firstError {
+            throw firstError
         }
     }
 

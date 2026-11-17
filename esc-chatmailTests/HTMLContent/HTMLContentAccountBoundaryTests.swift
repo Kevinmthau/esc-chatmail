@@ -168,6 +168,97 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         XCTAssertEqual(handler.loadHTML(for: "shared"), "<p>new account</p>")
     }
 
+    // Revert-check: the default `deleteHTMLFiles` of `HTMLContentHandler.init`, which renames
+    // the directory out of use (`RetiredAccountDirectory.takeOutOfUse`) and starts its
+    // removal. Empty the directory in place there, as before, and the first assertion
+    // fails: the Messages directory is still there when the cleanup returns.
+    // HONEST SCOPE: that the unlinks are not awaited is not asserted here, because the
+    // background removal may already have finished when the cleanup returns. The test
+    // below holds the tombstone to show the state in between.
+    func testClosedAccountDeletion_takesTheMessagesDirectoryOutOfUse_andItsTombstoneIsRemovedAfterwards() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLContentRetired-\(UUID().uuidString)", isDirectory: true)
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer {
+            try? handler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+        }
+        XCTAssertNotNil(handler.saveHTML("<p>old account</p>", for: "old"))
+
+        handler.closeAccountWork()
+        try await handler.deleteAllHTMLFromClosedAccount()
+
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: directory.path),
+            "The directory is renamed away, not emptied file by file"
+        )
+        let deadline = Date().addingTimeInterval(5)
+        while !RetiredAccountDirectory.tombstones(of: directory).isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTAssertEqual(RetiredAccountDirectory.tombstones(of: directory), [], "The tombstone was never removed")
+
+        try handler.reopenAccountWork()
+        XCTAssertFalse(try handler.hasStoredHTMLFiles())
+        XCTAssertNil(handler.loadHTML(for: "old"))
+    }
+
+    // The state a sign-in can find: the last account's bodies are still on disk, in a
+    // tombstone whose removal has not finished. The removal is held here by a
+    // `deleteHTMLFiles` that is the app's own without its second half.
+    //
+    // Revert-check: `hasStoredHTMLFiles()` looking in the live directory alone. Have it
+    // count the directory's tombstones as stored HTML and its assertion here fails; so
+    // does `AuthSessionTests`' sign-out over real files, where the sign-in that follows
+    // then resets the store a second time.
+    func testReopenedAccount_whileTheLastAccountsTombstoneIsStillOnDisk_seesNoneOfIt_andStaleWorkIsRejected() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLContentTombstone-\(UUID().uuidString)", isDirectory: true)
+        let held = HeldTombstone()
+        let handler = HTMLContentHandler(
+            messagesDirectory: directory,
+            deleteHTMLFiles: { directory in
+                held.set(try RetiredAccountDirectory.takeOutOfUse(directory))
+            }
+        )
+        defer {
+            try? handler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+            if let tombstone = held.url { RetiredAccountDirectory.remove(tombstone) }
+        }
+        let staleGeneration = try XCTUnwrap(handler.captureAccountGeneration())
+        XCTAssertNotNil(handler.saveHTML("<p>old account</p>", for: "shared"))
+
+        handler.closeAccountWork()
+        try await handler.deleteAllHTMLFromClosedAccount()
+        try handler.reopenAccountWork()
+
+        let tombstone = try XCTUnwrap(held.url)
+        XCTAssertEqual(
+            try String(contentsOf: tombstone.appendingPathComponent("shared.html"), encoding: .utf8),
+            "<p>old account</p>",
+            "Precondition: the last account's body is still on disk"
+        )
+        XCTAssertFalse(
+            try handler.hasStoredHTMLFiles(),
+            "A tombstone is not another account's HTML: counted, it would reset the store of the sign-in that follows"
+        )
+        XCTAssertNil(handler.loadHTML(for: "shared"), "No message of the next account can reach a body in a tombstone")
+
+        XCTAssertNil(handler.saveHTML("<p>stale</p>", for: "stale", expectedGeneration: staleGeneration))
+        XCTAssertNotNil(handler.saveHTML("<p>new account</p>", for: "shared"))
+        handler.deleteHTML(
+            forDeleted: [DeletedMessageBody(messageId: "shared", bodyStorageURI: nil)],
+            deletedAt: Date(),
+            expectedGeneration: staleGeneration,
+            liveMessageIDs: { _ in [] }
+        )
+        XCTAssertEqual(handler.loadHTML(for: "shared"), "<p>new account</p>")
+
+        XCTAssertTrue(RetiredAccountDirectory.remove(tombstone))
+        XCTAssertEqual(handler.loadHTML(for: "shared"), "<p>new account</p>", "Removing the tombstone touches nothing live")
+    }
+
     @MainActor
     func testClosedAccountDeletionRunsOffMainThreadAfterSynchronousClose() async throws {
         let directory = FileManager.default.temporaryDirectory
@@ -402,5 +493,22 @@ private final class HTMLDeletionExecutionRecorder: @unchecked Sendable {
         lock.lock()
         _didRunOnMainThread = isMainThread
         lock.unlock()
+    }
+}
+
+private final class HeldTombstone: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: URL?
+
+    var url: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func set(_ url: URL?) {
+        lock.lock()
+        defer { lock.unlock() }
+        stored = url
     }
 }

@@ -41,6 +41,10 @@ enum SandboxTripwire {
         /// The maintenance sweep of files under `Application Support/Attachments`
         /// and `Application Support/Previews` that no attachment names.
         case orphanedAttachmentFileSweep = "AttachmentDownloader.cleanupOrphanedFiles"
+        /// The launch sweep of the tombstones an account-removal or fresh-install cleanup
+        /// left beside `Documents/Messages`, the attachment folders and the legacy
+        /// attachment cache (`RetiredAccountDirectory`).
+        case retiredAccountDirectorySweep = "RetiredAccountDirectory.sweepLeftovers"
 
         /// The category of the subsystem that owns the files.
         var logCategory: LogCategory {
@@ -49,6 +53,8 @@ enum SandboxTripwire {
                 return .attachment
             case .accountRemovalMessageBodies, .orphanedMessageBodySweep, .accountRemovalMailDerivedCaches:
                 return .general
+            case .retiredAccountDirectorySweep:
+                return .auth
             }
         }
     }

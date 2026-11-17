@@ -280,23 +280,14 @@ struct FreshInstallHandler {
         }
         #endif
         Log.debug("Clearing attachment files", category: .attachment)
-        let fileManager = FileManager.default
-
-        // Clear Documents/Attachments and Documents/Messages
-        if let documentsURL = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: documentsURL.appendingPathComponent("Attachments"))
-            try? fileManager.removeItem(at: documentsURL.appendingPathComponent("Messages"))
-        }
-
-        // Clear Application Support
-        if let appSupportURL = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent(AttachmentPaths.attachmentsFolder))
-            try? fileManager.removeItem(at: appSupportURL.appendingPathComponent(AttachmentPaths.previewsFolder))
-        }
-
-        // Clear Caches
-        if let cacheURL = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first {
-            try? fileManager.removeItem(at: cacheURL.appendingPathComponent(AttachmentPaths.legacyAttachmentCacheFolder))
+        // Documents/Attachments and Documents/Messages, the two folders in Application
+        // Support, and the legacy cache. Each is renamed out of use and removed in the
+        // background: this runs before the app has started, and it used to unlink every
+        // file of the installation it cleans up after (`RetiredAccountDirectory`).
+        for directory in RetiredAccountDirectory.accountDirectories() {
+            RetiredAccountDirectory.removeInBackground(
+                try? RetiredAccountDirectory.takeOutOfUse(directory)
+            )
         }
 
         Log.debug("Attachment files cleared", category: .attachment)
