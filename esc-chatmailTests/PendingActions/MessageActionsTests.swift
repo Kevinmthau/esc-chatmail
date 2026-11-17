@@ -547,6 +547,281 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queued.isEmpty)
     }
 
+    // MARK: - A second archive, a label that could not be read, a send during an archive
+
+    /// The row of an archived conversation stays in the list until the
+    /// archive's save reaches the view context, so it can be swiped again.
+    /// The second archive queues behind the first and finds the store
+    /// already has it: no message is stamped again, `archivedAt` stays where
+    /// the first put it, and Gmail is told once. So does a third, made
+    /// after both have finished.
+    ///
+    /// Revert-check: dropping the `isAlreadyApplied` check from the loop in
+    /// `MessageActions.applyConversationWideMutation` queues an
+    /// `archiveConversation` action for each of the three, and the third
+    /// moves `archivedAt` and every `localModifiedAt`.
+    func testArchiveConversation_swipedAgainWhileTheFirstRuns_isDoneOnceAndQueuedOnce() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20], unreadDates: [20])
+        let blockingStack = BlockingSaveCoreDataStack(wrapping: messageActionsStack)
+        let actions = MessageActions(
+            coreDataStack: blockingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+        let conversation = fixture.conversation
+        let messages = fixture.inboxMessages + [fixture.otherMessage]
+
+        let first = Task { @MainActor in
+            await actions.archiveConversation(conversation: conversation)
+        }
+        await waitUntil { blockingStack.saveHasStarted }
+        // The first archive is still saving, so the view context has no
+        // `archivedAt` and the row is still there to swipe.
+        XCTAssertNil(conversation.archivedAt)
+        let second = Task { @MainActor in
+            await actions.archiveConversation(conversation: conversation)
+        }
+        blockingStack.releaseSaves()
+        await first.value
+        await second.value
+        viewContext.refreshAllObjects()
+
+        let queuedAfterTwo = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queuedAfterTwo.map { $0.type }, [.archiveConversation])
+        let archivedAt = try XCTUnwrap(conversation.archivedAt)
+        let stamps = messages.map(\.localModifiedAt)
+        XCTAssertFalse(stamps.contains(nil))
+
+        await actions.archiveConversation(conversation: conversation)
+        viewContext.refreshAllObjects()
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+        XCTAssertEqual(conversation.archivedAt, archivedAt)
+        XCTAssertEqual(messages.map(\.localModifiedAt), stamps)
+    }
+
+    /// Report Spam twice is done once too: every message already carries
+    /// SPAM and none carries INBOX.
+    ///
+    /// Revert-check: answering false from `MessageActions.isAlreadyApplied`
+    /// for `.reportSpam` queues a second `reportSpam` action.
+    func testReportSpamConversation_reportedAgain_isDoneOnceAndQueuedOnce() async throws {
+        _ = try existingOrNewLabel(id: "SPAM")
+        let fixture = try makeInboxConversation(inboxDates: [10, 20])
+
+        await messageActions.reportSpamConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+        let archivedAtAfterFirst = try XCTUnwrap(fixture.conversation.archivedAt)
+        await messageActions.reportSpamConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.reportSpam])
+        XCTAssertEqual(fixture.conversation.archivedAt, archivedAtAfterFirst)
+    }
+
+    /// What "already applied" must not swallow: an archived conversation is
+    /// reported as spam afterwards (its messages carry no SPAM yet), and an
+    /// archived conversation that has a message back in the inbox is
+    /// archived again.
+    ///
+    /// Revert-check: dropping the SPAM count from
+    /// `MessageActions.isAlreadyApplied` skips the spam report, and dropping
+    /// its INBOX count skips the second archive: either leaves one queued
+    /// action where this expects two.
+    func testConversationWideActions_onAnArchivedConversationWithWorkLeft_stillRun() async throws {
+        _ = try existingOrNewLabel(id: "SPAM")
+        let reported = try makeInboxConversation(inboxDates: [10], idPrefix: "reported")
+        await messageActions.archiveConversation(conversation: reported.conversation)
+        await messageActions.reportSpamConversation(conversation: reported.conversation)
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(labelIDs(of: reported.inboxMessages[0]), ["SPAM"])
+        XCTAssertEqual(labelIDs(of: reported.otherMessage), ["SPAM"])
+
+        let rearchived = try makeInboxConversation(inboxDates: [10], idPrefix: "rearchived")
+        await messageActions.archiveConversation(conversation: rearchived.conversation)
+        viewContext.refreshAllObjects()
+        // A repair re-homes mail into an archived conversation without
+        // touching its `archivedAt` or its rollup.
+        rearchived.otherMessage.addToLabels(try existingOrNewLabel(id: "INBOX"))
+        try saveViewContext()
+        await messageActions.archiveConversation(conversation: rearchived.conversation)
+        viewContext.refreshAllObjects()
+        XCTAssertFalse(labelIDs(of: rearchived.otherMessage).contains("INBOX"))
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(
+            queued.map { $0.type },
+            [.archiveConversation, .reportSpam, .archiveConversation, .archiveConversation]
+        )
+    }
+
+    /// A label that could not be read is not a label the store lacks. Taken
+    /// for one, a single archive marked the conversation archived, left
+    /// INBOX on every message, and told Gmail to archive them.
+    ///
+    /// Revert-check: `try?` in place of `try` on the `fetchLabel` calls in
+    /// `MessageActions.applyConversationWideMutation` archives the
+    /// conversation here and queues the action.
+    func testArchiveConversation_inboxLabelCannotBeRead_savesAndQueuesNothing() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20])
+        let failingStack = LabelFetchFailingCoreDataStack(
+            wrapping: messageActionsStack,
+            coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator
+        )
+        let actions = MessageActions(
+            coreDataStack: failingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.archiveConversation(conversation: fixture.conversation)
+        viewContext.refreshAllObjects()
+
+        XCTAssertGreaterThan(failingStack.failedLabelFetches, 0)
+        XCTAssertNil(fixture.conversation.archivedAt)
+        for message in fixture.inboxMessages {
+            XCTAssertTrue(labelIDs(of: message).contains("INBOX"), message.id)
+            XCTAssertNil(message.localModifiedAt, message.id)
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+    }
+
+    /// The same for Report Spam and for a star: neither changes anything on
+    /// the say-so of a read that failed.
+    ///
+    /// Revert-check: `try?` on the `fetchLabel` call in
+    /// `MessageActions.performStarMutation` stamps the message and queues a
+    /// remote star, as "no such label" does.
+    func testReportSpamAndStar_labelCannotBeRead_saveAndQueueNothing() async throws {
+        _ = try existingOrNewLabel(id: "SPAM")
+        _ = try existingOrNewLabel(id: "STARRED")
+        let fixture = try makeInboxConversation(inboxDates: [10])
+        let failingStack = LabelFetchFailingCoreDataStack(
+            wrapping: messageActionsStack,
+            coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator
+        )
+        let actions = MessageActions(
+            coreDataStack: failingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.reportSpamConversation(conversation: fixture.conversation)
+        await actions.star(message: fixture.inboxMessages[0])
+        viewContext.refreshAllObjects()
+
+        XCTAssertGreaterThanOrEqual(failingStack.failedLabelFetches, 2)
+        XCTAssertNil(fixture.conversation.archivedAt)
+        XCTAssertEqual(labelIDs(of: fixture.inboxMessages[0]), ["INBOX"])
+        XCTAssertNil(fixture.inboxMessages[0].localModifiedAt)
+        let queuedConversationActions = await pendingActionsManager.queuedConversationActions
+        let queuedSingleActions = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queuedConversationActions.isEmpty)
+        XCTAssertTrue(queuedSingleActions.isEmpty)
+    }
+
+    /// A send creates its optimistic row inside the cleanup-sensitive gate,
+    /// on the view context, and reactivates a conversation it finds
+    /// archived. While an archive is saving on its background context the
+    /// view context still has `archivedAt` nil, so a send created then
+    /// anchored to the conversation and was archived with it. The archive
+    /// holds the gate, and brings the view context's conversation up to the
+    /// store before it lets the gate go.
+    ///
+    /// Revert-check: `perform(conversationKeys:)` in place of
+    /// `performCleanupSensitiveMutation(conversationKeys:)` in
+    /// `MessageActions.performConversationWideMutation` runs the gated
+    /// block while the archive is still saving, and dropping
+    /// `refreshOnViewContext` there has the block read a nil `archivedAt`
+    /// (this suite's view context merges no save by itself).
+    func testArchiveConversation_holdsTheCleanupSensitiveGateUntilTheViewContextHasTheArchive() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10])
+        let blockingStack = BlockingSaveCoreDataStack(wrapping: messageActionsStack)
+        let actions = MessageActions(
+            coreDataStack: blockingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+        let conversation = fixture.conversation
+        let conversationID = conversation.objectID
+        let viewContext = self.viewContext!
+        let serializer = self.rollupMutationSerializer!
+
+        let archive = Task { @MainActor in
+            await actions.archiveConversation(conversation: conversation)
+        }
+        await waitUntil { blockingStack.saveHasStarted }
+
+        // What a send's optimistic creation does: take the gate, then read
+        // the conversation on the view context.
+        let sendIsQueued = AccountBoundaryFlag()
+        let sendRan = AccountBoundaryFlag()
+        let send = Task {
+            await serializer.performCleanupSensitiveMutation(
+                onEnqueued: { sendIsQueued.set() },
+                operation: {
+                    sendRan.set()
+                    return await MainActor.run {
+                        (viewContext.registeredObject(for: conversationID) as? Conversation)?.archivedAt
+                    }
+                }
+            )
+        }
+        await waitUntil { sendIsQueued.isSet }
+        // Long against the actor hops an ungated block needs to run.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertFalse(sendRan.isSet, "The send's block ran while the archive was still saving")
+
+        blockingStack.releaseSaves()
+        await archive.value
+        let archivedAtTheSendRead = await send.value
+
+        XCTAssertTrue(sendRan.isSet)
+        XCTAssertNotNil(archivedAtTheSendRead)
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map { $0.type }, [.archiveConversation])
+    }
+
+    /// The chat-open snapshot's fetch is queued when it is asked for and
+    /// runs with no help from the main actor, which at chat open is laying
+    /// the transcript out. A message saved after the fetch is not in it.
+    ///
+    /// Revert-check: starting the fetch from `Task { @MainActor in … }` in
+    /// `MessageActions.startUnreadInboxSnapshot`, in place of the non-async
+    /// `context.perform`, leaves the snapshot unfulfilled for as long as
+    /// this test holds the main thread.
+    func testStartUnreadInboxSnapshot_fetchesWithoutTheMainActorAndLeavesOutALaterMessage() async throws {
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let inboxLabel = LabelBuilder().inbox().build(in: viewContext)
+        let unreadAtOpen = MessageBuilder().withId("unread-at-open").unread()
+            .inConversation(conversation).build(in: viewContext)
+        unreadAtOpen.addToLabels(inboxLabel)
+        try saveViewContext()
+
+        let snapshot = messageActions.startUnreadInboxSnapshot(conversationID: conversation.objectID)
+        // No await between the call and here: nothing has run on the main
+        // actor since the snapshot was asked for.
+        XCTAssertTrue(
+            holdThisThread(until: { snapshot.isFulfilled }),
+            "The snapshot's fetch waited for the main actor"
+        )
+
+        let savedLater = MessageBuilder().withId("saved-after-the-snapshot").unread()
+            .inConversation(conversation).build(in: viewContext)
+        savedLater.addToLabels(inboxLabel)
+        try saveViewContext()
+
+        let messageIDs = await snapshot.messageIDs
+        XCTAssertEqual(messageIDs, [unreadAtOpen.objectID])
+    }
+
     /// Archiving single messages, newest first, keeps the conversation's
     /// rollup right at each step: the next-newest INBOX message becomes the
     /// latest, the unread count follows, and the last archive empties it.
@@ -1459,6 +1734,90 @@ private final class FailingSaveCoreDataStack: MessageActionsCoreDataStacking {
 
     func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
         false
+    }
+}
+
+/// Wraps a real test stack and holds every background save until
+/// `releaseSaves()`, so a test can act while an action is mid-save. The
+/// save runs on the background context's queue, which is what waits.
+///
+/// `@unchecked Sendable`: `started` and `released` are guarded by `condition`.
+private final class BlockingSaveCoreDataStack: MessageActionsCoreDataStacking, @unchecked Sendable {
+    private let wrapped: MainQueueMessageActionsCoreDataStack
+    private let condition = NSCondition()
+    private var started = false
+    private var released = false
+
+    init(wrapping wrapped: MainQueueMessageActionsCoreDataStack) {
+        self.wrapped = wrapped
+    }
+
+    var viewContext: NSManagedObjectContext { wrapped.viewContext }
+
+    /// Whether a background save has been asked for.
+    var saveHasStarted: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return started
+    }
+
+    func releaseSaves() {
+        condition.lock()
+        released = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func newBackgroundContext() -> NSManagedObjectContext {
+        wrapped.newBackgroundContext()
+    }
+
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
+        if context !== wrapped.viewContext {
+            condition.lock()
+            started = true
+            while !released {
+                condition.wait()
+            }
+            condition.unlock()
+        }
+        return wrapped.saveIfNeeded(context: context, caller: caller)
+    }
+}
+
+/// Wraps a real test stack and hands out background contexts whose fetches
+/// of `Label` throw, while every other read and the saves go to the store.
+private final class LabelFetchFailingCoreDataStack: MessageActionsCoreDataStacking, @unchecked Sendable {
+    private let wrapped: MainQueueMessageActionsCoreDataStack
+    private let coordinator: NSPersistentStoreCoordinator
+    private let lock = NSLock()
+    private var contexts: [EntityFetchFailingContext] = []
+
+    init(wrapping wrapped: MainQueueMessageActionsCoreDataStack, coordinator: NSPersistentStoreCoordinator) {
+        self.wrapped = wrapped
+        self.coordinator = coordinator
+    }
+
+    var viewContext: NSManagedObjectContext { wrapped.viewContext }
+
+    /// How many `Label` fetches the handed-out contexts rejected.
+    var failedLabelFetches: Int {
+        lock.lock()
+        let made = contexts
+        lock.unlock()
+        return made.reduce(0) { $0 + $1.failedFetches }
+    }
+
+    func newBackgroundContext() -> NSManagedObjectContext {
+        let context = EntityFetchFailingContext(failingEntityName: "Label", coordinator: coordinator)
+        lock.lock()
+        contexts.append(context)
+        lock.unlock()
+        return context
+    }
+
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
+        wrapped.saveIfNeeded(context: context, caller: caller)
     }
 }
 

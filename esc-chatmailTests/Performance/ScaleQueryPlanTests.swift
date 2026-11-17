@@ -167,6 +167,175 @@ final class ScaleQueryPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - Inbox rollup after a one-message change
+
+    /// The three statements `MessageActions.applyInboxRollup` runs.
+    private struct RollupPlans {
+        let inboxCount: Plan
+        let unreadCount: Plan
+        let newestInbox: Plan
+    }
+
+    /// Picks the rollup's statements out of a recording by their SQL. The
+    /// recording also holds the action's own faults and its save, and none of
+    /// those is a count or sorts by date.
+    private func rollupPlans(in plans: [Plan], _ statistics: ScaleStoreTemplate.Statistics) throws -> RollupPlans {
+        let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
+        let counts = messagePlans.filter { $0.sql.hasPrefix("SELECT COUNT(") }
+        return RollupPlans(
+            inboxCount: try XCTUnwrap(
+                counts.first { !$0.sql.contains("ZISUNREAD") },
+                "\(statistics):\n\(messagePlans)"
+            ),
+            unreadCount: try XCTUnwrap(
+                counts.first { $0.sql.contains("ZISUNREAD") },
+                "\(statistics):\n\(messagePlans)"
+            ),
+            newestInbox: try XCTUnwrap(
+                messagePlans.first { $0.sql.contains("ORDER BY") && $0.sql.contains("ZINTERNALDATE") },
+                "\(statistics):\n\(messagePlans)"
+            )
+        )
+    }
+
+    private func assertDrivenByTheConversation(
+        _ plan: Plan,
+        _ statistics: ScaleStoreTemplate.Statistics,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)", file: file, line: line)
+        XCTAssertFalse(
+            plan.indexes(on: "ZMESSAGE").contains("Z_Message_byIsUnreadIndex"),
+            "\(statistics): \(plan)",
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(Self.isDrivenByTheConversation(plan), "\(statistics): \(plan)", file: file, line: line)
+    }
+
+    /// The newest INBOX message of the largest chat, on the view context
+    /// `MessageActions` is handed, with how many INBOX messages the chat has.
+    @MainActor
+    private func newestInboxMessageOfLargestChat(
+        _ manifest: ScaleStoreManifest,
+        in context: NSManagedObjectContext
+    ) throws -> (message: Message, conversation: Conversation, inboxCount: Int) {
+        let conversationRequest = Conversation.fetchRequest()
+        conversationRequest.predicate = ConversationPredicates.id(manifest.largestConversationID)
+        let conversation = try XCTUnwrap(try context.fetch(conversationRequest).first)
+
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND ANY labels.id == %@",
+            conversation,
+            "INBOX"
+        )
+        request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
+        request.fetchLimit = 2
+        let newest = try context.fetch(request)
+        let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+        countRequest.predicate = request.predicate
+        return (try XCTUnwrap(newest.first), conversation, try context.count(for: countRequest))
+    }
+
+    /// Review item `single-archive-rollup-materializes-inbox`. Archiving one
+    /// message recomputes its conversation's rollup with two counts and a
+    /// one-row fetch (`MessageActions.applyInboxRollup`), here in the
+    /// largest chat of the store. Each of the three reaches ZMESSAGE only
+    /// through an index on the conversation: none walks the table, the
+    /// store-wide unread index or the store-wide date index, with or without
+    /// statistics.
+    ///
+    /// Revert-check: with `conversation.id == %@` (the conversation's UUID)
+    /// in place of `conversation == %@` in
+    /// `MessageActions.storedInboxPredicate`, a store without statistics
+    /// answers the INBOX count from the label (`SCAN t3`, then every INBOX
+    /// membership in the mailbox) and the newest-INBOX fetch from a walk of
+    /// the whole label join table (`SCAN t2`), reaching each message by its
+    /// primary key. `isUnread == YES` in `MessagePredicates.unreadInInbox`
+    /// drives the unread count from `Z_Message_byIsUnreadIndex`.
+    @MainActor
+    func testSingleMessageArchive_rollupCountsAndNewestInboxFetch_areDrivenByTheConversation() async throws {
+        for statistics in Self.bothStatistics {
+            let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let actionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+            let pendingActions = MockPendingActionsManager()
+            let actions = MessageActions(
+                coreDataStack: actionsStack,
+                pendingActionsManager: pendingActions,
+                rollupMutationSerializer: ConversationRollupMutationSerializer(),
+                syncRunCoordinator: SyncRunCoordinator()
+            )
+            let viewContext = actionsStack.viewContext
+            let target = try newestInboxMessageOfLargestChat(manifest, in: viewContext)
+            let archivedID = target.message.id
+            XCTAssertGreaterThan(target.inboxCount, 1, "\(statistics)")
+
+            let plans = try await SQLiteQueryPlanRecorder.record {
+                await actions.archive(message: target.message)
+            }
+
+            // The archive happened, and the rollup it left is the store's.
+            let queued = await pendingActions.queuedSingleActions
+            XCTAssertEqual(queued.map(\.messageId), [archivedID], "\(statistics)")
+            viewContext.refreshAllObjects()
+            let after = try newestInboxMessageOfLargestChat(manifest, in: viewContext)
+            XCTAssertEqual(after.inboxCount, target.inboxCount - 1, "\(statistics)")
+            XCTAssertTrue(after.conversation.hasInbox, "\(statistics)")
+            XCTAssertEqual(after.conversation.latestInboxDate, after.message.internalDate, "\(statistics)")
+
+            let rollup = try rollupPlans(in: plans, statistics)
+            assertDrivenByTheConversation(rollup.inboxCount, statistics)
+            assertDrivenByTheConversation(rollup.unreadCount, statistics)
+            assertDrivenByTheConversation(rollup.newestInbox, statistics)
+        }
+    }
+
+    /// Marking a conversation unread finds its newest INBOX message with the
+    /// same one-row fetch, with no message left out by ID
+    /// (`MessageActions.fetchLatestStoredInboxMessage`), and then runs the
+    /// rollup. The fetch is the conversation's, however large the chat.
+    ///
+    /// Revert-check: the UUID form in `MessageActions.storedInboxPredicate`,
+    /// as in the test above, has a store without statistics walk the whole
+    /// label join table for this fetch too.
+    @MainActor
+    func testMarkConversationAsUnread_newestInboxFetch_isDrivenByTheConversation() async throws {
+        for statistics in Self.bothStatistics {
+            let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let actionsStack = MainQueueMessageActionsCoreDataStack(wrapping: stack)
+            let pendingActions = MockPendingActionsManager()
+            let actions = MessageActions(
+                coreDataStack: actionsStack,
+                pendingActionsManager: pendingActions,
+                rollupMutationSerializer: ConversationRollupMutationSerializer(),
+                syncRunCoordinator: SyncRunCoordinator()
+            )
+            let viewContext = actionsStack.viewContext
+            let target = try newestInboxMessageOfLargestChat(manifest, in: viewContext)
+            // The action marks the newest INBOX message unread only when it is read.
+            if target.message.isUnread {
+                target.message.isUnread = false
+                try viewContext.save()
+            }
+
+            let plans = try await SQLiteQueryPlanRecorder.record {
+                await actions.markConversationAsUnread(conversation: target.conversation)
+            }
+
+            let queued = await pendingActions.queuedSingleActions
+            XCTAssertEqual(queued.map(\.messageId), [target.message.id], "\(statistics)")
+            let newestInboxPlans = plans.filter {
+                $0.reads("ZMESSAGE") && $0.sql.contains("ORDER BY") && $0.sql.contains("ZINTERNALDATE")
+            }
+            XCTAssertFalse(newestInboxPlans.isEmpty, "\(statistics):\n\(plans)")
+            for plan in newestInboxPlans {
+                assertDrivenByTheConversation(plan, statistics)
+            }
+        }
+    }
+
     // MARK: - Conversation list
 
     /// The first window of the conversation list

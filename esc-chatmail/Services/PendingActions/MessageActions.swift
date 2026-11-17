@@ -159,10 +159,25 @@ final class MessageActions: ObservableObject {
     func snapshotUnreadInboxMessageObjectIDs(
         conversationID: NSManagedObjectID
     ) async -> [NSManagedObjectID] {
-        guard !conversationID.isTemporaryID else { return [] }
+        await startUnreadInboxSnapshot(conversationID: conversationID).messageIDs
+    }
 
+    /// Queues the snapshot's fetch before returning, so the caller can start
+    /// it in the turn a chat opens and await the IDs in a task of its own.
+    ///
+    /// The fetch is put on the background context's queue here, with the
+    /// non-async `perform`, and needs nothing more from the main actor. When
+    /// the whole snapshot was awaited from a detached task it could not
+    /// start until the main actor was free again, which at chat open is
+    /// after the transcript's first layout, and a message saved meanwhile
+    /// was in the snapshot and was marked read with the rest. What is left
+    /// between the open and the fetch is one queue hop.
+    func startUnreadInboxSnapshot(conversationID: NSManagedObjectID) -> UnreadInboxSnapshot {
+        guard !conversationID.isTemporaryID else { return UnreadInboxSnapshot(messageIDs: []) }
+
+        let snapshot = UnreadInboxSnapshot()
         let context = coreDataStack.newBackgroundContext()
-        return await context.perform {
+        context.perform {
             let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
             request.predicate = MessagePredicates.unreadInInbox(conversationObjectID: conversationID)
             request.fetchBatchSize = 50
@@ -170,16 +185,17 @@ final class MessageActions: ObservableObject {
             request.resultType = .managedObjectIDResultType
 
             do {
-                return try context.fetch(request)
+                snapshot.fulfill(try context.fetch(request))
             } catch {
                 Log.error(
                     "Failed to snapshot unread INBOX message IDs for conversation",
                     category: .coreData,
                     error: error
                 )
-                return []
+                snapshot.fulfill([])
             }
         }
+        return snapshot
     }
 
     /// Filters an exact insertion set down to unread INBOX messages.
@@ -571,37 +587,80 @@ final class MessageActions: ObservableObject {
                 return
             }
 
+            // The conversations' turns and the cleanup-sensitive gate
+            // together: a send's optimistic row is created inside that gate,
+            // on the view context, which does not have this archive until
+            // its save has merged. See
+            // `ConversationRollupMutationSerializer.performCleanupSensitiveMutation(conversationKeys:operation:)`.
             let conversationKeys = Self.conversationKeys(for: conversationIDs)
-            await self.rollupMutationSerializer.perform(conversationKeys: conversationKeys) { [weak self] in
+            await self.rollupMutationSerializer.performCleanupSensitiveMutation(
+                conversationKeys: conversationKeys
+            ) { [weak self] in
                 guard let self else { return }
-                guard let messageIds = await self.saveConversationWideMutation(
+                guard let outcome = await self.saveConversationWideMutation(
                     mutation,
                     to: conversationIDs
                 ) else {
                     Log.error("Not queuing \(mutation.operation): nothing was saved", category: .message)
                     return
                 }
+                // Before the gate is released: whoever takes it next reads
+                // these conversations on the view context.
+                await self.refreshOnViewContext(conversationIDs)
+                guard outcome.changedConversationCount > 0 else {
+                    Log.info("Nothing to \(mutation.operation): no conversation still needed it", category: .message)
+                    return
+                }
                 Log.info(
-                    "Did \(mutation.operation): \(conversationIDs.count) conversations, \(messageIds.count) messages",
+                    "Did \(mutation.operation): \(outcome.changedConversationCount) conversations, \(outcome.messageIds.count) messages",
                     category: .message
                 )
 
                 // Queue sync to Gmail
-                guard !messageIds.isEmpty else { return }
+                guard !outcome.messageIds.isEmpty else { return }
                 await self.pendingActionsManager.queueConversationAction(
                     type: mutation.pendingActionType,
                     sourceConversationId: sourceConversationId,
-                    messageIds: messageIds,
+                    messageIds: outcome.messageIds,
                     within: syncRun
                 )
             }
         }
     }
 
+    /// Brings the view context's copies of these conversations up to the
+    /// store, keeping any change the view context has not saved.
+    ///
+    /// The view context gets a background save by merging it, a main-queue
+    /// block of its own that nothing here can wait for. A conversation-wide
+    /// action does this itself, while it still holds the cleanup-sensitive
+    /// gate, so that the next holder (a send choosing its conversation)
+    /// finds `archivedAt` set and reactivates the conversation, as it did
+    /// when the archive ran on the view context. For the seconds a long
+    /// archive took, the view context's `archivedAt` was still nil, and a
+    /// New Message to the same people anchored to the conversation and was
+    /// archived with it.
+    private func refreshOnViewContext(_ conversationIDs: [NSManagedObjectID]) {
+        let viewContext = coreDataStack.viewContext
+        for conversationID in conversationIDs {
+            guard let conversation = viewContext.registeredObject(for: conversationID) else { continue }
+            viewContext.refresh(conversation, mergeChanges: true)
+        }
+    }
+
+    /// What a conversation-wide action saved.
+    private struct ConversationWideOutcome: Sendable {
+        /// The Gmail IDs the pending action should name.
+        var messageIds: [String] = []
+        /// How many conversations the action changed. One the store already
+        /// had it applied to is not counted.
+        var changedConversationCount = 0
+    }
+
     private func saveConversationWideMutation(
         _ mutation: ConversationWideMutation,
         to conversationIDs: [NSManagedObjectID]
-    ) async -> [String]? {
+    ) async -> ConversationWideOutcome? {
         let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
@@ -615,32 +674,45 @@ final class MessageActions: ObservableObject {
     }
 
     /// Applies a conversation-wide action and saves it, all in one save.
-    /// Returns the Gmail IDs the pending action should name, or nil when
-    /// nothing was saved. Call inside `context.perform`.
+    /// Returns what was saved, or nil when a read or the save failed or the
+    /// action does not apply. Call inside `context.perform`.
     ///
     /// Every message of each conversation is stamped `localModifiedAt`, and
     /// Report Spam adds SPAM to every one. INBOX is removed only where it is
-    /// set: removing a label a message does not carry changed nothing.
+    /// set: removing a label a message does not carry changed nothing. A
+    /// conversation the store already has the action applied to is left as
+    /// it is (`isAlreadyApplied`).
     nonisolated private static func applyConversationWideMutation(
         _ mutation: ConversationWideMutation,
         to conversationIDs: [NSManagedObjectID],
         in context: NSManagedObjectContext,
         savingWith save: BackgroundSave
-    ) -> [String]? {
-        let inboxLabel = fetchLabel(id: "INBOX", in: context, operation: mutation.operation)
-        let spamLabel = mutation.kind == .reportSpam
-            ? fetchLabel(id: "SPAM", in: context, operation: mutation.operation)
-            : nil
+    ) -> ConversationWideOutcome? {
+        let inboxLabel: Label?
+        let spamLabel: Label?
+        do {
+            inboxLabel = try fetchLabel(id: "INBOX", in: context)
+            spamLabel = mutation.kind == .reportSpam ? try fetchLabel(id: "SPAM", in: context) : nil
+        } catch {
+            // A label that could not be read is not a label the store
+            // lacks. Taken for one, a single archive marked the conversation
+            // archived and left every message in the inbox.
+            Log.error("Failed to read a label to \(mutation.operation)", category: .coreData, error: error)
+            return nil
+        }
         if mutation.kind == .archive, mutation.isBatch, inboxLabel == nil {
             Log.warning("INBOX label not found, cannot archive", category: .message)
             return nil
         }
 
-        var messageIds: [String] = []
+        var outcome = ConversationWideOutcome()
         let modificationDate = Date()
 
         for conversationID in conversationIDs {
             guard let conversation = try? context.existingObject(with: conversationID) as? Conversation else {
+                continue
+            }
+            if isAlreadyApplied(mutation.kind, to: conversation, spamLabel: spamLabel, in: context) {
                 continue
             }
 
@@ -671,7 +743,7 @@ final class MessageActions: ObservableObject {
                     }
                     message.localModifiedAt = modificationDate
                     if let gmailMessageID = gmailMessageIDForConversationAction(message) {
-                        messageIds.append(gmailMessageID)
+                        outcome.messageIds.append(gmailMessageID)
                     }
                 }
             case .reportSpam:
@@ -684,7 +756,7 @@ final class MessageActions: ObservableObject {
                     }
                     message.localModifiedAt = modificationDate
                     if let gmailMessageID = gmailMessageIDForConversationAction(message) {
-                        messageIds.append(gmailMessageID)
+                        outcome.messageIds.append(gmailMessageID)
                     }
                 }
             }
@@ -694,13 +766,66 @@ final class MessageActions: ObservableObject {
             // conversation. The rollup fields go with it, in the same save,
             // to prevent un-archiving.
             applyArchivedConversationRollup(to: conversation, at: modificationDate)
+            outcome.changedConversationCount += 1
         }
 
+        guard outcome.changedConversationCount > 0 else { return outcome }
         guard save(context, mutation.operation) else {
             context.rollback()
             return nil
         }
-        return messageIds
+        return outcome
+    }
+
+    /// Whether the store already has the action applied to `conversation`:
+    /// it is archived with an empty inbox rollup, none of its messages
+    /// carries INBOX, and for Report Spam every one carries SPAM. Call
+    /// inside `context.perform`.
+    ///
+    /// The list row of an archived conversation stays until the archive's
+    /// save reaches the view context, which for a long chat is seconds, and
+    /// a second swipe in that time runs the action again behind the first.
+    /// Run again it stamped every message a second time, moved `archivedAt`,
+    /// and queued a second Gmail action for the same messages.
+    ///
+    /// A count that fails answers false: the action then runs, and its own
+    /// reads decide whether anything is saved. Report Spam with no SPAM
+    /// label in the store labels nothing, so the store cannot say whether it
+    /// ran, and it runs again.
+    nonisolated private static func isAlreadyApplied(
+        _ kind: ConversationWideMutation.Kind,
+        to conversation: Conversation,
+        spamLabel: Label?,
+        in context: NSManagedObjectContext
+    ) -> Bool {
+        guard conversation.archivedAt != nil,
+              !conversation.hasInbox,
+              conversation.inboxUnreadCount == 0,
+              conversation.latestInboxDate == nil else {
+            return false
+        }
+        do {
+            let inInbox = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+            inInbox.predicate = storedInboxPredicate(of: conversation, excluding: [], unreadOnly: false)
+            guard try context.count(for: inInbox) == 0 else { return false }
+
+            switch kind {
+            case .archive:
+                return true
+            case .reportSpam:
+                guard spamLabel != nil else { return false }
+                let notSpam = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
+                notSpam.predicate = NSPredicate(
+                    format: "conversation == %@ AND SUBQUERY(labels, $label, $label.id == %@).@count == 0",
+                    conversation,
+                    "SPAM"
+                )
+                return try context.count(for: notSpam) == 0
+            }
+        } catch {
+            Log.error("Failed to read whether a conversation is already archived", category: .coreData, error: error)
+            return false
+        }
     }
 
     // MARK: - Star/Unstar
@@ -935,19 +1060,17 @@ final class MessageActions: ObservableObject {
         return messagesByID
     }
 
+    /// The label with this ID, or nil when the store has none. Throws when
+    /// the fetch failed, which is not the same answer: a caller that took a
+    /// failed read for a missing label changed the conversation and left the
+    /// label on its messages.
     nonisolated private static func fetchLabel(
         id: String,
-        in context: NSManagedObjectContext,
-        operation: String
-    ) -> Label? {
+        in context: NSManagedObjectContext
+    ) throws -> Label? {
         let request = Label.fetchRequest()
         request.predicate = LabelPredicates.id(id)
-        do {
-            return try context.fetch(request).first
-        } catch {
-            Log.error("Failed to fetch \(id) label for \(operation)", category: .coreData, error: error)
-            return nil
-        }
+        return try context.fetch(request).first
     }
 
     nonisolated private static func applyArchivedConversationRollup(to conversation: Conversation, at date: Date) {
@@ -1029,7 +1152,15 @@ final class MessageActions: ObservableObject {
             guard isStarred != (existingStarLabel != nil) else { return nil }
 
             if isStarred {
-                if let starLabel = Self.fetchLabel(id: "STARRED", in: context, operation: "star") {
+                let starLabel: Label?
+                do {
+                    starLabel = try Self.fetchLabel(id: "STARRED", in: context)
+                } catch {
+                    // Not "no such label", which stars remotely only.
+                    Log.error("Not starring: the STARRED label could not be read", category: .coreData, error: error)
+                    return nil
+                }
+                if let starLabel {
                     message.addToLabels(starLabel)
                 } else {
                     Log.warning("STARRED label not found locally; queueing remote star only", category: .message)

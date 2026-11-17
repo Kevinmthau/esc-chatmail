@@ -414,15 +414,19 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Snapshots the conversation's unread INBOX messages off the main
-    /// thread and marks exactly those read, in one task: a message that
-    /// arrives after the snapshot is not in it and stays unread.
+    /// thread and marks exactly those read: a message that arrives after
+    /// the snapshot is not in it and stays unread.
+    ///
+    /// The snapshot's fetch is queued here, in the turn the chat opens, and
+    /// only its result is awaited in the task. Started inside the task it
+    /// waited for the main actor, which is busy laying the transcript out
+    /// just then, and a message saved in that time was marked read too.
     func markConversationAsReadIfNeeded() {
         let messageActions = self.messageActions
         let conversationID = conversation.objectID
+        let snapshot = messageActions.startUnreadInboxSnapshot(conversationID: conversationID)
         taskManager.runDetached("markConversationAsRead-\(UUID().uuidString)") {
-            let unreadMessageIDs = await messageActions.snapshotUnreadInboxMessageObjectIDs(
-                conversationID: conversationID
-            )
+            let unreadMessageIDs = await snapshot.messageIDs
             guard !unreadMessageIDs.isEmpty else { return }
             await messageActions.markMessagesAsReadBatch(
                 messageIDs: unreadMessageIDs,

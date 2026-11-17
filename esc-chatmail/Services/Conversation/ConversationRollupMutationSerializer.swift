@@ -141,6 +141,33 @@ actor ConversationRollupMutationSerializer {
         )
     }
 
+    /// A mutation that takes its conversations' turns and the
+    /// cleanup-sensitive gate together, for an action that changes whether a
+    /// conversation is archived (`MessageActions`' Archive and Report Spam).
+    ///
+    /// Optimistic-send creation picks its conversation on the view context
+    /// inside that gate, and reactivates one it finds archived. An archive
+    /// that saves on a background context is not on the view context until
+    /// its save has merged, so a send created meanwhile anchored to the
+    /// conversation as it was and was archived with it. Holding the gate
+    /// puts the send wholly before the archive or wholly after it.
+    ///
+    /// Both sets of keys are taken in one actor turn, so two callers cannot
+    /// each hold half. What can deadlock is nesting: an operation that holds
+    /// the gate must not ask for a conversation's turn, and one that holds a
+    /// conversation's turn must not ask for the gate, because a caller of
+    /// this method queued between the two waits on the first and is waited
+    /// on by the second. No operation nests them today.
+    func performCleanupSensitiveMutation<Value: Sendable>(
+        conversationKeys: Set<String>,
+        operation: @escaping @Sendable () async -> Value
+    ) async -> Value {
+        await perform(
+            conversationKeys: conversationKeys.union([Self.cleanupSensitiveMutationKey]),
+            operation: operation
+        )
+    }
+
     func performSyncMutation<Value: Sendable>(
         conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext,

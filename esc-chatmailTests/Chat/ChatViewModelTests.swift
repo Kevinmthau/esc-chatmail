@@ -993,6 +993,93 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertEqual(ConversationSnapshot(from: conversation).inboxUnreadCount, 1)
     }
 
+    /// Opening a chat snapshots its unread INBOX messages and marks exactly
+    /// those read. The snapshot's fetch is queued in the turn the chat opens
+    /// and needs nothing more from the main actor, which is laying the
+    /// transcript out just then: here the main thread is held until the
+    /// fetch has run, and a message saved after it stays unread.
+    ///
+    /// Revert-check: awaiting
+    /// `messageActions.snapshotUnreadInboxMessageObjectIDs(conversationID:)`
+    /// inside the detached task of
+    /// `ChatViewModel.markConversationAsReadIfNeeded`, in place of calling
+    /// `startUnreadInboxSnapshot` before it, starts no fetch while the main
+    /// thread is held, and the hold times out.
+    func testMarkConversationAsReadIfNeeded_snapshotIsFetchedBeforeTheMainActorIsFreeAgain() async throws {
+        let stack = TestCoreDataStack()
+        let countingStack = FetchCountingMessageActionsStack(
+            wrapping: MainQueueMessageActionsCoreDataStack(wrapping: stack),
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        let context: NSManagedObjectContext = countingStack.viewContext
+        let pendingActionsManager = MockPendingActionsManager()
+        let messageActions = MessageActions(
+            coreDataStack: countingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: ConversationRollupMutationSerializer(),
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+        let baseDependencies = makeDependencies(
+            authSession: makeTestAuthSession(userEmail: "me@example.com")
+        ).makeChatDependencies()
+        let chatDependencies = ChatDependencies(
+            session: baseDependencies.session,
+            content: baseDependencies.content,
+            messaging: ChatMessagingDependencies(
+                messageActions: messageActions,
+                outboundMessageCoordinator: baseDependencies.messaging.outboundMessageCoordinator,
+                outboundAttachmentContextBuilder: baseDependencies.messaging.outboundAttachmentContextBuilder,
+                outboundReplyContextBuilder: baseDependencies.messaging.outboundReplyContextBuilder,
+                composeForwardModeContextBuilder: baseDependencies.messaging.composeForwardModeContextBuilder
+            ),
+            contacts: baseDependencies.contacts,
+            storage: ChatStorageDependencies(
+                viewContext: context,
+                makeBackgroundContext: { stack.newBackgroundContext() }
+            ),
+            fullEmailOpener: baseDependencies.fullEmailOpener
+        )
+
+        let conversation = ConversationBuilder()
+            .visible()
+            .withUnreadCount(1)
+            .build(in: context)
+        let inboxLabel = LabelBuilder().inbox().build(in: context)
+        let unreadAtOpen = MessageBuilder()
+            .withId("unread-at-open")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        unreadAtOpen.addToLabels(inboxLabel)
+        try context.save()
+        let viewModel = ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
+
+        viewModel.markConversationAsReadIfNeeded()
+        // No await between the call and here: the main actor has not been
+        // free since the chat "opened".
+        XCTAssertTrue(
+            holdThisThread(until: { countingStack.fetchCount(ofEntity: "Message") >= 1 }),
+            "The chat-open snapshot waited for the main actor"
+        )
+
+        let savedAfterOpen = MessageBuilder()
+            .withId("saved-after-open")
+            .unread()
+            .inConversation(conversation)
+            .build(in: context)
+        savedAfterOpen.addToLabels(inboxLabel)
+        try context.save()
+
+        await waitUntil {
+            await pendingActionsManager.pendingActionCount() == 1
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.first?.messageIds, ["unread-at-open"])
+        context.refreshAllObjects()
+        XCTAssertFalse(unreadAtOpen.isUnread)
+        XCTAssertTrue(savedAfterOpen.isUnread)
+    }
+
     func testOpenEmailReaderFromTextBubbleCreatesReaderRoute() throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
@@ -3351,4 +3438,31 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
 
 private enum MockChatSendError: Error {
     case preflightFailed
+}
+
+/// Wraps a main-queue test stack and hands `MessageActions` background
+/// contexts that count their fetches, so a test can tell when a fetch made
+/// on one of them has run.
+private final class FetchCountingMessageActionsStack: MessageActionsCoreDataStacking, @unchecked Sendable {
+    private let wrapped: MainQueueMessageActionsCoreDataStack
+    private let contexts: FetchCountingContextFactory
+
+    init(wrapping wrapped: MainQueueMessageActionsCoreDataStack, coordinator: NSPersistentStoreCoordinator) {
+        self.wrapped = wrapped
+        self.contexts = FetchCountingContextFactory(coordinator: coordinator)
+    }
+
+    var viewContext: NSManagedObjectContext { wrapped.viewContext }
+
+    func fetchCount(ofEntity entityName: String) -> Int {
+        contexts.fetchCount(ofEntity: entityName)
+    }
+
+    func newBackgroundContext() -> NSManagedObjectContext {
+        contexts.makeContext()
+    }
+
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
+        wrapped.saveIfNeeded(context: context, caller: caller)
+    }
 }
