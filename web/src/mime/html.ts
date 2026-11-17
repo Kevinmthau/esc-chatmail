@@ -19,6 +19,7 @@ import {
   isStrongSignatureSupportLine,
   shouldPreserveSignatureNameLine,
 } from './patterns'
+import { trailingLegalDisclaimerStartLine } from './legalDisclaimer'
 import { looksLikeNameLine } from './text'
 
 /**
@@ -111,6 +112,7 @@ export function removeQuotesFromHtml(
       removeFooterContainers(document)
     }
     if (mode === 'quotedAndSignatures') {
+      truncateTrailingLegalDisclaimer(document)
       truncateAtSignatureMarkers(document)
       truncateTrailingContactSignature(document)
     }
@@ -1387,6 +1389,25 @@ function truncateAtSignatureMarkers(document: Document): void {
       }
     }
   }
+}
+
+// A legal disclaimer that ends the message (legalDisclaimer.ts). Ahead of the
+// signature markers, whose "If you are not the intended recipient" cuts mid-paragraph
+// and leaves the disclaimer's first sentences, and of the trailing contact signature,
+// so a contact block the disclaimer followed is the tail again when that pass looks.
+// Mirrors iOS EmailDOMQuoteRemover.truncateTrailingLegalDisclaimer.
+function truncateTrailingLegalDisclaimer(document: Document): void {
+  const body = document.body
+  if (!body) return
+  const lines = inlineHeaderLines(body, true)
+  const startIndex = trailingLegalDisclaimerStartLine(lines.map((line) => line.text))
+  if (startIndex === null) return
+  const line = lines[startIndex]!
+  const boundary = line.startTextNode
+  if (!boundary) return
+  // An authored image after the disclaimer is content; a logo or pixel belongs to it.
+  if (containsMediaAfterSignature(boundary, body)) return
+  truncateAtTextNode(boundary, line.startOffset, boundary.data)
 }
 
 const SIGNATURE_CITY_STATE_ZIP_PATTERN = /^[A-Z][A-Z .'-]+,\s*[A-Z]{2}\s+\d{5}(?:-\d{4})?$/i

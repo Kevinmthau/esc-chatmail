@@ -613,7 +613,9 @@ extension EmailDOMQuoteRemover {
         }
     }
 
-    private static func containsMediaAfterSignature(_ boundary: TextNode, in root: Element) throws -> Bool {
+    /// Internal (not private) because the trailing legal disclaimer pass guards its
+    /// truncation with it too. See `+LegalDisclaimers`.
+    static func containsMediaAfterSignature(_ boundary: TextNode, in root: Element) throws -> Bool {
         var reachedBoundary = false
         var stack: [Node] = [root]
         while let node = stack.popLast() {
