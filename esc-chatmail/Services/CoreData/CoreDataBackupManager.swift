@@ -26,8 +26,11 @@ enum CoreDataBackupManager {
             .lastPathComponent
 
         // Create backups directory if it doesn't exist
-        let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
+        let backupsDir = backupsDirectory(for: storeURL)
         try? FileManager.default.createDirectory(at: backupsDir, withIntermediateDirectories: true)
+        // A second copy of the mailbox that nothing reads back is not worth a device
+        // backup's space.
+        BackupExclusion.exclude(backupsDir, category: .coreData)
 
         let backupPath = backupsDir.appendingPathComponent(backupFilename)
 
@@ -90,6 +93,12 @@ enum CoreDataBackupManager {
     /// than `retentionInterval`. Runs whenever a store opens, which every
     /// reset and migration recovery is followed by.
     static func pruneBackups(for storeURL: URL, now: Date = Date()) {
+        // Here as well as where a backup is made: this runs at every launch, so a backup
+        // made by a build from before the mark is left out from the next launch on.
+        let backupsDir = backupsDirectory(for: storeURL)
+        if FileManager.default.fileExists(atPath: backupsDir.path) {
+            BackupExclusion.exclude(backupsDir, category: .coreData)
+        }
         cleanupOldBackups(
             for: storeURL,
             keepCount: 1,
@@ -105,7 +114,7 @@ enum CoreDataBackupManager {
 
     /// Backups sorted by embedded timestamp, then creation date (newest first).
     private static func sortedBackupFiles(for storeURL: URL) -> [BackupFile] {
-        let backupsDir = storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
+        let backupsDir = backupsDirectory(for: storeURL)
 
         guard let contents = try? FileManager.default.contentsOfDirectory(
             at: backupsDir,
@@ -138,6 +147,11 @@ enum CoreDataBackupManager {
 
             return lhs.filename < rhs.filename
         }
+    }
+
+    /// The directory beside the store that its backups are kept in.
+    static func backupsDirectory(for storeURL: URL) -> URL {
+        storeURL.deletingLastPathComponent().appendingPathComponent("Backups")
     }
 
     // MARK: - Private Helpers

@@ -225,6 +225,10 @@ final class ComposeAttachmentManager: ObservableObject {
             }
             try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try FileManager.default.copyItem(at: originalURL, to: destinationURL)
+            // The copy is this draft's own original now, and a copy carries the mark of the
+            // downloaded file it was made from (`BackupExclusion`). Without this a restored
+            // device would have the draft and not its attachment.
+            AttachmentPaths.applyBackupPolicy(toFileAt: newPath)
         } catch {
             AttachmentPaths.deleteFile(at: newPath)
             leaseRegistry.remove(sessionID: sessionID, attachmentID: newId)

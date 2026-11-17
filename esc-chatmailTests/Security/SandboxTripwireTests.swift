@@ -30,7 +30,9 @@ final class SandboxTripwireTests: XCTestCase {
         .orphanedMessageBodySweep:
             "guard SandboxTripwire.permitsDestructiveCleanup(.orphanedMessageBodySweep) else {",
         .orphanedAttachmentFileSweep:
-            "guard SandboxTripwire.permitsDestructiveCleanup(.orphanedAttachmentFileSweep) else {"
+            "guard SandboxTripwire.permitsDestructiveCleanup(.orphanedAttachmentFileSweep) else {",
+        .retiredAccountDirectorySweep:
+            "guard SandboxTripwire.permitsDestructiveCleanup(.retiredAccountDirectorySweep) else {"
     ]
 
     // Revert-check: fails if SandboxTripwire.ensureDestructiveCleanupPermitted(_:environment:)
@@ -112,8 +114,9 @@ final class SandboxTripwireTests: XCTestCase {
     // AuthSession.deleteAttachmentFilesFromDisk,
     // AuthSession.clearMailDerivedCaches,
     // HTMLContentHandler.deleteAllHTMLFromClosedAccount,
-    // HTMLContentHandler.cleanupOrphanedFiles or
-    // AttachmentDownloader.cleanupOrphanedFiles, moved below the function's
+    // HTMLContentHandler.cleanupOrphanedFiles,
+    // AttachmentDownloader.cleanupOrphanedFiles or
+    // RetiredAccountDirectory.sweepLeftovers, moved below the function's
     // first statement, taken out of its `#if os(macOS)` branch, or switched to
     // the non-throwing form in a throwing cleanup.
     // HONEST SCOPE: this reads source text. It proves each guard is present,

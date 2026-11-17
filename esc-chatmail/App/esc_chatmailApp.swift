@@ -202,6 +202,10 @@ struct esc_chatmailApp: App {
         }
         logStartupTiming("Fresh-install and Core Data bootstrap complete")
 
+        // What a sign-out or a fresh-install cleanup renamed out of use and the last run of
+        // the app did not finish removing. In the background, and waited for by nothing.
+        RetiredAccountDirectory.sweepLeftovers()
+
         // 2. Start cache coordinator for Core Data change notifications
         CacheCoordinator.shared.start()
         logStartupTiming("CacheCoordinator started")

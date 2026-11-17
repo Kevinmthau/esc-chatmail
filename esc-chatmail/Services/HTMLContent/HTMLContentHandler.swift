@@ -119,16 +119,12 @@ final class HTMLContentHandler: @unchecked Sendable {
         self.directoryKey = self.messagesDirectory.standardizedFileURL.path
         self.accountBoundary = HTMLContentAccountBoundaryRegistry.boundary(for: self.directoryKey)
         self.deleteHTMLFiles = deleteHTMLFiles ?? { directory in
-            guard FileManager.default.fileExists(atPath: directory.path) else {
-                return
-            }
-            let contents = try FileManager.default.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil
+            // One rename, however many bodies there are; the unlinks follow in the
+            // background and nothing waits for them (`RetiredAccountDirectory`).
+            // `reopenAccountWork` makes the directory again.
+            RetiredAccountDirectory.removeInBackground(
+                try RetiredAccountDirectory.takeOutOfUse(directory)
             )
-            for fileURL in contents {
-                try FileManager.default.removeItem(at: fileURL)
-            }
         }
         createMessagesDirectoryIfNeeded()
     }
@@ -138,7 +134,17 @@ final class HTMLContentHandler: @unchecked Sendable {
             if !FileManager.default.fileExists(atPath: messagesDirectory.path) {
                 FileSystemErrorHandler.createDirectory(at: messagesDirectory, category: .general)
             }
+            excludeMessagesDirectoryFromBackup()
         }
+    }
+
+    /// Message bodies can be fetched again, and at a large mailbox they are gigabytes. Called
+    /// wherever the directory is created or found, because the mark is the directory's own:
+    /// a directory made again after a sign-out has none, and neither has one from a build
+    /// before the mark (`BackupExclusion`). The bodies stay where they are: the verdict and
+    /// preview passes read them as stored state, so they must never become purgeable.
+    private func excludeMessagesDirectoryFromBackup() {
+        BackupExclusion.exclude(messagesDirectory)
     }
 
     /// Ensures the Messages directory exists. Call after cleanup operations that may delete it.
@@ -189,6 +195,12 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     /// Removes canonical HTML after `closeAccountWork()` has rejected all new
     /// readers and writers. Await completion before reopening account work.
+    ///
+    /// What is awaited is one rename of the Messages directory to a tombstone, not the
+    /// removal of its files, which goes on in the background after this returns
+    /// (`RetiredAccountDirectory`). Until `reopenAccountWork()` there is no Messages
+    /// directory. `hasStoredHTMLFiles()` does not count a tombstone: no body in one can be
+    /// reached by a message of the next account.
     func deleteAllHTMLFromClosedAccount() async throws {
         #if os(macOS)
         // Outside the App Sandbox this is the user's real ~/Documents/Messages.
@@ -209,6 +221,7 @@ final class HTMLContentHandler: @unchecked Sendable {
                 at: messagesDirectory,
                 withIntermediateDirectories: true
             )
+            excludeMessagesDirectoryFromBackup()
             clearCaches()
         })
     }
@@ -257,6 +270,7 @@ final class HTMLContentHandler: @unchecked Sendable {
                             at: messagesDirectory,
                             withIntermediateDirectories: true
                         )
+                        excludeMessagesDirectoryFromBackup()
                         try html.write(to: fileURL, atomically: true, encoding: .utf8)
                     }
                     cacheHTML(html, for: fileURL)
@@ -378,6 +392,76 @@ final class HTMLContentHandler: @unchecked Sendable {
             FileSystemErrorHandler.removeItem(at: resolvedURL, category: .general)
             invalidateCaches(for: resolvedURL)
         }
+    }
+
+    /// Removes the body files of messages a save deleted, some time after that save.
+    ///
+    /// Each chunk is one turn under the boundary's lock, so a writer of the same directory
+    /// waits for a hundred unlinks at most, and a closed or retired boundary stops the
+    /// removal at the next chunk. Within a chunk a file is left where the store has a row
+    /// for its message again, or where it was written after the delete
+    /// (`DeletedRowFileReclamation`). `deleteHTML(for:bodyStorageURI:)` asks neither, and
+    /// from this path it removed the body of a message that had been taken out of Trash
+    /// and stored again before the removal ran.
+    ///
+    /// - Parameters:
+    ///   - deletedAt: When the deleting save was posted.
+    ///   - liveMessageIDs: The IDs among those given that a stored row has. It is called
+    ///     with the lock held, so that no body can be written between the answer and the
+    ///     unlink. A throw removes nothing of that chunk.
+    ///   - isCancelled: Asked before each chunk.
+    func deleteHTML(
+        forDeleted bodies: [DeletedMessageBody],
+        deletedAt: Date,
+        expectedGeneration: HTMLContentAccountGeneration,
+        chunkSize: Int = 100,
+        liveMessageIDs: (Set<String>) throws -> Set<String>,
+        isCancelled: () -> Bool = { Task.isCancelled }
+    ) {
+        let chunkSize = max(1, chunkSize)
+        var start = 0
+        while start < bodies.count {
+            guard !isCancelled() else { return }
+            let chunk = bodies[start..<min(start + chunkSize, bodies.count)]
+            start += chunkSize
+            let admitted: Void? = accountBoundary.perform(
+                directoryKey: directoryKey,
+                expectedGeneration: expectedGeneration
+            ) {
+                let live: Set<String>
+                do {
+                    live = try liveMessageIDs(Set(chunk.map(\.messageId)))
+                } catch {
+                    Log.error(
+                        "Leaving deleted messages' body files: stored rows could not be read",
+                        category: .general,
+                        error: error
+                    )
+                    return
+                }
+                for body in chunk where !live.contains(body.messageId) {
+                    let fileURL = messagesDirectory.appendingPathComponent("\(body.messageId).html")
+                    removeDeletedBodyFile(at: fileURL, deletedAt: deletedAt)
+
+                    guard let bodyStorageURI = body.bodyStorageURI,
+                          let resolvedURL = StorageURIResolver.resolve(bodyStorageURI),
+                          resolvedURL.path != fileURL.path else {
+                        continue
+                    }
+                    removeDeletedBodyFile(at: resolvedURL, deletedAt: deletedAt)
+                }
+            }
+            // Closed, or reopened for another account: nothing later is this caller's.
+            guard admitted != nil else { return }
+        }
+    }
+
+    private func removeDeletedBodyFile(at fileURL: URL, deletedAt: Date) {
+        guard !DeletedRowFileReclamation.wasWrittenAfter(deletedAt, fileAt: fileURL) else {
+            return
+        }
+        FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
+        invalidateCaches(for: fileURL)
     }
 
     func deleteAllHTML() {

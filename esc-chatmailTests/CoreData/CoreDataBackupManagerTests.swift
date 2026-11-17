@@ -50,6 +50,30 @@ final class CoreDataBackupManagerTests: XCTestCase {
         XCTAssertEqual(backup.deletingLastPathComponent().lastPathComponent, "Backups")
     }
 
+    // Revert-check: `BackupExclusion.exclude(backupsDir)` in
+    // `CoreDataBackupManager.createTimestampedBackup`.
+    func testCreateTimestampedBackup_leavesTheBackupsDirectoryOutOfDeviceBackups() throws {
+        _ = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
+
+        XCTAssertTrue(BackupExclusion.isExcluded(CoreDataBackupManager.backupsDirectory(for: storeURL)))
+    }
+
+    // Revert-check: the `BackupExclusion.exclude` call that opens
+    // `CoreDataBackupManager.pruneBackups`. Without it a backup an earlier build made, in a
+    // directory that has no mark, stays in device backups until it expires.
+    func testPruneBackups_marksABackupsDirectoryAnEarlierBuildMade_andMakesNoneWhereThereIsNone() throws {
+        let backupsDir = CoreDataBackupManager.backupsDirectory(for: storeURL)
+        CoreDataBackupManager.pruneBackups(for: storeURL)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupsDir.path))
+
+        _ = try writeBackup(named: "Store.backup-old.sqlite")
+        XCTAssertFalse(BackupExclusion.isExcluded(backupsDir))
+
+        CoreDataBackupManager.pruneBackups(for: storeURL)
+
+        XCTAssertTrue(BackupExclusion.isExcluded(backupsDir))
+    }
+
     func testCreateTimestampedBackup_includesTimestampInFilename() throws {
         let backup = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
         XCTAssertTrue(backup.lastPathComponent.contains("backup-"))

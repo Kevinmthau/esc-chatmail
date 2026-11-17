@@ -80,6 +80,33 @@ final class AttachmentOrphanSweepTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: oldOrphan.path))
     }
 
+    // Revert-check: the `leaveOutOfBackupsIfDownloaded` branch of the Attachments loop in
+    // `AttachmentDownloader.performCleanupOrphanedFiles`. Without it a file a build from
+    // before the mark downloaded stays in every device backup.
+    func testCleanupOrphanedFiles_marksAKeptDownloadThatHasNoMark_andLeavesAUsersOriginalInBackups() async throws {
+        let downloadedPath = AttachmentPaths.originalPath(
+            messageId: "sweep-\(UUID().uuidString)",
+            attachmentId: "att-1",
+            ext: "pdf"
+        )
+        let downloaded = try makeFile(at: downloadedPath, age: 2 * 24 * 60 * 60)
+        // As an earlier build left it: downloaded, and never marked.
+        XCTAssertTrue(BackupExclusion.include(downloaded))
+        let originalPath = AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "jpg")
+        let original = try makeFile(at: originalPath, age: 2 * 24 * 60 * 60)
+        let downloader = makeDownloader { _ in
+            [["localURL": downloadedPath] as NSDictionary, ["localURL": originalPath] as NSDictionary]
+        }
+
+        await downloader.cleanupOrphanedFiles()
+
+        XCTAssertTrue(BackupExclusion.isExcluded(downloaded))
+        XCTAssertFalse(
+            BackupExclusion.isExcluded(original),
+            "An attachment the user added cannot be downloaded again and stays in backups"
+        )
+    }
+
     func testIsOldEnoughToSweep_missingFile_isKept() {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString)")

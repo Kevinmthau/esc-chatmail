@@ -20,6 +20,15 @@ enum AttachmentFileExport {
         }
     }
 
+    /// Copies a stored attachment to a place of the user's. Every copy this type makes goes
+    /// through here: a downloaded attachment is marked as left out of backups, a copy
+    /// carries the mark, and the user's own copy must be in the user's own backups
+    /// (`BackupExclusion`).
+    private static func copyOut(_ source: URL, to destination: URL, fileManager: FileManager) throws {
+        try fileManager.copyItem(at: source, to: destination)
+        BackupExclusion.include(destination, category: .attachment)
+    }
+
     /// Saves one attachment at `destination`, the file the save panel returned. A file already
     /// there is replaced: the panel asked.
     ///
@@ -37,7 +46,7 @@ enum AttachmentFileExport {
         }
         do {
             guard fileManager.fileExists(atPath: destination.path) else {
-                try fileManager.copyItem(at: item.sourceURL, to: destination)
+                try copyOut(item.sourceURL, to: destination, fileManager: fileManager)
                 return
             }
             let holding = try fileManager.url(
@@ -48,7 +57,7 @@ enum AttachmentFileExport {
             )
             defer { try? fileManager.removeItem(at: holding) }
             let staged = holding.appendingPathComponent(destination.lastPathComponent)
-            try fileManager.copyItem(at: item.sourceURL, to: staged)
+            try copyOut(item.sourceURL, to: staged, fileManager: fileManager)
             _ = try fileManager.replaceItemAt(destination, withItemAt: staged)
         } catch {
             throw ExportError.copyFailed(
@@ -70,7 +79,7 @@ enum AttachmentFileExport {
             throw ExportError.sourceMissing(filename: item.filename)
         }
         do {
-            try fileManager.copyItem(at: item.sourceURL, to: destination)
+            try copyOut(item.sourceURL, to: destination, fileManager: fileManager)
         } catch {
             throw ExportError.copyFailed(
                 filename: destination.lastPathComponent,
@@ -99,7 +108,7 @@ enum AttachmentFileExport {
                 fileManager.fileExists(atPath: folder.appendingPathComponent(candidate).path)
             }
             do {
-                try fileManager.copyItem(at: item.sourceURL, to: folder.appendingPathComponent(name))
+                try copyOut(item.sourceURL, to: folder.appendingPathComponent(name), fileManager: fileManager)
             } catch {
                 failures.append(.copyFailed(filename: name, reason: error.localizedDescription))
             }

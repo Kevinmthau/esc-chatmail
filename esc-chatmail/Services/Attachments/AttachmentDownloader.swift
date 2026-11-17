@@ -1327,6 +1327,8 @@ final class AttachmentDownloader: ObservableObject {
                    Self.isOldEnoughToSweep(fileURL, cutoff: recentFileCutoff) {
                     guard !generation.isCancelled else { return }
                     Self.removeOrphanedFile(at: fileURL, relativePath: path)
+                } else if let path = relativePath {
+                    Self.leaveOutOfBackupsIfDownloaded(fileURL, relativePath: path)
                 }
             }
 
@@ -1361,6 +1363,20 @@ final class AttachmentDownloader: ObservableObject {
             return false
         }
         return max(created, modified) < cutoff
+    }
+
+    /// Marks a downloaded attachment that this sweep keeps as left out of backups, where it
+    /// has no mark. A download is marked when it is written (`AttachmentPaths.saveData`);
+    /// this is for the files a build from before the mark downloaded, which are most of
+    /// what an existing installation has in `Attachments`. It only ever adds the mark: an
+    /// original the user added to a message is never one of these
+    /// (`AttachmentPaths.isRedownloadable`).
+    nonisolated static func leaveOutOfBackupsIfDownloaded(_ url: URL, relativePath: String) {
+        guard AttachmentPaths.isRedownloadable(relativePath),
+              !BackupExclusion.isExcluded(url) else {
+            return
+        }
+        BackupExclusion.exclude(url, category: .attachment)
     }
 
     /// Unsaved draft rows are invisible to the background-context snapshot.

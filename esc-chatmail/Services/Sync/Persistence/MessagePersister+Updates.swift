@@ -1020,6 +1020,9 @@ extension MessagePersister {
         }
         do {
             try fileManager.copyItem(at: sourceURL, to: destinationURL)
+            // The echo's copy can be downloaded again; the original it was copied from
+            // could not, and had no mark to bring.
+            AttachmentPaths.applyBackupPolicy(toFileAt: destinationPath)
             return true
         } catch {
             Log.error(

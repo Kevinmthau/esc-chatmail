@@ -1080,9 +1080,8 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
 
         let invalidationPlan = await syncContext.perform {
             CacheCoordinator.computeInvalidationPlan(
-                updatedObjectIDs: Set(syncContext.updatedObjects.map(\.objectID)),
-                deletedObjectIDs: Set(syncContext.deletedObjects.map(\.objectID)),
-                in: syncContext
+                updatedObjects: syncContext.updatedObjects,
+                deletedObjects: syncContext.deletedObjects
             )
         }
         XCTAssertFalse(invalidationPlan.attachmentPathsToDelete.contains(localOriginalPath))
@@ -1094,7 +1093,11 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
             try syncContext.save()
         }
 
-        let cacheCoordinator = CacheCoordinator()
+        // The removers ask this test's store, not the app's, whether a row still names a file.
+        let rowLookupStack: TestCoreDataStack = coreDataStack
+        let cacheCoordinator = CacheCoordinator(
+            fileReclamation: .asking { rowLookupStack.newBackgroundContext() }
+        )
         if let accountContext = cacheCoordinator.captureInvalidationAccountContext() {
             cacheCoordinator.applyInvalidationPlan(
                 invalidationPlan,
@@ -1122,6 +1125,11 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertEqual(durableAttachment.state, .downloaded)
         XCTAssertEqual(AttachmentPaths.loadData(from: remoteOriginalPath), originalData)
         XCTAssertEqual(AttachmentPaths.loadData(from: remotePreviewPath), previewData)
+        // Revert-check: `AttachmentPaths.applyBackupPolicy(toFileAt:)` after the copy in
+        // `handoffOptimisticAttachmentStorage`. The echo's copy can be downloaded again
+        // and is left out of backups; the original it was copied from stays in them.
+        XCTAssertTrue(BackupExclusion.isExcluded(try XCTUnwrap(AttachmentPaths.fullURL(for: remoteOriginalPath))))
+        XCTAssertFalse(BackupExclusion.isExcluded(try XCTUnwrap(AttachmentPaths.fullURL(for: localOriginalPath))))
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: activePreviewURL.path))
         XCTAssertEqual(try Data(contentsOf: activePreviewURL), originalData)

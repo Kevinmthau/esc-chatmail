@@ -42,6 +42,34 @@ final class AttachmentFileExportTests: XCTestCase {
         try FileManager.default.contentsOfDirectory(atPath: destinationFolder.path).sorted()
     }
 
+    // MARK: - Backups
+
+    // Revert-check: `BackupExclusion.include` in `AttachmentFileExport.copyOut`. Without it
+    // each copy carries the mark of the downloaded attachment it was made from, and the
+    // user's saved file is left out of the user's own backups. All three ways out of the
+    // app are here, and the replacing save too, whose copy is staged first.
+    func testEveryCopyHandedToTheUser_isBackedUp_thoughTheStoredAttachmentIsNot() throws {
+        let stored = try item(stored: "remote_stored.pdf", filename: "Report.pdf", bytes: "report")
+        XCTAssertTrue(BackupExclusion.exclude(stored.sourceURL))
+        let saved = destinationFolder.appendingPathComponent("Saved.pdf")
+        let replaced = destinationFolder.appendingPathComponent("Replaced.pdf")
+        try Data("older".utf8).write(to: replaced)
+        let promised = destinationFolder.appendingPathComponent("Promised.pdf")
+        let all = destinationFolder.appendingPathComponent("All", isDirectory: true)
+        try FileManager.default.createDirectory(at: all, withIntermediateDirectories: true)
+
+        try AttachmentFileExport.save(stored, to: saved)
+        try AttachmentFileExport.save(stored, to: replaced)
+        try AttachmentFileExport.writePromise(stored, to: promised)
+        XCTAssertEqual(AttachmentFileExport.saveAll([stored], into: all).count, 0)
+
+        XCTAssertTrue(BackupExclusion.isExcluded(stored.sourceURL), "The app's own copy keeps its mark")
+        for copy in [saved, replaced, promised, all.appendingPathComponent("Report.pdf")] {
+            XCTAssertEqual(try String(contentsOf: copy, encoding: .utf8), "report", copy.lastPathComponent)
+            XCTAssertFalse(BackupExclusion.isExcluded(copy), copy.lastPathComponent)
+        }
+    }
+
     // MARK: - Save Attachment…
 
     /// Revert-check: deleting the `copyItem` call from `save` makes this fail.

@@ -1851,6 +1851,104 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // A sign-out over real directories, with the app's own file cleanup wired to them and the
+    // background removal held: what a sign-out awaits, and what the sign-in after it finds
+    // while the last account's files are still on disk.
+    //
+    // Revert-check, two of them.
+    // 1. `RetiredAccountDirectory.takeOutOfUse` in `AuthSession.retireAttachmentDirectories`
+    //    and in `HTMLContentHandler`'s cleanup. Unlink the files there, as before, and
+    //    nothing is left for the held removal: the count of files still on disk is 0.
+    // 2. The tombstone policy of `AccountScopedMailboxFileInspector.hasStoredFiles` and
+    //    `HTMLContentHandler.hasStoredHTMLFiles`. Count a tombstone as account data and
+    //    the account preparation resets the store a second time.
+    // HONEST SCOPE: the cleanup closures here are built from the functions `AuthSession`'s
+    // defaults call, over temporary directories, because the defaults themselves act on
+    // the process's shared stores. That the defaults call them is not run by any test.
+    func testSignOut_overRealFiles_returnsWithEveryFileStillOnDisk_andTheNextSignInFindsAnEmptyMailbox() async throws {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("AuthSessionRetiredFiles-\(UUID().uuidString)", isDirectory: true)
+        let appSupport = root.appendingPathComponent("ApplicationSupport", isDirectory: true)
+        let caches = root.appendingPathComponent("Caches", isDirectory: true)
+        let messages = root.appendingPathComponent("Documents/Messages", isDirectory: true)
+        let held = AuthSessionHeldTombstones()
+        defer {
+            held.urls.forEach { RetiredAccountDirectory.remove($0) }
+            try? fileManager.removeItem(at: root)
+        }
+        try fileManager.createDirectory(at: caches, withIntermediateDirectories: true)
+        for name in ["Attachments", "Previews"] {
+            let directory = appSupport.appendingPathComponent(name, isDirectory: true)
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            for index in 0..<3 {
+                try Data("old".utf8).write(to: directory.appendingPathComponent("file-\(index).bin"))
+            }
+        }
+        let handler = HTMLContentHandler(
+            messagesDirectory: messages,
+            deleteHTMLFiles: { directory in
+                held.add(try RetiredAccountDirectory.takeOutOfUse(directory))
+            }
+        )
+        for index in 0..<3 {
+            XCTAssertNotNil(handler.saveHTML("<p>old account</p>", for: "message-\(index)"))
+        }
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { [] },
+            hasStoredAccountScopedMailboxData: {
+                try handler.hasStoredHTMLFiles() || AccountScopedMailboxFileInspector.hasStoredFiles(
+                    appSupportDirectory: appSupport,
+                    cachesDirectory: caches
+                )
+            },
+            deleteAttachmentFiles: {
+                try AuthSession.retireAttachmentDirectories(
+                    appSupportDirectory: appSupport,
+                    cachesDirectory: caches,
+                    removeTombstone: { held.add($0) }
+                )
+            },
+            cleanupHTMLContent: {
+                handler.closeAccountWork()
+                try await handler.deleteAllHTMLFromClosedAccount()
+            },
+            reopenHTMLContent: { try handler.reopenAccountWork() }
+        )
+
+        let didSignOut = await session.signOut()
+
+        XCTAssertTrue(didSignOut)
+        XCTAssertEqual(resetScript.attemptCount, 1)
+        XCTAssertEqual(held.urls.count, 3, "Messages, Attachments and Previews each became one tombstone")
+        let filesStillOnDisk = try held.urls.reduce(0) { count, tombstone in
+            count + (try fileManager.contentsOfDirectory(atPath: tombstone.path).count)
+        }
+        XCTAssertEqual(filesStillOnDisk, 9, "The sign-out returned without unlinking a file")
+        XCTAssertFalse(fileManager.fileExists(atPath: messages.path))
+        XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Attachments").path))
+        XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Previews").path))
+
+        // The next sign-in, with the removal still not done. Its reopen makes the Messages
+        // directory again, as the app's does.
+        try handler.reopenAccountWork()
+        try await session.prepareLocalStoreForAuthenticatedAccount(
+            "next@example.com",
+            entry: .interactiveSignIn
+        )
+
+        XCTAssertEqual(
+            resetScript.attemptCount,
+            1,
+            "Tombstones are not another account's mailbox: the sign-in must not reset the store again"
+        )
+        XCTAssertNil(handler.loadHTML(for: "message-0"))
+        XCTAssertNotNil(handler.saveHTML("<p>next account</p>", for: "message-0"))
+        XCTAssertEqual(handler.loadHTML(for: "message-0"), "<p>next account</p>")
+    }
+
     func testAccountPreparationReplacesAccountlessStoreWithOrphanedMailboxData() async throws {
         let resetScript = AuthSessionStoreResetScript()
         let session = makeAuthSession(
@@ -3267,6 +3365,24 @@ final class AuthSessionTests: XCTestCase {
 
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "AuthSessionTests.\(UUID().uuidString)")!
+    }
+}
+
+private final class AuthSessionHeldTombstones: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [URL] = []
+
+    var urls: [URL] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stored
+    }
+
+    func add(_ url: URL?) {
+        guard let url else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        stored.append(url)
     }
 }
 
