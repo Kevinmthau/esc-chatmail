@@ -226,6 +226,54 @@ final class SyncRunCoordinatorTests: XCTestCase {
         XCTAssertFalse(builtTask.isSet)
     }
 
+    // Revert-check: `parkUntilIdleOrCancelled()` in
+    // `SyncRunCoordinator.acquireRunWithTask`. Parked with `parkUntilIdle()`,
+    // a cancelled acquisition stays parked until the run ahead of it ends.
+    // Here that run is held past the deadline, so the acquisition has not
+    // returned and the first assertion fails. A fired background task is
+    // completed only once its handler has returned, so an expired
+    // maintenance task parked this way stayed uncompleted for as long as the
+    // sync ahead of it ran.
+    func testAcquireRunWithTask_cancelledWhileWaiting_returnsBeforeTheRunAheadEnds() async throws {
+        let coordinator = SyncRunCoordinator()
+        let beganRun = await coordinator.beginRun(kind: .foregroundIncremental)
+        let activeRun = try XCTUnwrap(beganRun)
+        let madeRequest = await coordinator.makeAccountWorkRequest()
+        let request = try XCTUnwrap(madeRequest)
+        let builtTask = LockedFlag()
+        let returned = LockedFlag()
+
+        let acquisition = Task { () -> SyncRunTask? in
+            let acquired = await coordinator.acquireRunWithTask(kind: .maintenance, for: request) { _ in
+                builtTask.set()
+                return Task {}
+            }
+            returned.set()
+            return acquired
+        }
+        let parked = await workIsWaiting(on: coordinator)
+        XCTAssertTrue(parked, "The acquisition waits for the active run")
+
+        acquisition.cancel()
+        let returnedWhileTheRunWasHeld = await waitUntil(timeout: 5) { returned.isSet }
+        XCTAssertTrue(
+            returnedWhileTheRunWasHeld,
+            "A cancelled acquisition must not wait for the run ahead of it to end"
+        )
+        let activeKind = await coordinator.activeRunKind()
+        XCTAssertEqual(activeKind, .foregroundIncremental, "The run ahead is untouched")
+
+        // Ending the run resumes whoever is still parked. The cancelled
+        // waiter was removed as it was resumed: left behind, its continuation
+        // is resumed a second time here, which traps.
+        await coordinator.endRun(activeRun)
+        let acquired = await acquisition.value
+        XCTAssertNil(acquired)
+        XCTAssertFalse(builtTask.isSet, "No task is built for a cancelled acquisition")
+        let nextRun = await coordinator.beginRun(kind: .background)
+        XCTAssertNotNil(nextRun, "The boundary is free for the next run")
+    }
+
     func testConcurrentQuiescenceOwnersAreSerializedWithoutReopeningRunBoundary() async {
         let coordinator = SyncRunCoordinator()
         await coordinator.beginQuiescence()
@@ -477,6 +525,33 @@ final class SyncRunCoordinatorTests: XCTestCase {
         await runFirstTransition.value
         XCTAssertTrue(runFirstDrained.isSet)
         await runFirstCoordinator.endQuiescence()
+    }
+}
+
+extension SyncRunCoordinatorTests {
+    /// Whether work parks behind `coordinator`'s boundary within the
+    /// deadline. `waitUntilWorkIsWaiting()` awaited bare never returns when
+    /// nothing parks: the test must fail on that, not hang.
+    fileprivate func workIsWaiting(on coordinator: SyncRunCoordinator) async -> Bool {
+        let parked = LockedFlag()
+        Task {
+            await coordinator.waitUntilWorkIsWaiting()
+            parked.set()
+        }
+        return await waitUntil(timeout: 5) { parked.isSet }
+    }
+
+    fileprivate func waitUntil(
+        timeout: TimeInterval,
+        pollIntervalNanoseconds: UInt64 = 5_000_000,
+        condition: () async -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        return await condition()
     }
 }
 

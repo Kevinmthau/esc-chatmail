@@ -202,6 +202,68 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
         XCTAssertFalse(isRunning, "The run is ended once the cancelled operation has returned")
     }
 
+    // Revert-check: `parkUntilIdleOrCancelled()` in
+    // `SyncRunCoordinator.acquireRunWithTask`, which this goes through. A
+    // caller cancelled while it waits behind a sync (a background task that
+    // expired) must be answered then, not when the sync ends: the sync here
+    // is held past the deadline, so with the plain park the request has not
+    // returned and the first assertion fails.
+    func testCancellingTheCaller_whileItWaitsBehindASync_answersBeforeTheSyncEnds() async throws {
+        let syncRunCoordinator = SyncRunCoordinator()
+        let coordinator = StoreMaintenanceCoordinator(syncRunCoordinator: syncRunCoordinator)
+        let operationRan = AsyncFlag()
+        let answered = AsyncFlag()
+        let beganSync = await syncRunCoordinator.beginRun(kind: .foregroundIncremental)
+        let activeSync = try XCTUnwrap(beganSync)
+
+        let maintenance = Task { () -> Bool in
+            let succeeded = await coordinator.runExclusivelyWhenStoreIsIdle(operationName: "test cleanup") {
+                await operationRan.set()
+                return true
+            }
+            await answered.set()
+            return succeeded
+        }
+        let parked = AsyncFlag()
+        Task {
+            await syncRunCoordinator.waitUntilWorkIsWaiting()
+            await parked.set()
+        }
+        let waited = await Self.waitUntil(timeout: 5) { await parked.value }
+        XCTAssertTrue(waited, "The maintenance waits for the sync's run to end")
+
+        maintenance.cancel()
+        let answeredWhileTheSyncRan = await Self.waitUntil(timeout: 5) { await answered.value }
+        XCTAssertTrue(
+            answeredWhileTheSyncRan,
+            "A cancelled request must not wait for the sync ahead of it to end"
+        )
+
+        await syncRunCoordinator.endRun(activeSync)
+        let succeeded = await maintenance.value
+        XCTAssertFalse(succeeded)
+        let didRunOperation = await operationRan.value
+        XCTAssertFalse(didRunOperation, "Nothing runs for a cancelled request")
+
+        // The coordinator is free again: a later request is not refused as
+        // "already running", and takes the run.
+        let later = await coordinator.runExclusivelyWhenStoreIsIdle(operationName: "later cleanup") { true }
+        XCTAssertTrue(later)
+    }
+
+    nonisolated private static func waitUntil(
+        timeout: TimeInterval,
+        pollIntervalNanoseconds: UInt64 = 5_000_000,
+        condition: () async -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
+        }
+        return await condition()
+    }
+
     /// Stands in for a maintenance operation's work: returns true as soon as
     /// its task is cancelled, false if `deadline` seconds pass first.
     nonisolated private static func waitForCancellation(deadline: TimeInterval) async -> Bool {

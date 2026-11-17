@@ -211,7 +211,7 @@ final class SyncEngine: ObservableObject, Sendable {
     }
 
     func triggerIncrementalSyncIfPossible(
-        completion: @escaping @MainActor @Sendable (Bool) -> Void
+        completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult {
         let resultRecorder = IncrementalSyncResultRecorder()
         switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
@@ -226,7 +226,13 @@ final class SyncEngine: ObservableObject, Sendable {
                       let result = await resultRecorder.recordedResult() else {
                     return
                 }
-                completion(result.needsFollowUp)
+                let continuationQueued = completion(result.needsFollowUp)
+                // The continuation is the rest of the mail this run did not
+                // reach. Asked for now, the maintenance took the exclusive
+                // run ahead of it, and the continuation waited for every
+                // store-wide pass. The last run of the chain asks instead:
+                // the one that needs no follow-up, or gets none at once.
+                guard !continuationQueued else { return }
                 await self.runStoreMaintenanceAfterSync()
             }
             return .started
@@ -269,7 +275,15 @@ final class SyncEngine: ObservableObject, Sendable {
             // A processing task has the time for the store-wide passes and
             // an app refresh does not. Awaited here, inside the background
             // task's own worker, so its expiration cancels them.
-            if budget.allowsStoreMaintenance {
+            //
+            // Not after a run that needs a follow-up. The caller schedules
+            // the catch-up only once this returns, and schedules nothing
+            // for a task that has expired by then
+            // (`BackgroundSyncManager.performAuthoritativeSync`): an
+            // expiration during a pass lost the catch-up of a run that had
+            // already committed. The cadence stays due for the next run
+            // that finishes its history.
+            if budget.allowsStoreMaintenance, !result.needsFollowUp {
                 await runStoreMaintenanceAfterSync()
             }
             return result.needsFollowUp ? .needsFollowUp : .completed
@@ -294,6 +308,11 @@ final class SyncEngine: ObservableObject, Sendable {
     /// kept its run, its progress and everything waiting on it for all of
     /// them. Whoever was waiting for the sync
     /// (`waitForCurrentSyncToComplete()`) is released before they start.
+    ///
+    /// Not called after a run whose follow-up is about to run: in the
+    /// foreground where the caller queued a continuation, in a processing
+    /// task where the run needs one. The follow-up is new mail, and it
+    /// would wait behind the passes for the exclusive run.
     private func runStoreMaintenanceAfterSync() async {
         await runDueStoreMaintenance()
     }

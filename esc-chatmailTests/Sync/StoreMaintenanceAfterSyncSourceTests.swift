@@ -43,14 +43,34 @@ final class StoreMaintenanceAfterSyncSourceTests: XCTestCase {
             )
         }
         XCTAssertTrue(
-            background.contains("if budget.allowsStoreMaintenance {"),
-            "An app refresh has no time for the store-wide passes"
+            background.contains("if budget.allowsStoreMaintenance, !result.needsFollowUp {"),
+            "An app refresh has no time for the store-wide passes, and a run that needs a follow-up leaves them"
         )
         let orchestration = try body(of: "private func performIncrementalSyncInternal(", in: source)
         XCTAssertFalse(
             orchestration.contains("runStoreMaintenanceAfterSync"),
             "This function is the body of the run's own task"
         )
+    }
+
+    // Revert-check: the `guard !continuationQueued else { return }` in
+    // `SyncEngine.triggerIncrementalSyncIfPossible`. A run that left history
+    // unread has a continuation queued by the time its completion returns,
+    // and the maintenance, asked for in the same turn, took the exclusive
+    // run first: the rest of the new mail waited for every store-wide pass.
+    // What the completion answers is run for real in
+    // `ForegroundSyncCoordinatorTests.testCompletion_answersWhetherAContinuationWasQueued`.
+    func testSyncEngine_foreground_leavesTheRunBoundaryToAQueuedContinuation() throws {
+        let source = try repositorySource("esc-chatmail/Services/Sync/SyncEngine.swift")
+        let foreground = try body(of: "func triggerIncrementalSyncIfPossible(", in: source)
+
+        let completion = try XCTUnwrap(
+            foreground.range(of: "let continuationQueued = completion(result.needsFollowUp)")
+        )
+        let yield = try XCTUnwrap(foreground.range(of: "guard !continuationQueued else { return }"))
+        let maintenance = try XCTUnwrap(foreground.range(of: "runStoreMaintenanceAfterSync()"))
+        XCTAssertLessThan(completion.lowerBound, yield.lowerBound)
+        XCTAssertLessThan(yield.lowerBound, maintenance.lowerBound)
     }
 
     /// The text from `signature` to the next function declared at the same

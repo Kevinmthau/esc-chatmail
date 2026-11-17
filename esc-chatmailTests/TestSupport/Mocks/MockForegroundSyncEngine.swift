@@ -10,7 +10,7 @@ import Foundation
 /// `onWaitForCurrentSyncToComplete` to gate it.
 @MainActor
 final class MockForegroundSyncEngine: ForegroundSyncPerforming {
-    private typealias Completion = @MainActor @Sendable (Bool) -> Void
+    private typealias Completion = @MainActor @Sendable (Bool) -> Bool
 
     var requestResults: [ForegroundSyncRequestResult] = [.started]
     var onWaitForCurrentSyncToComplete: (() async -> Void)?
@@ -27,7 +27,7 @@ final class MockForegroundSyncEngine: ForegroundSyncPerforming {
     }
 
     func triggerIncrementalSyncIfPossible(
-        completion: @escaping @MainActor @Sendable (Bool) -> Void
+        completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult {
         triggerIncrementalSyncIfPossibleCalls += 1
         completions.append(completion)
@@ -42,7 +42,10 @@ final class MockForegroundSyncEngine: ForegroundSyncPerforming {
         return .started
     }
 
-    func completeRequest(at index: Int, needsFollowUp: Bool) {
+    /// - Returns: what the completion answered: whether the coordinator
+    ///   queued a continuation to run at once.
+    @discardableResult
+    func completeRequest(at index: Int, needsFollowUp: Bool) -> Bool {
         completions[index](needsFollowUp)
     }
 }
