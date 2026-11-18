@@ -42,6 +42,11 @@ struct MacConversationSidebar: View {
     let onNewMessage: @MainActor () -> Void
 
     @FocusState private var isSearchFieldFocused: Bool
+    /// The conversation a row's swipe asked to report as spam, until the question is answered
+    /// (`conversationSpamConfirmation`). The context menu's Report Spam does not ask: it is
+    /// chosen from a menu, not one tap away from Archive. A property wrapper, so it is no
+    /// parameter of the memberwise initializer `MacMailboxView` uses (see `appearsActive`).
+    @State private var conversationAwaitingSpamConfirmation: NSManagedObjectID?
     /// Whether this window is the one the user is working in (`WindowAppearsActive` says what
     /// that means on the Mac). A selected row is gray in a window that is not.
     ///
@@ -117,23 +122,13 @@ struct MacConversationSidebar: View {
                 .onAppear {
                     viewModel.loadMoreIfNeeded(currentItem: item)
                 }
-                // Archive must stay the first button: the first is the one at the row's edge
-                // and the one a full swipe performs. Spam is shown only by a partial swipe
-                // (`ConversationListSwipeActionsSourceTests`).
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) {
-                        onArchive([item.id])
-                    } label: {
-                        SwiftUI.Label("Archive", systemImage: "archivebox")
-                    }
-                    .tint(.blue)
-                    Button(role: .destructive) {
-                        onReportSpam([item.id])
-                    } label: {
-                        SwiftUI.Label("Spam", systemImage: "exclamationmark.triangle")
-                    }
-                    .tint(.orange)
-                }
+                // A full swipe archives; Report Spam is a partial swipe's and asks first
+                // (`conversationRowTrailingSwipeActions`, shared with the iPhone's list).
+                .conversationRowTrailingSwipeActions(
+                    isEnabled: true,
+                    onArchive: { onArchive([item.id]) },
+                    onReportSpam: { conversationAwaitingSpamConfirmation = item.id }
+                )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     Button {
                         viewModel.toggleConversationReadState(withID: item.id)
@@ -163,6 +158,13 @@ struct MacConversationSidebar: View {
                 .accessibilityHidden(true)
         }
         .animation(nil, value: viewModel.filteredConversationItems.count)
+        // The question is a sheet on the mailbox window, so the menu commands that refuse under
+        // a sheet (New Message, Sign Out…) refuse while it asks (`FocusedWindowSheet`,
+        // `MailboxWindowSheet`); not seen in the app. The answer goes through `onReportSpam`,
+        // so `MacMailboxView` moves the selection off the row as it does for the context menu.
+        .conversationSpamConfirmation(for: $conversationAwaitingSpamConfirmation) { conversationID in
+            onReportSpam([conversationID])
+        }
         // The menu's rows are the ones right-clicked: the whole selection when the click is
         // inside it, otherwise just the clicked row, which the selection then does not follow.
         .contextMenu(forSelectionType: MacSidebarRowID.self) { rowIDs in

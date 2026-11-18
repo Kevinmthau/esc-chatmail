@@ -173,6 +173,26 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    /// Reports one row's conversation as spam: the iPhone list's trailing swipe, once its
+    /// confirmation is answered.
+    ///
+    /// The single-conversation action, as the row's Archive (`archiveConversation(withID:)`)
+    /// is, and on this view model's task manager under a key of its own per conversation. Not
+    /// `reportSpamConversations(withIDs:)`: that is the Mac sidebar's batch entry point, which
+    /// runs on the selection service under a fresh key per call and treats a conversation with
+    /// no messages as a batch does, so the row's two swipe buttons would follow different rules.
+    func reportSpamConversation(withID objectID: NSManagedObjectID) {
+        guard let conversation = conversation(withID: objectID) else {
+            return
+        }
+
+        let convID = conversation.objectID
+        taskManager.run("reportSpam-\(convID)") { [weak self] in
+            guard let self = self else { return }
+            await messageActions.reportSpamConversation(conversation: conversation)
+        }
+    }
+
     func toggleConversationReadState(withID objectID: NSManagedObjectID) {
         guard let conversation = conversation(withID: objectID) else {
             return
