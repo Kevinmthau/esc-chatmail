@@ -176,7 +176,8 @@ final class MacConversationSidebarSourceTests: XCTestCase {
     }
 
     /// The source of one conversation row: from the `ForEach` over the list's items to the
-    /// row's first swipe action.
+    /// row's first swipe action, the trailing one (`conversationRowTrailingSwipeActions`, which
+    /// is not spelled `.swipeActions(`), so the row's text holds none of the swipes' closures.
     private func rowSource() throws -> String {
         let source = try sidebarSource()
 
@@ -185,8 +186,8 @@ final class MacConversationSidebarSourceTests: XCTestCase {
             "MacConversationSidebar no longer lists its rows the way this test reads them"
         )
         let end = try XCTUnwrap(
-            source.range(of: ".swipeActions(", range: start.upperBound..<source.endIndex),
-            "The sidebar's row has no swipe action this test can stop at"
+            source.range(of: ".conversationRowTrailingSwipeActions(", range: start.upperBound..<source.endIndex),
+            "The sidebar's row has no trailing swipe this test can stop at"
         )
         return String(source[start.upperBound..<end.lowerBound])
     }

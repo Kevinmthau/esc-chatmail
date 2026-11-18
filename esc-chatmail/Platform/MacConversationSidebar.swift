@@ -42,11 +42,11 @@ struct MacConversationSidebar: View {
     let onNewMessage: @MainActor () -> Void
 
     @FocusState private var isSearchFieldFocused: Bool
-    /// The conversation a row's swipe asked to report as spam, until the question is answered
-    /// (`conversationSpamConfirmation`). The context menu's Report Spam does not ask: it is
-    /// chosen from a menu, not one tap away from Archive. A property wrapper, so it is no
-    /// parameter of the memberwise initializer `MacMailboxView` uses (see `appearsActive`).
-    @State private var conversationAwaitingSpamConfirmation: NSManagedObjectID?
+    /// The row's Report Spam waiting for its answer (`conversationSpamConfirmation`). The context
+    /// menu's Report Spam does not ask: it is chosen from a menu, not one tap away from Archive.
+    /// A property wrapper, so it is no parameter of the memberwise initializer `MacMailboxView`
+    /// uses (see `appearsActive`).
+    @State private var spamReportAwaitingAnswer: ConversationRowSwipePolicy.SpamReportRequest?
     /// Whether this window is the one the user is working in (`WindowAppearsActive` says what
     /// that means on the Mac). A selected row is gray in a window that is not.
     ///
@@ -127,7 +127,12 @@ struct MacConversationSidebar: View {
                 .conversationRowTrailingSwipeActions(
                     isEnabled: true,
                     onArchive: { onArchive([item.id]) },
-                    onReportSpam: { conversationAwaitingSpamConfirmation = item.id }
+                    onReportSpam: {
+                        spamReportAwaitingAnswer = .init(
+                            conversationID: item.id,
+                            storedName: item.snapshot.displayNameHint
+                        )
+                    }
                 )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     Button {
@@ -161,10 +166,13 @@ struct MacConversationSidebar: View {
         // The question is a sheet on the mailbox window, so the menu commands that refuse under
         // a sheet (New Message, Sign Out…) refuse while it asks (`FocusedWindowSheet`,
         // `MailboxWindowSheet`); not seen in the app. The answer goes through `onReportSpam`,
-        // so `MacMailboxView` moves the selection off the row as it does for the context menu.
-        .conversationSpamConfirmation(for: $conversationAwaitingSpamConfirmation) { conversationID in
-            onReportSpam([conversationID])
-        }
+        // once the sheet is gone, so `MacMailboxView` moves the selection off the row as it
+        // does for the context menu.
+        .conversationSpamConfirmation(
+            for: $spamReportAwaitingAnswer,
+            isListed: { viewModel.listsConversation(withID: $0) },
+            onConfirm: { onReportSpam([$0]) }
+        )
         // The menu's rows are the ones right-clicked: the whole selection when the click is
         // inside it, otherwise just the clicked row, which the selection then does not follow.
         .contextMenu(forSelectionType: MacSidebarRowID.self) { rowIDs in

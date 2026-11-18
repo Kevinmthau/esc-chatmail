@@ -49,9 +49,8 @@ struct ConversationListView: View {
     @State private var selectedConversation: Conversation?
     @State private var pendingConversationReference: ConversationReference?
     @State private var showingComposer = false
-    /// The conversation a row's swipe asked to report as spam, until the question is answered
-    /// (`conversationSpamConfirmation`).
-    @State private var conversationAwaitingSpamConfirmation: NSManagedObjectID?
+    /// The row's Report Spam waiting for its answer (`conversationSpamConfirmation`).
+    @State private var spamReportAwaitingAnswer: ConversationRowSwipePolicy.SpamReportRequest?
     @FocusState private var isSearchFieldFocused: Bool
 
     private var conversationList: some View {
@@ -73,6 +72,7 @@ struct ConversationListView: View {
                 .listRowSeparator(.hidden, edges: .top)
             }
             ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
+                let isBeingReportedAsSpam = viewModel.conversationIDsBeingReportedAsSpam.contains(item.id)
                 // One structural path for both selection modes: an if/else here
                 // would make the arms `_ConditionalContent`, so toggling Select
                 // tore down and rebuilt every visible row subtree (row @State
@@ -97,14 +97,22 @@ struct ConversationListView: View {
                             }
                         }
                 }
+                // A row whose spam report is running stays until the report's save lands;
+                // dimmed, it shows the answer was taken (`conversationIDsBeingReportedAsSpam`).
+                .opacity(isBeingReportedAsSpam ? 0.4 : 1)
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                 // A full swipe archives; Report Spam is a partial swipe's and asks first
                 // (`conversationRowTrailingSwipeActions`, shared with the Mac's sidebar).
                 .conversationRowTrailingSwipeActions(
-                    isEnabled: !viewModel.isSelecting,
+                    isEnabled: !viewModel.isSelecting && !isBeingReportedAsSpam,
                     onArchive: { viewModel.archiveConversation(withID: item.id) },
-                    onReportSpam: { conversationAwaitingSpamConfirmation = item.id }
+                    onReportSpam: {
+                        spamReportAwaitingAnswer = .init(
+                            conversationID: item.id,
+                            storedName: item.snapshot.displayNameHint
+                        )
+                    }
                 )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     if !viewModel.isSelecting {
@@ -125,9 +133,11 @@ struct ConversationListView: View {
         .listStyle(.plain)
         .animation(nil, value: viewModel.filteredConversationItems.count)
         .scrollDismissesKeyboard(.immediately)
-        .conversationSpamConfirmation(for: $conversationAwaitingSpamConfirmation) { conversationID in
-            viewModel.reportSpamConversation(withID: conversationID)
-        }
+        .conversationSpamConfirmation(
+            for: $spamReportAwaitingAnswer,
+            isListed: { viewModel.listsConversation(withID: $0) },
+            onConfirm: { viewModel.reportSpamConversation(withID: $0) }
+        )
         .navigationTitle(
             ConversationListChromePolicy.navigationTitle(
                 isSelecting: viewModel.isSelecting,

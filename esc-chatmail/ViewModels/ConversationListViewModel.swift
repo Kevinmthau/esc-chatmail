@@ -33,6 +33,14 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Published State (Presentation)
 
     @Published private(set) var filteredConversationItems: [ConversationListItem] = []
+    /// Conversations whose spam report from a row's swipe is running
+    /// (`reportSpamConversation(withID:)`). The iPhone list dims their rows and offers no swipe
+    /// on them until it ends: the row stays until the report's save reaches this context, which
+    /// for a long chat is seconds, and with nothing changed on screen the answer looked ignored.
+    ///
+    /// Cleared when the action returns, which can be a moment before its save has reached the
+    /// list, so a row can show undimmed for that moment before it goes.
+    @Published private(set) var conversationIDsBeingReportedAsSpam: Set<NSManagedObjectID> = []
 
     // MARK: - Dependencies
 
@@ -166,31 +174,47 @@ final class ConversationListViewModel: ObservableObject {
             return
         }
 
-        let convID = conversation.objectID
-        taskManager.run("archive-\(convID)") { [weak self] in
-            guard let self = self else { return }
+        runRowAction("archive", on: conversation) { messageActions, conversation in
             await messageActions.archiveConversation(conversation: conversation)
         }
     }
 
     /// Reports one row's conversation as spam: the iPhone list's trailing swipe, once its
-    /// confirmation is answered.
+    /// question is answered (`View.conversationSpamConfirmation`).
     ///
     /// The single-conversation action, as the row's Archive (`archiveConversation(withID:)`)
-    /// is, and on this view model's task manager under a key of its own per conversation. Not
-    /// `reportSpamConversations(withIDs:)`: that is the Mac sidebar's batch entry point, which
-    /// runs on the selection service under a fresh key per call and treats a conversation with
-    /// no messages as a batch does, so the row's two swipe buttons would follow different rules.
+    /// is. Not `reportSpamConversations(withIDs:)`: that is the Mac sidebar's batch entry point,
+    /// which runs on the selection service under a fresh key per call and treats a conversation
+    /// with no messages as a batch does, so the row's two swipe buttons would follow different
+    /// rules.
+    ///
+    /// The conversation is in `conversationIDsBeingReportedAsSpam` until the action ends, and a
+    /// second report of it meanwhile is refused: the row stays in the list until the report's
+    /// save reaches this context, which for a long chat is seconds, and a second run under the
+    /// same task key would cancel the first.
     func reportSpamConversation(withID objectID: NSManagedObjectID) {
-        guard let conversation = conversation(withID: objectID) else {
+        guard let conversation = conversation(withID: objectID),
+              !conversationIDsBeingReportedAsSpam.contains(conversation.objectID) else {
             return
         }
 
         let convID = conversation.objectID
-        taskManager.run("reportSpam-\(convID)") { [weak self] in
-            guard let self = self else { return }
+        conversationIDsBeingReportedAsSpam.insert(convID)
+        runRowAction(
+            "reportSpam",
+            on: conversation,
+            then: { [weak self] in
+                self?.conversationIDsBeingReportedAsSpam.remove(convID)
+            }
+        ) { messageActions, conversation in
             await messageActions.reportSpamConversation(conversation: conversation)
         }
+    }
+
+    /// Whether the list shows the conversation now. One pass over the rows: asked while a row's
+    /// spam question is up (`View.conversationSpamConfirmation`), and not otherwise.
+    func listsConversation(withID objectID: NSManagedObjectID) -> Bool {
+        filteredConversationItems.contains { $0.id == objectID }
     }
 
     func toggleConversationReadState(withID objectID: NSManagedObjectID) {
@@ -198,14 +222,34 @@ final class ConversationListViewModel: ObservableObject {
             return
         }
 
-        let convID = conversation.objectID
-        taskManager.run("toggleRead-\(convID)") { [weak self] in
-            guard let self = self else { return }
+        runRowAction("toggleRead", on: conversation) { messageActions, conversation in
             if conversation.inboxUnreadCount > 0 {
                 await messageActions.markConversationAsRead(conversation: conversation)
             } else {
                 await messageActions.markConversationAsUnread(conversation: conversation)
             }
+        }
+    }
+
+    /// Runs one conversation's action on this view model's task manager, under a key of its own
+    /// per kind and conversation (`"<kind>-<objectID>"`): the same action asked again for the
+    /// same conversation replaces the earlier task, and nothing else does.
+    ///
+    /// - Parameters:
+    ///   - kind: The action's part of the task key. Kinds that share it share their tasks:
+    ///     the Mac's read-state command runs under the row toggle's `"toggleRead"`.
+    ///   - completion: Runs on the main actor once the action has returned.
+    private func runRowAction(
+        _ kind: String,
+        on conversation: Conversation,
+        then completion: (@MainActor () -> Void)? = nil,
+        _ action: @escaping (MessageActions, Conversation) async -> Void
+    ) {
+        let convID = conversation.objectID
+        taskManager.run("\(kind)-\(convID)") { [weak self] in
+            guard let self = self else { return }
+            await action(messageActions, conversation)
+            completion?()
         }
     }
 
@@ -252,9 +296,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func runReadStateChange(_ command: MailboxMenuPolicy.ReadStateCommand, on conversation: Conversation) {
-        let convID = conversation.objectID
-        taskManager.run("toggleRead-\(convID)") { [weak self] in
-            guard let self = self else { return }
+        runRowAction("toggleRead", on: conversation) { messageActions, conversation in
             switch command {
             case .markRead:
                 await messageActions.markConversationAsRead(conversation: conversation)

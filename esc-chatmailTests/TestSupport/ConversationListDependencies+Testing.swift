@@ -11,9 +11,10 @@ extension ConversationListDependencies {
     /// `repairMissingConversationPreviews`) run against the given
     /// `TestCoreDataStack`'s store instead of the shared on-disk store.
     ///
-    /// Not yet isolated: `foregroundSyncCoordinator`, `messaging`,
-    /// `personCache`, and `profilePhotoResolver` still come from
-    /// `Dependencies.shared` because no test seam exists for them yet.
+    /// Not yet isolated: `foregroundSyncCoordinator`, `messaging` (all but
+    /// its `MessageActions`, see `messageActions`), `personCache`, and
+    /// `profilePhotoResolver` still come from `Dependencies.shared` because no
+    /// test seam exists for them yet.
     ///
     /// - Parameters:
     ///   - stack: The suite's `TestCoreDataStack`; supplies background
@@ -51,6 +52,11 @@ extension ConversationListDependencies {
     ///     comes from `Dependencies.shared` (no test seam yet).
     ///   - filterService: Optional service override returned by the bundle's
     ///     filter factory; takes precedence over `contactEmailLoader`.
+    ///   - messageActions: Optional `MessageActions` for the view model's own row
+    ///     actions (`archiveConversation(withID:)`, `reportSpamConversation(withID:)`),
+    ///     e.g. one over this suite's stack with a `MockPendingActionsManager`. The
+    ///     default still comes from `Dependencies.shared`, as every other messaging
+    ///     factory here does.
     @MainActor
     static func forTesting(
         stack: TestCoreDataStack,
@@ -63,7 +69,8 @@ extension ConversationListDependencies {
         launchRepairTaskPriority: TaskPriority? = nil,
         searchService: ConversationSearchService? = nil,
         selectionService: ConversationSelectionService? = nil,
-        filterService: ConversationFilterService? = nil
+        filterService: ConversationFilterService? = nil,
+        messageActions: MessageActions? = nil
     ) -> ConversationListDependencies {
         let resolvedSearchService = searchService ?? ConversationSearchService()
         let resolvedSelectionService = selectionService ?? ConversationSelectionService(
@@ -86,7 +93,7 @@ extension ConversationListDependencies {
                 personCache: Dependencies.shared.personCache,
                 profilePhotoResolver: Dependencies.shared.profilePhotoResolver
             ),
-            messaging: Dependencies.shared.makeMessagingDependencies(),
+            messaging: Self.messagingDependencies(messageActions: messageActions),
             syncWaiter: resolvedSyncWaiter,
             foregroundSyncCoordinator: Dependencies.shared.foregroundSyncCoordinator,
             conversationManager: resolvedConversationManager,
@@ -95,6 +102,21 @@ extension ConversationListDependencies {
             makeConversationSearchService: { resolvedSearchService },
             makeConversationSelectionService: { resolvedSelectionService },
             makeConversationFilterService: { resolvedFilterService }
+        )
+    }
+
+    /// The shared messaging bundle, with its `MessageActions` factory replaced when a suite
+    /// gives its own.
+    @MainActor
+    private static func messagingDependencies(messageActions: MessageActions?) -> MessagingDependencies {
+        let shared = Dependencies.shared.makeMessagingDependencies()
+        guard let messageActions else { return shared }
+        return MessagingDependencies(
+            makeMessageActions: { messageActions },
+            makeOutboundMessageCoordinator: shared.makeOutboundMessageCoordinator,
+            makeOutboundReplyContextBuilder: shared.makeOutboundReplyContextBuilder,
+            makeComposeForwardModeContextBuilder: shared.makeComposeForwardModeContextBuilder,
+            makeOutboundAttachmentContextBuilder: shared.makeOutboundAttachmentContextBuilder
         )
     }
 }
