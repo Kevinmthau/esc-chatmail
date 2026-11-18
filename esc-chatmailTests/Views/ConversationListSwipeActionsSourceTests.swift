@@ -52,8 +52,9 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
     }
 
     /// Revert-check: in `ConversationSpamConfirmation`, deleting the `.onChange(of:
-    /// requestIsListed)` that withdraws the question fails this; so does calling `onConfirm`
-    /// in place of the deferred `Task`, or a title that no longer comes from the policy.
+    /// requestIsListed)` that withdraws the question, or the withdrawal when a question comes
+    /// up (`.onChange(of: request)`), fails this; so does calling `onConfirm` in place of the
+    /// deferred `Task`, or a title read from the live request alone.
     func testSpamConfirmation_appliesThePolicysRules() throws {
         let source = try repositorySource(Self.confirmationPath)
         let body = try sourceBlock(
@@ -63,7 +64,17 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
             in: source,
             path: Self.confirmationPath
         )
-        XCTAssertTrue(body.contains("ConversationRowSwipePolicy.questionTitle(for: request)"), body)
+        XCTAssertTrue(body.contains("ConversationRowSwipePolicy.questionTitle(for: request ?? shownRequest)"), body)
+        let raised = try sourceBlock(
+            after: ".onChange(of: request) { _, newRequest in",
+            open: "{",
+            close: "}",
+            in: body,
+            path: Self.confirmationPath,
+            openingIsInMarker: true
+        )
+        XCTAssertTrue(raised.contains("shownRequest = newRequest"), raised)
+        XCTAssertTrue(raised.contains("conversationIsListed: isListed(newRequest.conversationID)"), raised)
         XCTAssertTrue(body.contains("Text(ConversationRowSwipePolicy.questionMessage)"), body)
         XCTAssertTrue(body.contains(#"Button("Report Spam", role: .destructive)"#), body)
         let withdrawal = try sourceBlock(
@@ -120,31 +131,62 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
         }
     }
 
-    /// Revert-check: in `ConversationListView`, an `onReportSpam` that reports at once, an
-    /// `isEnabled` that no longer follows Select mode or the row's running report, an answer
-    /// calling `reportSpamConversations(withIDs:)` (the Mac's batch entry point), or the
-    /// question moved inside the `List`, onto the rows, fails this.
+    /// Revert-check: in `ConversationListView`, an `onReportSpam` that reports at once or names
+    /// the stored title, a row whose leaving state no longer comes from
+    /// `conversationIDsLeavingList` (`let isLeavingList = false`), a dim or a leading swipe that
+    /// no longer follows it, an answer calling `reportSpamConversations(withIDs:)` (the batch
+    /// entry point), or the question moved inside the `List`, onto the rows, fails this.
     func testIOSList_trailingSwipeIsTheSharedOneAndItsQuestionIsOnTheList() throws {
         try assertListUsesSharedSwipe(
             path: Self.iOSListPath,
             listHead: "\n        List {",
-            isEnabled: "isEnabled: !viewModel.isSelecting && !isBeingReportedAsSpam",
+            isSelecting: "viewModel.isSelecting",
             onArchive: "onArchive: { viewModel.archiveConversation(withID: item.id) }",
+            currentUserEmail: "authSession.userEmail ?? \"\"",
+            participantLoader: "deps.participantLoader",
             onConfirm: "onConfirm: { viewModel.reportSpamConversation(withID: $0) }"
         )
     }
 
-    /// Revert-check: in `MacConversationSidebar`, an `onReportSpam` that reports at once, an
-    /// answer that no longer goes through `onReportSpam` (which moves the selection), or the
-    /// question moved inside the `List`, onto the rows, fails this.
+    /// Revert-check: in `MacConversationSidebar`, an `onReportSpam` that reports at once or
+    /// names the stored title, a row whose leaving state no longer comes from
+    /// `conversationIDsLeavingList`, a dim or a leading swipe that no longer follows it, a swipe
+    /// whose Archive or answer no longer goes through `onSwipeAction` (which moves the
+    /// selection and runs the row's single-conversation action), or the question moved inside
+    /// the `List`, onto the rows, fails this.
     func testMacSidebar_trailingSwipeIsTheSharedOneAndItsQuestionIsOnTheList() throws {
         try assertListUsesSharedSwipe(
             path: Self.macSidebarPath,
             listHead: "\n        List(selection: rowSelection) {",
-            isEnabled: "isEnabled: true",
-            onArchive: "onArchive: { onArchive([item.id]) }",
-            onConfirm: "onConfirm: { onReportSpam([$0]) }"
+            isSelecting: "false",
+            onArchive: "onArchive: { onSwipeAction(.archive, item.id) }",
+            currentUserEmail: "currentUserEmail",
+            participantLoader: "participantLoader",
+            onConfirm: "onConfirm: { onSwipeAction(.reportSpam, $0) }"
         )
+    }
+
+    /// The Mac's swipe runs the same single-conversation actions as the iPhone's, after the
+    /// selection moves, so the shared swipe follows one set of rules on both.
+    ///
+    /// Revert-check: in `MacMailboxView.swipeAction(_:on:)`, calling the batch
+    /// `reportSpamConversations(withIDs:)` or `archiveConversations(withIDs:)`, or acting
+    /// without `performListAction`, fails this.
+    func testMacMailbox_swipeRunsTheRowsSingleConversationActionsAfterMovingTheSelection() throws {
+        let path = "esc-chatmail/Platform/MacMailboxView.swift"
+        let source = try repositorySource(path)
+        XCTAssertTrue(source.contains("onSwipeAction: { swipeAction($0, on: $1) }"), path)
+        let body = try sourceBlock(
+            after: "private func swipeAction(_ action: ConversationRowSwipePolicy.TrailingAction, on conversationID: NSManagedObjectID)",
+            open: "{",
+            close: "}",
+            in: source,
+            path: path
+        )
+        XCTAssertTrue(body.contains("performListAction(on: [conversationID]) { targets in"), body)
+        XCTAssertTrue(body.contains("case .archive: viewModel.archiveConversation(withID: target)"), body)
+        XCTAssertTrue(body.contains("case .reportSpam: viewModel.reportSpamConversation(withID: target)"), body)
+        XCTAssertFalse(body.contains("withIDs:"), body)
     }
 
     // MARK: - Helpers
@@ -152,13 +194,58 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
     private func assertListUsesSharedSwipe(
         path: String,
         listHead: String,
-        isEnabled: String,
+        isSelecting: String,
         onArchive: String,
+        currentUserEmail: String,
+        participantLoader: String,
         onConfirm: String,
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
         let source = try repositorySource(path, file: file, line: line)
+        let collapsedSource = Self.collapsingWhitespace(source)
+
+        // The row's leaving state, from the view model, decides its dim and both swipes.
+        for expected in [
+            "let isLeavingList = viewModel.conversationIDsLeavingList.contains(item.id)",
+            "let offersSwipes = ConversationRowSwipePolicy.offersSwipes( isSelecting: \(isSelecting), isLeavingList: isLeavingList )",
+            ".opacity(ConversationRowSwipePolicy.rowOpacity(isLeavingList: isLeavingList))",
+        ] {
+            XCTAssertTrue(collapsedSource.contains(expected), "\(path) no longer has `\(expected)`", file: file, line: line)
+        }
+        let leadingSwipe = try sourceBlock(
+            after: ".swipeActions(edge: .leading, allowsFullSwipe: true)",
+            open: "{",
+            close: "}",
+            in: source,
+            path: path,
+            file: file,
+            line: line
+        )
+        let trimmedLeading = leadingSwipe.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertTrue(
+            trimmedLeading.hasPrefix("if offersSwipes {"),
+            "\(path): the leading swipe must offer its button only `if offersSwipes`:\n\(leadingSwipe)",
+            file: file,
+            line: line
+        )
+        let guarded = try sourceBlockRange(
+            after: "if offersSwipes {",
+            open: "{",
+            close: "}",
+            in: trimmedLeading,
+            path: path,
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            trimmedLeading[trimmedLeading.index(after: guarded.upperBound)...]
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+            "",
+            "\(path): nothing may follow `if offersSwipes { … }` in the leading swipe:\n\(leadingSwipe)",
+            file: file,
+            line: line
+        )
 
         let swipeCall = try sourceBlock(
             after: ".conversationRowTrailingSwipeActions",
@@ -169,7 +256,7 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
             file: file,
             line: line
         )
-        XCTAssertTrue(swipeCall.contains(isEnabled), "\(path)\n\(swipeCall)", file: file, line: line)
+        XCTAssertTrue(swipeCall.contains("isEnabled: offersSwipes,"), "\(path)\n\(swipeCall)", file: file, line: line)
         XCTAssertTrue(swipeCall.contains(onArchive), "\(path)\n\(swipeCall)", file: file, line: line)
         let onReportSpam = try sourceBlock(
             after: "onReportSpam: {",
@@ -183,8 +270,10 @@ final class ConversationListSwipeActionsSourceTests: XCTestCase {
         )
         XCTAssertEqual(
             Self.collapsingWhitespace(onReportSpam),
-            "spamReportAwaitingAnswer = .init( conversationID: item.id, storedName: item.snapshot.displayNameHint )",
-            "\(path): the swipe's Report Spam must only ask, naming the row",
+            "spamReportAwaitingAnswer = .init( conversationID: item.id, shownName: ConversationRowView.displayedName( "
+                + "snapshot: item.snapshot, conversationObjectID: item.id, currentUserEmail: \(currentUserEmail), "
+                + "participantLoader: \(participantLoader) ) )",
+            "\(path): the swipe's Report Spam must only ask, naming the row as it shows",
             file: file,
             line: line
         )

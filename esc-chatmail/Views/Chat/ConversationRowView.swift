@@ -7,7 +7,7 @@ struct ConversationRowView: View {
     /// This value is a `ParticipantRollupCache` key component — it must agree
     /// with `ChatViewModel.rollupMaxParticipants`, or the two surfaces silently
     /// fork the rollup cache (`ChatViewModelHeaderParticipantsTests`).
-    private let maxDisplayedParticipants = 4
+    private static let maxDisplayedParticipants = 4
 
     /// Use snapshot to avoid re-renders from unrelated Conversation property changes
     let snapshot: ConversationSnapshot
@@ -230,6 +230,25 @@ struct ConversationRowView: View {
     /// base and full cache entries so the two lookups cannot drift in their other
     /// arguments.
     private func cachedParticipantInfo(includePhotos: Bool) -> ParticipantLoader.ParticipantInfo? {
+        Self.cachedParticipantInfo(
+            snapshot: snapshot,
+            conversationObjectID: conversationObjectID,
+            currentUserEmail: currentUserEmail,
+            participantLoader: participantLoader,
+            includePhotos: includePhotos
+        )
+    }
+
+    /// The rollup-cache lookup every reader of a row's participants makes: the row's body,
+    /// and `displayedName` for the lists that ask about a row.
+    @MainActor
+    private static func cachedParticipantInfo(
+        snapshot: ConversationSnapshot,
+        conversationObjectID: NSManagedObjectID,
+        currentUserEmail: String,
+        participantLoader: ParticipantLoader,
+        includePhotos: Bool
+    ) -> ParticipantLoader.ParticipantInfo? {
         participantLoader.cachedParticipantInfo(
             conversationObjectID: conversationObjectID,
             participantHash: snapshot.participantHash,
@@ -237,6 +256,50 @@ struct ConversationRowView: View {
             maxParticipants: maxDisplayedParticipants,
             fallbackDisplayName: snapshot.displayNameHint,
             includePhotos: includePhotos
+        )
+    }
+
+    /// The name a conversation's row shows, read as the row reads it: the participants' names
+    /// from the rollup cache the row filled (`ConversationRowPolicy.resolvedDisplayName`), and
+    /// otherwise the row's fallback, the stored title or the participants' addresses. For the
+    /// lists' questions about a row (`ConversationRowSwipePolicy.SpamReportRequest`), so the
+    /// question names what the row says.
+    ///
+    /// HONEST SCOPE: a row whose conversation has no participant hash keeps its loaded names in
+    /// its own state, not the cache; for it this is the fallback, which is what the row shows
+    /// until its load lands.
+    @MainActor
+    static func displayedName(
+        snapshot: ConversationSnapshot,
+        conversationObjectID: NSManagedObjectID,
+        currentUserEmail: String,
+        participantLoader: ParticipantLoader
+    ) -> String {
+        let info: ParticipantLoader.ParticipantInfo?
+        if ConversationRowPolicy.shouldLoadParticipantInfo(conversationType: snapshot.conversationType) {
+            info = cachedParticipantInfo(
+                snapshot: snapshot,
+                conversationObjectID: conversationObjectID,
+                currentUserEmail: currentUserEmail,
+                participantLoader: participantLoader,
+                includePhotos: true
+            ) ?? cachedParticipantInfo(
+                snapshot: snapshot,
+                conversationObjectID: conversationObjectID,
+                currentUserEmail: currentUserEmail,
+                participantLoader: participantLoader,
+                includePhotos: false
+            )
+        } else {
+            info = nil
+        }
+        return ConversationRowPolicy.resolvedDisplayName(
+            conversationType: snapshot.conversationType,
+            storedDisplayName: fallbackDisplayName(
+                snapshot: snapshot,
+                normalizedCurrentUserEmail: EmailNormalizer.normalize(currentUserEmail)
+            ),
+            participantInfo: info
         )
     }
 
@@ -251,13 +314,26 @@ struct ConversationRowView: View {
     }
 
     private var fallbackDisplayName: String {
+        Self.fallbackDisplayName(snapshot: snapshot, normalizedCurrentUserEmail: normalizedCurrentUserEmail)
+    }
+
+    private static func fallbackDisplayName(
+        snapshot: ConversationSnapshot,
+        normalizedCurrentUserEmail: String
+    ) -> String {
         PersonDisplayNameResolver.displayFallbackConversationName(
             hint: snapshot.displayNameHint,
-            participantEmails: nonSelfParticipantEmails
+            participantEmails: nonSelfParticipantEmails(
+                snapshot: snapshot,
+                normalizedCurrentUserEmail: normalizedCurrentUserEmail
+            )
         )
     }
 
-    private var nonSelfParticipantEmails: [String] {
+    private static func nonSelfParticipantEmails(
+        snapshot: ConversationSnapshot,
+        normalizedCurrentUserEmail: String
+    ) -> [String] {
         // Snapshot emails are already normalized (ConversationSnapshot.participantFields(from:)
         // stores EmailNormalizer.normalize output, which is idempotent), so compare them
         // against the once-normalized current-user email without re-normalizing each one.
@@ -295,7 +371,7 @@ struct ConversationRowView: View {
             from: conversationObjectID,
             in: conversationContext,
             currentUserEmail: currentUserEmail,
-            maxParticipants: maxDisplayedParticipants,
+            maxParticipants: Self.maxDisplayedParticipants,
             participantHash: snapshot.participantHash,
             fallbackDisplayName: snapshot.displayNameHint
         )

@@ -33,14 +33,19 @@ final class ConversationListViewModel: ObservableObject {
     // MARK: - Published State (Presentation)
 
     @Published private(set) var filteredConversationItems: [ConversationListItem] = []
-    /// Conversations whose spam report from a row's swipe is running
-    /// (`reportSpamConversation(withID:)`). The iPhone list dims their rows and offers no swipe
-    /// on them until it ends: the row stays until the report's save reaches this context, which
-    /// for a long chat is seconds, and with nothing changed on screen the answer looked ignored.
+    /// Conversations an archive or a spam report asked from the list is running for: every one
+    /// of this view model's archive and spam entry points, the row's (`archiveConversation`,
+    /// `reportSpamConversation`), the Mac sidebar's (`archiveConversations(withIDs:)`,
+    /// `reportSpamConversations(withIDs:)`) and Select mode's. Both lists dim these rows and
+    /// offer no swipe on them (`ConversationRowSwipePolicy.rowOpacity`, `offersSwipes`): a row
+    /// stays until the action's save reaches this context, which for a long chat is seconds,
+    /// and with nothing changed on screen the answer looked ignored. An entry point leaves out
+    /// a conversation already here, so nothing runs twice for one row.
     ///
     /// Cleared when the action returns, which can be a moment before its save has reached the
-    /// list, so a row can show undimmed for that moment before it goes.
-    @Published private(set) var conversationIDsBeingReportedAsSpam: Set<NSManagedObjectID> = []
+    /// list, so a row can show undimmed for that moment before it goes; and a row the action
+    /// left as it was (one with no messages, for the row's own actions) shows undimmed again.
+    @Published private(set) var conversationIDsLeavingList: Set<NSManagedObjectID> = []
 
     // MARK: - Dependencies
 
@@ -169,52 +174,73 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Conversation Actions
 
+    /// Archives one row's conversation: a row's swipe, on the iPhone's list and the Mac's
+    /// sidebar. The single-conversation action, as the row's Report Spam
+    /// (`reportSpamConversation(withID:)`) is, so the swipe follows one set of rules on both.
     func archiveConversation(withID objectID: NSManagedObjectID) {
-        guard let conversation = conversation(withID: objectID) else {
-            return
-        }
-
-        runRowAction("archive", on: conversation) { messageActions, conversation in
-            await messageActions.archiveConversation(conversation: conversation)
-        }
-    }
-
-    /// Reports one row's conversation as spam: the iPhone list's trailing swipe, once its
-    /// question is answered (`View.conversationSpamConfirmation`).
-    ///
-    /// The single-conversation action, as the row's Archive (`archiveConversation(withID:)`)
-    /// is. Not `reportSpamConversations(withIDs:)`: that is the Mac sidebar's batch entry point,
-    /// which runs on the selection service under a fresh key per call and treats a conversation
-    /// with no messages as a batch does, so the row's two swipe buttons would follow different
-    /// rules.
-    ///
-    /// The conversation is in `conversationIDsBeingReportedAsSpam` until the action ends, and a
-    /// second report of it meanwhile is refused: the row stays in the list until the report's
-    /// save reaches this context, which for a long chat is seconds, and a second run under the
-    /// same task key would cancel the first.
-    func reportSpamConversation(withID objectID: NSManagedObjectID) {
         guard let conversation = conversation(withID: objectID),
-              !conversationIDsBeingReportedAsSpam.contains(conversation.objectID) else {
+              beginLeavingList([conversation.objectID]) == [conversation.objectID] else {
             return
         }
 
         let convID = conversation.objectID
-        conversationIDsBeingReportedAsSpam.insert(convID)
+        runRowAction(
+            "archive",
+            on: conversation,
+            then: { [weak self] in self?.endLeavingList([convID]) }
+        ) { messageActions, conversation in
+            await messageActions.archiveConversation(conversation: conversation)
+        }
+    }
+
+    /// Reports one row's conversation as spam: a row's swipe, on the iPhone's list and the
+    /// Mac's sidebar, once its question is answered (`View.conversationSpamConfirmation`).
+    ///
+    /// The single-conversation action, as the row's Archive (`archiveConversation(withID:)`)
+    /// is. Not `reportSpamConversations(withIDs:)`: that is the batch entry point, which treats
+    /// a conversation with no messages as a batch does (it archives it, where the
+    /// single-conversation actions leave it as it is), so the row's two swipe buttons, or the
+    /// two platforms' swipes, would follow different rules.
+    ///
+    /// The conversation is in `conversationIDsLeavingList` until the action ends, and a second
+    /// report of it meanwhile is refused: a second run under the same task key would cancel
+    /// the first.
+    func reportSpamConversation(withID objectID: NSManagedObjectID) {
+        guard let conversation = conversation(withID: objectID),
+              beginLeavingList([conversation.objectID]) == [conversation.objectID] else {
+            return
+        }
+
+        let convID = conversation.objectID
         runRowAction(
             "reportSpam",
             on: conversation,
-            then: { [weak self] in
-                self?.conversationIDsBeingReportedAsSpam.remove(convID)
-            }
+            then: { [weak self] in self?.endLeavingList([convID]) }
         ) { messageActions, conversation in
             await messageActions.reportSpamConversation(conversation: conversation)
         }
     }
 
-    /// Whether the list shows the conversation now. One pass over the rows: asked while a row's
-    /// spam question is up (`View.conversationSpamConfirmation`), and not otherwise.
+    /// Whether the list shows the conversation now: one of its loaded rows (see
+    /// `ConversationRowSwipePolicy.withdrawsQuestion` for a row the window trims). One pass over
+    /// the rows; the lists ask it while a row's spam question is up and once more when its
+    /// answer runs (`View.conversationSpamConfirmation`).
     func listsConversation(withID objectID: NSManagedObjectID) -> Bool {
         filteredConversationItems.contains { $0.id == objectID }
+    }
+
+    /// Adds the named conversations to `conversationIDsLeavingList` and returns the ones that
+    /// were not there yet, which are the ones the caller may act on and must end.
+    private func beginLeavingList(_ conversationIDs: Set<NSManagedObjectID>) -> Set<NSManagedObjectID> {
+        let starting = conversationIDs.subtracting(conversationIDsLeavingList)
+        if !starting.isEmpty {
+            conversationIDsLeavingList.formUnion(starting)
+        }
+        return starting
+    }
+
+    private func endLeavingList(_ conversationIDs: Set<NSManagedObjectID>) {
+        conversationIDsLeavingList.subtract(conversationIDs)
     }
 
     func toggleConversationReadState(withID objectID: NSManagedObjectID) {
@@ -316,24 +342,46 @@ final class ConversationListViewModel: ObservableObject {
         }
     }
 
+    /// Select mode's Archive. The selected rows leave the list as the action runs
+    /// (`conversationIDsLeavingList`); the selection service still acts on all of them, and a
+    /// row already leaving is left to the action that started it.
     func archiveSelectedConversations() {
-        selectionService.archiveSelectedConversations()
+        let leaving = beginLeavingList(selectionService.selectedConversationIDs)
+        selectionService.archiveSelectedConversations { [weak self] in
+            self?.endLeavingList(leaving)
+        }
     }
 
+    /// Select mode's Spam. See `archiveSelectedConversations()`.
     func reportSpamSelectedConversations() {
-        selectionService.reportSpamSelectedConversations()
+        let leaving = beginLeavingList(selectionService.selectedConversationIDs)
+        selectionService.reportSpamSelectedConversations { [weak self] in
+            self?.endLeavingList(leaving)
+        }
     }
 
-    /// Archives the named rows without touching select mode: the Mac sidebar's Delete key,
-    /// context menu and swipe (`ConversationSelectionService.archiveConversations(withIDs:)`).
+    /// Archives the named rows without touching select mode: the Mac sidebar's Delete key and
+    /// context menu, and the chat column's button while several rows are selected
+    /// (`ConversationSelectionService.archiveConversations(withIDs:)`). A row's swipe archives
+    /// through `archiveConversation(withID:)` instead. Rows already leaving the list are left
+    /// out (`conversationIDsLeavingList`).
     func archiveConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
-        selectionService.archiveConversations(withIDs: conversationIDs)
+        let leaving = beginLeavingList(conversationIDs)
+        guard !leaving.isEmpty else { return }
+        selectionService.archiveConversations(withIDs: leaving) { [weak self] in
+            self?.endLeavingList(leaving)
+        }
     }
 
     /// Reports the named rows as spam without touching select mode. See
-    /// `archiveConversations(withIDs:)`.
+    /// `archiveConversations(withIDs:)`; a row's swipe reports through
+    /// `reportSpamConversation(withID:)`.
     func reportSpamConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
-        selectionService.reportSpamConversations(withIDs: conversationIDs)
+        let leaving = beginLeavingList(conversationIDs)
+        guard !leaving.isEmpty else { return }
+        selectionService.reportSpamConversations(withIDs: leaving) { [weak self] in
+            self?.endLeavingList(leaving)
+        }
     }
 
     // MARK: - List Store Updates

@@ -82,24 +82,30 @@ final class ConversationSelectionService: ObservableObject {
     // MARK: - Batch Operations
 
     /// Archives all selected conversations in a single batch operation
-    func archiveSelectedConversations() {
+    ///
+    /// - Parameter completion: See `performBatchAction`.
+    func archiveSelectedConversations(completion: (@MainActor () -> Void)? = nil) {
         performBatchAction(
             on: .selection,
             taskKey: "archive",
             emptyLogMessage: "No conversations to archive",
-            batchLogPrefix: "Batch archive"
+            batchLogPrefix: "Batch archive",
+            completion: completion
         ) { [messageActions] conversations in
             await messageActions.archiveConversations(conversations: conversations)
         }
     }
 
     /// Reports all selected conversations as spam in a single batch operation
-    func reportSpamSelectedConversations() {
+    ///
+    /// - Parameter completion: See `performBatchAction`.
+    func reportSpamSelectedConversations(completion: (@MainActor () -> Void)? = nil) {
         performBatchAction(
             on: .selection,
             taskKey: "reportSpam",
             emptyLogMessage: "No conversations to report as spam",
-            batchLogPrefix: "Batch spam report"
+            batchLogPrefix: "Batch spam report",
+            completion: completion
         ) { [messageActions] conversations in
             await messageActions.reportSpamConversations(conversations: conversations)
         }
@@ -110,12 +116,16 @@ final class ConversationSelectionService: ObservableObject {
     ///
     /// The Mac sidebar's entry point. Its selection is the list's own, which also decides the
     /// open chat (`MacSidebarSelectionPolicy`), not the select-mode set kept here.
-    func archiveConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
+    func archiveConversations(
+        withIDs conversationIDs: Set<NSManagedObjectID>,
+        completion: (@MainActor () -> Void)? = nil
+    ) {
         performBatchAction(
             on: .conversations(conversationIDs),
             taskKey: "archive",
             emptyLogMessage: "No conversations to archive",
-            batchLogPrefix: "Batch archive"
+            batchLogPrefix: "Batch archive",
+            completion: completion
         ) { [messageActions] conversations in
             await messageActions.archiveConversations(conversations: conversations)
         }
@@ -123,12 +133,16 @@ final class ConversationSelectionService: ObservableObject {
 
     /// Reports the given conversations as spam in a single batch operation. See
     /// `archiveConversations(withIDs:)`.
-    func reportSpamConversations(withIDs conversationIDs: Set<NSManagedObjectID>) {
+    func reportSpamConversations(
+        withIDs conversationIDs: Set<NSManagedObjectID>,
+        completion: (@MainActor () -> Void)? = nil
+    ) {
         performBatchAction(
             on: .conversations(conversationIDs),
             taskKey: "reportSpam",
             emptyLogMessage: "No conversations to report as spam",
-            batchLogPrefix: "Batch spam report"
+            batchLogPrefix: "Batch spam report",
+            completion: completion
         ) { [messageActions] conversations in
             await messageActions.reportSpamConversations(conversations: conversations)
         }
@@ -158,6 +172,9 @@ final class ConversationSelectionService: ObservableObject {
     ///     press must never cancel an earlier one's archive.
     ///   - emptyLogMessage: Debug log emitted when nothing is selected.
     ///   - batchLogPrefix: Prefix of the info log announcing the batch size.
+    ///   - completion: Runs on the main actor once the batch `MessageActions` call has
+    ///     returned, or at once when nothing resolved and nothing runs. Called exactly once
+    ///     either way: the list view model clears its rows' leaving state from it.
     ///   - action: The batch `MessageActions` call, given the resolved
     ///     conversations.
     private func performBatchAction(
@@ -165,6 +182,7 @@ final class ConversationSelectionService: ObservableObject {
         taskKey: String,
         emptyLogMessage: String,
         batchLogPrefix: String,
+        completion: (@MainActor () -> Void)?,
         _ action: @escaping ([Conversation]) async -> Void
     ) {
         let conversationIDs: Set<NSManagedObjectID>
@@ -183,6 +201,7 @@ final class ConversationSelectionService: ObservableObject {
 
         guard !conversations.isEmpty else {
             Log.debug(emptyLogMessage, category: .message)
+            completion?()
             return
         }
 
@@ -197,6 +216,7 @@ final class ConversationSelectionService: ObservableObject {
         // Single batch operation instead of sequential loop
         taskManager.run(resolvedTaskKey) {
             await action(conversations)
+            completion?()
         }
     }
 

@@ -102,7 +102,7 @@ final class ConversationRowTrailingSwipeActionsMacTests: XCTestCase {
             rootView: list
         )
         addTeardownBlock { @MainActor in
-            host.window.close()
+            host.close()
         }
         let tableView = try XCTUnwrap(host.waitForView(NSTableView.self), "SwiftUI built no NSTableView for the list")
         let deadline = Date().addingTimeInterval(5)

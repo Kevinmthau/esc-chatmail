@@ -44,6 +44,22 @@ final class ConversationRowSwipePolicyTests: XCTestCase {
         XCTAssertFalse(ConversationRowSwipePolicy.TrailingAction.reportSpam.isDestructive)
     }
 
+    /// Revert-check: dropping `!isLeavingList` from `ConversationRowSwipePolicy.offersSwipes`
+    /// makes this fail: a row whose archive or report is running would offer its swipes again.
+    func testOffersSwipes_notWhileSelectingNorWhileTheRowIsLeaving() {
+        XCTAssertTrue(ConversationRowSwipePolicy.offersSwipes(isSelecting: false, isLeavingList: false))
+        XCTAssertFalse(ConversationRowSwipePolicy.offersSwipes(isSelecting: true, isLeavingList: false))
+        XCTAssertFalse(ConversationRowSwipePolicy.offersSwipes(isSelecting: false, isLeavingList: true))
+        XCTAssertFalse(ConversationRowSwipePolicy.offersSwipes(isSelecting: true, isLeavingList: true))
+    }
+
+    /// Revert-check: returning 1 for a leaving row from `ConversationRowSwipePolicy.rowOpacity`
+    /// makes this fail.
+    func testRowOpacity_dimsOnlyALeavingRow() {
+        XCTAssertEqual(ConversationRowSwipePolicy.rowOpacity(isLeavingList: false), 1)
+        XCTAssertLessThan(ConversationRowSwipePolicy.rowOpacity(isLeavingList: true), 1)
+    }
+
     func testTrailingAction_reportSpam_isNamedAsTheMenusNameIt() {
         XCTAssertEqual(ConversationRowSwipePolicy.TrailingAction.reportSpam.title, "Report Spam")
         XCTAssertEqual(ConversationRowSwipePolicy.TrailingAction.archive.title, "Archive")
@@ -54,7 +70,7 @@ final class ConversationRowSwipePolicyTests: XCTestCase {
     func testQuestionTitle_namesTheConversation() throws {
         let request = ConversationRowSwipePolicy.SpamReportRequest(
             conversationID: try makeConversationID(),
-            storedName: "  Weekly Deals  "
+            shownName: "  Weekly Deals  "
         )
 
         XCTAssertEqual(
@@ -65,10 +81,10 @@ final class ConversationRowSwipePolicyTests: XCTestCase {
 
     func testQuestionTitle_noStoredName_asksAboutThisConversation() throws {
         let conversationID = try makeConversationID()
-        for storedName in [nil, "", "   "] {
+        for shownName in [nil, "", "   "] {
             let request = ConversationRowSwipePolicy.SpamReportRequest(
                 conversationID: conversationID,
-                storedName: storedName
+                shownName: shownName
             )
             XCTAssertNil(request.conversationName)
             XCTAssertEqual(
@@ -85,7 +101,7 @@ final class ConversationRowSwipePolicyTests: XCTestCase {
         let name = String(repeating: "a", count: ConversationRowSwipePolicy.questionNameLimit + 40)
         let request = ConversationRowSwipePolicy.SpamReportRequest(
             conversationID: try makeConversationID(),
-            storedName: name
+            shownName: name
         )
 
         let title = ConversationRowSwipePolicy.questionTitle(for: request)
@@ -101,7 +117,7 @@ final class ConversationRowSwipePolicyTests: XCTestCase {
     func testConversationToReport_waitsForTheQuestionToGo() throws {
         let request = ConversationRowSwipePolicy.SpamReportRequest(
             conversationID: try makeConversationID(),
-            storedName: "Alice"
+            shownName: "Alice"
         )
 
         XCTAssertNil(ConversationRowSwipePolicy.conversationToReport(answered: request, isQuestionPresented: true))

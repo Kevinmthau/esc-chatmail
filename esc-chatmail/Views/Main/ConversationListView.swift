@@ -72,7 +72,11 @@ struct ConversationListView: View {
                 .listRowSeparator(.hidden, edges: .top)
             }
             ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
-                let isBeingReportedAsSpam = viewModel.conversationIDsBeingReportedAsSpam.contains(item.id)
+                let isLeavingList = viewModel.conversationIDsLeavingList.contains(item.id)
+                let offersSwipes = ConversationRowSwipePolicy.offersSwipes(
+                    isSelecting: viewModel.isSelecting,
+                    isLeavingList: isLeavingList
+                )
                 // One structural path for both selection modes: an if/else here
                 // would make the arms `_ConditionalContent`, so toggling Select
                 // tore down and rebuilt every visible row subtree (row @State
@@ -97,25 +101,30 @@ struct ConversationListView: View {
                             }
                         }
                 }
-                // A row whose spam report is running stays until the report's save lands;
-                // dimmed, it shows the answer was taken (`conversationIDsBeingReportedAsSpam`).
-                .opacity(isBeingReportedAsSpam ? 0.4 : 1)
+                // A row whose archive or report is running stays until its save lands; dimmed,
+                // it shows the action was taken (`conversationIDsLeavingList`).
+                .opacity(ConversationRowSwipePolicy.rowOpacity(isLeavingList: isLeavingList))
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
                 // A full swipe archives; Report Spam is a partial swipe's and asks first
                 // (`conversationRowTrailingSwipeActions`, shared with the Mac's sidebar).
                 .conversationRowTrailingSwipeActions(
-                    isEnabled: !viewModel.isSelecting && !isBeingReportedAsSpam,
+                    isEnabled: offersSwipes,
                     onArchive: { viewModel.archiveConversation(withID: item.id) },
                     onReportSpam: {
                         spamReportAwaitingAnswer = .init(
                             conversationID: item.id,
-                            storedName: item.snapshot.displayNameHint
+                            shownName: ConversationRowView.displayedName(
+                                snapshot: item.snapshot,
+                                conversationObjectID: item.id,
+                                currentUserEmail: authSession.userEmail ?? "",
+                                participantLoader: deps.participantLoader
+                            )
                         )
                     }
                 )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if !viewModel.isSelecting {
+                    if offersSwipes {
                         Button {
                             viewModel.toggleConversationReadState(withID: item.id)
                         } label: {

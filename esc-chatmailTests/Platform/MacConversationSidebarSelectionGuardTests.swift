@@ -106,6 +106,7 @@ final class MacConversationSidebarSelectionGuardTests: XCTestCase {
                 viewContext: viewContext,
                 onArchive: { _ in },
                 onReportSpam: { _ in },
+                onSwipeAction: { _, _ in },
                 onNewMessage: {}
             )
             .frame(width: 320, height: 700)

@@ -6,7 +6,7 @@ import CoreData
 /// `View.conversationSpamConfirmation`).
 enum ConversationRowSwipePolicy {
     /// One button of the trailing swipe.
-    enum TrailingAction: Hashable, CaseIterable {
+    enum TrailingAction: Hashable {
         case archive
         case reportSpam
 
@@ -44,25 +44,41 @@ enum ConversationRowSwipePolicy {
     /// (there is no Not Spam), so a tap that missed Archive by a few points would otherwise
     /// report the conversation for good.
     ///
-    /// - Parameter isEnabled: False while the iPhone list selects, and while the row's own
-    ///   report is running. Nothing is offered then, Report Spam included: left on its own it
-    ///   would be the first button, and a full swipe would perform it.
+    /// - Parameter isEnabled: `offersSwipes`. Nothing is offered while it is false, Report Spam
+    ///   included: left on its own it would be the first button, and a full swipe would
+    ///   perform it.
     static func trailingActions(isEnabled: Bool) -> [TrailingAction] {
         isEnabled ? [.archive, .reportSpam] : []
+    }
+
+    /// Whether a row offers its swipes, both edges: not while the iPhone list selects, and not
+    /// while the row's conversation is leaving the list (`ConversationListViewModel
+    /// .conversationIDsLeavingList`). A row whose archive or report is running stays until
+    /// that save lands, which for a long chat is seconds; swiped again it would mark the
+    /// messages on their way out read or unread, or ask its question a second time.
+    static func offersSwipes(isSelecting: Bool, isLeavingList: Bool) -> Bool {
+        !isSelecting && !isLeavingList
+    }
+
+    /// A row's opacity: dimmed while its conversation is leaving the list, so the archive or
+    /// report asked for shows as taken while its save lands. A tap still opens it.
+    static func rowOpacity(isLeavingList: Bool) -> Double {
+        isLeavingList ? 0.4 : 1
     }
 
     /// A row's Report Spam waiting for its answer: the conversation, and the name the question
     /// gives it, read from the row when it was swiped.
     struct SpamReportRequest: Equatable {
         let conversationID: NSManagedObjectID
-        /// Nil where the row has no stored name; the question then asks about "this conversation".
+        /// Nil where the row shows no name; the question then asks about "this conversation".
         let conversationName: String?
 
-        /// - Parameter storedName: The conversation's stored title (`ConversationSnapshot
-        ///   .displayNameHint`). Blank is no name.
-        init(conversationID: NSManagedObjectID, storedName: String?) {
+        /// - Parameter shownName: The name the row shows (`ConversationRowView.displayedName`),
+        ///   not the stored title, which can differ from it (a contact's name, the
+        ///   participants' addresses). Blank is no name.
+        init(conversationID: NSManagedObjectID, shownName: String?) {
             self.conversationID = conversationID
-            let trimmed = storedName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let trimmed = shownName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             self.conversationName = trimmed.isEmpty ? nil : trimmed
         }
     }
@@ -98,6 +114,14 @@ enum ConversationRowSwipePolicy {
     /// sync archived the conversation, a search or a filter hid it). Both lists act only on rows
     /// they show: answered after the row left, the iPhone would report a conversation that was
     /// archived meanwhile and the Mac would drop the answer without a word, so neither is asked.
+    /// Asked when the question comes up as well as when the list changes: a row can be gone in
+    /// the update that raised its question.
+    ///
+    /// "Shows" is the list's loaded rows (`ConversationListViewModel.listsConversation`). A
+    /// row the window drops from its end when new mail arrives (`trimVisibleItems`) has left
+    /// too, as it has for every other list action (`MacSidebarSelectionPolicy.actionTargets`):
+    /// it is gone from the screen the user swiped it on, and scrolling down brings it back to
+    /// be swiped again.
     static func withdrawsQuestion(isQuestionPresented: Bool, conversationIsListed: Bool) -> Bool {
         isQuestionPresented && !conversationIsListed
     }
