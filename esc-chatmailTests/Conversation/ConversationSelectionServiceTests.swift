@@ -348,6 +348,43 @@ final class ConversationSelectionServiceTests: XCTestCase {
         XCTAssertEqual(queued.first?.messageIds ?? [], ["alice-1"])
     }
 
+    /// The list view model ends its rows' leaving state from the completion
+    /// (`ConversationListViewModel.conversationIDsLeavingList`), so it must come once the
+    /// action has run, and after what it queued.
+    ///
+    /// Revert-check: deleting the `completion?()` after `await action(conversations)` in
+    /// `ConversationSelectionService.performBatchAction` makes this fail.
+    func testReportSpamConversationsWithIDs_completionRunsOnceTheBatchHasQueued() async throws {
+        _ = LabelBuilder().inbox().build(in: viewContext)
+        let alice = makeConversation(name: "Alice")
+        _ = MessageBuilder().withId("alice-1").inConversation(alice).build(in: viewContext)
+        try saveViewContext()
+        var completions = 0
+
+        service.reportSpamConversations(withIDs: [alice.objectID]) { completions += 1 }
+
+        XCTAssertEqual(completions, 0, "The completion came before the batch ran")
+        await waitUntil { completions > 0 }
+        XCTAssertEqual(completions, 1)
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.first?.type, .reportSpam)
+    }
+
+    /// Revert-check: deleting the `completion?()` in `ConversationSelectionService
+    /// .performBatchAction`'s empty guard makes this fail.
+    func testArchiveConversationsWithIDs_nothingResolves_completionRunsAtOnce() throws {
+        let gone = makeConversation(name: "Gone")
+        try saveViewContext()
+        let goneID = gone.objectID
+        viewContext.delete(gone)
+        try saveViewContext()
+        var completions = 0
+
+        service.archiveConversations(withIDs: [goneID]) { completions += 1 }
+
+        XCTAssertEqual(completions, 1)
+    }
+
     func testArchiveSelectedConversations_emptySelection_keepsSelectionModeActive() {
         service.toggleSelectionMode()
         XCTAssertTrue(service.isSelecting)

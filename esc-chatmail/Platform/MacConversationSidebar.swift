@@ -35,13 +35,22 @@ struct MacConversationSidebar: View {
     let currentUserEmail: String
     let participantLoader: ParticipantLoader
     let viewContext: NSManagedObjectContext
-    /// Archive and Report Spam for rows of this list. `MacMailboxView` runs them, because they
-    /// also move the selection.
+    /// Archive and Report Spam for rows of this list: the Delete key and the context menu.
+    /// `MacMailboxView` runs them, because they also move the selection.
     let onArchive: @MainActor (Set<NSManagedObjectID>) -> Void
     let onReportSpam: @MainActor (Set<NSManagedObjectID>) -> Void
+    /// A row's swipe: its Archive, and its Report Spam once the question is answered.
+    /// `MacMailboxView` runs it through the single-conversation actions, as the iPhone's swipe
+    /// does, after moving the selection.
+    let onSwipeAction: @MainActor (ConversationRowSwipePolicy.TrailingAction, NSManagedObjectID) -> Void
     let onNewMessage: @MainActor () -> Void
 
     @FocusState private var isSearchFieldFocused: Bool
+    /// The row's Report Spam waiting for its answer (`conversationSpamConfirmation`). The context
+    /// menu's Report Spam does not ask: it is chosen from a menu, not one tap away from Archive.
+    /// A property wrapper, so it is no parameter of the memberwise initializer `MacMailboxView`
+    /// uses (see `appearsActive`).
+    @State private var spamReportAwaitingAnswer: ConversationRowSwipePolicy.SpamReportRequest?
     /// Whether this window is the one the user is working in (`WindowAppearsActive` says what
     /// that means on the Mac). A selected row is gray in a window that is not.
     ///
@@ -96,6 +105,11 @@ struct MacConversationSidebar: View {
                     isSelected: selection.contains(item.id),
                     windowAppearsActive: appearsActive
                 )
+                let isLeavingList = viewModel.conversationIDsLeavingList.contains(item.id)
+                let offersSwipes = ConversationRowSwipePolicy.offersSwipes(
+                    isSelecting: false,
+                    isLeavingList: isLeavingList
+                )
                 ConversationRowView(
                     snapshot: item.snapshot,
                     conversationObjectID: item.id,
@@ -105,6 +119,10 @@ struct MacConversationSidebar: View {
                     metrics: .mac,
                     palette: MacSidebarRowSelectionPolicy.palette(on: selectionFill)
                 )
+                // A row whose archive or report is running stays until its save lands; dimmed,
+                // it shows the action was taken (`conversationIDsLeavingList`). The row only,
+                // not the selection fill behind it.
+                .opacity(ConversationRowSwipePolicy.rowOpacity(isLeavingList: isLeavingList))
                 // The fill and the palette above come from one decision and go together:
                 // without this the row's white text sits on the list's own gray selection.
                 // Nil for a row that is not selected, which then has the list's own background.
@@ -117,25 +135,36 @@ struct MacConversationSidebar: View {
                 .onAppear {
                     viewModel.loadMoreIfNeeded(currentItem: item)
                 }
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    Button(role: .destructive) {
-                        onArchive([item.id])
-                    } label: {
-                        SwiftUI.Label("Archive", systemImage: "archivebox")
+                // A full swipe archives; Report Spam is a partial swipe's and asks first
+                // (`conversationRowTrailingSwipeActions`, shared with the iPhone's list).
+                .conversationRowTrailingSwipeActions(
+                    isEnabled: offersSwipes,
+                    onArchive: { onSwipeAction(.archive, item.id) },
+                    onReportSpam: {
+                        spamReportAwaitingAnswer = .init(
+                            conversationID: item.id,
+                            shownName: ConversationRowView.displayedName(
+                                snapshot: item.snapshot,
+                                conversationObjectID: item.id,
+                                currentUserEmail: currentUserEmail,
+                                participantLoader: participantLoader
+                            )
+                        )
                     }
-                    .tint(.blue)
-                }
+                )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button {
-                        viewModel.toggleConversationReadState(withID: item.id)
-                    } label: {
-                        if item.snapshot.inboxUnreadCount > 0 {
-                            SwiftUI.Label("Read", systemImage: "envelope.open")
-                        } else {
-                            SwiftUI.Label("Unread", systemImage: "envelope.badge")
+                    if offersSwipes {
+                        Button {
+                            viewModel.toggleConversationReadState(withID: item.id)
+                        } label: {
+                            if item.snapshot.inboxUnreadCount > 0 {
+                                SwiftUI.Label("Read", systemImage: "envelope.open")
+                            } else {
+                                SwiftUI.Label("Unread", systemImage: "envelope.badge")
+                            }
                         }
+                        .tint(.blue)
                     }
-                    .tint(.blue)
                 }
             }
         }
@@ -154,6 +183,16 @@ struct MacConversationSidebar: View {
                 .accessibilityHidden(true)
         }
         .animation(nil, value: viewModel.filteredConversationItems.count)
+        // The question is a sheet on the mailbox window, so the menu commands that refuse under
+        // a sheet (New Message, Sign Out…) refuse while it asks (`FocusedWindowSheet`,
+        // `MailboxWindowSheet`); not seen in the app. The answer goes through `onSwipeAction`,
+        // once the sheet is gone, so `MacMailboxView` moves the selection off the row, where it
+        // was the open chat, as it does for the context menu.
+        .conversationSpamConfirmation(
+            for: $spamReportAwaitingAnswer,
+            isListed: { viewModel.listsConversation(withID: $0) },
+            onConfirm: { onSwipeAction(.reportSpam, $0) }
+        )
         // The menu's rows are the ones right-clicked: the whole selection when the click is
         // inside it, otherwise just the clicked row, which the selection then does not follow.
         .contextMenu(forSelectionType: MacSidebarRowID.self) { rowIDs in

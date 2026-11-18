@@ -49,6 +49,8 @@ struct ConversationListView: View {
     @State private var selectedConversation: Conversation?
     @State private var pendingConversationReference: ConversationReference?
     @State private var showingComposer = false
+    /// The row's Report Spam waiting for its answer (`conversationSpamConfirmation`).
+    @State private var spamReportAwaitingAnswer: ConversationRowSwipePolicy.SpamReportRequest?
     @FocusState private var isSearchFieldFocused: Bool
 
     private var conversationList: some View {
@@ -70,6 +72,11 @@ struct ConversationListView: View {
                 .listRowSeparator(.hidden, edges: .top)
             }
             ForEach(Array(viewModel.filteredConversationItems.enumerated()), id: \.element.id) { index, item in
+                let isLeavingList = viewModel.conversationIDsLeavingList.contains(item.id)
+                let offersSwipes = ConversationRowSwipePolicy.offersSwipes(
+                    isSelecting: viewModel.isSelecting,
+                    isLeavingList: isLeavingList
+                )
                 // One structural path for both selection modes: an if/else here
                 // would make the arms `_ConditionalContent`, so toggling Select
                 // tore down and rebuilt every visible row subtree (row @State
@@ -94,20 +101,30 @@ struct ConversationListView: View {
                             }
                         }
                 }
+                // A row whose archive or report is running stays until its save lands; dimmed,
+                // it shows the action was taken (`conversationIDsLeavingList`).
+                .opacity(ConversationRowSwipePolicy.rowOpacity(isLeavingList: isLeavingList))
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
-                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
-                    if !viewModel.isSelecting {
-                        Button(role: .destructive) {
-                            viewModel.archiveConversation(withID: item.id)
-                        } label: {
-                            SwiftUI.Label("Archive", systemImage: "archivebox")
-                        }
-                        .tint(.blue)
+                // A full swipe archives; Report Spam is a partial swipe's and asks first
+                // (`conversationRowTrailingSwipeActions`, shared with the Mac's sidebar).
+                .conversationRowTrailingSwipeActions(
+                    isEnabled: offersSwipes,
+                    onArchive: { viewModel.archiveConversation(withID: item.id) },
+                    onReportSpam: {
+                        spamReportAwaitingAnswer = .init(
+                            conversationID: item.id,
+                            shownName: ConversationRowView.displayedName(
+                                snapshot: item.snapshot,
+                                conversationObjectID: item.id,
+                                currentUserEmail: authSession.userEmail ?? "",
+                                participantLoader: deps.participantLoader
+                            )
+                        )
                     }
-                }
+                )
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    if !viewModel.isSelecting {
+                    if offersSwipes {
                         Button {
                             viewModel.toggleConversationReadState(withID: item.id)
                         } label: {
@@ -125,6 +142,11 @@ struct ConversationListView: View {
         .listStyle(.plain)
         .animation(nil, value: viewModel.filteredConversationItems.count)
         .scrollDismissesKeyboard(.immediately)
+        .conversationSpamConfirmation(
+            for: $spamReportAwaitingAnswer,
+            isListed: { viewModel.listsConversation(withID: $0) },
+            onConfirm: { viewModel.reportSpamConversation(withID: $0) }
+        )
         .navigationTitle(
             ConversationListChromePolicy.navigationTitle(
                 isSelecting: viewModel.isSelecting,

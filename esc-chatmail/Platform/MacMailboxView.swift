@@ -62,6 +62,7 @@ struct MacMailboxView: View {
                 viewContext: viewContext,
                 onArchive: { archive($0) },
                 onReportSpam: { reportSpam($0) },
+                onSwipeAction: { swipeAction($0, on: $1) },
                 onNewMessage: { showingComposer = true }
             )
             // Messages has no Hide Sidebar button, and with one column hidden there would be
@@ -141,14 +142,29 @@ struct MacMailboxView: View {
 
     private typealias SelectionPolicy = MacSidebarSelectionPolicy
 
-    /// Archive from the list: the Delete key, a row's context menu or swipe, or the chat column's
-    /// button while several rows are selected.
+    /// Archive from the list: the Delete key, a row's context menu, or the chat column's button
+    /// while several rows are selected. A row's swipe goes through `swipeAction(_:on:)`.
     private func archive(_ requested: Set<NSManagedObjectID>) {
         performListAction(on: requested) { viewModel.archiveConversations(withIDs: $0) }
     }
 
     private func reportSpam(_ requested: Set<NSManagedObjectID>) {
         performListAction(on: requested) { viewModel.reportSpamConversations(withIDs: $0) }
+    }
+
+    /// A row's swipe: Archive, or Report Spam once its question is answered. The view model's
+    /// single-conversation actions, as the iPhone's swipe runs them, so the shared swipe
+    /// (`conversationRowTrailingSwipeActions`) follows one set of rules on both platforms; the
+    /// selection moves first, as for every list action.
+    private func swipeAction(_ action: ConversationRowSwipePolicy.TrailingAction, on conversationID: NSManagedObjectID) {
+        performListAction(on: [conversationID]) { targets in
+            for target in targets {
+                switch action {
+                case .archive: viewModel.archiveConversation(withID: target)
+                case .reportSpam: viewModel.reportSpamConversation(withID: target)
+                }
+            }
+        }
     }
 
     /// Moves the selection first, so the chat column leaves the rows being removed before their

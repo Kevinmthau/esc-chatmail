@@ -47,6 +47,7 @@
         "ChatViewExitTests",
         "ContactsAppLinkTests",
         "ConversationRowMetricsTests",
+        "ConversationRowTrailingSwipeActionsMacTests",
         "DraftFileDropPolicyTests",
         "EmailPreviewCardMetricsTests",
         "ExternalURLOpenerTests",
