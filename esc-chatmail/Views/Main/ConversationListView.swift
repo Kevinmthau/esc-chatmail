@@ -96,6 +96,9 @@ struct ConversationListView: View {
                 }
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(index == 0 ? .hidden : .visible, edges: .top)
+                // Archive must stay the first button: the first is the one at the
+                // row's edge and the one a full swipe performs. Spam is shown only
+                // by a partial swipe (`ConversationListSwipeActionsSourceTests`).
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     if !viewModel.isSelecting {
                         Button(role: .destructive) {
@@ -104,6 +107,12 @@ struct ConversationListView: View {
                             SwiftUI.Label("Archive", systemImage: "archivebox")
                         }
                         .tint(.blue)
+                        Button(role: .destructive) {
+                            viewModel.reportSpamConversations(withIDs: [item.id])
+                        } label: {
+                            SwiftUI.Label("Spam", systemImage: "exclamationmark.triangle")
+                        }
+                        .tint(.orange)
                     }
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {

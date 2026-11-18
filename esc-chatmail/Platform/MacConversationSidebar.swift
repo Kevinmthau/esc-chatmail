@@ -117,6 +117,9 @@ struct MacConversationSidebar: View {
                 .onAppear {
                     viewModel.loadMoreIfNeeded(currentItem: item)
                 }
+                // Archive must stay the first button: the first is the one at the row's edge
+                // and the one a full swipe performs. Spam is shown only by a partial swipe
+                // (`ConversationListSwipeActionsSourceTests`).
                 .swipeActions(edge: .trailing, allowsFullSwipe: true) {
                     Button(role: .destructive) {
                         onArchive([item.id])
@@ -124,6 +127,12 @@ struct MacConversationSidebar: View {
                         SwiftUI.Label("Archive", systemImage: "archivebox")
                     }
                     .tint(.blue)
+                    Button(role: .destructive) {
+                        onReportSpam([item.id])
+                    } label: {
+                        SwiftUI.Label("Spam", systemImage: "exclamationmark.triangle")
+                    }
+                    .tint(.orange)
                 }
                 .swipeActions(edge: .leading, allowsFullSwipe: true) {
                     Button {
