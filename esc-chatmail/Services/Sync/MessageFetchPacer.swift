@@ -35,6 +35,9 @@ actor MessageFetchPacer {
         var quietPeriod: TimeInterval = 60
     }
 
+    private static let tokenTolerance = 1e-6
+    private static let minimumWait: TimeInterval = 0.001
+
     private let configuration: Configuration
     private let clock: any SyncClock
     private var tokens: Double
@@ -65,12 +68,18 @@ actor MessageFetchPacer {
             let now = clock.now()
             refill(now: now)
             let pauseRemaining = pausedUntil.map { $0.timeIntervalSince(now) } ?? 0
-            if pauseRemaining <= 0, tokens >= 1 {
-                tokens -= 1
+            // A refill leaves the count a rounding error short of a whole
+            // token; read that as a token.
+            let hasToken = tokens >= 1 - Self.tokenTolerance
+            if pauseRemaining <= 0, hasToken {
+                tokens = max(0, tokens - 1)
                 return
             }
-            let tokenWait = tokens >= 1 ? 0 : (1 - tokens) / configuration.requestsPerSecond
-            let wait = max(pauseRemaining, tokenWait)
+            let tokenWait = hasToken ? 0 : (1 - tokens) / configuration.requestsPerSecond
+            // Never less than a millisecond: a `Date` near today's time cannot
+            // be moved by a nanosecond, so a `FakeSyncClock` asked for one
+            // never advanced and this loop spun forever.
+            let wait = max(pauseRemaining, tokenWait, Self.minimumWait)
             try await clock.sleep(nanoseconds: UInt64((wait * 1_000_000_000).rounded(.up)))
         }
     }
