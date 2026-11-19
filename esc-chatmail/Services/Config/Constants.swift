@@ -167,6 +167,17 @@ struct SyncConfig {
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
 
+    /// UserDefaults key for the IDs an app refresh's missed-message check
+    /// found and left for a sync with a larger budget to fetch
+    /// (`SyncReconciliation.deferMissedMessageFetches`). Account data:
+    /// removed by `AuthSession.clearAccountScopedSyncDefaults`.
+    static let deferredMissedMessageIdsKey = "deferredMissedMessageIds"
+
+    /// The most deferred missed-message IDs kept; the newest are kept. One
+    /// check finds at most `maxReconciliationMessages`, and an ID dropped
+    /// here is still found by a later check while it is in that window.
+    static let maxDeferredMissedMessageIds = 2 * maxReconciliationMessages
+
     /// The oldest an interrupted initial sync's or history recovery's listing
     /// may be and still resume at its next page (`PagedSyncProgress`). Its
     /// cursor is the watermark taken before its first page, and a resumed

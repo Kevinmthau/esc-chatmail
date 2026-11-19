@@ -1421,6 +1421,80 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
     }
 
+    /// An app refresh syncs its history slice and leaves what does not move
+    /// the cursor to a sync with a larger budget: no abandoned-message drain,
+    /// no label reconciliation (and no reconciliation time recorded, so it
+    /// stays due), and the missed messages its one list call finds are kept,
+    /// not fetched. The next foreground sync fetches them and forgets them.
+    ///
+    /// Revert-check: pass `.empty` only when `allowsDeferrableWork` is true
+    /// (i.e. always drain) in `IncrementalSyncOrchestrator.performSync` and
+    /// the refresh fetches "was-abandoned".
+    /// Revert-check: drop `!allowsDeferrableWork ||` from
+    /// `shouldSkipReconciliation` and the refresh lists messages twice and
+    /// records a reconciliation time.
+    /// Revert-check: pass `defersMissedMessageFetches: false` there and the
+    /// refresh fetches "missed-1".
+    /// Revert-check: drop `deferred.stillMissing` from `missedIds` in
+    /// `ReconciliationPhase.execute` and the foreground sync never fetches
+    /// "missed-1", which its own check no longer lists.
+    @MainActor
+    func testAppRefreshBudgetLeavesDrainLabelReconciliationAndMissedFetchesForLater() async throws {
+        try await seedLedgerRow(id: "was-abandoned", state: .abandoned)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageResponses["was-abandoned"] = makeFullMessage(id: "was-abandoned")
+        apiClient.getMessageResponses["missed-1"] = makeFullMessage(id: "missed-1")
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "missed-1", threadId: "t-missed-1")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+
+        let budget = BackgroundMailboxSyncBudget.appRefresh
+        _ = try await makeOrchestrator().performSync(
+            historyPageLimit: budget.historyPageLimit,
+            historyPageSize: budget.historyPageSize,
+            allowsExpensiveRecovery: budget.allowsExpensiveRecovery,
+            allowsDeferrableWork: budget.allowsDeferrableWork,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(apiClient.getMessageCalledIds.contains("m-new"), "Positive control: the slice ran")
+        XCTAssertFalse(apiClient.getMessageCalledIds.contains("was-abandoned"), "No drain in an app refresh")
+        XCTAssertFalse(apiClient.getMessageCalledIds.contains("missed-1"), "Missed fetches wait")
+        XCTAssertEqual(apiClient.listMessagesCallCount, 1, "Only the missed-message list call runs")
+        XCTAssertEqual(
+            defaults.stringArray(forKey: SyncConfig.deferredMissedMessageIdsKey), ["missed-1"],
+            "The missed message is kept for a later sync"
+        )
+        XCTAssertEqual(
+            defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0,
+            "Label reconciliation stays due"
+        )
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["was-abandoned"])
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertNotEqual(historyId, Self.startingHistoryId, "The cursor still moves in an app refresh")
+
+        // The next foreground sync's own check no longer lists "missed-1".
+        apiClient.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        await ModificationTracker.shared.reset()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let missedStored = await messageExists(id: "missed-1")
+        XCTAssertTrue(missedStored, "The foreground sync fetches the deferred missed message")
+        XCTAssertNil(defaults.stringArray(forKey: SyncConfig.deferredMissedMessageIdsKey))
+        let drained = await messageExists(id: "was-abandoned")
+        XCTAssertTrue(drained, "The foreground sync drains")
+        XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0)
+    }
+
     // MARK: - History-recovery scenarios
 
     // Revert-check: fails if the `guard allowsExpensiveRecovery` inside `performSync`'s

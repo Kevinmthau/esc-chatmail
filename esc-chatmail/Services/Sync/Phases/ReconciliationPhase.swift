@@ -5,11 +5,17 @@ import CoreData
 struct ReconciliationInput {
     /// Skip label reconciliation when history reported no changes
     let skipLabelReconciliation: Bool
+    /// List missed messages but leave their fetches, with any deferred
+    /// earlier, to a sync with a larger budget (an app refresh).
+    var defersMissedMessageFetches = false
 }
 
 struct ReconciliationPhaseResult: Sendable, Equatable {
     let diagnostics: SyncReconciliationDiagnostics
     let labelOutcome: LabelReconciliationOutcome
+    /// Deferred missed-message IDs this run tried to fetch. The orchestrator
+    /// forgets them only once the run has saved.
+    var attemptedDeferredMissedIds: [String] = []
 }
 
 /// Phase 4: Reconciliation to catch missed messages
@@ -56,8 +62,28 @@ struct ReconciliationPhase: SyncPhase {
             in: context.coreDataContext,
             installTimestamp: installTimestamp
         )
-        let missedIds = missedResult.missingIds
         diagnostics.merge(missedResult.diagnostics)
+
+        if input.defersMissedMessageFetches {
+            // The list call above is the per-sync safety net and stays; the
+            // fetches it calls for can be hundreds of full messages, which
+            // an app refresh's half minute cannot hold.
+            if !missedResult.missingIds.isEmpty {
+                log.info("Deferring \(missedResult.missingIds.count) missed-message fetches to a sync with a larger budget")
+                reconciliation.deferMissedMessageFetches(missedResult.missingIds)
+            }
+        }
+
+        var attemptedDeferredMissedIds: [String] = []
+        var missedIds: [String] = []
+        if !input.defersMissedMessageFetches {
+            let deferred = await reconciliation.deferredMissedMessageIds(in: context.coreDataContext)
+            attemptedDeferredMissedIds = deferred.deferred
+            var seen = Set<String>()
+            missedIds = (missedResult.missingIds + deferred.stillMissing).filter {
+                seen.insert($0).inserted
+            }
+        }
 
         if !missedIds.isEmpty {
             log.info("Reconciliation found \(missedIds.count) missed messages")
@@ -105,7 +131,8 @@ struct ReconciliationPhase: SyncPhase {
         context.reportProgress(1.0, status: "Reconciliation complete", phase: self)
         return ReconciliationPhaseResult(
             diagnostics: diagnostics,
-            labelOutcome: labelOutcome
+            labelOutcome: labelOutcome,
+            attemptedDeferredMissedIds: attemptedDeferredMissedIds
         )
     }
 

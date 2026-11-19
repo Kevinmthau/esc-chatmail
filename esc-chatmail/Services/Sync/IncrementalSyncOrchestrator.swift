@@ -140,10 +140,19 @@ final class IncrementalSyncOrchestrator {
     // MARK: - Public API
 
     /// Performs incremental sync using composable phases
+    ///
+    /// - Parameter allowsDeferrableWork: False for an app refresh, whose
+    ///   half minute holds the history slice and little else (scalability
+    ///   review step 8): the abandoned-message drain, label reconciliation
+    ///   and the fetches of missed messages wait for a foreground sync or a
+    ///   processing task, and nothing that marks them done is written. The
+    ///   missed-message list call still runs; the IDs it finds are kept for
+    ///   that later sync (`SyncReconciliation.deferMissedMessageFetches`).
     func performSync(
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
         allowsExpensiveRecovery: Bool = true,
+        allowsDeferrableWork: Bool = true,
         progressHandler: @escaping (Double, String) -> Void,
         initialSyncFallback: @escaping () async throws -> Void
     ) async throws -> IncrementalSyncResult {
@@ -325,8 +334,14 @@ final class IncrementalSyncOrchestrator {
             // resolution commits atomically with the recovered messages; if the save
             // fails, the staged changes die with the context and every record stays
             // for the next drain.
+            //
+            // Not in an app refresh: up to `maxAbandonedMessagesPerSync` full
+            // fetches the cursor does not wait on, and the drain alone owns
+            // the rows' retry counts, so leaving them is not a failure.
             let abandonedRetryTimer = timing.start("abandonedRetry")
-            let abandonedOutcome = try await retryAbandonedMessages(phaseContext: phaseContext)
+            let abandonedOutcome = allowsDeferrableWork
+                ? try await retryAbandonedMessages(phaseContext: phaseContext)
+                : .empty
             await failureTracker.stageAbandonedRetryOutcome(
                 recoveredIds: abandonedOutcome.recoveredIds,
                 goneIds: abandonedOutcome.goneIds,
@@ -388,14 +403,20 @@ final class IncrementalSyncOrchestrator {
             // expensive half (~1 metadata GET per recent message) and is
             // TTL-gated below.
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
-            let shouldSkipReconciliation = Self.shouldSkipLabelReconciliation(
+            // An app refresh skips label reconciliation (about one metadata
+            // GET per recent message) and records no reconciliation time, so
+            // the next foreground or processing sync still finds it due.
+            let shouldSkipReconciliation = !allowsDeferrableWork || Self.shouldSkipLabelReconciliation(
                 noHistoryChanges: noHistoryChanges,
                 lastReconciliation: defaults.double(forKey: SyncConfig.lastReconciliationTimeKey),
                 now: Date().timeIntervalSince1970
             )
             let reconciliationTimer = timing.start("reconciliation")
             let reconciliationResult = try await reconciliationPhase.execute(
-                input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
+                input: ReconciliationInput(
+                    skipLabelReconciliation: shouldSkipReconciliation,
+                    defersMissedMessageFetches: !allowsDeferrableWork
+                ),
                 context: phaseContext
             )
             timing.finish(
@@ -505,6 +526,10 @@ final class IncrementalSyncOrchestrator {
                         recordsSuccessfulSync: !historyResult.wasTruncated
                     )
                     await failureTracker.retireLegacyCounterState()
+                    // Their messages, where fetched, are in the save above.
+                    self.reconciliation.clearDeferredMissedMessageIds(
+                        reconciliationResult.attemptedDeferredMissedIds
+                    )
                 },
                 recordReconciliation: {
                     self.recordReconciliationTime()

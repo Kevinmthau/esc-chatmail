@@ -506,6 +506,51 @@ final class SyncReconciliation: Sendable {
         )
     }
 
+    // MARK: - Deferred Missed-Message Fetches
+
+    /// Keeps `ids` for a later sync to fetch. An app refresh lists missed
+    /// messages (one cheap list call, the safety net against dropped history
+    /// events) but leaves their full fetches to a sync with a larger budget
+    /// (scalability review step 8, `bg-app-refresh-budget-not-honored`).
+    func deferMissedMessageFetches(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        var seen = Set<String>()
+        let merged = (storedDeferredMissedMessageIds() + ids).reversed().filter {
+            seen.insert($0).inserted
+        }
+        let kept = Array(merged.prefix(SyncConfig.maxDeferredMissedMessageIds).reversed())
+        defaults.set(kept, forKey: SyncConfig.deferredMissedMessageIdsKey)
+    }
+
+    /// Every deferred ID, and those of them still not stored. An ID history
+    /// stored meanwhile needs no fetch, but is forgotten with the rest; a
+    /// failed read answers every ID as missing.
+    func deferredMissedMessageIds(
+        in context: NSManagedObjectContext
+    ) async -> (deferred: [String], stillMissing: [String]) {
+        let stored = storedDeferredMissedMessageIds()
+        guard !stored.isEmpty else { return ([], []) }
+        return (stored, await findMissingMessages(ids: stored, in: context))
+    }
+
+    /// Forgets deferred IDs once a run that attempted them has saved. As
+    /// with the missed messages a check finds itself, a failed fetch is not
+    /// kept for another attempt: a later check finds it again.
+    func clearDeferredMissedMessageIds(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        let attempted = Set(ids)
+        let remaining = storedDeferredMissedMessageIds().filter { !attempted.contains($0) }
+        if remaining.isEmpty {
+            defaults.removeObject(forKey: SyncConfig.deferredMissedMessageIdsKey)
+        } else {
+            defaults.set(remaining, forKey: SyncConfig.deferredMissedMessageIdsKey)
+        }
+    }
+
+    private func storedDeferredMissedMessageIds() -> [String] {
+        defaults.stringArray(forKey: SyncConfig.deferredMissedMessageIdsKey) ?? []
+    }
+
     /// Finds message IDs that don't exist in local database using efficient batch query
     private func findMissingMessages(ids: [String], in context: NSManagedObjectContext) async -> [String] {
         await context.perform {
