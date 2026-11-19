@@ -60,14 +60,24 @@ actor MessageFetchPacer {
         return limit
     }
 
-    /// Waits for the pause to pass and for a token. Throws only
-    /// `CancellationError`.
-    func acquire() async throws {
+    /// The pause outlasts what the caller may wait
+    /// (`MessageFetchWaitBudget.maxPauseWait`): the GET is not sent.
+    struct PauseOutlastsWait: Error, Equatable {
+        let remaining: TimeInterval
+    }
+
+    /// Waits for the pause to pass and for a token. Throws
+    /// `CancellationError`, or `PauseOutlastsWait` when the pause still has
+    /// longer than `maxPauseWait` to run.
+    func acquire(maxPauseWait: TimeInterval? = nil) async throws {
         while true {
             try Task.checkCancellation()
             let now = clock.now()
             refill(now: now)
             let pauseRemaining = pausedUntil.map { $0.timeIntervalSince(now) } ?? 0
+            if let maxPauseWait, pauseRemaining > maxPauseWait {
+                throw PauseOutlastsWait(remaining: pauseRemaining)
+            }
             // A refill leaves the count a rounding error short of a whole
             // token; read that as a token.
             let hasToken = tokens >= 1 - Self.tokenTolerance
@@ -95,6 +105,11 @@ actor MessageFetchPacer {
 
     /// A 429 (or a 403 naming a rate limit): halve the concurrency once per
     /// pause and pause for `retryAfter`, capped at `maxPause`.
+    ///
+    /// A `retryAfter` of zero or less counts as none, as in
+    /// `MessageFetcher.calculateRetryDelay`: `GmailAPIClient` passes a parsed
+    /// `Retry-After: 0` through, and a zero pause ended at once, so every 429
+    /// of a burst found no pause and halved again, taking 15 to 1.
     func recordRateLimited(retryAfter: TimeInterval?) {
         let now = clock.now()
         let alreadyPaused = pausedUntil.map { now < $0 } ?? false
@@ -102,7 +117,8 @@ actor MessageFetchPacer {
             limit = max(1, limit / 2)
             successesSinceRaise = 0
         }
-        let pause = min(configuration.maxPause, max(retryAfter ?? configuration.defaultPause, 0))
+        let requested = retryAfter.flatMap { $0 > 0 ? $0 : nil } ?? configuration.defaultPause
+        let pause = min(configuration.maxPause, requested)
         let until = now.addingTimeInterval(pause)
         pausedUntil = max(pausedUntil ?? until, until)
         lastRateLimitedAt = now

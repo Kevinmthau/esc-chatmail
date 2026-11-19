@@ -315,6 +315,47 @@ final class InitialSyncScaleBoundTests: XCTestCase {
         XCTAssertEqual(advanced, "history-500")
     }
 
+    /// A resumed initial sync advances to its first attempt's watermark, so
+    /// the last-sync time it records is that listing's start, not the time
+    /// it finished: recovery's and reconciliation's windows are measured
+    /// back from it, and the mail between the attempts was never listed.
+    ///
+    /// Revert-check: call `failureTracker.commit(advancePlan)` without
+    /// `listingStartedAt` in `InitialSyncOrchestrator.performSync` and the
+    /// recorded time is now.
+    @MainActor
+    func testPerformSync_resumedListing_recordsTheFirstAttemptsStartAsTheLastSync() async throws {
+        let now = Date().timeIntervalSince1970
+        UserDefaults.standard.set(now - 3 * 3600, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"], ["m2"]])
+        let listingStartedAt = now - 2 * 3600
+        let context = coreDataStack.newBackgroundContext()
+        try await SyncWindowCheckpointStore.initialSync.stageFreeze(
+            windowStart: now - 3 * 3600,
+            progress: PagedSyncProgress(
+                watermarkHistoryId: "history-100",
+                listingStartedAt: listingStartedAt,
+                nextPageToken: "page-2",
+                fetchFailedIds: [],
+                persistenceFailedIds: [],
+                resolvedTrackedIds: []
+            ),
+            accountEmail: Self.myEmail,
+            in: context
+        )
+        try await context.perform { try context.save() }
+
+        _ = try await makeOrchestrator().performSync { _, _ in }
+
+        XCTAssertEqual(apiClient.getMessageCalledIds, ["m2"], "Positive control: the run resumed at page 2")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "history-100")
+        XCTAssertEqual(
+            defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey), listingStartedAt,
+            accuracy: 0.001
+        )
+    }
+
     // MARK: - Fixture
 
     private func configureMailbox(pages: [[String]]) {

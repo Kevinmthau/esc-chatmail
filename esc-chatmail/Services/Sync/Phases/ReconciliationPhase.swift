@@ -14,8 +14,12 @@ struct ReconciliationPhaseResult: Sendable, Equatable {
     let diagnostics: SyncReconciliationDiagnostics
     let labelOutcome: LabelReconciliationOutcome
     /// Deferred missed-message IDs this run tried to fetch. The orchestrator
-    /// forgets them only once the run has saved.
+    /// settles them only once the run has saved
+    /// (`SyncReconciliation.settleMissedMessageFetches`).
     var attemptedDeferredMissedIds: [String] = []
+    /// Missed-message IDs, deferred or found by this run, whose fetch or
+    /// persistence failed: kept for the next sync when the run saves.
+    var failedMissedIds: [String] = []
 }
 
 /// Phase 4: Reconciliation to catch missed messages
@@ -75,6 +79,7 @@ struct ReconciliationPhase: SyncPhase {
         }
 
         var attemptedDeferredMissedIds: [String] = []
+        var failedMissedIds: [String] = []
         var missedIds: [String] = []
         if !input.defersMissedMessageFetches {
             let deferred = await reconciliation.deferredMissedMessageIds(in: context.coreDataContext)
@@ -106,8 +111,10 @@ struct ReconciliationPhase: SyncPhase {
 
             if recoveryOutcome.hasBlockingFailures {
                 // Missed-message recovery is a safety net outside history
-                // semantics; failures here are logged, not cursor-gating.
+                // semantics; failures here do not gate the cursor. They are
+                // kept for the next sync, which no later check would list.
                 log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
+                failedMissedIds = recoveryOutcome.blockingFailureIds
             }
         }
 
@@ -132,7 +139,8 @@ struct ReconciliationPhase: SyncPhase {
         return ReconciliationPhaseResult(
             diagnostics: diagnostics,
             labelOutcome: labelOutcome,
-            attemptedDeferredMissedIds: attemptedDeferredMissedIds
+            attemptedDeferredMissedIds: attemptedDeferredMissedIds,
+            failedMissedIds: failedMissedIds
         )
     }
 

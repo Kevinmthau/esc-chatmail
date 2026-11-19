@@ -217,14 +217,89 @@ final class MessageListPaginatorTests: XCTestCase {
             // Expected.
         }
 
-        mockAPI.listMessagesErrorsByPageToken["stored"] = APIError.serverError(503)
-        let resumed = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "stored")
-        do {
-            try await resumed.forEachPage { _ in }
-            XCTFail("Only a 400 gives up the stored token")
-        } catch APIError.serverError(_) {
-            // Expected.
+        let transientOrAccountScoped: [APIError] = [
+            .serverError(503),
+            .timeout,
+            .rateLimited(retryAfter: nil),
+            .authenticationError,
+            .credentialsRevoked,
+            .quotaExhausted("daily")
+        ]
+        for error in transientOrAccountScoped {
+            mockAPI.listMessagesErrorsByPageToken["stored"] = error
+            let resumed = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "stored")
+            do {
+                try await resumed.forEachPage { _ in }
+                XCTFail("\(error) must not give up the stored token")
+            } catch is APIError {
+                // Expected.
+            }
         }
+    }
+
+    /// A stored token refused some other deterministic way than a 400 (a
+    /// 404, say: nobody has measured what Gmail answers) is given up the
+    /// same way. Propagated, it failed every attempt at its first list call
+    /// until the progress was three days old.
+    ///
+    /// Revert-check: give up the stored token only on `.invalidData` in
+    /// `MessageIDPageStream.forEachPage` (or answer false for `.notFound` in
+    /// `refusesStoredPageToken`) and the stream throws `notFound`.
+    func testMessageIDPageStream_storedTokenNotFound_listsFromTheFirstPage() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"]],
+            pageTokens: ["page-2", nil]
+        )
+        mockAPI.listMessagesErrorsByPageToken["stale"] = APIError.notFound("Requested entity was not found.")
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let stream = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "stale")
+        var pages: [MessageIDPage] = []
+        try await stream.forEachPage { pages.append($0) }
+
+        XCTAssertEqual(pages.map(\.messageIds), [["first"], ["second"]])
+    }
+
+    /// A resumed first page that comes back empty with no next token is not
+    /// trusted as the end of the listing: a stored token Gmail had expired
+    /// could answer that way and end, clean, a listing that never reached
+    /// its later pages. The listing starts again from its first page.
+    ///
+    /// Revert-check: drop the empty-and-last check from
+    /// `MessageIDPageStream.forEachPage` and the stream ends after one empty
+    /// page.
+    func testMessageIDPageStream_resumedFirstPageEmptyAndLast_listsFromTheFirstPage() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"], []],
+            pageTokens: ["page-2", "page-3", nil]
+        )
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let stream = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "page-3")
+        var pages: [MessageIDPage] = []
+        try await stream.forEachPage { pages.append($0) }
+
+        XCTAssertEqual(pages.map(\.messageIds), [["first"], ["second"], []])
+        XCTAssertEqual(pages.map(\.pageIndex), [1, 2, 3])
+    }
+
+    /// Only the stored token's first answer is doubted: an empty last page
+    /// reached from a resumed page that listed something ends the listing.
+    func testMessageIDPageStream_resumedListingEndingOnAnEmptyPage_ends() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"], []],
+            pageTokens: ["page-2", "page-3", nil]
+        )
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let stream = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "page-2")
+        var pages: [MessageIDPage] = []
+        try await stream.forEachPage { pages.append($0) }
+
+        XCTAssertEqual(pages.map(\.messageIds), [["second"], []])
     }
 
     /// Each page's completion carries the page to list next and the call's

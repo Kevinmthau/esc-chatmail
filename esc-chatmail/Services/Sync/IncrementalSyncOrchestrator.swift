@@ -148,11 +148,35 @@ final class IncrementalSyncOrchestrator {
     ///   processing task, and nothing that marks them done is written. The
     ///   missed-message list call still runs; the IDs it finds are kept for
     ///   that later sync (`SyncReconciliation.deferMissedMessageFetches`).
+    ///   Nor does it wait out a rate limit (`MessageFetchWaitBudget.appRefresh`):
+    ///   the IDs a 429 refused hold the cursor and the slice saves the rest.
     func performSync(
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
         allowsExpensiveRecovery: Bool = true,
         allowsDeferrableWork: Bool = true,
+        progressHandler: @escaping (Double, String) -> Void,
+        initialSyncFallback: @escaping () async throws -> Void
+    ) async throws -> IncrementalSyncResult {
+        try await MessageFetchWaitBudget.$current.withValue(
+            allowsDeferrableWork ? .standard : .appRefresh
+        ) {
+            try await performSyncWithinWaitBudget(
+                historyPageLimit: historyPageLimit,
+                historyPageSize: historyPageSize,
+                allowsExpensiveRecovery: allowsExpensiveRecovery,
+                allowsDeferrableWork: allowsDeferrableWork,
+                progressHandler: progressHandler,
+                initialSyncFallback: initialSyncFallback
+            )
+        }
+    }
+
+    private func performSyncWithinWaitBudget(
+        historyPageLimit: Int?,
+        historyPageSize: Int?,
+        allowsExpensiveRecovery: Bool,
+        allowsDeferrableWork: Bool,
         progressHandler: @escaping (Double, String) -> Void,
         initialSyncFallback: @escaping () async throws -> Void
     ) async throws -> IncrementalSyncResult {
@@ -526,9 +550,11 @@ final class IncrementalSyncOrchestrator {
                         recordsSuccessfulSync: !historyResult.wasTruncated
                     )
                     await failureTracker.retireLegacyCounterState()
-                    // Their messages, where fetched, are in the save above.
-                    self.reconciliation.clearDeferredMissedMessageIds(
-                        reconciliationResult.attemptedDeferredMissedIds
+                    // Their messages, where fetched, are in the save above;
+                    // those that failed are kept for the next sync.
+                    self.reconciliation.settleMissedMessageFetches(
+                        attemptedDeferredIds: reconciliationResult.attemptedDeferredMissedIds,
+                        failedIds: reconciliationResult.failedMissedIds
                     )
                 },
                 recordReconciliation: {
@@ -950,7 +976,10 @@ final class IncrementalSyncOrchestrator {
 
             // The save above committed the staged ledger rows with the cursor;
             // only now may the tracker's success state change.
-            await failureTracker.commit(advancePlan)
+            // The last-sync time recorded is no later than the listing's
+            // start, the first attempt's for a resumed recovery: the cursor
+            // is that attempt's watermark.
+            await failureTracker.commit(advancePlan, listingStartedAt: listingStartedAt)
             await failureTracker.retireLegacyCounterState()
 
             if advancePlan.shouldAdvance {

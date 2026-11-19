@@ -508,47 +508,125 @@ final class SyncReconciliation: Sendable {
 
     // MARK: - Deferred Missed-Message Fetches
 
+    /// A missed message whose fetch waits for a later sync, and how many
+    /// syncs have already failed to fetch or store it.
+    struct DeferredMissedMessage: Codable, Equatable, Sendable {
+        let id: String
+        var failedAttempts: Int
+        /// When the last failure that counted was, in Unix seconds; nil
+        /// before the first.
+        var lastCountedFailureAt: TimeInterval?
+    }
+
     /// Keeps `ids` for a later sync to fetch. An app refresh lists missed
     /// messages (one cheap list call, the safety net against dropped history
     /// events) but leaves their full fetches to a sync with a larger budget
     /// (scalability review step 8, `bg-app-refresh-budget-not-honored`).
+    /// An ID already kept keeps its failed attempts.
     func deferMissedMessageFetches(_ ids: [String]) {
         guard !ids.isEmpty else { return }
-        var seen = Set<String>()
-        let merged = (storedDeferredMissedMessageIds() + ids).reversed().filter {
-            seen.insert($0).inserted
+        let stored = storedDeferredMissedMessages()
+        var known: [String: DeferredMissedMessage] = [:]
+        for entry in stored where known[entry.id] == nil {
+            known[entry.id] = entry
         }
-        let kept = Array(merged.prefix(SyncConfig.maxDeferredMissedMessageIds).reversed())
-        defaults.set(kept, forKey: SyncConfig.deferredMissedMessageIdsKey)
+        let added = ids.map {
+            known[$0] ?? DeferredMissedMessage(id: $0, failedAttempts: 0, lastCountedFailureAt: nil)
+        }
+        storeDeferredMissedMessages(stored + added)
     }
 
     /// Every deferred ID, and those of them still not stored. An ID history
-    /// stored meanwhile needs no fetch, but is forgotten with the rest; a
-    /// failed read answers every ID as missing.
+    /// stored meanwhile needs no fetch and is forgotten when the run settles;
+    /// a failed read answers every ID as missing.
     func deferredMissedMessageIds(
         in context: NSManagedObjectContext
     ) async -> (deferred: [String], stillMissing: [String]) {
-        let stored = storedDeferredMissedMessageIds()
+        let stored = storedDeferredMissedMessages().map(\.id)
         guard !stored.isEmpty else { return ([], []) }
         return (stored, await findMissingMessages(ids: stored, in: context))
     }
 
-    /// Forgets deferred IDs once a run that attempted them has saved. As
-    /// with the missed messages a check finds itself, a failed fetch is not
-    /// kept for another attempt: a later check finds it again.
-    func clearDeferredMissedMessageIds(_ ids: [String]) {
-        guard !ids.isEmpty else { return }
-        let attempted = Set(ids)
-        let remaining = storedDeferredMissedMessageIds().filter { !attempted.contains($0) }
-        if remaining.isEmpty {
-            defaults.removeObject(forKey: SyncConfig.deferredMissedMessageIdsKey)
-        } else {
-            defaults.set(remaining, forKey: SyncConfig.deferredMissedMessageIdsKey)
+    /// Settles a run's missed-message fetches once it has saved.
+    ///
+    /// A deferred ID the run attempted is forgotten when it is now stored or
+    /// gone. An ID whose fetch or persistence failed, deferred or found by
+    /// the run's own check, is kept for the next sync: no later check lists
+    /// it again, because each lists mail after the last sync less five
+    /// minutes and the last sync is now this one. An ID that has failed
+    /// `SyncConfig.maxDeferredMissedMessageFetchAttempts` times is dropped,
+    /// so one that can never be fetched is not fetched by every sync without
+    /// end. A failure counts only `SyncConfig.deferredMissedMessageFailureSpacing`
+    /// after the last one that did: a foreground sync runs every minute, and
+    /// counted per sync, five minutes of 5xx or rate limits dropped a message
+    /// nothing would list again. It is still fetched by every sync.
+    func settleMissedMessageFetches(
+        attemptedDeferredIds: [String],
+        failedIds: [String],
+        now: Date = Date()
+    ) {
+        guard !attemptedDeferredIds.isEmpty || !failedIds.isEmpty else { return }
+        let attempted = Set(attemptedDeferredIds)
+        let failed = Set(failedIds)
+        var kept: [DeferredMissedMessage] = []
+        var keptIds = Set<String>()
+        var dropped = 0
+
+        let nowSeconds = now.timeIntervalSince1970
+        func keepFailure(_ entry: DeferredMissedMessage) {
+            var entry = entry
+            if let last = entry.lastCountedFailureAt,
+               nowSeconds >= last,
+               nowSeconds - last < SyncConfig.deferredMissedMessageFailureSpacing {
+                kept.append(entry)
+                return
+            }
+            entry.failedAttempts += 1
+            entry.lastCountedFailureAt = nowSeconds
+            if entry.failedAttempts >= SyncConfig.maxDeferredMissedMessageFetchAttempts {
+                dropped += 1
+            } else {
+                kept.append(entry)
+            }
         }
+
+        for entry in storedDeferredMissedMessages() where keptIds.insert(entry.id).inserted {
+            if failed.contains(entry.id) {
+                keepFailure(entry)
+            } else if !attempted.contains(entry.id) {
+                kept.append(entry)
+            }
+        }
+        for id in failedIds where keptIds.insert(id).inserted {
+            keepFailure(DeferredMissedMessage(id: id, failedAttempts: 0, lastCountedFailureAt: nil))
+        }
+
+        if dropped > 0 {
+            log.warning("Dropped \(dropped) missed messages that failed \(SyncConfig.maxDeferredMissedMessageFetchAttempts) fetches")
+        }
+        storeDeferredMissedMessages(kept)
     }
 
-    private func storedDeferredMissedMessageIds() -> [String] {
-        defaults.stringArray(forKey: SyncConfig.deferredMissedMessageIdsKey) ?? []
+    /// The missed messages a later sync is to fetch, oldest first.
+    func storedDeferredMissedMessages() -> [DeferredMissedMessage] {
+        guard let data = defaults.data(forKey: SyncConfig.deferredMissedMessageIdsKey),
+              let entries = try? JSONDecoder().decode([DeferredMissedMessage].self, from: data) else {
+            return []
+        }
+        return entries
+    }
+
+    /// Stores `entries` with each ID once, at its last position, and the
+    /// newest `SyncConfig.maxDeferredMissedMessageIds` of them.
+    private func storeDeferredMissedMessages(_ entries: [DeferredMissedMessage]) {
+        var seen = Set<String>()
+        let newestFirst = entries.reversed().filter { seen.insert($0.id).inserted }
+        let kept = Array(newestFirst.prefix(SyncConfig.maxDeferredMissedMessageIds).reversed())
+        guard !kept.isEmpty, let data = try? JSONEncoder().encode(kept) else {
+            defaults.removeObject(forKey: SyncConfig.deferredMissedMessageIdsKey)
+            return
+        }
+        defaults.set(data, forKey: SyncConfig.deferredMissedMessageIdsKey)
     }
 
     /// Finds message IDs that don't exist in local database using efficient batch query

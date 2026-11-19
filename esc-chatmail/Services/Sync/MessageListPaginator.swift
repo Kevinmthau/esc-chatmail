@@ -52,11 +52,32 @@ struct MessageIDPageStream: Sendable {
         self.startPageToken = startPageToken
     }
 
+    /// Lists every page from `startPageToken`, or from the first page.
+    ///
+    /// A stored page token is opaque, days old at most
+    /// (`SyncConfig.pagedSyncResumeMaxAge`), and nobody has measured how
+    /// Gmail answers one it no longer honors. So the stored token is given
+    /// up once, and the listing starts again from its first page, wherever
+    /// trusting it could be wrong: a deterministic refusal of it (any 4xx
+    /// but an account-scoped or rate-limit one, `refusesStoredPageToken`),
+    /// or a first page that comes back empty and last, which an expired
+    /// token answered that way would make a clean end of a listing that
+    /// never reached its later pages. What the earlier attempt saved stays
+    /// saved and its failures ride in the caller's progress; starting again
+    /// costs the window's pages listed and fetched again, as before resume
+    /// existed. Transient and account-scoped failures propagate, and so does
+    /// anything on a token Gmail itself just handed out.
     func forEachPage(
         _ handler: (MessageIDPage) async throws -> Void
     ) async throws {
         var pageToken = startPageToken
         var pageIndex = 0
+
+        /// Whether this list call was of the stored token, which may be
+        /// given up (once: giving it up sets the token to nil).
+        func isListingStoredToken() -> Bool {
+            pageIndex == 0 && startPageToken != nil && pageToken == startPageToken
+        }
 
         // Not `repeat … while pageToken != nil`: giving up the stored token
         // sets it to nil and continues, which that condition would end.
@@ -72,21 +93,20 @@ struct MessageIDPageStream: Sendable {
                     maxResults: pageSize
                 )
             } catch let error as APIError {
-                // A stored page token is opaque and can outlive what Gmail
-                // honors; Gmail answers a stale one with a 400. Only the
-                // stored token is given up, once, and the listing starts again
-                // from its first page: what the earlier attempt saved stays
-                // saved, and its failures ride in the caller's progress. Any
-                // other failure, and a 400 on a token Gmail just issued,
-                // propagates.
-                guard pageIndex == 0,
-                      let startPageToken,
-                      pageToken == startPageToken,
-                      case .invalidData(_) = error else {
+                guard isListingStoredToken(), Self.refusesStoredPageToken(error) else {
                     throw error
                 }
                 Log.warning(
-                    "Stored message-list page token was rejected; listing again from the first page",
+                    "Stored message-list page token was refused; listing again from the first page",
+                    category: .sync
+                )
+                pageToken = nil
+                continue
+            }
+
+            if isListingStoredToken(), messageIds.isEmpty, nextPageToken == nil {
+                Log.warning(
+                    "Stored message-list page token listed nothing and ended the listing; listing again from the first page",
                     category: .sync
                 )
                 pageToken = nil
@@ -104,6 +124,21 @@ struct MessageIDPageStream: Sendable {
 
             guard let nextPageToken else { break }
             pageToken = nextPageToken
+        }
+    }
+
+    /// Whether `error` refuses the request itself, the same way every time,
+    /// rather than the account (authentication, revoked credentials, quota)
+    /// or the moment (a rate limit, a 5xx, a timeout, the network). The
+    /// client raises `invalidData` for a 4xx it has no case for (and a 403
+    /// that names neither a rate limit nor a quota) and `notFound` for a 404.
+    static func refusesStoredPageToken(_ error: APIError) -> Bool {
+        switch error {
+        case .invalidData, .notFound, .invalidURL, .invalidHistoryPageToken:
+            return true
+        case .networkError, .decodingError, .authenticationError, .credentialsRevoked,
+             .rateLimited, .quotaExhausted, .serverError, .timeout, .historyIdExpired:
+            return false
         }
     }
 }

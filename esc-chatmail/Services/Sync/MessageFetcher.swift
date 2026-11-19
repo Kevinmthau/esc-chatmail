@@ -157,6 +157,7 @@ final class MessageFetcher: @unchecked Sendable {
         var sawRateLimit = false
         var runAbortError: APIError?
         let pacer = self.pacer
+        let maxPauseWait = MessageFetchWaitBudget.current.maxPauseWait
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
@@ -172,12 +173,20 @@ final class MessageFetcher: @unchecked Sendable {
             // per-request timeout is already forced ≥30s).
             //
             // Every GET waits for the pacer first and reports to it after.
-            // `acquire` throws only on cancellation, which the loop below
-            // treats as the end of the pass, never as a verdict.
+            // A cancelled `acquire` is the end of the pass, never a verdict.
+            // A pause longer than the run may wait (an app refresh's
+            // `MessageFetchWaitBudget`) fails the GET unsent as rate limited,
+            // which no server said, so the pacer is not told of it.
             @Sendable func fetchOnce(_ id: String) async -> (String, Result<GmailMessage, Error>) {
                 do {
                     try Task.checkCancellation()
-                    try await pacer.acquire()
+                    try await pacer.acquire(maxPauseWait: maxPauseWait)
+                } catch let refusal as MessageFetchPacer.PauseOutlastsWait {
+                    return (id, .failure(APIError.rateLimited(retryAfter: refusal.remaining)))
+                } catch {
+                    return (id, .failure(error))
+                }
+                do {
                     let message = try await self.apiClient.getMessage(id: id, format: "full", maxRetries: 1)
                     await pacer.recordSuccess()
                     return (id, .success(message))
@@ -383,11 +392,22 @@ final class MessageFetcher: @unchecked Sendable {
         var currentFailedIds = initialResult.retriableFailedIds
         var pendingRetryAfter = initialResult.maxRetryAfterSeconds
         var pendingRateLimit = initialResult.sawRateLimit
+        let waitBudget = MessageFetchWaitBudget.current
 
         // Retry loop with exponential backoff and jitter
         for attempt in 1...maxRetryAttempts {
             guard !currentFailedIds.isEmpty else { break }
             try Task.checkCancellation()
+
+            // A run that cannot wait out a rate limit (an app refresh) ends
+            // the retries of a rate-limited pass here: its IDs are blocking
+            // failures that hold the cursor, and what was fetched is saved.
+            if pendingRateLimit, !waitBudget.retriesRateLimitedPasses {
+                Log.info("Rate limited with no time to wait it out; leaving \(currentFailedIds.count) messages to the next sync", category: .sync)
+                exhaustedRetries.append(contentsOf: currentFailedIds)
+                currentFailedIds = []
+                break
+            }
 
             // Server-provided Retry-After (when the previous pass was rate
             // limited) dominates the synthetic backoff.
@@ -507,8 +527,30 @@ final class MessageFetcher: @unchecked Sendable {
     }
 
     /// Fetches Gmail metadata for a single message.
+    ///
+    /// Paced like the full GETs (`MessageFetchPacer`): label reconciliation
+    /// makes about one of these for each recent message, against the same
+    /// per-user limit. The client keeps its own retries here (no
+    /// `maxRetries: 1`), so only the 429 it finally throws reaches the pacer;
+    /// the backoff it sleeps before that is what its `RateLimitTracker`
+    /// records, as before. A pause longer than the run may wait throws
+    /// `APIError.rateLimited` without sending the GET.
     func getMessageMetadata(id: String) async throws -> GmailMessage {
-        try await apiClient.getMessage(id: id, format: "metadata")
+        do {
+            try await pacer.acquire(maxPauseWait: MessageFetchWaitBudget.current.maxPauseWait)
+        } catch let refusal as MessageFetchPacer.PauseOutlastsWait {
+            throw APIError.rateLimited(retryAfter: refusal.remaining)
+        }
+        do {
+            let message = try await apiClient.getMessage(id: id, format: "metadata")
+            await pacer.recordSuccess()
+            return message
+        } catch {
+            if case APIError.rateLimited(let retryAfter) = error {
+                await pacer.recordRateLimited(retryAfter: retryAfter)
+            }
+            throw error
+        }
     }
 
     /// Fetches send-as aliases from Gmail API

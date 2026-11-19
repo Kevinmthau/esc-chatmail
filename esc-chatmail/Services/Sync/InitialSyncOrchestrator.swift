@@ -150,6 +150,10 @@ final class InitialSyncOrchestrator {
             // A resumed listing advances to the watermark its first attempt
             // took (`PagedSyncProgress`); a fresh one to this attempt's.
             let cursorHistoryId = listing.progress?.watermarkHistoryId ?? profile.historyId
+            // When the listing behind that cursor began: the first attempt's
+            // for a resumed listing. An advance records it as the last-sync
+            // time (`SyncFailureTracker.commit(_:listingStartedAt:)`).
+            let listingStartedAt = listing.progress?.listingStartedAt ?? Date().timeIntervalSince1970
 
             // Tracked so the completion retry does not fetch a deferred ID
             // again after this run's listing already resolved it.
@@ -164,7 +168,6 @@ final class InitialSyncOrchestrator {
             } else {
                 let prior = listing.progress
                 let watermark = cursorHistoryId
-                let listingStartedAt = prior?.listingStartedAt ?? Date().timeIntervalSince1970
                 let windowCheckpointStore = self.windowCheckpointStore
                 let accountEmail = profile.emailAddress
                 let listedResult = try await fetchAndProcessMessages(
@@ -273,7 +276,7 @@ final class InitialSyncOrchestrator {
             // an escape-hatch plan rearms the abandoned-message drain only after
             // its ledger transition, counter reset, and cursor are durable.
             if let advancePlan = completion.advancePlan {
-                await failureTracker.commit(advancePlan)
+                await failureTracker.commit(advancePlan, listingStartedAt: listingStartedAt)
             }
             await failureTracker.retireLegacyCounterState()
 
