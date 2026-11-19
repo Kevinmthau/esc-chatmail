@@ -17,6 +17,9 @@ private struct BoundedFetchResult {
     /// Largest server-provided Retry-After (seconds, capped) among rate-limited
     /// failures in this pass — the outer retry loop honors it over synthetic backoff.
     let maxRetryAfterSeconds: TimeInterval?
+    /// Whether any GET of this pass was refused for a rate limit: the retry
+    /// that follows waits on the rate-limit ladder, not the transient one.
+    let sawRateLimit: Bool
     /// Set when Gmail reported an account-scoped condition during this pass.
     /// The pass stops issuing requests and the affected IDs appear in no
     /// failure bucket: authentication, revoked credentials, and quota
@@ -63,14 +66,32 @@ final class MessageFetcher: @unchecked Sendable {
     /// Base delay in nanoseconds for exponential backoff (500ms)
     private let baseRetryDelay: UInt64 = 500_000_000
 
+    /// The waits before each retry of a pass that was rate limited, in
+    /// seconds: 50 in all, against Gmail's per-user limit window. The
+    /// transient ladder (0.5, 1 and 2 seconds) ended inside one window, and
+    /// an ID still limited on the last pass is a blocking failure that holds
+    /// the cursor (scalability review step 8, `rate-limit-pacing`).
+    static let rateLimitedRetryDelays: [TimeInterval] = [5, 15, 30]
+
+    /// Paces every message GET of this fetcher (`MessageFetchPacer`). One
+    /// fetcher serves a `SyncEngine`'s every sync, so its pacing carries
+    /// from one batch, pass and run to the next.
+    let pacer: MessageFetchPacer
+
     @MainActor init() {
         self.apiClient = GmailAPIClient.shared
         self.clock = SystemSyncClock()
+        self.pacer = MessageFetchPacer(clock: clock)
     }
 
-    init(apiClient: any GmailAPIClientProtocol, clock: any SyncClock = SystemSyncClock()) {
+    init(
+        apiClient: any GmailAPIClientProtocol,
+        clock: any SyncClock = SystemSyncClock(),
+        pacer: MessageFetchPacer? = nil
+    ) {
         self.apiClient = apiClient
         self.clock = clock
+        self.pacer = pacer ?? MessageFetchPacer(clock: clock)
     }
 
     /// Checks if an error is retriable (transient network/server issues)
@@ -133,12 +154,13 @@ final class MessageFetcher: @unchecked Sendable {
         var notFoundIds: [String] = []
         var exhaustedRetryIds: [String] = []
         var maxRetryAfterSeconds: TimeInterval?
+        var sawRateLimit = false
         var runAbortError: APIError?
+        let pacer = self.pacer
 
         await withTaskGroup(of: (String, Result<GmailMessage, Error>).self) { group in
             var iterator = ids.makeIterator()
             var activeTasks = 0
-            let maxConcurrent = SyncConfig.maxConcurrentMessageFetches
 
             // Single retry owner: this class owns the retry policy, so the
             // client gets a budget of ONE total attempt per call (a successful
@@ -148,21 +170,36 @@ final class MessageFetcher: @unchecked Sendable {
             // allowed up to 12 HTTP attempts per message, and the 15s wrapper
             // amputated the client's backoff mid-sleep anyway (URLSession's
             // per-request timeout is already forced ≥30s).
+            //
+            // Every GET waits for the pacer first and reports to it after.
+            // `acquire` throws only on cancellation, which the loop below
+            // treats as the end of the pass, never as a verdict.
             @Sendable func fetchOnce(_ id: String) async -> (String, Result<GmailMessage, Error>) {
                 do {
                     try Task.checkCancellation()
+                    try await pacer.acquire()
                     let message = try await self.apiClient.getMessage(id: id, format: "full", maxRetries: 1)
+                    await pacer.recordSuccess()
                     return (id, .success(message))
                 } catch {
+                    if case APIError.rateLimited(let retryAfter) = error {
+                        await pacer.recordRateLimited(retryAfter: retryAfter)
+                    }
                     return (id, .failure(error))
                 }
             }
 
-            // Start initial batch of concurrent tasks
-            while activeTasks < maxConcurrent, let id = iterator.next() {
-                group.addTask { await fetchOnce(id) }
-                activeTasks += 1
+            // Starts GETs up to the pacer's current concurrency, which a 429
+            // in this pass lowers before the next one starts.
+            func startTasksUpToLimit() async {
+                let limit = await pacer.concurrencyLimit
+                while activeTasks < limit, let id = iterator.next() {
+                    group.addTask { await fetchOnce(id) }
+                    activeTasks += 1
+                }
             }
+
+            await startTasksUpToLimit()
 
             // Process results and start new tasks as others complete
             for await (id, result) in group {
@@ -188,8 +225,11 @@ final class MessageFetcher: @unchecked Sendable {
                             group.cancelAll()
                         }
                     } else if runAbortError == nil {
-                        if case APIError.rateLimited(let retryAfter) = error, let retryAfter {
-                            maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
+                        if case APIError.rateLimited(let retryAfter) = error {
+                            sawRateLimit = true
+                            if let retryAfter {
+                                maxRetryAfterSeconds = max(maxRetryAfterSeconds ?? 0, retryAfter)
+                            }
                         }
                         if self.isRetriableError(error) {
                             // Transient error (timeout, network, 5xx)
@@ -213,11 +253,10 @@ final class MessageFetcher: @unchecked Sendable {
                     // no verdict.
                 }
 
-                // Start next task if there are more IDs and the pass was not
+                // Start more if there are more IDs and the pass was not
                 // aborted by an account-scoped condition.
-                if runAbortError == nil, let nextId = iterator.next() {
-                    group.addTask { await fetchOnce(nextId) }
-                    activeTasks += 1
+                if runAbortError == nil {
+                    await startTasksUpToLimit()
                 }
             }
         }
@@ -236,6 +275,7 @@ final class MessageFetcher: @unchecked Sendable {
             notFoundIds: notFoundIds,
             exhaustedRetryIds: exhaustedRetryIds,
             maxRetryAfterSeconds: maxRetryAfterSeconds,
+            sawRateLimit: sawRateLimit,
             runAbortError: runAbortError
         )
     }
@@ -342,6 +382,7 @@ final class MessageFetcher: @unchecked Sendable {
 
         var currentFailedIds = initialResult.retriableFailedIds
         var pendingRetryAfter = initialResult.maxRetryAfterSeconds
+        var pendingRateLimit = initialResult.sawRateLimit
 
         // Retry loop with exponential backoff and jitter
         for attempt in 1...maxRetryAttempts {
@@ -350,7 +391,11 @@ final class MessageFetcher: @unchecked Sendable {
 
             // Server-provided Retry-After (when the previous pass was rate
             // limited) dominates the synthetic backoff.
-            let delay = calculateRetryDelay(attempt: attempt, retryAfter: pendingRetryAfter)
+            let delay = calculateRetryDelay(
+                attempt: attempt,
+                retryAfter: pendingRetryAfter,
+                rateLimited: pendingRateLimit
+            )
             Log.debug("Retry attempt \(attempt)/\(maxRetryAttempts) for \(currentFailedIds.count) failed messages after \(delay / 1_000_000)ms...", category: .sync)
 
             try await clock.sleep(nanoseconds: delay)
@@ -384,6 +429,7 @@ final class MessageFetcher: @unchecked Sendable {
 
             currentFailedIds = retryResult.retriableFailedIds
             pendingRetryAfter = retryResult.maxRetryAfterSeconds
+            pendingRateLimit = retryResult.sawRateLimit
         }
 
         // Log exhausted retries separately - these might succeed on next sync
@@ -489,9 +535,21 @@ final class MessageFetcher: @unchecked Sendable {
     ///   - attempt: The current retry attempt number (1-based)
     ///   - retryAfter: Server-requested pacing in seconds, if any
     /// - Returns: Delay in nanoseconds
-    private func calculateRetryDelay(attempt: Int, retryAfter: TimeInterval? = nil) -> UInt64 {
-        // Base exponential backoff: 500ms, 1s, 2s, etc.
-        let syntheticDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+    private func calculateRetryDelay(
+        attempt: Int,
+        retryAfter: TimeInterval? = nil,
+        rateLimited: Bool = false
+    ) -> UInt64 {
+        // Base exponential backoff: 500ms, 1s, 2s, etc. A rate-limited pass
+        // waits on the longer ladder instead.
+        let syntheticDelay: UInt64
+        if rateLimited {
+            let ladder = Self.rateLimitedRetryDelays
+            let seconds = ladder[min(max(attempt - 1, 0), ladder.count - 1)]
+            syntheticDelay = UInt64(seconds * 1_000_000_000)
+        } else {
+            syntheticDelay = baseRetryDelay * UInt64(1 << (attempt - 1))
+        }
         let baseDelay: UInt64
         if let retryAfter, retryAfter > 0 {
             baseDelay = max(syntheticDelay, UInt64(retryAfter * 1_000_000_000))

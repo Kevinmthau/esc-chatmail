@@ -18,6 +18,15 @@ final class StubURLProtocol: URLProtocol {
     private static var _script: [Response] = []
     private static var _requestCount = 0
     private static var _requestURLs: [URL] = []
+    private static var _responder: (@Sendable (URLRequest) -> Response)?
+
+    /// Answers each request at the moment it arrives, in place of `script`:
+    /// for a response that depends on when it is asked (a rate limit that
+    /// ends at a time on a `FakeSyncClock`).
+    static var responder: (@Sendable (URLRequest) -> Response)? {
+        get { lock.withLock { _responder } }
+        set { lock.withLock { _responder = newValue } }
+    }
 
     static var script: [Response] {
         get { lock.withLock { _script } }
@@ -39,6 +48,7 @@ final class StubURLProtocol: URLProtocol {
             _script = []
             _requestCount = 0
             _requestURLs = []
+            _responder = nil
         }
     }
 
@@ -49,12 +59,18 @@ final class StubURLProtocol: URLProtocol {
         return URLSession(configuration: configuration)
     }
 
-    private static func nextResponse(for url: URL?) -> Response? {
-        lock.withLock {
+    private static func nextResponse(for request: URLRequest) -> Response? {
+        let responder: (@Sendable (URLRequest) -> Response)? = lock.withLock {
             _requestCount += 1
-            if let url {
+            if let url = request.url {
                 _requestURLs.append(url)
             }
+            return _responder
+        }
+        if let responder {
+            return responder(request)
+        }
+        return lock.withLock {
             guard !_script.isEmpty else { return nil }
             return _script.count > 1 ? _script.removeFirst() : _script[0]
         }
@@ -64,7 +80,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let url = request.url, let response = Self.nextResponse(for: request.url) else {
+        guard let url = request.url, let response = Self.nextResponse(for: request) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
