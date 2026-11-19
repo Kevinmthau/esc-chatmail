@@ -50,7 +50,7 @@ final class InitialSyncScaleBoundTests: XCTestCase {
     /// advancing attempt deletes the frozen row with the cursor.
     ///
     /// Revert-check: remove the `windowCheckpointStore.load` branch from
-    /// `InitialSyncOrchestrator.resolveInitialSyncQuery` and the second
+    /// `InitialSyncOrchestrator.resolveInitialSyncListing` and the second
     /// attempt lists from the new install time instead of the frozen start.
     @MainActor
     func testPerformSync_oldInstall_listsCappedWindowFrozenAcrossAttempts() async throws {
@@ -211,6 +211,110 @@ final class InitialSyncScaleBoundTests: XCTestCase {
         )
     }
 
+    /// A run killed after its second page resumes at its third: the next
+    /// attempt fetches only what it had not saved, and advances to the
+    /// watermark the first attempt took before listing, not its own.
+    ///
+    /// Revert-check: drop `try await stageProgress(page)` from the page
+    /// completion in `InitialSyncOrchestrator.fetchAndProcessMessages` and
+    /// the second attempt lists and fetches "m1" and "m2" again.
+    /// Revert-check: advance to `profile.historyId` in place of
+    /// `cursorHistoryId` in `performSync` and the cursor is "history-900".
+    @MainActor
+    func testPerformSync_interruptedRun_resumesAtItsNextPageAndAdvancesToTheFirstWatermark() async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 - 3600, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"], ["m2"], ["m3"]])
+        apiClient.listMessagesErrorsByPageToken["page-3"] = CancellationError()
+
+        do {
+            _ = try await makeOrchestrator().performSync { _, _ in }
+            XCTFail("Positive control: the first attempt dies before its third page")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        let progress = try await frozenProgress()
+        XCTAssertEqual(progress?.nextPageToken, "page-3", "Each saved page commits the page to list next")
+        XCTAssertEqual(progress?.watermarkHistoryId, "history-500")
+        let historyAfterKill = await fetchAccountHistoryId()
+        XCTAssertNil(historyAfterKill)
+
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 3,
+            threadsTotal: 3,
+            historyId: "history-900"
+        )
+        let fetchedBefore = apiClient.getMessageCalledIds.count
+        let listedBefore = apiClient.listMessagesCallCount
+        await ModificationTracker.shared.reset()
+
+        let result = try await makeOrchestrator().performSync { _, _ in }
+
+        XCTAssertFalse(result.hadWarnings)
+        XCTAssertEqual(Array(apiClient.getMessageCalledIds.dropFirst(fetchedBefore)), ["m3"])
+        XCTAssertEqual(apiClient.listMessagesCallCount - listedBefore, 1, "Only the third page is listed")
+        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-3")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(
+            historyId, "history-500",
+            "The history from the first watermark covers what changed on the pages saved before the kill"
+        )
+        let cleared = try await frozenWindowStart()
+        XCTAssertNil(cleared, "The advancing save deletes the window and its progress")
+    }
+
+    /// A fetch failure on page 1, a kill on page 2, and a resumed attempt
+    /// whose own page is clean: the cursor must stay unset, because page 1's
+    /// failure rode in the progress, and the completion retry fetches it.
+    ///
+    /// Revert-check: use `listedResult` alone in place of
+    /// `prior?.merging(into: listedResult)` in
+    /// `InitialSyncOrchestrator.performSync` and the resumed attempt
+    /// advances the cursor past "m1", which was never stored.
+    @MainActor
+    func testPerformSync_failureOnFirstPageKillResume_cursorStaysFrozen() async throws {
+        UserDefaults.standard.set(Date().timeIntervalSince1970 - 3600, forKey: "installTimestamp")
+        configureMailbox(pages: [["m1"], ["m2"]])
+        apiClient.getMessageErrors["m1"] = APIError.timeout
+        apiClient.listMessagesErrorsByPageToken["page-2"] = CancellationError()
+
+        do {
+            _ = try await makeOrchestrator().performSync { _, _ in }
+            XCTFail("Positive control: the first attempt dies before its second page")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let progress = try await frozenProgress()
+        XCTAssertEqual(progress?.fetchFailedIds, ["m1"])
+
+        await ModificationTracker.shared.reset()
+        let fetchedBefore = apiClient.getMessageCalledIds.count
+        let result = try await makeOrchestrator().performSync { _, _ in }
+
+        XCTAssertTrue(result.hadWarnings)
+        XCTAssertTrue(
+            apiClient.getMessageCalledIds.dropFirst(fetchedBefore).contains("m1"),
+            "The completion retry fetches the earlier page's failure"
+        )
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertNil(historyId, "A resumed run must not advance past a failure an earlier page recorded")
+        let held = try await SyncWindowCheckpointStore.initialSync.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNotNil(held?.windowStart, "A held completion keeps its window")
+        XCTAssertNil(held?.progress, "and lists it again from the first page, its failures now in the ledger")
+
+        // Once "m1" can be fetched the retry stores it and the cursor moves.
+        apiClient.getMessageErrors["m1"] = nil
+        await ModificationTracker.shared.reset()
+        let recovered = try await makeOrchestrator().performSync { _, _ in }
+        XCTAssertFalse(recovered.hadWarnings)
+        let advanced = await fetchAccountHistoryId()
+        XCTAssertEqual(advanced, "history-500")
+    }
+
     // MARK: - Fixture
 
     private func configureMailbox(pages: [[String]]) {
@@ -312,6 +416,13 @@ final class InitialSyncScaleBoundTests: XCTestCase {
             accountEmail: Self.myEmail,
             in: coreDataStack.newBackgroundContext()
         )?.windowStart
+    }
+
+    private func frozenProgress() async throws -> PagedSyncProgress? {
+        try await SyncWindowCheckpointStore.initialSync.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )?.progress
     }
 
     private func fetchAccountHistoryId() async -> String? {

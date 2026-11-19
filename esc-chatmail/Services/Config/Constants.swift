@@ -167,6 +167,14 @@ struct SyncConfig {
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
 
+    /// The oldest an interrupted initial sync's or history recovery's listing
+    /// may be and still resume at its next page (`PagedSyncProgress`). Its
+    /// cursor is the watermark taken before its first page, and a resumed
+    /// listing leaves the mail that arrived since to the history from that
+    /// watermark. Gmail keeps history for about a week and documents no
+    /// floor, so a listing older than this lists again from its first page.
+    static let pagedSyncResumeMaxAge: TimeInterval = 3 * 24 * 60 * 60
+
     /// UserDefaults key for the moment the local mailbox began: no sync lists
     /// mail from before it (less a clock-drift buffer). The stored name is the
     /// key's first meaning, the app's first launch, which `FreshInstallHandler`

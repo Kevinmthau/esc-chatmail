@@ -30,7 +30,7 @@ final class MessageListPaginatorTests: XCTestCase {
             var report = MessagePersistenceReport()
             for message in messages { report.record(message.id, .persisted) }
             return report
-        } pageCompletion: {
+        } pageCompletion: { _ in
             await pageCompletions.increment()
         }
 
@@ -149,6 +149,128 @@ final class MessageListPaginatorTests: XCTestCase {
         XCTAssertEqual(pages.map(\.messageIds), [["first"], ["second"], []])
         XCTAssertEqual(pages.map(\.nextPageToken), ["page-2", "page-3", nil])
     }
+
+    /// A resumed listing starts at the page its interrupted attempt stopped
+    /// before, never at the first page.
+    ///
+    /// Revert-check: start `MessageIDPageStream.forEachPage` at a nil page
+    /// token instead of `startPageToken` and "first" is listed again.
+    func testMessageIDPageStream_startsAtTheStartPageToken() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"], ["third"]],
+            pageTokens: ["page-2", "page-3", nil]
+        )
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let stream = MessageIDPageStream(
+            query: "after:1",
+            messageFetcher: fetcher,
+            startPageToken: "page-2"
+        )
+        var pages: [MessageIDPage] = []
+        try await stream.forEachPage { pages.append($0) }
+
+        XCTAssertEqual(pages.map(\.messageIds), [["second"], ["third"]])
+        XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
+    }
+
+    /// Gmail answers a stored page token it no longer honors with a 400. The
+    /// stored token is given up once and the listing starts again from its
+    /// first page; it does not fail the run.
+    ///
+    /// Revert-check: rethrow every `APIError` from the list call in
+    /// `MessageIDPageStream.forEachPage` and the stream throws `invalidData`.
+    func testMessageIDPageStream_rejectedStartPageToken_listsFromTheFirstPage() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"]],
+            pageTokens: ["page-2", nil]
+        )
+        mockAPI.listMessagesErrorsByPageToken["stale"] = APIError.invalidData("Gmail API 400: Invalid pageToken")
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+        let stream = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "stale")
+        var pages: [MessageIDPage] = []
+        try await stream.forEachPage { pages.append($0) }
+
+        XCTAssertEqual(pages.map(\.messageIds), [["first"], ["second"]])
+        XCTAssertEqual(pages.map(\.pageIndex), [1, 2])
+    }
+
+    /// Only the stored token is given up: a 400 on a token Gmail itself just
+    /// handed out, or any other error on the stored one, still fails.
+    func testMessageIDPageStream_otherListFailures_propagate() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["first"], ["second"]],
+            pageTokens: ["page-2", nil]
+        )
+        mockAPI.listMessagesErrorsByPageToken["page-2"] = APIError.invalidData("Gmail API 400")
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
+
+        let fresh = MessageIDPageStream(query: "after:1", messageFetcher: fetcher)
+        do {
+            try await fresh.forEachPage { _ in }
+            XCTFail("A 400 on a token Gmail just issued must not restart the listing")
+        } catch APIError.invalidData(_) {
+            // Expected.
+        }
+
+        mockAPI.listMessagesErrorsByPageToken["stored"] = APIError.serverError(503)
+        let resumed = MessageIDPageStream(query: "after:1", messageFetcher: fetcher, startPageToken: "stored")
+        do {
+            try await resumed.forEachPage { _ in }
+            XCTFail("Only a 400 gives up the stored token")
+        } catch APIError.serverError(_) {
+            // Expected.
+        }
+    }
+
+    /// Each page's completion carries the page to list next and the call's
+    /// cumulative failures, which the orchestrators stage into that page's
+    /// save so a resumed run keeps the failures of the pages before it.
+    ///
+    /// Revert-check: pass an empty `fetchFailedIds` in the paginator's
+    /// `pageProgress()` and the second page's progress loses "bad-fetch".
+    func testFetchAndProcess_pageCompletionReportsCumulativeFailures() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageListWithPagination(
+            [["bad-fetch", "ok-1"], ["bad-save", "t-ok"]],
+            pageTokens: ["page-2", nil]
+        )
+        for id in ["ok-1", "bad-save", "t-ok"] {
+            mockAPI.getMessageResponses[id] = GmailMessageBuilder().withId(id).build()
+        }
+        mockAPI.getMessageErrors["bad-fetch"] = APIError.timeout
+
+        let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI, clock: FakeSyncClock()) }
+        let progress = PageProgressCollector()
+        _ = try await MessageListPaginator.fetchAndProcess(
+            query: "after:1",
+            batchSize: 2,
+            messageFetcher: fetcher,
+            trackedIds: ["t-ok"]
+        ) { _ in
+        } messageHandler: { messages in
+            var report = MessagePersistenceReport()
+            for message in messages {
+                report.record(message.id, message.id == "bad-save" ? .failed : .persisted)
+            }
+            return report
+        } pageCompletion: { page in
+            await progress.append(page)
+        }
+
+        let pages = await progress.values()
+        XCTAssertEqual(pages.count, 2)
+        XCTAssertEqual(pages.first?.nextPageToken, "page-2")
+        XCTAssertEqual(pages.first?.fetchFailedIds, ["bad-fetch"])
+        XCTAssertEqual(pages.last?.nextPageToken, nil)
+        XCTAssertEqual(pages.last?.fetchFailedIds, ["bad-fetch"])
+        XCTAssertEqual(pages.last?.persistenceFailedIds, ["bad-save"])
+        XCTAssertEqual(pages.last?.resolvedTrackedIds, ["t-ok"])
+    }
 }
 
 private actor OrderedIDCollector {
@@ -196,5 +318,17 @@ private actor Counter {
 
     func increment() {
         count += 1
+    }
+}
+
+private actor PageProgressCollector {
+    private var pages: [MessageListPageProgress] = []
+
+    func append(_ page: MessageListPageProgress) {
+        pages.append(page)
+    }
+
+    func values() -> [MessageListPageProgress] {
+        pages
     }
 }

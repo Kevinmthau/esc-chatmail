@@ -162,7 +162,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// `.standard` is how production gets it and is not matched.
     ///
     /// Revert-check: reading `UserDefaults.standard` in
-    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryQuery`, or writing it in
+    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryListing`, or writing it in
     /// `recordReconciliationTime`, fails this.
     ///
     /// HONEST SCOPE: this reads source text. It does not catch a call that leaves out its
@@ -1695,7 +1695,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// holds a newer received row. The advancing run deletes it.
     ///
     /// Revert-check: remove the `recoveryWindowCheckpointStore.load` branch
-    /// from `resolveHistoryRecoveryQuery` and the second run starts after
+    /// from `resolveHistoryRecoveryListing` and the second run starts after
     /// the newer row. Revert-check: pass `newestReceivedInternalDate: nil`
     /// there and the first run lists from the 400-day-old install time.
     @MainActor
@@ -1955,7 +1955,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// otherwise anchor on the newest page the first attempt saved.
     ///
     /// Revert-check: return the `.historyRecovery` query directly from the
-    /// last-sync branch of `resolveHistoryRecoveryQuery` (no freeze) and the
+    /// last-sync branch of `resolveHistoryRecoveryListing` (no freeze) and the
     /// second run starts at the newest received row.
     @MainActor
     func testRecoveryFreezesTheLastSuccessfulSyncBranchAcrossATeardown() async throws {
@@ -2005,6 +2005,137 @@ final class IncrementalSyncCursorTests: XCTestCase {
             isFromMe: false
         )
         try await body()
+    }
+
+    /// A recovery killed after its second page resumes at its third when the
+    /// expired cursor sends the next sync back to recovery: it fetches only
+    /// what it had not saved and advances, in the save that clears the
+    /// window and its progress, to the first attempt's pre-scan watermark.
+    ///
+    /// Revert-check: drop the `recoveryWindowCheckpointStore.stageFreeze`
+    /// call from the recovery page completion in
+    /// `IncrementalSyncOrchestrator.performHistoryRecoverySync` and the
+    /// second run lists and fetches "r1" and "r2" again.
+    /// Revert-check: advance to `profile.historyId` in place of
+    /// `cursorHistoryId` there and the cursor is "8888".
+    @MainActor
+    func testCancelledRecoveryResumesFromStagedPageTokenWithoutRefetchingSavedPages() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination(
+            [["r1"], ["r2"], ["r3"]],
+            pageTokens: ["page-2", "page-3", nil]
+        )
+        for id in ["r1", "r2", "r3"] {
+            apiClient.getMessageResponses[id] = makeFullMessage(id: id)
+        }
+        apiClient.listMessagesErrorsByPageToken["page-3"] = CancellationError()
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 3,
+            threadsTotal: 3,
+            historyId: "7777"
+        )
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Positive control: the first recovery dies before its third page")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let historyAfterKill = await fetchAccountHistoryId()
+        XCTAssertEqual(historyAfterKill, Self.startingHistoryId)
+        let progress = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )?.progress
+        XCTAssertEqual(progress?.nextPageToken, "page-3")
+        XCTAssertEqual(progress?.watermarkHistoryId, "7777")
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 3,
+            threadsTotal: 3,
+            historyId: "8888"
+        )
+        let fetchedBefore = apiClient.getMessageCalledIds.count
+        let listedBefore = apiClient.listMessagesCallCount
+        await ModificationTracker.shared.reset()
+
+        let result = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertFalse(result.needsFollowUp)
+        XCTAssertEqual(Array(apiClient.getMessageCalledIds.dropFirst(fetchedBefore)), ["r3"])
+        XCTAssertEqual(apiClient.listMessagesCallCount - listedBefore, 1)
+        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-3")
+        for id in ["r1", "r2", "r3"] {
+            let stored = await messageExists(id: id)
+            XCTAssertTrue(stored, "\(id) is stored")
+        }
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777")
+        let cleared = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNil(cleared, "The advancing save clears the recovery window and its progress")
+    }
+
+    /// A recovery page failure, a kill, and a resumed attempt whose own page
+    /// is clean: the failure rode in the progress, so it is recorded in the
+    /// ledger and the cursor stays at the expired value.
+    ///
+    /// Revert-check: use `listedResult` alone in place of
+    /// `prior?.merging(into: listedResult)` in `performHistoryRecoverySync`
+    /// and the resumed recovery advances to "7777" with "r1" never stored.
+    @MainActor
+    func testRecoveryFailureBeforeAKillHoldsTheResumedRecovery() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination([["r1"], ["r2"]], pageTokens: ["page-2", nil])
+        apiClient.getMessageResponses["r2"] = makeFullMessage(id: "r2")
+        apiClient.getMessageErrors["r1"] = APIError.timeout
+        apiClient.listMessagesErrorsByPageToken["page-2"] = CancellationError()
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 2,
+            threadsTotal: 2,
+            historyId: "7777"
+        )
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Positive control: the first recovery dies before its second page")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        await ModificationTracker.shared.reset()
+        let result = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.needsFollowUp)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["r1"])
+        let held = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNotNil(held, "A held recovery keeps its window")
+        XCTAssertNil(held?.progress, "and lists it again from the first page")
     }
 
     /// History has expired and recovery lists one fetchable message, "m-rec".
