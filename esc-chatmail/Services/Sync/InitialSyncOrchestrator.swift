@@ -142,28 +142,61 @@ final class InitialSyncOrchestrator {
 
             // Phase 3: Fetch and process messages
             progressHandler(0.2, "Fetching messages...")
-            let query = try await resolveInitialSyncQuery(
+            let listing = try await resolveInitialSyncListing(
                 accountEmail: profile.emailAddress,
                 in: context
             )
-            log.info("Initial sync query: \(query)")
+            log.info("Initial sync query: \(listing.query)")
+            // A resumed listing advances to the watermark its first attempt
+            // took (`PagedSyncProgress`); a fresh one to this attempt's.
+            let cursorHistoryId = listing.progress?.watermarkHistoryId ?? profile.historyId
+            // When the listing behind that cursor began: the first attempt's
+            // for a resumed listing. An advance records it as the last-sync
+            // time (`SyncFailureTracker.commit(_:listingStartedAt:)`).
+            let listingStartedAt = listing.progress?.listingStartedAt ?? Date().timeIntervalSince1970
 
             // Tracked so the completion retry does not fetch a deferred ID
             // again after this run's listing already resolved it.
             let deferredLedgerIds = Set(try await failureTracker.deferredMessageIds(in: context))
 
             let messagesTimer = timing.start("fetchAndProcessMessages")
-            let result = try await fetchAndProcessMessages(
-                query: query,
-                trackedIds: deferredLedgerIds,
-                labelIds: labelIds,
-                modificationTransaction: modificationTransaction,
-                context: context,
-                progressHandler: { progress, status in
-                    // Map 0-1 to 0.2-0.85
-                    progressHandler(0.2 + progress * 0.65, status)
-                }
-            )
+            let result: BatchProcessingResult
+            if let prior = listing.progress, prior.isListingComplete {
+                // Killed after its last page: only the completion is left.
+                log.info("Initial sync listing already complete; resuming at its completion retry")
+                result = prior.completedListingResult
+            } else {
+                let prior = listing.progress
+                let watermark = cursorHistoryId
+                let windowCheckpointStore = self.windowCheckpointStore
+                let accountEmail = profile.emailAddress
+                let listedResult = try await fetchAndProcessMessages(
+                    query: listing.query,
+                    startPageToken: prior?.nextPageToken,
+                    trackedIds: deferredLedgerIds,
+                    labelIds: labelIds,
+                    modificationTransaction: modificationTransaction,
+                    context: context,
+                    stageProgress: { page in
+                        try await windowCheckpointStore.stageFreeze(
+                            windowStart: listing.windowStart,
+                            progress: .afterPage(
+                                page,
+                                prior: prior,
+                                watermarkHistoryId: watermark,
+                                listingStartedAt: listingStartedAt
+                            ),
+                            accountEmail: accountEmail,
+                            in: context
+                        )
+                    },
+                    progressHandler: { progress, status in
+                        // Map 0-1 to 0.2-0.85
+                        progressHandler(0.2 + progress * 0.65, status)
+                    }
+                )
+                result = prior?.merging(into: listedResult) ?? listedResult
+            }
             timing.finish(
                 messagesTimer,
                 detail: "processed=\(result.totalProcessed) success=\(result.successfulCount) failed=\(result.failedIds.count)"
@@ -176,11 +209,22 @@ final class InitialSyncOrchestrator {
             let completion = try await handleSyncCompletion(
                 result: result,
                 profile: profile,
+                cursorHistoryId: cursorHistoryId,
                 labelIds: labelIds,
                 modificationTransaction: modificationTransaction,
                 priorFailureCount: durableFailureCounter.consecutiveFailureCount,
                 context: context
             )
+            if completion.advancePlan?.shouldAdvance != true {
+                // Held: the retry lists the window again from its first page,
+                // with this run's failures in the ledger, so the page progress
+                // goes in this same final save and the window stays.
+                try await windowCheckpointStore.stageFreeze(
+                    windowStart: listing.windowStart,
+                    accountEmail: profile.emailAddress,
+                    in: context
+                )
+            }
             let syncCompletedWithWarnings = completion.hadWarnings
             timing.finish(completionTimer, detail: "warnings=\(syncCompletedWithWarnings)")
 
@@ -232,7 +276,7 @@ final class InitialSyncOrchestrator {
             // an escape-hatch plan rearms the abandoned-message drain only after
             // its ledger transition, counter reset, and cursor are durable.
             if let advancePlan = completion.advancePlan {
-                await failureTracker.commit(advancePlan)
+                await failureTracker.commit(advancePlan, listingStartedAt: listingStartedAt)
             }
             await failureTracker.retireLegacyCounterState()
 
@@ -297,15 +341,16 @@ final class InitialSyncOrchestrator {
     }
 
     /// Reuses the window frozen by an earlier attempt of this initial sync,
-    /// or computes the capped window and stages its freeze, which commits
-    /// with the first page's save.
-    private func resolveInitialSyncQuery(
+    /// with its page progress where it can still be resumed, or computes the
+    /// capped window and stages its freeze, which commits with the first
+    /// page's save.
+    private func resolveInitialSyncListing(
         accountEmail: String,
         in context: NSManagedObjectContext
-    ) async throws -> String {
+    ) async throws -> PagedSyncListing {
         if let frozen = try await windowCheckpointStore.load(accountEmail: accountEmail, in: context) {
             log.info("Resuming initial sync window frozen at \(Date(timeIntervalSince1970: frozen.windowStart))")
-            return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
+            return PagedSyncListing(resuming: frozen, now: Date().timeIntervalSince1970)
         }
 
         let installTimestamp = UserDefaults.standard.double(forKey: SyncConfig.mailboxStartTimestampKey)
@@ -321,7 +366,7 @@ final class InitialSyncOrchestrator {
             accountEmail: accountEmail,
             in: context
         )
-        return SyncTimeCalculator.buildSyncQuery(startTime: windowStart)
+        return PagedSyncListing(windowStart: windowStart, progress: nil)
     }
 
     /// Stages the cursor and the deletion of the frozen window together: the
@@ -336,16 +381,19 @@ final class InitialSyncOrchestrator {
 
     private func fetchAndProcessMessages(
         query: String,
+        startPageToken: String?,
         trackedIds: Set<String>,
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
         context: NSManagedObjectContext,
+        stageProgress: @escaping (MessageListPageProgress) async throws -> Void,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> BatchProcessingResult {
         return try await MessageListPaginator.fetchAndProcess(
             query: query,
             messageFetcher: messageFetcher,
-            trackedIds: trackedIds
+            trackedIds: trackedIds,
+            startPageToken: startPageToken
         ) { checkpoint in
             let progress = Self.streamingProgressFraction(for: checkpoint)
             await MainActor.run {
@@ -364,7 +412,10 @@ final class InitialSyncOrchestrator {
                 modificationTransaction: modificationTransaction,
                 in: context
             )
-        } pageCompletion: { [conversationManager, coreDataStack, rollupMutationSerializer] in
+        } pageCompletion: { [conversationManager, coreDataStack, rollupMutationSerializer] page in
+            // The page progress commits in the page's own save, so a resumed
+            // run starts after exactly the pages that were saved.
+            try await stageProgress(page)
             // Roll up each page's modified conversations before its save so messages
             // and their derived state (snippet, displayName, counts) persist together;
             // an interrupted run then keeps every saved page fully presentable.
@@ -395,14 +446,19 @@ final class InitialSyncOrchestrator {
         return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
     }
 
+    /// - Parameter cursorHistoryId: The cursor an advance stages: the
+    ///   watermark of the listing's first attempt. Nil is this attempt's
+    ///   profile watermark.
     func handleSyncCompletion(
         result: BatchProcessingResult,
         profile: GmailProfile,
+        cursorHistoryId: String? = nil,
         labelIds: Set<String>,
         modificationTransaction: ModificationTracker.Transaction,
         priorFailureCount: Int = 0,
         context: NSManagedObjectContext
     ) async throws -> InitialSyncCompletionOutcome {
+        let cursorHistoryId = cursorHistoryId ?? profile.historyId
         // The capped window need not list a message the ledger deferred
         // earlier (a kept store, or a run held before the window was frozen),
         // and both the clean advance and recordFailure's reconcile delete
@@ -472,7 +528,7 @@ final class InitialSyncOrchestrator {
                 )
                 if advancePlan.shouldAdvance {
                     log.warning("Initial-sync failure threshold reached - advancing historyId with failed messages staged for abandonment")
-                    try await stageHistoryAdvance(to: profile.historyId, in: context)
+                    try await stageHistoryAdvance(to: cursorHistoryId, in: context)
                 } else {
                     log.warning("Keeping historyId unset so initial sync can retry failed messages")
                 }
@@ -494,7 +550,7 @@ final class InitialSyncOrchestrator {
                     in: context
                 )
                 log.info("All failed messages recovered on retry - advancing historyId")
-                try await stageHistoryAdvance(to: profile.historyId, in: context)
+                try await stageHistoryAdvance(to: cursorHistoryId, in: context)
             } else {
                 log.error("Recovered messages but failure-ledger cleanup could not be planned - keeping historyId unset")
             }
@@ -515,8 +571,8 @@ final class InitialSyncOrchestrator {
                 accountEmail: profile.emailAddress,
                 in: context
             )
-            log.info("All messages fetched successfully - advancing historyId to \(profile.historyId)")
-            try await stageHistoryAdvance(to: profile.historyId, in: context)
+            log.info("All messages fetched successfully - advancing historyId to \(cursorHistoryId)")
+            try await stageHistoryAdvance(to: cursorHistoryId, in: context)
         } else {
             log.error("Initial sync succeeded but failure-ledger cleanup could not be planned - keeping historyId unset")
         }

@@ -285,19 +285,37 @@ actor SyncFailureTracker {
     /// save has durably committed the staged ledger rows (and, when advancing,
     /// the cursor). Never call this when the save failed — discarding the plan
     /// leaves every tracker state intact for the retry.
+    ///
+    /// - Parameter listingStartedAt: For an initial sync or a history
+    ///   recovery, when its listing began (`PagedSyncProgress.listingStartedAt`,
+    ///   the first attempt's for a resumed run). The last-sync time recorded
+    ///   is then no later than it, because the cursor this plan advances to
+    ///   was read before it: recovery's window (that time less 10 minutes)
+    ///   and reconciliation's (less 5) must reach back to what the listing
+    ///   did not see. A resumed run that recorded the time it finished left
+    ///   the mail of the days between its attempts to the history from that
+    ///   cursor alone, and a recovery after that history expired never
+    ///   listed it.
     func commit(
         _ plan: HistoryAdvancePlan,
-        recordsSuccessfulSync: Bool = true
+        recordsSuccessfulSync: Bool = true,
+        listingStartedAt: TimeInterval? = nil
     ) async {
         switch plan.outcome {
         case .held:
             return
         case .advancedClean:
             deferredStagingFailed = false
-            recordResolvedProgress(recordsSuccessfulSync: recordsSuccessfulSync)
+            recordResolvedProgress(
+                recordsSuccessfulSync: recordsSuccessfulSync,
+                listingStartedAt: listingStartedAt
+            )
         case .advancedAbandoning(let count):
             deferredStagingFailed = false
-            recordResolvedProgress(recordsSuccessfulSync: recordsSuccessfulSync)
+            recordResolvedProgress(
+                recordsSuccessfulSync: recordsSuccessfulSync,
+                listingStartedAt: listingStartedAt
+            )
             // Newly abandoned rows carry their original drain budget, so the
             // drain has work again.
             mayHaveRetryableAbandonedMessages = true
@@ -314,11 +332,16 @@ actor SyncFailureTracker {
     /// A clean bounded history slice resolves the same failure state as a
     /// terminal sync, but it must not update the user-facing last-success time
     /// until Gmail's terminal page and Account cursor commit.
-    private func recordResolvedProgress(recordsSuccessfulSync: Bool) {
+    private func recordResolvedProgress(
+        recordsSuccessfulSync: Bool,
+        listingStartedAt: TimeInterval? = nil
+    ) {
         defaults.set(0, forKey: SyncConfig.consecutiveFailuresKey)
         defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
         if recordsSuccessfulSync {
-            defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            let now = Date().timeIntervalSince1970
+            let syncTime = listingStartedAt.map { $0.isFinite ? min(now, $0) : now } ?? now
+            defaults.set(syncTime, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
             log.debug("Sync success - reset failure tracking")
         } else {
             log.debug("History slice committed - reset failure tracking without recording terminal success")

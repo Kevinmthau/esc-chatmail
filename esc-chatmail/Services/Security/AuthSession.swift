@@ -2018,6 +2018,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         userDefaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
         userDefaults.removeObject(forKey: SyncConfig.lastReconciliationTimeKey)
         userDefaults.removeObject(forKey: SyncConfig.missedMessageReconciliationCursorKey)
+        userDefaults.removeObject(forKey: SyncConfig.deferredMissedMessageIdsKey)
         SendAsAliasRefreshPolicy.forgetAllAccounts(in: userDefaults)
     }
 

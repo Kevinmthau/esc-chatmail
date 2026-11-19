@@ -120,6 +120,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
         // never an app refresh's, which has about half a minute.
         XCTAssertFalse(BackgroundMailboxSyncBudget.appRefresh.allowsStoreMaintenance)
         XCTAssertTrue(BackgroundMailboxSyncBudget.processing.allowsStoreMaintenance)
+        XCTAssertFalse(BackgroundMailboxSyncBudget.appRefresh.allowsDeferrableWork)
+        XCTAssertTrue(BackgroundMailboxSyncBudget.processing.allowsDeferrableWork)
     }
 
     func testModelV3Executor_incompleteHistorySchedulesCatchUpAndFailsTask() async {
