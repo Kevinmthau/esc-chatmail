@@ -255,8 +255,9 @@ struct AttachmentPicker: View {
                 attachment.setValue(finalizedPreviewPath, forKey: "previewURL")
                 attachment.setValue("queued", forKey: "stateRaw")
                 
-                attachment.width = Int16(clamping: Int(prepared.size.width.rounded()))
-                attachment.height = Int16(clamping: Int(prepared.size.height.rounded()))
+                let persistedSize = AttachmentMetadataBounds.persistedImageDimensions(prepared.size)
+                attachment.width = persistedSize.width
+                attachment.height = persistedSize.height
                 
                 attachments.append(attachment)
                 return true
