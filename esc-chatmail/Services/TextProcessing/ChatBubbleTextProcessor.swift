@@ -66,13 +66,16 @@ enum ChatBubbleTextProcessor {
     /// body (`cappedExtractedText`).
     static let extractedTextUTF16Limit = 65_536
 
-    /// `text`, or its first `extractedTextUTF16Limit` UTF-16 units cut back to
-    /// the last line break (to a character boundary where there is none).
+    /// `text`, or its first `extractedTextUTF16Limit` UTF-16 units, cut back
+    /// to the last line break in their second half, or to a character
+    /// boundary where that half has none (so a short first line before one
+    /// long one does not leave the bubble nearly empty).
     ///
-    /// A bubble shows a few lines, but the quote and signature passes after
-    /// extraction read all of it, several of them more than once, and nothing
-    /// bounded a body's size: a megabyte log stalled the sync batch it was in.
-    /// So derivation reads at most this much. The cap is a pure function of
+    /// The quote and signature passes after extraction read all of the text,
+    /// several of them more than once, and nothing bounded a body's size: a
+    /// megabyte log stalled the sync batch it was in. So derivation reads at
+    /// most this much, and the bubble of a longer body ends there (it has no
+    /// line limit; the original email still opens whole). The cap is a pure function of
     /// the extracted text, so ingest, both `ChatPreviewRepair` passes and the
     /// bubble loader, which all derive through here, still agree. Text under
     /// it derives exactly as before, and no stored verdict reads text past it
@@ -89,7 +92,8 @@ enum ChatBubbleTextProcessor {
         let nsText = text as NSString
         let cut = nsText.rangeOfComposedCharacterSequence(at: extractedTextUTF16Limit).location
         let prefix = nsText.substring(to: cut) as NSString
-        let lastLineBreak = prefix.range(of: "\n", options: .backwards)
+        let secondHalf = NSRange(location: cut / 2, length: cut - cut / 2)
+        let lastLineBreak = prefix.range(of: "\n", options: .backwards, range: secondHalf)
         if lastLineBreak.location != NSNotFound {
             return prefix.substring(to: lastLineBreak.location)
         }

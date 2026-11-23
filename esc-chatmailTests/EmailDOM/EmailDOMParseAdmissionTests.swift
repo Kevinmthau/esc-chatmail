@@ -129,12 +129,35 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(EmailDOMQuoteRemover.removeQuotes(from: Self.deepDivNest), Self.deepDivNest)
     }
 
-    func testSanitizer_deepNest_stillRemovesScriptThroughTheLegacyPass() {
-        let html = "<script>alert(1)</script><p onclick=\"x()\">hi</p>" + Self.deepDivNest
-        let sanitized = HTMLSanitizerService.shared.sanitize(html)
+    /// A refused body is shown as its escaped text, never through the legacy
+    /// regex pass: that pass removes a tag once, so a tag split around itself
+    /// re-forms (`<me<meta>ta http-equiv="refresh" …>` became a working meta
+    /// refresh), and any sender can cause a refusal.
+    /// Revert-check: the `catch is EmailDOMParseRefusal` branches in
+    /// `HTMLSanitizerService` (without them the meta refresh survives).
+    func testSanitizer_refusedBody_keepsNoneOfTheSendersMarkup() {
+        let attack = "<me<meta>ta http-equiv=\"refresh\" content=\"0;url=https://attacker.example/\">"
+            + "<scr<script>ipt>alert(1)</scr</script>ipt><p onclick=\"x()\">hi</p>"
+        for body in [attack + Self.deepDivNest, attack + String(repeating: "<div>", count: 9_000)] {
+            for sanitized in [
+                HTMLSanitizerService.shared.sanitize(body),
+                HTMLSanitizerService.shared.removeOriginalReaderActiveMarkupAndEventHandlers(body),
+            ] {
+                let markup = sanitized.replacingOccurrences(of: "<br>", with: "")
+                XCTAssertFalse(markup.contains("<"), String(markup.prefix(200)))
+                XCTAssertTrue(sanitized.contains("hi"))
+            }
+        }
+        XCTAssertTrue(HTMLSanitizerService.shared.sanitize(Self.deepDivNest).contains(Self.sentinel))
+    }
+
+    /// Other parse failures keep the legacy pass, as before.
+    func testSanitizer_otherDOMFailure_stillUsesTheLegacyPass() {
+        struct Failure: Error {}
+        let service = HTMLSanitizerService(dangerousMarkupSanitizer: { _ in throw Failure() })
+        let sanitized = service.sanitize("<p>hi</p><script>alert(1)</script>")
+        XCTAssertTrue(sanitized.contains("<p>hi</p>"))
         XCTAssertFalse(sanitized.lowercased().contains("<script"))
-        XCTAssertFalse(sanitized.lowercased().contains("onclick"))
-        XCTAssertTrue(sanitized.contains(Self.sentinel))
     }
 
     func testDisplayWrapper_deepDocument_isWrappedByStringSurgery() {

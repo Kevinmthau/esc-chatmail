@@ -29,6 +29,16 @@ final class ChatBubbleTextProcessorExtractedTextCapTests: XCTestCase {
         XCTAssertEqual(ChatBubbleTextProcessor.cappedExtractedText(text), firstLine)
     }
 
+    /// A line break early in the text is not where the cut goes: "Hi," then
+    /// one 70,000-character line would otherwise derive as "Hi,".
+    func testCappedExtractedText_lineBreakOnlyInTheFirstHalf_cutsAtTheLimit() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        let text = "Hi,\n" + String(repeating: "x", count: 70_000)
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit)
+        XCTAssertTrue(capped.hasPrefix("Hi,\nxxx"))
+    }
+
     func testCappedExtractedText_withoutALineBreak_cutsOnACharacterBoundary() {
         let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
         // An emoji (two UTF-16 units) straddles the limit.

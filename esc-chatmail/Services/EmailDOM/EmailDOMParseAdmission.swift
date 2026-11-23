@@ -18,8 +18,11 @@ enum EmailDOMParseRefusal: LocalizedError, Equatable {
     }
 }
 
-/// The one place SwiftSoup is asked to parse HTML (pinned by
-/// `EmailDOMParseAdmissionSourceTests`).
+/// The one place SwiftSoup is asked to parse a string of HTML (pinned by
+/// `EmailDOMParseAdmissionSourceTests`). SwiftSoup's `Element` methods that
+/// take HTML (`html(_:)`, `append(_:)`, `prepend(_:)`, `before(_:)`,
+/// `after(_:)`, `wrap(_:)`) parse too, and must only be given strings the app
+/// builds, never a sender's.
 ///
 /// Nesting depth is the sender's to choose, and both SwiftSoup and the app
 /// recurse once per level: releasing a document frees each node from inside
@@ -39,8 +42,10 @@ enum EmailDOMParseRefusal: LocalizedError, Equatable {
 /// `EmailDOMParseRefusal`, and that is not new behavior for any caller:
 /// each already handles a throwing parse, and that branch now runs (text
 /// extraction's regex recovery, quote removal returning its input, the
-/// sanitizer's legacy regex pass, the display wrapper's string wrapping, a
-/// preview query of nil). The answer is a pure function of the string, so
+/// display wrapper's string wrapping, a preview query of nil). The one
+/// exception is the sanitizer: its legacy regex pass is not safe against a
+/// crafted body, so a refused body is shown as escaped text
+/// (`HTMLSanitizerService.textOnlyReplacement(forRefusedHTML:)`). The answer is a pure function of the string, so
 /// the ingest prerun and a later bubble load always agree.
 ///
 /// Each parse goes one of three ways, by `estimatedDepth(of:limit:)`, a scan
@@ -54,8 +59,10 @@ enum EmailDOMParseRefusal: LocalizedError, Equatable {
 ///   optional end tag left out before its parent's, `<ul><li>a</ul>`), so
 ///   a large old-style newsletter can land here and still be admitted.
 /// Every admitted tree is measured too, and one deeper than `maximumDepth`
-/// is refused and released on that thread: a defense should the scan ever
-/// under-count.
+/// is refused and released on that thread. That backstop is partial: such a
+/// tree was already built on the caller's stack, where building it recurses
+/// too, and the measuring thread's stack runs out near 65,000 levels. The
+/// scan's bound is what must hold.
 ///
 /// The bound must never be lower than the real depth. Two scans give it:
 /// - Every `<` followed by an ASCII letter, wherever it sits (attribute
