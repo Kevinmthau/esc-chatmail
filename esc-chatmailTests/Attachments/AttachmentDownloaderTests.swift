@@ -1,5 +1,6 @@
 import XCTest
 import CoreData
+import UniformTypeIdentifiers
 @testable import esc_chatmail
 
 /// Tests for AttachmentDownloader infrastructure and state management.
@@ -786,25 +787,70 @@ final class AttachmentDownloaderTests: XCTestCase {
         XCTAssertEqual(AttachmentPaths.loadData(from: secondPath), secondData)
     }
 
-    func testSynthesizedInlineRecoveredMetadataClampsToInt16Bounds() {
-        XCTAssertEqual(
-            SynthesizedInlineAttachmentRecovery.persistedImageDimension(
-                CGFloat(Int16.max) + 10_000
-            ),
-            Int16.max
+    /// Review item 1 (architecture review 2026-11): an image taller than `Int16.max` once
+    /// trapped the processing task's `Int16(dimensions.height)` before the row was written, so
+    /// the row stayed queued and every sweep after a sync, and every opening of the chat,
+    /// crashed the app again. The PNG is a few hundred bytes, as a sender's would be.
+    /// Revert-check: put back `Int16(dimensions.width)` / `Int16(dimensions.height)` in
+    /// `AttachmentDownloader.performDownloadAttachment`. HONEST SCOPE: the revert does not fail
+    /// this test, it traps the test host, which is the bug; the clamp's values are pinned in
+    /// `AttachmentMetadataBoundsTests`.
+    @MainActor
+    func testDownloadAttachment_imageTallerThanInt16Max_endsDownloadedWithItsHeightClamped() async throws {
+        let png = try TestImageData.encoded(as: .png, pixelSizes: [CGSize(width: 1, height: 40_000)])
+        XCTAssertLessThan(png.count, 4_096)
+        XCTAssertEqual(ImageProcessor.getImageDimensions(from: png), CGSize(width: 1, height: 40_000))
+
+        let message = MessageBuilder()
+            .withId("message-oversized-image-\(UUID().uuidString)")
+            .withAttachments()
+            .build(in: viewContext)
+        let attachmentID = "attachment-oversized-image-\(UUID().uuidString)"
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("strip.png")
+            .withMimeType("image/png")
+            .queued()
+            .forMessage(message)
+            .build(in: viewContext)
+        try saveViewContext()
+
+        let apiClient = MockGmailAPIClient()
+        apiClient.attachmentResponses["\(message.id):\(attachmentID)"] = png
+        let downloader = AttachmentDownloader(
+            apiClient: apiClient,
+            coreDataStack: CoreDataStack(
+                persistentContainerForTesting: testStack.persistentContainer
+            )
         )
-        XCTAssertEqual(
-            SynthesizedInlineAttachmentRecovery.persistedImageDimension(1_024.4),
-            1_024
+        let originalPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "png"
         )
-        XCTAssertEqual(
-            SynthesizedInlineAttachmentRecovery.persistedPDFPageCount(Int.max),
-            Int16.max
+        defer {
+            AttachmentPaths.deleteFile(at: originalPath)
+            AttachmentPaths.deleteFile(
+                at: AttachmentPaths.previewPath(messageId: message.id, attachmentId: attachmentID)
+            )
+        }
+
+        await downloader.downloadAttachment(
+            attachmentObjectID: attachment.objectID,
+            messageId: message.id,
+            in: testStack.newBackgroundContext()
         )
-        XCTAssertEqual(
-            SynthesizedInlineAttachmentRecovery.persistedPDFPageCount(12),
-            12
-        )
+
+        let persisted = try await testStack.performBackgroundTask { context in
+            guard let row = try context.existingObject(with: attachment.objectID) as? Attachment else {
+                throw NSError(domain: "AttachmentDownloaderTests", code: 1)
+            }
+            return (state: row.state, localURL: row.localURL, width: row.width, height: row.height)
+        }
+        XCTAssertEqual(persisted.state, .downloaded)
+        XCTAssertEqual(persisted.localURL, originalPath)
+        XCTAssertEqual(persisted.width, 1)
+        XCTAssertEqual(persisted.height, Int16.max)
     }
 
     @MainActor
