@@ -7,8 +7,9 @@ import XCTest
 /// Pins the pixel budget on decoding a sender's image: `ImageProcessor.generateThumbnail` reads
 /// the size from the header and refuses past `maxThumbnailSourcePixelCount` before decoding, and
 /// `AttachmentCacheActor`'s downsample of an original holds the same budget. Made with ImageIO
-/// alone, so it runs on iOS and on the Mac. The iPhone's within-limit byte identity and white
-/// flattening are pinned further in `ImageBackdropPolicyTests`.
+/// alone, so it also builds for the Mac, but keep it out of `Mac.xctestplan`: the cache test
+/// writes into `Attachments`, which in a Mac test host is the real container's. The iPhone's
+/// within-limit byte identity and white flattening are pinned further in `ImageBackdropPolicyTests`.
 final class ImageThumbnailDecodeBudgetTests: XCTestCase {
 
     // MARK: - The plan

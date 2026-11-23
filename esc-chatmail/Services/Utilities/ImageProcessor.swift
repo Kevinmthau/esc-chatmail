@@ -138,8 +138,9 @@ struct ImageProcessor {
 
         switch imageThumbnailPlan(sourcePixelSize: pixelSize, maxSourcePixelCount: maxSourcePixelCount) {
         case .refused:
+            // Never `Int(_:)` here: a refused size can be NaN or infinite, and that traps.
             Log.debug(
-                "ImageProcessor: No preview for an image of \(Int(pixelSize.width)) x \(Int(pixelSize.height)) pixels",
+                "ImageProcessor: No preview for an image of \(pixelSize.width) x \(pixelSize.height) pixels",
                 category: .attachment
             )
             return nil
