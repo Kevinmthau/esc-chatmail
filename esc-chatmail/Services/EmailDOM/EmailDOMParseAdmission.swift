@@ -1,23 +1,6 @@
 import Foundation
 import SwiftSoup
 
-/// Why a body was not handed to the app's DOM code.
-enum EmailDOMParseRefusal: LocalizedError, Equatable {
-    /// The tree is, or may be, deeper than
-    /// `EmailDOMParseAdmission.maximumDepth`: `depth` is SwiftSoup's measured
-    /// depth, or the byte scan's bound where that was too high to parse at
-    /// all. The HTML itself may be fine to show; only the DOM work was
-    /// declined.
-    case nestingTooDeep(depth: Int, limit: Int)
-
-    var errorDescription: String? {
-        switch self {
-        case let .nestingTooDeep(depth, limit):
-            "HTML nesting depth \(depth) exceeds the parse limit \(limit)."
-        }
-    }
-}
-
 /// The one place SwiftSoup is asked to parse a string of HTML (pinned by
 /// `EmailDOMParseAdmissionSourceTests`). SwiftSoup's `Element` methods that
 /// take HTML (`html(_:)`, `append(_:)`, `prepend(_:)`, `before(_:)`,
@@ -403,6 +386,9 @@ private enum ScannedTagName {
 /// closes. Tokenizer state does not matter to it, so nothing a sender writes
 /// can make it count less than the tree holds.
 private struct StartTagCount {
+    /// Longer than any name `ScannedTagName` gives a meaning (`plaintext`).
+    private static let nameLengthRead = 17
+
     private(set) var weight = 0
     private(set) var namesTagWithModeDependentRawText = false
 
@@ -419,12 +405,17 @@ private struct StartTagCount {
                 index += 1
                 continue
             }
+            // At most `nameLengthRead` bytes: every name the scan looks up
+            // is shorter, so a longer one counts as unknown either way. The
+            // scan goes on from the next byte, not past the name, so reading
+            // names to their end was quadratic on `<a<a<a…` with no
+            // delimiter (`testEstimatedDepth_delimiterlessTagRun_isLinear`).
             var nameEnd = nameStart
             var name: [UInt8] = []
-            while nameEnd < count, !ScannedTagName.endsTagName(bytes[nameEnd]) {
-                if name.count <= 16 {
-                    name.append(ScannedTagName.lowercasedASCII(bytes[nameEnd]))
-                }
+            while nameEnd < count,
+                  nameEnd - nameStart < Self.nameLengthRead,
+                  !ScannedTagName.endsTagName(bytes[nameEnd]) {
+                name.append(ScannedTagName.lowercasedASCII(bytes[nameEnd]))
                 nameEnd += 1
             }
             weight += ScannedTagName.weight(of: name)

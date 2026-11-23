@@ -11,6 +11,9 @@ final class EmailDOMParseAdmissionSourceTests: XCTestCase {
     private static let parseEntryPoints = [
         "SwiftSoup.parse(",
         "SwiftSoup.parseBodyFragment(",
+        "SwiftSoup.parseHTML(",
+        "SwiftSoup.parseXML(",
+        "parse(withBytes:",
         "SwiftSoup.clean(",
         "SwiftSoup.isValid(",
         "Parser.parse(",

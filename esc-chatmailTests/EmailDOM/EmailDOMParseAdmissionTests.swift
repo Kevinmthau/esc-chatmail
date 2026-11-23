@@ -382,6 +382,27 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(failures.values, [])
     }
 
+    /// The gate runs before every parse, so it must be linear in anything a
+    /// sender writes. Reading each tag name to its end made the first scan
+    /// quadratic on a run of `<a` with no delimiter: about 3 s for 200 KB in
+    /// a Release build, minutes per parse for a megabyte. Here 400 KB, which
+    /// a linear scan reads in milliseconds and the quadratic one took far
+    /// longer than the timeout. On its own thread, so a regression fails by
+    /// timeout rather than hanging the suite.
+    /// Revert-check: `StartTagCount.nameLengthRead`.
+    func testEstimatedDepth_delimiterlessTagRun_isLinear() {
+        let html = "<p>hi</p>" + String(repeating: "<a", count: 200_000)
+        let done = expectation(description: "scan")
+        let results = LockedResults()
+        let thread = Thread {
+            results.text = String(EmailDOMParseAdmission.estimatedDepth(of: html))
+            done.fulfill()
+        }
+        thread.start()
+        wait(for: [done], timeout: 20)
+        XCTAssertNotNil(results.text)
+    }
+
     func testEstimatedDepth_simpleShapes_areExactUpToTheFixedAllowance() {
         let fixed = EmailDOMParseAdmission.enclosingNodeCount + EmailDOMParseAdmission.leafAllowance
         XCTAssertEqual(EmailDOMParseAdmission.tokenizedDepthEstimate(of: "plain text"), fixed)
