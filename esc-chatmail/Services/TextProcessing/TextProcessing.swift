@@ -264,20 +264,42 @@ enum TextProcessing {
         return false
     }
 
-    private static func containsUnclosedOpeningTag(_ html: String) -> Bool {
-        var index = html.startIndex
-
-        while let tagStart = html[index...].firstIndex(of: "<") {
-            let nameStart = html.index(after: tagStart)
-            guard nameStart < html.endIndex else { return false }
-
-            if html[nameStart].isLetter, tagEndIndex(in: html, from: nameStart) == nil {
+    /// Whether some `<` and a letter has no `tagEndIndex` after it.
+    ///
+    /// One pass from the end, not a `tagEndIndex` walk from every `<`: that
+    /// was quadratic, and a sender's `<a` repeated 20,000 times then `>`
+    /// (40 KB) took 4 s ahead of every text extraction. Walking back, it keeps
+    /// whether `tagEndIndex` would find its `>` from the next character with
+    /// no quote open, inside `"`, or inside `'`, which is all that walk
+    /// depends on, so the answer is the same
+    /// (`TextProcessingUnclosedTagTests` compares the two).
+    static func containsUnclosedOpeningTag(_ html: String) -> Bool {
+        let characters = Array(html)
+        var reachesEndOutsideQuotes = false
+        var reachesEndInDoubleQuote = false
+        var reachesEndInSingleQuote = false
+        var index = characters.count - 1
+        while index >= 0 {
+            let character = characters[index]
+            let outsideQuotes: Bool
+            switch character {
+            case ">": outsideQuotes = true
+            case "\"": outsideQuotes = reachesEndInDoubleQuote
+            case "'": outsideQuotes = reachesEndInSingleQuote
+            default: outsideQuotes = reachesEndOutsideQuotes
+            }
+            if character == "\"" {
+                reachesEndInDoubleQuote = reachesEndOutsideQuotes
+            }
+            if character == "'" {
+                reachesEndInSingleQuote = reachesEndOutsideQuotes
+            }
+            reachesEndOutsideQuotes = outsideQuotes
+            if index > 0, characters[index - 1] == "<", character.isLetter, !outsideQuotes {
                 return true
             }
-
-            index = nameStart
+            index -= 1
         }
-
         return false
     }
 

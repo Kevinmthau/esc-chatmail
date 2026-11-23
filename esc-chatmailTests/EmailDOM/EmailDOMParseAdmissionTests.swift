@@ -98,6 +98,54 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(results.text.map { $0.contains(Self.sentinel) }, true)
     }
 
+    // MARK: - Cost
+
+    /// Most tags make SwiftSoup search the open elements, so a body of
+    /// moderate depth and many tags costs depth × tags (`<span>` × 8,000
+    /// then 200,000 `</x>` took 83 s in Release). Past `maximumTreeWork` it
+    /// is refused unparsed. Revert-check: `ParseCost.excessWork`'s tree-work
+    /// refusal (the body is then measured and admitted, seconds later).
+    func testParseDocument_deepAndManyTags_isRefusedAsTooCostly() {
+        let html = String(repeating: "<span>", count: 3_000) + String(repeating: "</x>", count: 20_000)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
+            )
+        }
+    }
+
+    /// Inside a `title` SwiftSoup searches the rest of the input for its end
+    /// tag at every `<` and letter, so a long title of tags parses in
+    /// quadratic time though it is one level deep.
+    /// Revert-check: `TokenizingScanner.countTitleEndTagSearch` (the body is
+    /// then admitted on its depth and parsed).
+    func testParseDocument_titleFullOfTags_isRefusedAsTooCostly() {
+        let html = "<title>" + String(repeating: "<a ", count: 20_000) + "</title><p>body</p>"
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertGreaterThan(cost.titleSearchBytes, EmailDOMParseAdmission.maximumTitleSearchBytes)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.titleSearchBytes, limit: EmailDOMParseAdmission.maximumTitleSearchBytes)
+            )
+        }
+    }
+
+    /// An ordinary title costs next to nothing, in a body long enough that
+    /// the second scan reads it.
+    func testEstimatedCost_ordinaryTitle_isSmall() {
+        let html = "<html><head><title>Your <b>order</b> shipped</title></head><body>"
+            + String(repeating: "<div>hi</div>", count: 600) + "</body></html>"
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html)
+        XCTAssertGreaterThan(cost.titleSearchBytes, 0)
+        XCTAssertLessThan(cost.titleSearchBytes, 100)
+        XCTAssertNil(cost.excessWork)
+    }
+
     func testMeasuredDepth_countsNodesFromTheRoot() throws {
         let document = try XCTUnwrap(SwiftSoup.parse("<div><p><b>x</b></p></div><span>y</span>"))
         // document, html, body, div, p, b, text
@@ -313,6 +361,13 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             String(repeating: "<é a=\"<div>\">", count: 300),
             String(repeating: "<DIV>", count: 300),
             String(repeating: "<d\u{0}iv></d\u{0}iv><div>", count: 300),
+            // SwiftSoup takes the byte after `</style` or `</script` as text
+            // when it does not end the tag, so a `<` there starts nothing.
+            "<style></style</style x><plaintext></style>" + String(repeating: "<span>", count: 300),
+            "<script></script</script x><plaintext></script>" + String(repeating: "<span>", count: 300),
+            "<script><!--</script</script x><plaintext></script>" + String(repeating: "<span>", count: 300),
+            "<noframes></noframes\u{e9}</noframes x><plaintext></noframes>" + String(repeating: "<span>", count: 300),
+            String(repeating: "<div><title></title<b></title>", count: 300),
             // SwiftSoup's double escape matches `script` in lowercase only.
             String(repeating: "<div><script><!--<SCRIPT></script>", count: 300),
             String(repeating: "<div><script><!--<script></SCRIPT></script></div>--></script>", count: 300),
@@ -577,6 +632,7 @@ private struct TagSoupGenerator {
                 "</div>", "<div>", "<!--", "<script>", "</script>", "</style >", "</STYLE>", "</stylex>",
                 "-->", "</title>", "</noframes>", "<!--<script>", "</script >", "<style>", "<title>",
                 "<!--<SCRIPT>", "</SCRIPT>", "</TITLE>", "</Title>", "<script >", "<noscript>", "</NOSCRIPT>",
+                "</style<", "</script<", "</title<", "</noframes\"", "</STYLE<", "</script\u{e9}", "<plaintext>",
             ])
         }
     }

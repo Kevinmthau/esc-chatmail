@@ -123,9 +123,13 @@ enum EmailDOMParseAdmission {
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
-        let bound = estimatedDepth(of: html, limit: maximumBoundForMeasuredParse)
+        let cost = estimatedCost(of: html, limit: maximumBoundForMeasuredParse)
+        let bound = cost.depth
         if bound > maximumBoundForMeasuredParse {
             throw refusal(depth: bound)
+        }
+        if let excess = cost.excessWork {
+            throw refusal(excessWork: excess)
         }
         if bound > maximumDepth {
             return try parseOnMeasuringThread(rootDepth: rootDepth, roots: roots, parse: parse)
@@ -190,6 +194,11 @@ enum EmailDOMParseAdmission {
         handOff.finished.wait()
     }
 
+    private static func refusal(excessWork: EmailDOMParseRefusal) -> EmailDOMParseRefusal {
+        Log.warning("Declined to parse HTML whose parse would cost too much", category: .message)
+        return excessWork
+    }
+
     private static func refusal(depth: Int) -> EmailDOMParseRefusal {
         Log.warning(
             "Declined to parse HTML nested past the admission limit (\(depth) > \(maximumDepth))",
@@ -218,11 +227,54 @@ enum EmailDOMParseAdmission {
     /// may stop as soon as the bound is known to be past it and return any
     /// value above it.
     static func estimatedDepth(of html: String, limit: Int = .max) -> Int {
+        estimatedCost(of: html, limit: limit).depth
+    }
+
+    /// What the scans say a parse of `html` would build and cost.
+    ///
+    /// SwiftSoup's parse is not linear in every input, and the gate runs
+    /// before every parse site of a message a sync cannot cancel, so cost is
+    /// bounded as well as depth (both measured on SwiftSoup 2.13.5, Release,
+    /// by review of PR 453):
+    /// - Most start and end tags search the open elements, so a parse costs
+    ///   up to depth × tags: `<span>` × 8,000 then 200,000 `</x>` took 83 s.
+    ///   `treeWork` is the depth bound times every `<` or `</` followed by a
+    ///   letter, wherever it sits.
+    /// - Inside a `title`, SwiftSoup searches the rest of the input for an
+    ///   end tag at every `<` and letter (`RcdataLessthanSign`), so
+    ///   `<title>` then 1 MB of `<a ` took minutes. `titleSearchBytes` is
+    ///   the bytes those searches read, from the second scan.
+    struct ParseCost: Equatable {
+        let depth: Int
+        let treeWork: Int
+        let titleSearchBytes: Int
+
+        /// The refusal past `maximumTreeWork` or `maximumTitleSearchBytes`.
+        var excessWork: EmailDOMParseRefusal? {
+            if treeWork > EmailDOMParseAdmission.maximumTreeWork {
+                return .tooCostlyToParse(work: treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
+            }
+            if titleSearchBytes > EmailDOMParseAdmission.maximumTitleSearchBytes {
+                return .tooCostlyToParse(work: titleSearchBytes, limit: EmailDOMParseAdmission.maximumTitleSearchBytes)
+            }
+            return nil
+        }
+    }
+
+    /// About a second of the stack searches in a Release build (measured at
+    /// about 30 million depth × tag units a second). A large old-style
+    /// newsletter, a few thousand levels of over-counted bound over ten
+    /// thousand tags, stays under it.
+    static let maximumTreeWork = 50_000_000
+    /// About a quarter of a second of byte comparisons.
+    static let maximumTitleSearchBytes = 200_000_000
+
+    static func estimatedCost(of html: String, limit: Int = .max) -> ParseCost {
         let bytes = html.utf8
-        if let estimate = bytes.withContiguousStorageIfAvailable({ buffer in
+        if let cost = bytes.withContiguousStorageIfAvailable({ buffer in
             estimate(in: buffer, limit: limit)
         }) {
-            return estimate
+            return cost
         }
         return Array(bytes).withUnsafeBufferPointer { estimate(in: $0, limit: limit) }
     }
@@ -248,15 +300,25 @@ enum EmailDOMParseAdmission {
     /// The first scan's count where it already admits a parse here or the
     /// second scan cannot be trusted; otherwise the tighter of the two, both
     /// being upper bounds.
-    private static func estimate(in bytes: UnsafeBufferPointer<UInt8>, limit: Int) -> Int {
+    private static func estimate(in bytes: UnsafeBufferPointer<UInt8>, limit: Int) -> ParseCost {
         let fixed = enclosingNodeCount + leafAllowance
         let count = StartTagCount(bytes: bytes)
         let countedBound = count.weight + fixed
+        let depth: Int
+        var titleSearchBytes = 0
         if countedBound <= maximumDepth || count.namesTagWithModeDependentRawText {
-            return countedBound
+            depth = countedBound
+        } else {
+            var scanner = TokenizingScanner(bytes: bytes, limit: limit)
+            depth = min(scanner.run(), countedBound)
+            titleSearchBytes = scanner.titleSearchBytes
         }
-        var scanner = TokenizingScanner(bytes: bytes, limit: limit)
-        return min(scanner.run(), countedBound)
+        let (treeWork, overflow) = depth.multipliedReportingOverflow(by: count.tagCount)
+        return ParseCost(
+            depth: depth,
+            treeWork: overflow ? .max : treeWork,
+            titleSearchBytes: titleSearchBytes
+        )
     }
 }
 
@@ -390,6 +452,8 @@ private struct StartTagCount {
     private static let nameLengthRead = 17
 
     private(set) var weight = 0
+    /// Every `<` or `</` followed by an ASCII letter.
+    private(set) var tagCount = 0
     private(set) var namesTagWithModeDependentRawText = false
 
     init(bytes: UnsafeBufferPointer<UInt8>) {
@@ -402,9 +466,13 @@ private struct StartTagCount {
             }
             let nameStart = index + 1
             guard nameStart < count, ScannedTagName.isASCIIAlpha(bytes[nameStart]) else {
+                if nameStart + 1 < count, bytes[nameStart] == 0x2F, ScannedTagName.isASCIIAlpha(bytes[nameStart + 1]) {
+                    tagCount += 1
+                }
                 index += 1
                 continue
             }
+            tagCount += 1
             // At most `nameLengthRead` bytes: every name the scan looks up
             // is shorter, so a longer one counts as unknown either way. The
             // scan goes on from the next byte, not past the name, so reading
@@ -451,6 +519,13 @@ private struct TokenizingScanner {
     private var stack: [OpenElement] = []
     private var openWeight = 0
     private var deepestOpenWeight = 0
+    /// What SwiftSoup's searches for a title's end tag read
+    /// (`EmailDOMParseAdmission.ParseCost`).
+    private(set) var titleSearchBytes = 0
+    /// The next `</title` and `</TITLE` at or after the last position asked
+    /// about (`count` for none), or -1 before the first ask.
+    private var nextLowercaseTitleEndTag = -1
+    private var nextUppercaseTitleEndTag = -1
 
     init(bytes: UnsafeBufferPointer<UInt8>, limit: Int) {
         self.bytes = bytes
@@ -849,6 +924,35 @@ private struct TokenizingScanner {
         return ScannedTagName.endsTagName(bytes[index + 2 + name.count])
     }
 
+    /// When `</name` at `index` is followed by a byte that neither ends a tag
+    /// name nor continues it (`</style<`, `</script"`), where the raw text
+    /// goes on: after that byte, or that character outside ASCII. SwiftSoup's
+    /// RAWTEXT and script data states take it as text with the end tag
+    /// (`handleDataEndTag`), so a `<` there never starts the next end tag:
+    /// `<style></style</style x>` is still raw text after its second
+    /// `</style`. Its RCDATA state (`title`) gives the byte back instead.
+    private func endAfterEndTagFollowedByText(named name: [UInt8], at index: Int) -> Int? {
+        let followingIndex = index + 2 + name.count
+        guard followingIndex < count,
+              bytes[index] == 0x3C,
+              bytes[index + 1] == 0x2F,
+              matches(name, at: index + 2, ignoringCase: true) else {
+            return nil
+        }
+        let following = bytes[followingIndex]
+        guard !ScannedTagName.endsTagName(following), !ScannedTagName.isASCIIAlpha(following) else {
+            return nil
+        }
+        let characterLength: Int
+        switch following {
+        case 0xF0...: characterLength = 4
+        case 0xE0...: characterLength = 3
+        case 0xC0...: characterLength = 2
+        default: characterLength = 1
+        }
+        return min(count, followingIndex + characterLength)
+    }
+
     /// Skips RCDATA or RAWTEXT and handles its end tag; nil at the end of
     /// the input.
     ///
@@ -865,17 +969,66 @@ private struct TokenizingScanner {
                 if isAppropriateEndTag(named: name, at: index) {
                     return endTag(at: index)
                 }
+                if !endsAtStartTagWithoutEndTag,
+                   let resume = endAfterEndTagFollowedByText(named: name, at: index) {
+                    index = resume
+                    continue
+                }
                 if endsAtStartTagWithoutEndTag,
                    index + 1 < count,
-                   ScannedTagName.isASCIIAlpha(bytes[index + 1]),
-                   lastTitleEndTagStart < index + 1 {
-                    closeElement(named: name)
-                    return index
+                   ScannedTagName.isASCIIAlpha(bytes[index + 1]) {
+                    countTitleEndTagSearch(from: index + 1)
+                    if lastTitleEndTagStart < index + 1 {
+                        closeElement(named: name)
+                        return index
+                    }
                 }
             }
             index += 1
         }
         return nil
+    }
+
+    /// Adds what SwiftSoup's `containsIgnoreCase` reads from `position`: up
+    /// to the next `</title`, or else all the rest and then up to the next
+    /// `</TITLE` (it tries those two spellings, in that order).
+    private mutating func countTitleEndTagSearch(from position: Int) {
+        let lowercase = Self.nextOccurrence(
+            of: Self.lowercaseTitleEndTag, in: bytes, from: position, cursor: &nextLowercaseTitleEndTag
+        )
+        var searched = lowercase - position
+        if lowercase == count {
+            let uppercase = Self.nextOccurrence(
+                of: Self.uppercaseTitleEndTag, in: bytes, from: position, cursor: &nextUppercaseTitleEndTag
+            )
+            searched += uppercase - position
+        }
+        titleSearchBytes = titleSearchBytes.addingReportingOverflow(searched).overflow ? .max : titleSearchBytes + searched
+    }
+
+    /// The first index at or after `position` where `pattern` starts, or
+    /// `count`. Positions asked about only grow, so the cursor makes all the
+    /// searches of one scan linear together.
+    private static func nextOccurrence(
+        of pattern: [UInt8],
+        in bytes: UnsafeBufferPointer<UInt8>,
+        from position: Int,
+        cursor: inout Int
+    ) -> Int {
+        if cursor >= position {
+            return cursor
+        }
+        var index = max(position, cursor)
+        search: while index + pattern.count <= bytes.count {
+            for offset in 0..<pattern.count where bytes[index + offset] != pattern[offset] {
+                index += 1
+                continue search
+            }
+            cursor = index
+            return index
+        }
+        cursor = bytes.count
+        return bytes.count
     }
 
     private static let title = Array("title".utf8)
@@ -929,6 +1082,11 @@ private struct TokenizingScanner {
                 if byte == 0x3C {
                     if isAppropriateEndTag(named: Self.script, at: index) {
                         return endTag(at: index)
+                    }
+                    if let resume = endAfterEndTagFollowedByText(named: Self.script, at: index) {
+                        state = state == .data ? .data : .escaped
+                        index = resume
+                        continue
                     }
                     if state == .data {
                         if matches(Self.commentOpen, at: index) {
