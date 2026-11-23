@@ -330,7 +330,9 @@ struct HTMLDisplayWrapper {
         injectedHead: String
     ) -> String? {
         do {
-            let document = try SwiftSoup.parse(html)
+            // Refused for nesting too deep to parse safely
+            // (`EmailDOMParseAdmission`); the caller then wraps the string.
+            let document = try EmailDOMParseAdmission.parseDocument(html)
             document.outputSettings().prettyPrint(pretty: false)
 
             let head = try existingOrInsertedHead(in: document)

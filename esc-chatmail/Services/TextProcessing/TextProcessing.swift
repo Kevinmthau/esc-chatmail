@@ -484,6 +484,14 @@ enum TextProcessing {
     /// Unwraps artificial email line breaks (72-80 char wrapping) while preserving paragraph breaks
     /// Emails often contain hard line breaks at fixed widths for legacy compatibility.
     /// This function joins lines that were artificially wrapped while keeping intentional paragraph breaks.
+    ///
+    /// Linear in the text's length. It used to re-split, trim and lowercase the
+    /// whole growing paragraph for every line it joined, which made one run of
+    /// joinable lines (a log, a file listing, CSV) quadratic: minutes for a
+    /// megabyte, inside a sync batch that cannot be cancelled. `UnwrapParagraph`
+    /// now keeps what those checks read as the lines are added, and the output
+    /// is byte-identical (`TextProcessingUnwrapLinearityTests` compares it with
+    /// a copy of the old function).
     static func unwrapEmailLineBreaks(from text: String) -> String {
         var normalizedText = normalizeLineEndings(text)
 
@@ -506,34 +514,42 @@ enum TextProcessing {
 
         let lines = normalizedText.components(separatedBy: "\n")
         guard lines.count > 1 else { return normalizedText }
+        let trimmedLines = lines.map { $0.trimmingCharacters(in: .whitespaces) }
 
         var result: [String] = []
-        var currentParagraph = ""
+        var paragraph = UnwrapParagraph()
+        // The first non-empty line at or after the blank line being read. Every
+        // blank line of one run looks ahead to the same line, so the run is
+        // walked once instead of once per blank line.
+        var nextNonEmptyLookahead = -1
         var i = 0
 
         while i < lines.count {
-            let trimmedLine = lines[i].trimmingCharacters(in: .whitespaces)
+            let trimmedLine = trimmedLines[i]
             i += 1
 
             // Skip empty lines but check if we should join across them
             if trimmedLine.isEmpty {
-                if currentParagraph.isEmpty {
+                if paragraph.isEmpty {
                     continue
                 }
 
                 // Look ahead to find the next non-empty line
-                var nextNonEmptyIndex = i
-                while nextNonEmptyIndex < lines.count &&
-                      lines[nextNonEmptyIndex].trimmingCharacters(in: .whitespaces).isEmpty {
-                    nextNonEmptyIndex += 1
+                if nextNonEmptyLookahead < i {
+                    nextNonEmptyLookahead = i
+                    while nextNonEmptyLookahead < lines.count &&
+                          trimmedLines[nextNonEmptyLookahead].isEmpty {
+                        nextNonEmptyLookahead += 1
+                    }
                 }
+                let nextNonEmptyIndex = nextNonEmptyLookahead
 
                 // Check if we should join across the blank line(s)
                 if nextNonEmptyIndex < lines.count {
-                    let nextLine = lines[nextNonEmptyIndex].trimmingCharacters(in: .whitespaces)
-                    let currentIsSignatureDelimiter = isSignatureDelimiterLine(currentParagraph)
+                    let nextLine = trimmedLines[nextNonEmptyIndex]
+                    let currentIsSignatureDelimiter = paragraph.isSignatureDelimiterLine
                     let nextIsSignatureDelimiter = isSignatureDelimiterLine(nextLine)
-                    let lastChar = currentParagraph.last
+                    let lastChar = paragraph.text.last
                     let firstChar = nextLine.first
 
                     let endsWithPunctuation = lastChar.map { ".!?".contains($0) } ?? false
@@ -551,22 +567,24 @@ enum TextProcessing {
                 }
 
                 // Real paragraph break - flush current paragraph
-                result.append(currentParagraph)
+                result.append(paragraph.text)
                 result.append("") // Add paragraph separator
-                currentParagraph = ""
+                paragraph = UnwrapParagraph()
                 continue
             }
 
-            if currentParagraph.isEmpty {
-                currentParagraph = trimmedLine
+            if paragraph.isEmpty {
+                paragraph.start(with: trimmedLine)
             } else {
-                if shouldPreserveLineBreakBetween(currentParagraph, and: trimmedLine) {
-                    currentParagraph += "\n" + trimmedLine
+                // Keep a name on its own line after a standalone sign-off. The
+                // name check reads only the new line, so it goes first.
+                if looksLikeNameLine(trimmedLine), paragraph.lastLineIsStandaloneSignOff {
+                    paragraph.appendOnNewLine(trimmedLine)
                     continue
                 }
 
                 // Check if this looks like a continuation (soft wrap) or new paragraph
-                let lastChar = currentParagraph.last
+                let lastChar = paragraph.text.last
                 let firstChar = trimmedLine.first
 
                 let endsWithPunctuation = lastChar.map { ".!?".contains($0) } ?? false
@@ -579,7 +597,7 @@ enum TextProcessing {
                 // Don't join if next line looks like a list item
                 // Handles: 1. 10. 100. a) A. - * • · (a) (1)
                 let isListItem = TextProcessing.isListItem(trimmedLine)
-                let currentIsSignatureDelimiter = isSignatureDelimiterLine(currentParagraph)
+                let currentIsSignatureDelimiter = paragraph.isSignatureDelimiterLine
                 let nextIsSignatureDelimiter = isSignatureDelimiterLine(trimmedLine)
 
                 if !endsWithPunctuation &&
@@ -590,22 +608,191 @@ enum TextProcessing {
                     !currentIsSignatureDelimiter &&
                     !nextIsSignatureDelimiter {
                     // Join with space (unwrap soft line break)
-                    currentParagraph += " " + trimmedLine
+                    paragraph.appendJoined(trimmedLine)
                 } else {
                     // New paragraph
-                    result.append(currentParagraph)
-                    currentParagraph = trimmedLine
+                    result.append(paragraph.text)
+                    paragraph = UnwrapParagraph()
+                    paragraph.start(with: trimmedLine)
                 }
             }
         }
 
-        if !currentParagraph.isEmpty {
-            result.append(currentParagraph)
+        if !paragraph.isEmpty {
+            result.append(paragraph.text)
         }
 
         // Filter out empty strings and join with double newlines for paragraph breaks
         let paragraphs = result.filter { !$0.isEmpty }
         return paragraphs.joined(separator: "\n\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The paragraph `unwrapEmailLineBreaks` is building, with what its join
+    /// checks read about it kept up to date as lines are added, so no check
+    /// re-reads the whole paragraph. Lines arrive trimmed and non-empty, are
+    /// joined by " " or "\n", and contain no "\n" of their own (the text was
+    /// split on it).
+    private struct UnwrapParagraph {
+        private(set) var text = ""
+        /// Lines holding something other than whitespace and newlines.
+        private var contentLineCount = 0
+        private var firstContentLine: String?
+        private var lastLine = UnwrapLastLine()
+
+        var isEmpty: Bool { text.isEmpty }
+
+        mutating func start(with line: String) {
+            text = line
+            noteLine(line)
+            lastLine = UnwrapLastLine(firstSegment: line)
+        }
+
+        mutating func appendOnNewLine(_ line: String) {
+            text += "\n" + line
+            noteLine(line)
+            lastLine = UnwrapLastLine(firstSegment: line)
+        }
+
+        mutating func appendJoined(_ line: String) {
+            text += " " + line
+            noteLine(line)
+            lastLine.append(" " + line)
+        }
+
+        /// `isSignatureDelimiterLine(text)`. That trims the paragraph before
+        /// matching, so it sees one content line alone and is false for two:
+        /// the separator between them is whitespace inside the match, which
+        /// none of the delimiter shapes allows.
+        var isSignatureDelimiterLine: Bool {
+            guard contentLineCount == 1, let firstContentLine else { return false }
+            return TextProcessing.isSignatureDelimiterLine(firstContentLine)
+        }
+
+        /// `isStandaloneSignOffLine` of the paragraph's last line trimmed of
+        /// whitespace and newlines: whether a name on the next line keeps its
+        /// own line.
+        var lastLineIsStandaloneSignOff: Bool {
+            mutating get { lastLine.isStandaloneSignOff }
+        }
+
+        private mutating func noteLine(_ line: String) {
+            guard line.unicodeScalars.contains(where: { !Self.whitespaceAndNewlines.contains($0) }) else { return }
+            contentLineCount += 1
+            if firstContentLine == nil {
+                firstContentLine = line
+            }
+        }
+
+        private static let whitespaceAndNewlines = CharacterSet.whitespacesAndNewlines
+    }
+
+    /// The paragraph's last line (the text after its last "\n"), with enough
+    /// kept about its ends to answer `isStandaloneSignOffLine` without
+    /// reading the whole line every time a segment is added.
+    ///
+    /// That check lowercases the line, trims whitespace and newlines from
+    /// both ends, then punctuation, and looks the rest up among the sign-off
+    /// phrases. Lowercasing maps each scalar to one or more scalars of the
+    /// same kind (a letter to letters, never to whitespace or punctuation), so
+    /// what is left has at least as many scalars as the same trimming leaves
+    /// of the line itself. The phrases are ASCII, and a string equal to one
+    /// (Swift compares canonically) has no more scalars than it. So a line
+    /// whose trimmed middle is longer than the longest phrase is no sign-off,
+    /// and only a short middle runs the real check. The middle grows by at
+    /// least one scalar for each segment holding more than whitespace, so a
+    /// line runs it at most `longestPhraseScalarCount + 1` times. Whitespace
+    /// added at the end is trimmed away and cannot change the answer.
+    private struct UnwrapLastLine {
+        private enum LeadingTrim {
+            case whitespace
+            case punctuation
+            case done
+        }
+
+        private var line = ""
+        private var scalarCount = 0
+        private var leadingTrim = LeadingTrim.whitespace
+        private var leadingTrimmedScalarCount = 0
+        private var trailingWhitespaceScalarCount = 0
+        private var trailingPunctuationScalarCount = 0
+        private var cachedAnswer: Bool?
+
+        private static let whitespaceAndNewlines = CharacterSet.whitespacesAndNewlines
+        private static let punctuation = CharacterSet.punctuationCharacters
+
+        init() {}
+
+        init(firstSegment: String) {
+            append(firstSegment)
+        }
+
+        mutating func append(_ segment: String) {
+            let scalars = Array(segment.unicodeScalars)
+            line += segment
+            scalarCount += scalars.count
+
+            var index = 0
+            while leadingTrim != .done, index < scalars.count {
+                let scalar = scalars[index]
+                switch leadingTrim {
+                case .whitespace:
+                    if Self.whitespaceAndNewlines.contains(scalar) {
+                        leadingTrimmedScalarCount += 1
+                    } else if Self.punctuation.contains(scalar) {
+                        leadingTrimmedScalarCount += 1
+                        leadingTrim = .punctuation
+                    } else {
+                        leadingTrim = .done
+                    }
+                case .punctuation:
+                    if Self.punctuation.contains(scalar) {
+                        leadingTrimmedScalarCount += 1
+                    } else {
+                        leadingTrim = .done
+                    }
+                case .done:
+                    break
+                }
+                index += 1
+            }
+
+            var end = scalars.count
+            while end > 0, Self.whitespaceAndNewlines.contains(scalars[end - 1]) {
+                end -= 1
+            }
+            if end == 0 {
+                // Whitespace only: trimmed off the end again, answer unchanged.
+                trailingWhitespaceScalarCount += scalars.count
+                return
+            }
+            trailingWhitespaceScalarCount = scalars.count - end
+            var punctuationStart = end
+            while punctuationStart > 0, Self.punctuation.contains(scalars[punctuationStart - 1]) {
+                punctuationStart -= 1
+            }
+            trailingPunctuationScalarCount = end - punctuationStart
+            cachedAnswer = nil
+        }
+
+        var isStandaloneSignOff: Bool {
+            mutating get {
+                // Nothing but leading whitespace then punctuation: trims to "".
+                guard leadingTrim == .done else { return false }
+                let middleScalarCount = scalarCount
+                    - leadingTrimmedScalarCount
+                    - trailingWhitespaceScalarCount
+                    - trailingPunctuationScalarCount
+                guard middleScalarCount <= TextProcessing.longestSignOffScalarCount else { return false }
+                if let cachedAnswer {
+                    return cachedAnswer
+                }
+                let answer = TextProcessing.isStandaloneSignOffLine(
+                    line.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+                cachedAnswer = answer
+                return answer
+            }
+        }
     }
 
     // MARK: - HTML Entity Decoding
@@ -673,20 +860,10 @@ enum TextProcessing {
         return result
     }
 
-    private static func shouldPreserveLineBreakBetween(_ currentParagraph: String, and nextLine: String) -> Bool {
-        guard let currentLine = currentParagraph
-            .components(separatedBy: "\n")
-            .last?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              isStandaloneSignOffLine(currentLine),
-              looksLikeNameLine(nextLine) else {
-            return false
-        }
+    /// The most scalars any sign-off phrase has (`UnwrapLastLine`).
+    fileprivate static let longestSignOffScalarCount = signOffWords.map(\.unicodeScalars.count).max() ?? 0
 
-        return true
-    }
-
-    private static func isStandaloneSignOffLine(_ line: String) -> Bool {
+    fileprivate static func isStandaloneSignOffLine(_ line: String) -> Bool {
         let normalized = line
             .lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -699,7 +876,7 @@ enum TextProcessing {
         SignatureSignOffPolicy.looksLikeNameLine(line)
     }
 
-    private static func isSignatureDelimiterLine(_ line: String) -> Bool {
+    fileprivate static func isSignatureDelimiterLine(_ line: String) -> Bool {
         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, let pattern = signatureDelimiterPattern else { return false }
         let range = NSRange(location: 0, length: trimmed.utf16.count)

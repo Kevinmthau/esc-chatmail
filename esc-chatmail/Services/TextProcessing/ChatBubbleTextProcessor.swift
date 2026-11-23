@@ -62,6 +62,40 @@ enum ChatBubbleTextProcessor {
         )
     }()
 
+    /// The most text, in UTF-16 units, the bubble derivation reads from one
+    /// body (`cappedExtractedText`).
+    static let extractedTextUTF16Limit = 65_536
+
+    /// `text`, or its first `extractedTextUTF16Limit` UTF-16 units cut back to
+    /// the last line break (to a character boundary where there is none).
+    ///
+    /// A bubble shows a few lines, but the quote and signature passes after
+    /// extraction read all of it, several of them more than once, and nothing
+    /// bounded a body's size: a megabyte log stalled the sync batch it was in.
+    /// So derivation reads at most this much. The cap is a pure function of
+    /// the extracted text, so ingest, both `ChatPreviewRepair` passes and the
+    /// bubble loader, which all derive through here, still agree. Text under
+    /// it derives exactly as before, and no stored verdict reads text past it
+    /// (the verdict reads the HTML), so there is no `CacheVersioning` bump: a
+    /// preview already stored for a longer body keeps the text it has. It
+    /// caps extracted text only:
+    /// never the HTML (the rich-content verdict reads that) nor the stored
+    /// `bodyText` or `cleanedSnippet`, and it is not inside the shared
+    /// primitives (`unwrapEmailLineBreaks`, `PlainTextQuoteRemover`), which
+    /// also build the reader and outgoing reply quotes.
+    static func cappedExtractedText(_ text: String) -> String {
+        let utf16 = text.utf16
+        guard utf16.count > extractedTextUTF16Limit else { return text }
+        let nsText = text as NSString
+        let cut = nsText.rangeOfComposedCharacterSequence(at: extractedTextUTF16Limit).location
+        let prefix = nsText.substring(to: cut) as NSString
+        let lastLineBreak = prefix.range(of: "\n", options: .backwards)
+        if lastLineBreak.location != NSNotFound {
+            return prefix.substring(to: lastLineBreak.location)
+        }
+        return prefix as String
+    }
+
     static func process(
         content: String?,
         options: ChatBubbleTextProcessorOptions
@@ -182,7 +216,7 @@ enum ChatBubbleTextProcessor {
             plainText = RepeatedSignatureRemover.removeSignature(from: currentText) {
                 // Only project the source for a surviving, corroborated contact block.
                 // History is evidence for preview cleanup; canonical HTML remains untouched.
-                let sourceText = TextProcessing.extractPlainText(from: html)
+                let sourceText = cappedExtractedText(TextProcessing.extractPlainText(from: html))
                 return PlainTextQuoteRemover.extractQuotes(from: sourceText, removingSignature: false)
                     .quotedParts.map(\.text).joined(separator: "\n")
             }
@@ -212,6 +246,7 @@ enum ChatBubbleTextProcessor {
         if decodeHTMLEntities {
             processed = HTMLEntityDecoder.decode(processed)
         }
+        processed = cappedExtractedText(processed)
 
         let unwrapped = TextProcessing.unwrapEmailLineBreaks(from: processed)
         let extractionResult = PlainTextQuoteRemover.extractQuotes(from: unwrapped)

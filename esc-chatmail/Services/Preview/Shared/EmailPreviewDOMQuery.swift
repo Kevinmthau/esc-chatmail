@@ -8,9 +8,11 @@ struct EmailPreviewDOMQuery {
         self.document = document
     }
 
+    /// Nil when SwiftSoup fails or `EmailDOMParseAdmission` refuses the HTML
+    /// as nested too deeply to parse safely.
     init?(html: String) {
         do {
-            let document = try SwiftSoup.parse(html)
+            let document = try EmailDOMParseAdmission.parseDocument(html)
             document.outputSettings().prettyPrint(pretty: false)
             self.document = document
         } catch {

@@ -71,10 +71,52 @@ enum PlainTextQuoteRemover {
         "Doorgestuurd bericht",         // Dutch
     ]
 
+    /// A run of literal characters that every match of the pattern contains,
+    /// for the patterns whose `.+` makes a miss expensive. `Le .+ a écrit`
+    /// is tried at every "le " in the text (no anchor, no word boundary, any
+    /// case), each try reading to the end of the line, so a long joined
+    /// paragraph cost one line's length per "table ", "people " or "simple ".
+    /// The literal is searched once, with the same options; where it is
+    /// absent the pattern cannot match and is skipped, so the result is the
+    /// same. Each literal is the pattern's own run of literal characters,
+    /// between two non-literal atoms, so case folding treats it alike in both.
+    private static let requiredLiteralByPattern: [String: String] = [
+        "(?:^|\\n)On .+ wrote:": " wrote:",
+        "(?:^|\\n)On .+, .+ wrote:": " wrote:",
+        "> On .+, at .+, .+ wrote:": " wrote:",
+        "Am .+ schrieb .+:": " schrieb ",
+        "Le .+ a écrit\\s*:": " a écrit",
+        "El .+ escribió:": " escribió:",
+        "Il .+ ha scritto:": " ha scritto:",
+        "Em .+ escreveu:": " escreveu:",
+        "Op .+ schreef .+:": " schreef ",
+        "From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
+        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
+        "From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",
+        "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+": "\nDate: ",
+        "Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+": "\nGesendet: ",
+        "De: .+\nEnviado: .+\nPara: .+\nAsunto: .+": "\nEnviado: ",
+    ]
+
+    private struct QuotePattern {
+        let regex: NSRegularExpression
+        /// The `requiredLiteralByPattern` entry and its compiled search.
+        let requiredLiteral: (text: String, regex: NSRegularExpression)?
+    }
+
     /// Pre-compiled regex patterns for performance (compiled once at class load)
-    private static let compiledQuotePatterns: [NSRegularExpression] = {
-        quoteIndicatorPatternStrings.compactMap {
-            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+    private static let compiledQuotePatterns: [QuotePattern] = {
+        quoteIndicatorPatternStrings.compactMap { pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            let requiredLiteral = requiredLiteralByPattern[pattern].flatMap { literal in
+                (try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: literal),
+                    options: [.caseInsensitive]
+                )).map { (text: literal, regex: $0) }
+            }
+            return QuotePattern(regex: regex, requiredLiteral: requiredLiteral)
         }
     }()
 
@@ -227,13 +269,28 @@ enum PlainTextQuoteRemover {
         return findEarliestPatternMatchWithAttribution(in: text).0
     }
 
-    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution
-    private static func findEarliestPatternMatchWithAttribution(in text: String) -> (Int, String?) {
+    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution.
+    /// `skipsPatternsMissingTheirLiteral` is false only in the test that shows the
+    /// `requiredLiteralByPattern` shortcut changes no answer.
+    static func findEarliestPatternMatchWithAttribution(
+        in text: String,
+        skipsPatternsMissingTheirLiteral: Bool = true
+    ) -> (Int, String?) {
         var earliestIndex = text.count
         var attribution: String?
         let range = NSRange(location: 0, length: text.utf16.count)
+        var literalIsPresent: [String: Bool] = [:]
 
-        for regex in compiledQuotePatterns {
+        for pattern in compiledQuotePatterns {
+            if skipsPatternsMissingTheirLiteral, let literal = pattern.requiredLiteral {
+                let isPresent = literalIsPresent[literal.text] ?? {
+                    let found = literal.regex.firstMatch(in: text, options: [], range: range) != nil
+                    literalIsPresent[literal.text] = found
+                    return found
+                }()
+                guard isPresent else { continue }
+            }
+            let regex = pattern.regex
             if let match = regex.firstMatch(in: text, options: [], range: range),
                let matchRange = Range(match.range, in: text) {
                 let index = text.distance(from: text.startIndex, to: matchRange.lowerBound)
