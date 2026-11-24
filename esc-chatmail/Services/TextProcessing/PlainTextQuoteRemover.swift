@@ -133,7 +133,29 @@ enum PlainTextQuoteRemover {
         let regex: NSRegularExpression
         /// The `requiredLiteralByPattern` entry and its compiled search.
         let requiredLiteral: (text: String, regex: NSRegularExpression)?
+        /// Apple Mail's quoted attributions only: the "> On ", "> Am "… every
+        /// match starts with (`quotedAttributionSearchRange`).
+        let quotedStartLiteral: NSRegularExpression?
     }
+
+    /// How many starts of an Apple Mail quoted attribution ("> On ", "> Am "…)
+    /// are tried. Those patterns stay unanchored (see
+    /// `quoteIndicatorPatternStrings`), so each is tried at every occurrence of
+    /// its start literal at the cost of its bounds: about 36 µs each, 4 to 5 s
+    /// a megabyte of crafted text for each pattern on a path that is not capped
+    /// (the ingest snippet, `TextSnippetCreator`, reads the whole body). Past
+    /// this many occurrences the search stops a little after the last one it
+    /// tries (`quotedAttributionSearchTail`), which bounds each pattern at
+    /// about 40 ms. The text itself is never cut: the other patterns and
+    /// detectors still read all of it, and `bodyText` and `cleanedSnippet` are
+    /// not capped. Only a text with more than this many "> On " (or "> Am "…)
+    /// before its first such attribution reads differently.
+    static let quotedAttributionStartLimit = 1_024
+
+    /// UTF-16 units searched past the last tried start: more than the longest
+    /// match of a quoted pattern's bounds (two of 200 characters, each up to
+    /// two units), with room for the `\s*` before "a écrit"'s colon.
+    static let quotedAttributionSearchTail = 4_096
 
     /// Pre-compiled regex patterns for performance (compiled once at class load)
     private static let compiledQuotePatterns: [QuotePattern] = {
@@ -147,7 +169,17 @@ enum PlainTextQuoteRemover {
                     options: [.caseInsensitive]
                 )).map { (text: literal, regex: $0) }
             }
-            return QuotePattern(regex: regex, requiredLiteral: requiredLiteral)
+            let quotedStartLiteral: NSRegularExpression? = pattern.hasPrefix("> ")
+                ? try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: String(pattern.prefix(5))),
+                    options: [.caseInsensitive]
+                )
+                : nil
+            return QuotePattern(
+                regex: regex,
+                requiredLiteral: requiredLiteral,
+                quotedStartLiteral: quotedStartLiteral
+            )
         }
     }()
 
@@ -322,7 +354,10 @@ enum PlainTextQuoteRemover {
                 guard isPresent else { continue }
             }
             let regex = pattern.regex
-            if let match = regex.firstMatch(in: text, options: [], range: range),
+            let searchRange = pattern.quotedStartLiteral.map {
+                quotedAttributionSearchRange(in: text, fullRange: range, startLiteral: $0)
+            } ?? range
+            if let match = regex.firstMatch(in: text, options: [], range: searchRange),
                let matchRange = Range(match.range, in: text) {
                 let index = text.distance(from: text.startIndex, to: matchRange.lowerBound)
                 if index < earliestIndex {
@@ -359,6 +394,41 @@ enum PlainTextQuoteRemover {
     }
 
     /// Pre-compiled regex for collapsing excessive newlines (performance optimization)
+    /// The whole text, unless its start literal occurs more than
+    /// `quotedAttributionStartLimit` times: then up to the last occurrence tried
+    /// plus `quotedAttributionSearchTail`. A match found in the shorter range is
+    /// a match in the text (the quoted patterns read nothing past their end),
+    /// and every match that starts at a tried occurrence fits in it.
+    static func quotedAttributionSearchRange(
+        in text: String,
+        fullRange: NSRange,
+        startLiteral: NSRegularExpression
+    ) -> NSRange {
+        var seen = 0
+        var lastTriedStart: Int?
+        var searchFrom = fullRange.location
+        let end = NSMaxRange(fullRange)
+        while searchFrom < end,
+              let match = startLiteral.firstMatch(
+                in: text,
+                options: [],
+                range: NSRange(location: searchFrom, length: end - searchFrom)
+              ) {
+            seen += 1
+            if seen > quotedAttributionStartLimit, let lastTriedStart {
+                var cut = min(end, lastTriedStart + quotedAttributionSearchTail)
+                // Never between the two halves of a surrogate pair.
+                if cut < end, UTF16.isLeadSurrogate((text as NSString).character(at: cut - 1)) {
+                    cut -= 1
+                }
+                return NSRange(location: fullRange.location, length: cut - fullRange.location)
+            }
+            lastTriedStart = match.range.location
+            searchFrom = match.range.location + max(1, match.range.length)
+        }
+        return fullRange
+    }
+
     private static let excessiveNewlinesPattern: NSRegularExpression? = {
         try? NSRegularExpression(pattern: "\n{3,}", options: [])
     }()

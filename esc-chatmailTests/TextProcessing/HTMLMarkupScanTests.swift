@@ -1,0 +1,392 @@
+import XCTest
+@testable import esc_chatmail
+
+/// `HTMLMarkupScan` and `LineStartMarkerSearch` replace steps of text
+/// derivation that were quadratic on markup a sender can write, and each must
+/// give the result of what it replaced: the walk and the regexes are kept here
+/// and compared with the scans over generated markup, then crafted shapes are
+/// timed.
+final class HTMLMarkupScanTests: XCTestCase {
+
+    // MARK: - Same results
+
+    func testContainsLikelyHTMLMarkup_matchesTheWalk() {
+        var generator = MarkupGenerator(seed: 0xC0FFEE)
+        for _ in 0..<30_000 {
+            let html = generator.next()
+            XCTAssertEqual(
+                HTMLMarkupScan.containsLikelyHTMLMarkup(html),
+                LegacyMarkupWalk.containsLikelyHTMLMarkup(html),
+                html.debugDescription
+            )
+        }
+    }
+
+    func testBlockRules_matchTheirRegexes() throws {
+        let rules: [(start: String, close: String, readsToTagEnd: Bool, options: NSRegularExpression.Options, regex: String)] = [
+            ("<head\\b", "</head>", true, [.caseInsensitive], "<head\\b[^>]*>[\\s\\S]*?</head>"),
+            ("<!--", "-->", false, [.caseInsensitive], "<!--[\\s\\S]*?-->"),
+            ("<!--", "-->", false, [], "<!--[\\s\\S]*?-->"),
+            ("<script", "</script>", true, [], "<script[^>]*>[\\s\\S]*?</script>"),
+            ("<style", "</style>", true, [], "<style[^>]*>[\\s\\S]*?</style>"),
+        ]
+        var generator = MarkupGenerator(seed: 0xB10C)
+        for rule in rules {
+            let block = try XCTUnwrap(HTMLBlockRule(
+                start: rule.start,
+                close: rule.close,
+                readsToTagEnd: rule.readsToTagEnd,
+                options: rule.options
+            ))
+            let regex = try NSRegularExpression(pattern: rule.regex, options: rule.options)
+            for _ in 0..<10_000 {
+                let html = generator.next()
+                XCTAssertEqual(block.removingBlocks(from: html), Self.replacing(regex, in: html, with: ""), "\(rule.regex) \(html.debugDescription)")
+            }
+        }
+    }
+
+    func testBreakPairs_matchTheRegex() throws {
+        let regex = try NSRegularExpression(pattern: "<br[^>]*>\\s*<br[^>]*>", options: [])
+        var generator = MarkupGenerator(seed: 0xB2)
+        for _ in 0..<30_000 {
+            let html = generator.next()
+            XCTAssertEqual(
+                HTMLMarkupScan.replacingBreakPairs(in: html, with: "\n\n"),
+                Self.replacing(regex, in: html, with: "\n\n"),
+                html.debugDescription
+            )
+        }
+    }
+
+    func testTagsEndingAtTagEnd_matchTheirRegexes() throws {
+        for (pattern, template) in [("<br[^>]*>", "\n"), ("<[^>]+>", "")] {
+            let regex = try NSRegularExpression(pattern: pattern, options: [])
+            var generator = MarkupGenerator(seed: 0x7A6)
+            for _ in 0..<15_000 {
+                let html = generator.next()
+                XCTAssertEqual(
+                    HTMLMarkupScan.replacingTagsEndingAtTagEnd(in: html, regex: regex, with: template),
+                    Self.replacing(regex, in: html, with: template),
+                    "\(pattern) \(html.debugDescription)"
+                )
+            }
+        }
+    }
+
+    func testHiddenElements_matchTheRegex() throws {
+        let regex = try XCTUnwrap(HTMLMarkupScan.hiddenElementRegex)
+        var generator = MarkupGenerator(seed: 0x41DE)
+        for _ in 0..<40_000 {
+            let html = generator.next()
+            XCTAssertEqual(
+                HTMLMarkupScan.removingHiddenElements(from: html),
+                Self.replacing(regex, in: html, with: ""),
+                html.debugDescription
+            )
+        }
+    }
+
+    /// The hidden-element regex picks the last hiding `style` whose end has a
+    /// close tag after it; ends that cross a `>` in a value decide which.
+    func testHiddenElements_crossingValues_matchTheRegex() throws {
+        let regex = try XCTUnwrap(HTMLMarkupScan.hiddenElementRegex)
+        let shapes = [
+            "<div style=\"display:none\" x style='opacity:0 > </div> '>a</div>b</div>",
+            "<div style='display:none'>a</DIV><div style=\"font-size:0\">b</div>c",
+            "<p style=\"display:none>\" style='opacity:0'>x</p>y</p>",
+            "<span style = \"mso-hide:all\">x</Span><span>y</span>",
+            "<td style=\"max-height:0\" style=\"display:none\">x</td>",
+            "<div style=\"display:none\">x",
+            "<div\u{212A} style=\"display:none\">x</div\u{212A}>",
+            "<kbd style=\"display:none\">x</\u{212A}BD>",
+        ]
+        for html in shapes {
+            XCTAssertEqual(HTMLMarkupScan.removingHiddenElements(from: html), Self.replacing(regex, in: html, with: ""), html)
+        }
+    }
+
+    func testLineStartMarkers_matchTheirRegexes() throws {
+        let markers = [
+            "On .{1,400}? wrote:",
+            "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
+            "-{2,}\\s*Original Message\\s*-{2,}",
+            "(?:Le|Am)\\s.{1,200}?\\s(?:a écrit|schrieb):",
+        ]
+        let regexes = try markers.map {
+            try NSRegularExpression(pattern: "(?:^|[\\r\\n])\\s*" + $0, options: [.caseInsensitive])
+        }
+        let search = LineStartMarkerSearch(markers: markers)
+        var generator = MarkupGenerator(seed: 0x11E5)
+        for _ in 0..<30_000 {
+            let text = generator.next()
+            let range = NSRange(location: 0, length: (text as NSString).length)
+            let matches: [NSRange] = regexes.compactMap { regex -> NSRange? in
+                regex.firstMatch(in: text, options: [], range: range)?.range
+            }
+            let expected: NSRange? = matches.min(by: Self.isEarlier)
+            XCTAssertEqual(search.earliestMatch(in: text), expected, text.debugDescription)
+        }
+    }
+
+    // MARK: - Linear on crafted markup
+
+    /// Each of these held a message's ingest for seconds to tens of seconds
+    /// at a quarter of this size, and the time grew with the square of the size.
+    /// Revert-check: `HTMLMarkupScan.containsLikelyHTMLMarkup`,
+    /// `replacingBlocks`, `replacingTagsEndingAtTagEnd` and
+    /// `removingHiddenElements` (each in its caller), and
+    /// `LineStartMarkerSearch` in `EmailDOMQuoteRemover+TextMarkers`: put back
+    /// one walk or regex and its input here runs past the limit.
+    func testCraftedMarkup_ingestsQuickly() async throws {
+        let count = 30_000
+        let bodies = [
+            String(repeating: "<head>x", count: count),
+            String(repeating: "<!--x", count: count),
+            String(repeating: "<script>x", count: count),
+            String(repeating: "<style>x", count: count),
+            String(repeating: "<foo>x", count: count),
+            String(repeating: "<div style=\"a", count: count),
+            "<p>a" + String(repeating: " \n ", count: count) + "b</p>",
+        ]
+        for body in bodies {
+            let started = Date()
+            _ = try await MessageProcessor().processGmailMessage(Self.message(html: body), myAliases: [])
+            let elapsed = Date().timeIntervalSince(started)
+            print(String(format: "crafted ingest %.2f s: %@", elapsed, String(body.prefix(12))))
+            XCTAssertLessThan(elapsed, 10, String(body.prefix(40)))
+        }
+    }
+
+    /// A tag start with no `>` after it sends `extractPlainText` to its regex
+    /// recovery, never a parse, and each of the recovery's rules read to the
+    /// end of the text from every start these repeat.
+    /// Revert-check: `malformedHTMLBlockRules` (each of its four rules),
+    /// `replacingBreakPairs` and `replacingTagsEndingAtTagEnd` (both of its
+    /// calls) in `TextProcessing.recoverPlainTextFromMalformedHTML`.
+    func testCraftedTagStarts_extractQuickly() {
+        let count = 40_000
+        let unclosed = "<a"
+        for text in [
+            String(repeating: "<br", count: count),
+            String(repeating: "<x", count: count),
+            String(repeating: "<head>x", count: count / 2) + unclosed,
+            String(repeating: "<!--x", count: count / 2) + unclosed,
+            String(repeating: "<script>x", count: count / 2) + unclosed,
+            String(repeating: "<style>x", count: count / 2) + unclosed,
+        ] {
+            let started = Date()
+            _ = TextProcessing.extractPlainText(from: text)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 5, String(text.prefix(6)))
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// The order `earliestTextMarkerMatch` took the first match of each regex in.
+    private static func isEarlier(_ lhs: NSRange, _ rhs: NSRange) -> Bool {
+        if lhs.location == rhs.location {
+            return lhs.length < rhs.length
+        }
+        return lhs.location < rhs.location
+    }
+
+    private static func replacing(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
+        regex.stringByReplacingMatches(
+            in: text,
+            options: [],
+            range: NSRange(location: 0, length: (text as NSString).length),
+            withTemplate: template
+        )
+    }
+
+    private static func message(html: String) -> GmailMessage {
+        GmailMessage(
+            id: "crafted",
+            threadId: "crafted-thread",
+            labelIds: ["INBOX"],
+            snippet: "crafted",
+            historyId: "1",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/html",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Sender <sender@example.com>"),
+                    MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8"),
+                ],
+                body: MessageBody(size: html.utf8.count, data: Data(html.utf8).base64EncodedString(), attachmentId: nil),
+                parts: nil
+            ),
+            sizeEstimate: html.utf8.count
+        )
+    }
+}
+
+/// Markup soup from the pieces the replaced steps look at.
+private struct MarkupGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    private static let pieces: [String] = [
+        "<", ">", "\"", "'", "/", "!", "-", "--", "=", " ", "  ", "\n", "\r", "\r\n", "\t", "\u{00A0}", "\u{2028}",
+        "a", "x", "K", "\u{212A}", "ß", "é", "e\u{301}", ">\u{301}", "\u{1F600}",
+        "<!--", "-->", "<!-->", "<!doctype html>", "<!DOCTYPE", "<!x>",
+        "<head", "<head>", "<HEAD x>", "<header>", "</head>", "</HEAD>", "</head >",
+        "<script", "<script>", "</script>", "</SCRIPT>", "<style", "<style>", "</style>",
+        "<br", "<br>", "<br/>", "<BR>", "<br x=\">\">",
+        "<div", "<div>", "</div>", "</DIV>", "<div ", "<foo", "<foo>", "</foo>", "</foo >", "</foo x>", "</FOO>",
+        "<x", "<x>", "</x>", "<a1>", "</a1>", "<p>", "</p>", "<kbd>", "</\u{212A}bd>",
+        "style", "style=", "style=\"", "style='", " style=\"display:none\"", " style='opacity:0'",
+        "display:none", "display : none", "font-size:0", "mso-hide:all", "visibility:hidden", "max-height:0",
+        "On ", "on ", " wrote:", "On Jan 30, 2026 at 7:32 PM,", "Le ", " a écrit:", "Am ", " schrieb:",
+        "-----Original Message-----", "-- Original Message --",
+    ]
+
+    mutating func next() -> String {
+        let length = Int(random() % 40)
+        var text = ""
+        for _ in 0..<length {
+            text += Self.pieces[Int(random() % UInt64(Self.pieces.count))]
+        }
+        return text
+    }
+
+    /// SplitMix64.
+    private mutating func random() -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// `TextProcessing.containsLikelyHTMLMarkup` as it was: from each `<`, a walk
+/// to the tag's `>`, and for an unknown tag a walk to the end of the text for
+/// its close tag.
+private enum LegacyMarkupWalk {
+    static func containsLikelyHTMLMarkup(_ html: String) -> Bool {
+        var index = html.startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let nextIndex = html.index(after: tagStart)
+            guard nextIndex < html.endIndex else { return false }
+
+            let firstCharacter = html[nextIndex]
+            if firstCharacter.isLetter,
+               let tagEnd = tagEndIndex(in: html, from: nextIndex) {
+                let tagNameStart = nextIndex
+                var tagNameEnd = tagNameStart
+                while tagNameEnd < html.endIndex, TextProcessing.isTagNameCharacter(html[tagNameEnd]) {
+                    tagNameEnd = html.index(after: tagNameEnd)
+                }
+
+                let tagName = String(html[tagNameStart..<tagNameEnd]).lowercased()
+                if TextProcessing.knownHTMLTagNames.contains(tagName) ||
+                    TextProcessing.tagHasAttributes(in: html, nameEnd: tagNameEnd, tagEnd: tagEnd) ||
+                    hasExplicitCloseTag(named: tagName, in: html, after: html.index(after: tagEnd)) {
+                    return true
+                }
+            } else if firstCharacter == "!",
+                      html[nextIndex...].lowercased().hasPrefix("!doctype"),
+                      tagEndIndex(in: html, from: nextIndex) != nil {
+                return true
+            }
+            if firstCharacter == "!",
+               html[nextIndex...].hasPrefix("!--"),
+               html[nextIndex...].range(of: "-->") != nil {
+                return true
+            }
+
+            if firstCharacter == "/" {
+                let nameStart = html.index(after: nextIndex)
+                var nameEnd = nameStart
+                while nameEnd < html.endIndex, TextProcessing.isTagNameCharacter(html[nameEnd]) {
+                    nameEnd = html.index(after: nameEnd)
+                }
+
+                let tagName = String(html[nameStart..<nameEnd]).lowercased()
+                if nameStart < html.endIndex,
+                   html[nameStart].isLetter,
+                   TextProcessing.knownHTMLTagNames.contains(tagName),
+                   tagEndIndex(in: html, from: nameEnd) != nil {
+                    return true
+                }
+            }
+
+            index = nextIndex
+        }
+
+        return false
+    }
+
+    private static func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
+        var index = startIndex
+        var quote: Character?
+
+        while index < html.endIndex {
+            let character = html[index]
+            if let activeQuote = quote {
+                if character == activeQuote {
+                    quote = nil
+                }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+
+            index = html.index(after: index)
+        }
+
+        return nil
+    }
+
+    private static func hasExplicitCloseTag(
+        named tagName: String,
+        in html: String,
+        after startIndex: String.Index
+    ) -> Bool {
+        var index = startIndex
+
+        while let tagStart = html[index...].firstIndex(of: "<") {
+            let afterOpen = html.index(after: tagStart)
+            guard afterOpen < html.endIndex else { return false }
+
+            guard html[afterOpen] == "/" else {
+                index = afterOpen
+                continue
+            }
+
+            let nameStart = html.index(after: afterOpen)
+            var nameEnd = nameStart
+            while nameEnd < html.endIndex, TextProcessing.isTagNameCharacter(html[nameEnd]) {
+                nameEnd = html.index(after: nameEnd)
+            }
+
+            guard String(html[nameStart..<nameEnd]).caseInsensitiveCompare(tagName) == .orderedSame,
+                  let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
+                index = nameEnd
+                continue
+            }
+
+            var closeRemainder = nameEnd
+            while closeRemainder < tagEnd, html[closeRemainder].isWhitespace {
+                closeRemainder = html.index(after: closeRemainder)
+            }
+
+            if closeRemainder == tagEnd {
+                return true
+            }
+
+            index = html.index(after: tagEnd)
+        }
+
+        return false
+    }
+}
