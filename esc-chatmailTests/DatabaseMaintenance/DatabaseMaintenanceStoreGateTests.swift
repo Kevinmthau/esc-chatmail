@@ -118,7 +118,7 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
             readiness: { true },
             sweep: sweep
         )
-        let orphanBody = try XCTUnwrap(service.htmlContentHandler.saveHTML("<p>orphan</p>", for: "orphan"))
+        let orphanBody = try XCTUnwrap(service.htmlContentHandler().saveHTML("<p>orphan</p>", for: "orphan"))
 
         let analyzed = try await registry.run(DatabaseMaintenanceService.analyzeTaskIdentifier)
         let cleaned = try await registry.run(DatabaseMaintenanceService.cleanupTaskIdentifier)
@@ -127,6 +127,7 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
         XCTAssertTrue(cleaned)
         XCTAssertFalse(FileManager.default.fileExists(atPath: orphanBody.path))
         XCTAssertEqual(sweep.count, 1)
+        withExtendedLifetime(service) {}
     }
 
     // MARK: - Helpers
@@ -140,12 +141,18 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
         let messagesDirectory = FileManager.default.temporaryDirectory
             .appendingPathComponent("DatabaseMaintenanceStoreGateTests-\(UUID().uuidString)", isDirectory: true)
         directoriesToRemove.append(messagesDirectory)
+        let htmlContentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
         return DatabaseMaintenanceService(
             taskRegistry: registry ?? CapturingTaskRegistry(),
             coreDataStack: stack,
             persistenceReadiness: readiness,
-            storeMaintenanceCoordinator: StoreMaintenanceCoordinator(syncRunCoordinator: SyncRunCoordinator()),
-            htmlContentHandler: HTMLContentHandler(messagesDirectory: messagesDirectory),
+            storeMaintenanceCoordinator: StoreMaintenanceCoordinator(
+                syncRunCoordinator: SyncRunCoordinator(),
+                // Not the shared provider: a flag turned off there would make every
+                // refusal here pass without reaching its guard.
+                remoteConfig: StaticRemoteConfigProvider(flags: [.databaseMaintenanceEnabled: true])
+            ),
+            htmlContentHandler: { htmlContentHandler },
             sweepOrphanedAttachmentFiles: { sweep.record() }
         )
     }

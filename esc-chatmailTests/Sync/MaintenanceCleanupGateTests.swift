@@ -298,6 +298,55 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         XCTAssertFalse(DataCleanupService.IncrementalCleanupSchedule.isDue(defaults: scheduleDefaults))
     }
 
+    // Revert-check: the `coreDataStack.isStoreLoaded` guard inside the exclusive run of
+    // `DataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner:)`. Without it
+    // `newBackgroundContext()` starts the store's load from inside the maintenance run,
+    // which this unopenable store latches as a failure (the attached-store check then
+    // still refuses the passes).
+    func testRunStoreMaintenanceIfDue_storeNotLoaded_startsNoLoadAndStaysDue() async throws {
+        let storeURL = try TestCoreDataStack.makeUnopenableSQLiteStore()
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+        let unloadedStack = CoreDataStack(
+            unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
+        )
+        let service = makeService(on: unloadedStack)
+
+        let outcome = await service.runStoreMaintenanceIfDue(exclusiveRunner: makeExclusiveRunner())
+
+        XCTAssertEqual(outcome, .notAdmitted)
+        XCTAssertTrue(DataCleanupService.IncrementalCleanupSchedule.isDue(defaults: scheduleDefaults))
+        do {
+            try await unloadedStack.waitForStoreToLoad(timeout: 0)
+            XCTFail("The store must not have loaded")
+        } catch CoreDataError.storeLoadFailed(let underlying) {
+            XCTAssertFalse(underlying is PersistentStoreLoadError, "The maintenance started the store's load: \(underlying)")
+        }
+    }
+
+    // HONEST SCOPE: the attached-store check inside the exclusive run of
+    // `DataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner:)` is not revert-run.
+    // Without it the passes reach `removeDraftMessages`, whose batch delete on a coordinator
+    // with no store raises NSInternalInconsistencyException and crashes the test host
+    // (measured for `deleteOrphanedAttachments`' batch delete, 2026-11-24).
+    func testRunStoreMaintenanceIfDue_flagSaysLoadedButNoStoreIsAttached_runsNoPassAndStaysDue() async {
+        let (container, storeURL) = TestCoreDataStack.makeStorelessContainer()
+        defer { try? FileManager.default.removeItem(at: storeURL.deletingLastPathComponent()) }
+        let aliasReads = AliasReadCounter()
+        let service = makeService(
+            on: CoreDataStack(persistentContainerForTesting: container),
+            identityAliasProvider: { _ in
+                aliasReads.record()
+                return [Self.me]
+            }
+        )
+
+        let outcome = await service.runStoreMaintenanceIfDue(exclusiveRunner: makeExclusiveRunner())
+
+        XCTAssertEqual(outcome, .notAdmitted)
+        XCTAssertEqual(aliasReads.count, 0, "No pass may run")
+        XCTAssertTrue(DataCleanupService.IncrementalCleanupSchedule.isDue(defaults: scheduleDefaults))
+    }
+
     // Revert-check: the `isDue` guard ahead of the exclusive run in
     // `DataCleanupService.runStoreMaintenanceIfDue(exclusiveRunner:)`.
     // Without it every sync's follow-up waits for the boundary to learn that
@@ -427,6 +476,30 @@ final class MaintenanceCleanupGateTests: XCTestCase {
 
     /// A service whose runs announce through `announceCleanupFinished`
     /// and nowhere else, with everything else as `makeService` has it.
+    private func makeExclusiveRunner() -> StoreMaintenanceCoordinator {
+        StoreMaintenanceCoordinator(
+            syncRunCoordinator: SyncRunCoordinator(),
+            remoteConfig: StaticRemoteConfigProvider(flags: [.databaseMaintenanceEnabled: true])
+        )
+    }
+
+    private func makeService(
+        on coreDataStack: CoreDataStack,
+        identityAliasProvider: @escaping @Sendable (NSManagedObjectContext) async -> Set<String> = { _ in ["me@example.com"] }
+    ) -> DataCleanupService {
+        let flags = InMemoryMigrationFlagStore()
+        flags.set(true, forKey: DataCleanupService.participantSetSplitMigrationKey)
+        flags.set(true, forKey: DataCleanupService.rfc2047HeaderTextRepairKey)
+        return DataCleanupService(
+            coreDataStack: coreDataStack,
+            conversationManager: ConversationManager(currentUserEmail: { Self.me }),
+            conversationMutationSerializer: ConversationRollupMutationSerializer(),
+            migrationFlags: flags,
+            identityAliasProvider: identityAliasProvider,
+            maintenanceScheduleDefaults: scheduleDefaults
+        )
+    }
+
     private func makeService(
         announceCleanupFinished: @escaping @Sendable () -> Void
     ) -> DataCleanupService {
@@ -678,3 +751,22 @@ private actor FailNextHoldSave {
 }
 
 private struct InjectedHoldSaveError: Error {}
+
+/// Counts the alias reads of a maintenance run's hash-repair pass.
+private final class AliasReadCounter: @unchecked Sendable {
+    /// `@unchecked Sendable`: `lock` guards `reads`.
+    private let lock = NSLock()
+    private var reads = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return reads
+    }
+
+    func record() {
+        lock.lock()
+        reads += 1
+        lock.unlock()
+    }
+}

@@ -21,7 +21,7 @@ extension DatabaseMaintenanceService {
             Log.info("Database cleanup skipped: the store is not loaded", category: .coreData)
             return false
         }
-        let htmlContentHandler = self.htmlContentHandler
+        let htmlContentHandler = self.htmlContentHandler()
         let htmlAccountGeneration = htmlContentHandler.captureAccountGeneration()
         let context = coreDataStack.newBackgroundContext()
         let cleanupService = DataCleanupService(coreDataStack: coreDataStack)

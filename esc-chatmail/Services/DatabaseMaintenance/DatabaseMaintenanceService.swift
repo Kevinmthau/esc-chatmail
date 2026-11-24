@@ -43,8 +43,11 @@ final class DatabaseMaintenanceService: ObservableObject {
     let persistenceReadiness: @Sendable () async -> Bool
     /// The exclusive maintenance run both tasks take. `.shared` in the app.
     let storeMaintenanceCoordinator: StoreMaintenanceCoordinator
-    /// The boundary the cleanup's body sweep removes files through.
-    let htmlContentHandler: HTMLContentHandler
+    /// The boundary the cleanup's body sweep removes files through. Asked
+    /// for when a cleanup runs, not here: `.shared` makes and marks the
+    /// `Messages` directory, and this service is built in `App.init`, a Mac
+    /// unit-test host's included, whose container is the real one.
+    let htmlContentHandler: @Sendable () -> HTMLContentHandler
     /// The cleanup's last step, the sweep of `Attachments` and `Previews`.
     let sweepOrphanedAttachmentFiles: @Sendable () async -> Void
 
@@ -75,7 +78,7 @@ final class DatabaseMaintenanceService: ObservableObject {
             return await AppStartupBootstrap.shared.preparePersistenceIfNeeded()
         },
         storeMaintenanceCoordinator: StoreMaintenanceCoordinator = .shared,
-        htmlContentHandler: HTMLContentHandler = .shared,
+        htmlContentHandler: @escaping @Sendable () -> HTMLContentHandler = { .shared },
         sweepOrphanedAttachmentFiles: @escaping @Sendable () async -> Void = {
             await AttachmentDownloader.shared.cleanupOrphanedFiles()
         }
