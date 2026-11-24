@@ -455,7 +455,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             + corpus.cleanedSnippetCases.compactMap(\.html)
         XCTAssertGreaterThan(inputs.count, 100)
         for html in inputs {
-            XCTAssertNoThrow(try EmailDOMParseAdmission.admit(html), String(html.prefix(120)))
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(120)))
             XCTAssertLessThan(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), 100, String(html.prefix(120)))
         }
     }
@@ -466,7 +466,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         for index in 0..<120 {
             chain = "<div dir=\"ltr\">reply \(index)</div><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">On a day, someone wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 .8ex\">" + chain + "</blockquote></div>"
         }
-        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(chain))
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(chain))
 
         // A large old-style newsletter: thousands of tags, unclosed cells,
         // fonts and list items, conditional comments and a commented style
@@ -476,7 +476,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             newsletter += "<!--[if mso]><table><tr><td><![endif]--><table><tr><td><font face=Arial>row \(row)<td>cell<tr><td><ul><li>a<li>b</ul></table><!--[if mso]></td></tr></table><![endif]--><p>para<p>next"
         }
         newsletter += "</body></html>"
-        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(newsletter))
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(newsletter))
     }
 
     // MARK: - The bound is never below SwiftSoup's depth

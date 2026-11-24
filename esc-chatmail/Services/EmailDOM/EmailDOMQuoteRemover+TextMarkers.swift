@@ -14,21 +14,21 @@ extension EmailDOMQuoteRemover {
     /// Patterns matched against text-node content. Each text node is scanned
     /// for the earliest occurrence; if one is found, the containing element
     /// (and everything after it at every ancestor level) is removed.
-    private static let textTruncationPatterns: [NSRegularExpression] = {
-        let raw = [
-            // English "On <date> <name> wrote:"
-            "(?:^|[\\r\\n])\\s*On .{1,400}? wrote:",
-            // iOS "On Jan 30, 2026 at 7:32 PM, Name"
-            "(?:^|[\\r\\n])\\s*On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
-            // Outlook "-----Original Message-----"
-            "(?:^|[\\r\\n])\\s*-{2,}\\s*Original Message\\s*-{2,}",
-            // International "Le … a écrit:" / "Am … schrieb:"
-            "(?:^|[\\r\\n])\\s*(?:Le|Am)\\s.{1,200}?\\s(?:a écrit|schrieb):"
-        ]
-        return raw.compactMap {
-            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
-        }
-    }()
+    ///
+    /// Each is `(?:^|[\r\n])\s*` and then one of these, and is matched through
+    /// `LineStartMarkerSearch`, never as one regex: `\s*` crosses newlines, so
+    /// the regex read a run of blank lines again from each newline in it, and
+    /// 8,000 blank lines held every received message's cleanup for 30 s.
+    static let textTruncationPatterns = LineStartMarkerSearch(markers: [
+        // English "On <date> <name> wrote:"
+        "On .{1,400}? wrote:",
+        // iOS "On Jan 30, 2026 at 7:32 PM, Name"
+        "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
+        // Outlook "-----Original Message-----"
+        "-{2,}\\s*Original Message\\s*-{2,}",
+        // International "Le … a écrit:" / "Am … schrieb:"
+        "(?:Le|Am)\\s.{1,200}?\\s(?:a écrit|schrieb):"
+    ])
 
     static func truncateAtTextMarkers(in document: Document) throws {
         guard let body = document.body() else { return }
@@ -55,7 +55,7 @@ extension EmailDOMQuoteRemover {
             guard let match = earliestTextMarkerMatch(in: text) else { continue }
             return TextMarkerCandidate(
                 textNode: textNode,
-                matchStartUTF16: match.range.location,
+                matchStartUTF16: match.location,
                 fullText: text,
                 textNodeIndex: index
             )
@@ -79,7 +79,7 @@ extension EmailDOMQuoteRemover {
 
             let combinedText = runs.map { $0.text }.joined()
             guard let match = earliestTextMarkerMatch(in: combinedText),
-                  let run = textRunForTruncation(atOrAfterUTF16Offset: match.range.location, in: runs),
+                  let run = textRunForTruncation(atOrAfterUTF16Offset: match.location, in: runs),
                   let textNode = run.textNode,
                   let textNodeIndex = textNodeIndexesByID[ObjectIdentifier(textNode)] else {
                 continue
@@ -87,7 +87,7 @@ extension EmailDOMQuoteRemover {
 
             let candidate = TextMarkerCandidate(
                 textNode: textNode,
-                matchStartUTF16: max(0, match.range.location - run.startUTF16Offset),
+                matchStartUTF16: max(0, match.location - run.startUTF16Offset),
                 fullText: run.text,
                 textNodeIndex: textNodeIndex
             )
@@ -99,18 +99,8 @@ extension EmailDOMQuoteRemover {
         return bestCandidate
     }
 
-    private static func earliestTextMarkerMatch(in text: String) -> NSTextCheckingResult? {
-        let range = NSRange(location: 0, length: text.utf16.count)
-        return textTruncationPatterns
-            .compactMap { pattern in
-                pattern.firstMatch(in: text, options: [], range: range)
-            }
-            .min { lhs, rhs in
-                if lhs.range.location == rhs.range.location {
-                    return lhs.range.length < rhs.range.length
-                }
-                return lhs.range.location < rhs.range.location
-            }
+    private static func earliestTextMarkerMatch(in text: String) -> NSRange? {
+        textTruncationPatterns.earliestMatch(in: text)
     }
 
     private static func isEarlierTextMarkerCandidate(_ lhs: TextMarkerCandidate, _ rhs: TextMarkerCandidate) -> Bool {

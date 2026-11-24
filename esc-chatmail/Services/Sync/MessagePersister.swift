@@ -458,6 +458,9 @@ actor MessagePersister {
             return .unprocessable(id: gmailMessage.id)
         }
 
+        // The pre-run is one more cleanup of the whole body: a cancelled run
+        // stops ahead of it rather than after it (no verdict, as above).
+        try Task.checkCancellation()
         processedMessage.richContentPrerun = Self.richContentPrerun(for: processedMessage)
         return .processed(processedMessage)
     }
@@ -507,38 +510,62 @@ actor MessagePersister {
         return try await withThrowingTaskGroup(of: (Int, PreparedMessage).self) { group in
             var results = [PreparedMessage?](repeating: nil, count: gmailMessages.count)
             var nextIndex = 0
+            var running = 0
+            // At most one message whose text body is oversized is prepared at
+            // a time: its derivation reads the whole body several times and
+            // holds what it builds until the batch persists. Messages start
+            // in their order, so one waiting for the oversized message ahead
+            // of it holds back the ones after it, while those already running
+            // go on. Results keep the input order whatever order they finish in.
+            var oversizedIndexInFlight: Int?
 
-            while nextIndex < maxConcurrent {
-                let index = nextIndex
-                let message = gmailMessages[index]
-                group.addTask { [self] in
-                    (index, try await self.prepareMessage(
-                        message,
-                        myAliases: myAliases,
-                        sendAsAliases: sendAsAliases
-                    ))
-                }
-                nextIndex += 1
-            }
-
-            while let (index, prepared) = try await group.next() {
-                results[index] = prepared
-                if nextIndex < gmailMessages.count {
-                    let refillIndex = nextIndex
-                    let message = gmailMessages[refillIndex]
+            func startMessages() {
+                while nextIndex < gmailMessages.count, running < maxConcurrent {
+                    let index = nextIndex
+                    let message = gmailMessages[index]
+                    let isOversized = Self.textBodyByteCount(of: message) > SyncConfig.oversizedPreparationBodyBytes
+                    if isOversized {
+                        guard oversizedIndexInFlight == nil else { return }
+                        oversizedIndexInFlight = index
+                    }
                     group.addTask { [self] in
-                        (refillIndex, try await self.prepareMessage(
+                        (index, try await self.prepareMessage(
                             message,
                             myAliases: myAliases,
                             sendAsAliases: sendAsAliases
                         ))
                     }
+                    running += 1
                     nextIndex += 1
                 }
             }
 
+            startMessages()
+            while let (index, prepared) = try await group.next() {
+                results[index] = prepared
+                running -= 1
+                if index == oversizedIndexInFlight {
+                    oversizedIndexInFlight = nil
+                }
+                startMessages()
+            }
+
             return results.compactMap { $0 }
         }
+    }
+
+    /// The bytes of the message's text and HTML body parts, as Gmail sizes
+    /// them, inline or fetched later by attachment ID. Attachments do not
+    /// count: their bytes are never derived from.
+    nonisolated static func textBodyByteCount(of message: GmailMessage) -> Int {
+        func count(_ part: MessagePart) -> Int {
+            let mimeType = part.mimeType?.lowercased() ?? ""
+            let isTextBody = (mimeType.hasPrefix("text/html") || mimeType.hasPrefix("text/plain")) &&
+                (part.filename ?? "").isEmpty
+            let own = isTextBody ? (part.body?.size ?? 0) : 0
+            return (part.parts ?? []).reduce(own) { $0 + count($1) }
+        }
+        return message.payload.map(count) ?? 0
     }
 
     // MARK: - Persistence (serialized on the actor)

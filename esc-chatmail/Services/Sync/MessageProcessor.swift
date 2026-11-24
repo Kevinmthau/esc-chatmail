@@ -70,12 +70,20 @@ class MessageProcessor: @unchecked Sendable {
             maxSuccessBytes: Self.attachmentFetchMemoMaxSuccessBytes
         )
         let content = try await extractContent(from: payload, messageId: gmailMessage.id, fetchMemo: fetchMemo)
+        // Text derivation reads the whole body several times and none of its
+        // steps can be interrupted, so a cancelled run (an expired background
+        // task, an account transition) is answered between them: thrown as
+        // `CancellationError`, which records no verdict for the message
+        // (`MessagePersister.prepareMessage`).
+        try Task.checkCancellation()
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = resolvedPlainTextBody(
             plainText: content.plainText,
             html: content.html
         )
+        try Task.checkCancellation()
         processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
+        try Task.checkCancellation()
         processedMessage.chatPreviewText = createChatPreviewText(
             html: content.html,
             plainText: content.plainText,
@@ -90,6 +98,7 @@ class MessageProcessor: @unchecked Sendable {
             processedMessage.isUnread = labelIds.contains("UNREAD")
         }
 
+        try Task.checkCancellation()
         // Detect if this is a newsletter/promotion
         processedMessage.isNewsletter = isNewsletterOrPromotion(
             labelIds: processedMessage.labelIds,
@@ -110,6 +119,7 @@ class MessageProcessor: @unchecked Sendable {
         )
         processedMessage.inlineCIDPrefetchContentIDs = inlineCIDPrefetchTargets.contentIDs
         processedMessage.inlineCIDPrefetchAttachmentIDs = inlineCIDPrefetchTargets.attachmentIDs
+        try Task.checkCancellation()
         processedMessage.canonicalContent = canonicalContent(
             html: content.html,
             plainText: content.plainText,
@@ -1008,25 +1018,25 @@ class MessageProcessor: @unchecked Sendable {
         return result.mainText
     }
 
-    // prepareHTMLForSnippet's three patterns, compiled once instead of per
-    // message. Each keeps the options its per-call replacement passed:
-    // .caseInsensitive on the <head> and hidden-element patterns, none on the
-    // comment pattern. The hidden-element pattern's `\1` is a backreference in
-    // the pattern, not the template; every template is "".
-    private static let snippetHeadElementRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<head\\b[^>]*>[\\s\\S]*?</head>", options: [.caseInsensitive])
-    }()
+    // prepareHTMLForSnippet's three patterns: `<head\b[^>]*>[\s\S]*?</head>`
+    // (.caseInsensitive), `<!--[\s\S]*?-->` (no options) and the hidden-element
+    // pattern (`HiddenElementRule.snippet`, which documents it and its one
+    // difference), each removed with the result its regex gave but
+    // read once (`HTMLMarkupScan`): the regexes reread the rest of the text at
+    // every start with nothing to close it.
+    private static let snippetHeadElementRule = HTMLBlockRule(
+        start: "<head\\b",
+        close: "</head>",
+        readsToTagEnd: true,
+        options: [.caseInsensitive]
+    )
 
-    private static let snippetHTMLCommentRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [])
-    }()
-
-    private static let snippetHiddenElementRegex: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
-            options: [.caseInsensitive]
-        )
-    }()
+    private static let snippetHTMLCommentRule = HTMLBlockRule(
+        start: "<!--",
+        close: "-->",
+        readsToTagEnd: false,
+        options: []
+    )
 
     /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
     /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
@@ -1034,13 +1044,13 @@ class MessageProcessor: @unchecked Sendable {
         var cleaned = html
 
         // Remove HTML head content (title, meta, style, mso settings, etc.)
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHeadElementRegex)
+        cleaned = Self.snippetHeadElementRule?.removingBlocks(from: cleaned) ?? cleaned
 
         // Remove HTML comments, including Outlook conditional blocks.
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHTMLCommentRegex)
+        cleaned = Self.snippetHTMLCommentRule?.removingBlocks(from: cleaned) ?? cleaned
 
         // Remove hidden preheader/style-hiding elements.
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHiddenElementRegex)
+        cleaned = HTMLMarkupScan.removingHiddenElements(from: cleaned)
 
         return cleaned
     }
