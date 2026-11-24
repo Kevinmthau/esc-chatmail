@@ -24,7 +24,6 @@ final class EmailWebViewLoadCoordination {
         let content: String
         let reloadSignature: String
         var count: Int
-        var wasDisplayed: Bool
     }
 
     /// How many times terminations may reload one content and signature.
@@ -117,43 +116,33 @@ final class EmailWebViewLoadCoordination {
         return true
     }
 
-    /// Answers whether a WebContent process termination may reload this content. The coordinators
+    /// Answers whether a WebContent process termination may reload this content: at most
+    /// `maximumWebContentTerminationReloads` times for one content and signature. The coordinators
     /// reload their own content when the process dies, and `updateWebView` reloads whenever
-    /// `needsReload` holds, so a page that crashes WebKit as it loads would reload for as long as
-    /// the view is on screen. A termination is admitted for content not reloaded before; for the
-    /// same content and signature again only once the last reload was displayed
-    /// (`recordDisplayedAfterWebContentTermination`), and at most
-    /// `maximumWebContentTerminationReloads` times. So a page that takes the process down before it
-    /// shows is reloaded once, a view killed each time the app is suspended recovers each time, up
-    /// to the cap, and a page that shows and then crashes is reloaded no more than the cap. When
-    /// this answers `false` the caller leaves the signature recorded, so nothing reloads the content
-    /// until it or its signature changes.
+    /// `needsReload` holds, so without a bound a page that crashes WebKit would reload for as long
+    /// as the view is on screen. The bound is a count and nothing else: a view killed each time the
+    /// app is suspended recovers each time up to it, whether or not its last reload had painted
+    /// (WebKit may not paint while the app is in the background, so a reload made during a
+    /// background launch can be killed unseen), and a page that crashes WebKit costs that many
+    /// reloads. When this answers `false` the caller leaves the signature recorded, so nothing
+    /// reloads the content until it or its signature changes.
     func admitsReloadAfterWebContentTermination(content: String, reloadSignature: String) -> Bool {
         if var reload = webContentTerminationReload,
            reload.content == content,
            reload.reloadSignature == reloadSignature {
-            guard reload.wasDisplayed,
-                  reload.count < Self.maximumWebContentTerminationReloads else {
+            guard reload.count < Self.maximumWebContentTerminationReloads else {
                 return false
             }
             reload.count += 1
-            reload.wasDisplayed = false
             webContentTerminationReload = reload
             return true
         }
         webContentTerminationReload = WebContentTerminationReload(
             content: content,
             reloadSignature: reloadSignature,
-            count: 1,
-            wasDisplayed: false
+            count: 1
         )
         return true
-    }
-
-    /// The current load was displayed: the reader confirmed its paint, the preview finished it.
-    /// After a termination's reload this lets a later termination reload again.
-    func recordDisplayedAfterWebContentTermination() {
-        webContentTerminationReload?.wasDisplayed = true
     }
 
     /// A navigation that failed because its WebContent process died. The coordinators ignore it:

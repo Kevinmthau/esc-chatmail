@@ -492,72 +492,40 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertTrue(adopter.checkins.isEmpty, "A dead view is never checked back in")
     }
 
-    // Revert-check: fails if the reader's handler resets the signature on every termination (drop
-    // the `admitsReloadAfterWebContentTermination` guard, or its `wasDisplayed` condition): the
-    // second termination of a reload that never painted then reloads, and so does every
-    // `updateWebView` after it, which is a page that crashes WebKit reloading for as long as the
-    // reader is open.
-    func testWebContentTermination_beforeTheReloadPainted_doesNotReloadAgain() {
+    // Revert-check: fails if `admitsReloadAfterWebContentTermination` loses its
+    // `maximumWebContentTerminationReloads` bound, or the reader's handler resets the signature on
+    // every termination (drop its `admitsReloadAfterWebContentTermination` guard): a page that
+    // crashes WebKit then reloads at every termination, and at every `updateWebView` after it, for
+    // as long as the reader is open. No reload here ever paints, which is also the case of a reload
+    // made during a background launch and killed before it could paint: those reload too.
+    func testWebContentTermination_reloadsUpToTheCapThenLeavesTheSignatureRecorded() {
         var loadFailedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(
             makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 }),
             paintConfirmer: DeferredPaintConfirmer()
         )
         let webView = RecordingReaderWebView()
+        let cap = EmailWebViewLoadCoordination.maximumWebContentTerminationReloads
         coordinator.loadContentIfReady(in: webView)
         coordinator.webView(webView, didFinish: nil)
-        XCTAssertEqual(webView.loadedHTML.count, 1)
 
-        coordinator.webViewWebContentProcessDidTerminate(webView)
-        XCTAssertEqual(webView.loadedHTML.count, 2)
-        coordinator.webView(webView, didFinish: nil)
+        for _ in 0..<cap {
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+        }
+        XCTAssertEqual(webView.loadedHTML.count, 1 + cap, "Every termination up to the cap reloads")
 
         coordinator.webViewWebContentProcessDidTerminate(webView)
         coordinator.loadContentIfReady(in: webView)
 
-        XCTAssertEqual(webView.loadedHTML.count, 2)
+        XCTAssertEqual(webView.loadedHTML.count, 1 + cap)
         XCTAssertFalse(coordinator.needsReload)
-        XCTAssertEqual(loadFailedCount, 2, "Each termination still restores the placeholder")
+        XCTAssertEqual(loadFailedCount, cap + 1, "Each termination still restores the placeholder")
 
         coordinator.updateParent(makeReader(message: nil, htmlContent: "<p>Changed</p>"))
         coordinator.loadContentIfReady(in: webView)
         XCTAssertEqual(webView.loadedHTML.last, "<p>Changed</p>", "New content loads as before")
         coordinator.webViewWebContentProcessDidTerminate(webView)
-        XCTAssertEqual(webView.loadedHTML.count, 4, "New content has a termination reload of its own")
-    }
-
-    // Revert-check: fails if `completePaintGate` stops calling
-    // `recordDisplayedAfterWebContentTermination` (a second jetsam of a reader that recovered and
-    // painted is not reloaded, and the reader stays dead until it is reopened), or if
-    // `admitsReloadAfterWebContentTermination` loses its `maximumWebContentTerminationReloads`
-    // bound (a page that paints and then crashes reloads without end).
-    func testWebContentTermination_afterEachReloadPainted_reloadsAgainUpToTheCap() {
-        let paintConfirmer = DeferredPaintConfirmer()
-        let coordinator = FullEmailReaderWebView.Coordinator(
-            makeReader(message: nil),
-            paintConfirmer: paintConfirmer
-        )
-        let webView = RecordingReaderWebView()
-        coordinator.loadContentIfReady(in: webView)
-        coordinator.webView(webView, didFinish: nil)
-        paintConfirmer.completeNext()
-
-        for _ in 0..<EmailWebViewLoadCoordination.maximumWebContentTerminationReloads {
-            coordinator.webViewWebContentProcessDidTerminate(webView)
-            coordinator.webView(webView, didFinish: nil)
-            paintConfirmer.completeNext()
-        }
-        XCTAssertEqual(
-            webView.loadedHTML.count,
-            1 + EmailWebViewLoadCoordination.maximumWebContentTerminationReloads,
-            "Each termination after a painted reload reloads"
-        )
-
-        coordinator.webViewWebContentProcessDidTerminate(webView)
-        coordinator.loadContentIfReady(in: webView)
-
-        XCTAssertEqual(webView.loadedHTML.count, 1 + EmailWebViewLoadCoordination.maximumWebContentTerminationReloads)
-        XCTAssertFalse(coordinator.needsReload)
+        XCTAssertEqual(webView.loadedHTML.count, 3 + cap, "New content has termination reloads of its own")
     }
 
     // Revert-check: fails if `completeAdoptionCallbacksIfActive` loses its
@@ -602,7 +570,9 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         )
         let webView = RecordingReaderWebView()
         coordinator.loadContentIfReady(in: webView)
-        coordinator.webViewWebContentProcessDidTerminate(webView)
+        for _ in 0..<EmailWebViewLoadCoordination.maximumWebContentTerminationReloads {
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+        }
         coordinator.webView(webView, didFinish: nil)
         XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
 

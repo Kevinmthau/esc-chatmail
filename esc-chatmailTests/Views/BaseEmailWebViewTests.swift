@@ -162,48 +162,25 @@ final class BaseEmailWebViewTests: XCTestCase {
 
     // Revert-check: fails if `BaseEmailWebView.Coordinator.webViewWebContentProcessDidTerminate`
     // stops reloading (the preview stays blank: `needsReload` compares only the recorded
-    // signature), or reloads on every termination (drop its
-    // `admitsReloadAfterWebContentTermination` guard: a second termination before the reload
-    // finished, and every update after it, reload a page that crashes WebKit as it loads).
-    func testWebContentTermination_beforeTheReloadFinished_reloadsOnlyOnce() {
+    // signature), or reloads past the cap (drop its `admitsReloadAfterWebContentTermination`
+    // guard: a page that crashes WebKit then reloads at every termination and every update after
+    // it). No reload here finishes, so a reload killed before it could show still counts.
+    func testWebContentTermination_reloadsUpToTheCapThenLeavesTheSignatureRecorded() {
         let view = makeWebView(message: nil, html: "<p>Preview</p>")
         let coordinator = BaseEmailWebView.Coordinator(view)
         let webView = RecordingPreviewWebView()
+        let cap = EmailWebViewLoadCoordination.maximumWebContentTerminationReloads
         coordinator.loadContentIfReady(in: webView)
         coordinator.webView(webView, didFinish: nil)
 
-        coordinator.webViewWebContentProcessDidTerminate(webView)
-        XCTAssertEqual(webView.loadedHTML, ["<p>Preview</p>", "<p>Preview</p>"])
+        for _ in 0..<cap {
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+        }
+        XCTAssertEqual(webView.loadedHTML, Array(repeating: "<p>Preview</p>", count: 1 + cap))
         XCTAssertTrue(webView.loadedRequests.isEmpty, "Nothing is loaded by URL, the base URL included")
 
         coordinator.webViewWebContentProcessDidTerminate(webView)
         coordinator.updateParent(view)
-        coordinator.loadContentIfReady(in: webView)
-
-        XCTAssertEqual(webView.loadedHTML.count, 2)
-        XCTAssertFalse(coordinator.needsReload)
-    }
-
-    // Revert-check: fails if the preview's `didFinish` stops calling
-    // `recordDisplayedAfterWebContentTermination` (a preview killed again after it recovered stays
-    // blank), or if `admitsReloadAfterWebContentTermination` loses its
-    // `maximumWebContentTerminationReloads` bound (a page that loads and then crashes reloads
-    // without end).
-    func testWebContentTermination_afterEachReloadFinished_reloadsAgainUpToTheCap() {
-        let view = makeWebView(message: nil, html: "<p>Preview</p>")
-        let coordinator = BaseEmailWebView.Coordinator(view)
-        let webView = RecordingPreviewWebView()
-        coordinator.loadContentIfReady(in: webView)
-        coordinator.webView(webView, didFinish: nil)
-        let cap = EmailWebViewLoadCoordination.maximumWebContentTerminationReloads
-
-        for _ in 0..<cap {
-            coordinator.webViewWebContentProcessDidTerminate(webView)
-            coordinator.webView(webView, didFinish: nil)
-        }
-        XCTAssertEqual(webView.loadedHTML.count, 1 + cap)
-
-        coordinator.webViewWebContentProcessDidTerminate(webView)
         coordinator.loadContentIfReady(in: webView)
 
         XCTAssertEqual(webView.loadedHTML.count, 1 + cap)

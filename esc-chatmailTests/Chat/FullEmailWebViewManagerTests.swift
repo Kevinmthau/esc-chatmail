@@ -855,8 +855,9 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
     // MARK: WebContent process termination
 
     // Revert-check: fails if `WarmNavigationDelegate.webViewWebContentProcessDidTerminate` is
-    // removed, or `handleWarmWebContentTermination` stops removing the entry: checkout then hands
-    // the dead view out as ready, because `didFinishInitialLoad` is never cleared.
+    // removed (the entry stays, still marked finished, and checkout hands the dead view out as
+    // ready), or `handleWarmWebContentTermination` stops removing the entry (it stays tracked,
+    // unready, and keeps every later warm of the same key from replacing it).
     func testWebContentTermination_ofWarmIdleEntry_dropsEntryKeepsPayloadAndNeverChecksOut() throws {
         let fixture = makePrepaintedFixture(id: "terminated-idle")
         let manager = fixture.manager

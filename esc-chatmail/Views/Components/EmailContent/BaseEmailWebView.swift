@@ -297,7 +297,6 @@ struct BaseEmailWebView: WebViewRepresentable {
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
             isLoading = false
             recordFinishedLoad()
-            coordination.recordDisplayedAfterWebContentTermination()
             schedulePreviewHeightMeasurement(
                 in: webView,
                 generation: previewMeasurementGeneration
@@ -325,9 +324,9 @@ struct BaseEmailWebView: WebViewRepresentable {
         /// also stops WebKit's own reload, which loads a pending load's base URL from the network
         /// (see `FullEmailReaderWebView.Coordinator.webViewWebContentProcessDidTerminate`). The
         /// preview reloads the content it holds, never the base URL, as often as
-        /// `admitsReloadAfterWebContentTermination` allows (again only after the last reload
-        /// finished, at most three times for one content and signature), so a page that crashes
-        /// WebKit is not reloaded for as long as it is on screen.
+        /// `admitsReloadAfterWebContentTermination` allows (at most three times for one content
+        /// and signature), so a page that crashes WebKit is not reloaded for as long as it is on
+        /// screen.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             Log.warning(
                 "Preview WebContent process terminated messageId=\(Log.hashIdentifier(parent.message?.id))",
