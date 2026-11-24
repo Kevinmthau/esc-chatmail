@@ -109,17 +109,27 @@ type AddressScanMode = 'phrase' | 'quote' | 'comment' | 'angle' | 'angleQuote'
  * reading UTF-16 code units here finds them where Swift's Unicode scalars do.
  */
 export function addressTokens(headerValue: string): string[] {
-  const tokens: string[] = []
-  let current = ''
+  return addressTokenRanges(headerValue).map(([start, end]) => headerValue.slice(start, end))
+}
+
+/**
+ * Where each of `addressTokens`' tokens sits in `headerValue` as `[start,
+ * end)`, trimmed of whitespace, empty tokens left out (port of
+ * EmailAddressListParser.addressTokenRanges).
+ */
+export function addressTokenRanges(headerValue: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = []
+  let tokenStart = 0
   let mode: AddressScanMode = 'phrase'
   let commentDepth = 0
   let previousWasEscape = false
 
-  const push = (token: string) => {
-    const trimmed = token.trim()
-    if (trimmed.length > 0) {
-      tokens.push(trimmed)
-    }
+  const push = (start: number, end: number) => {
+    let lower = start
+    let upper = end
+    while (lower < upper && /\s/.test(headerValue.charAt(lower))) lower += 1
+    while (lower < upper && /\s/.test(headerValue.charAt(upper - 1))) upper -= 1
+    if (lower < upper) ranges.push([lower, upper])
   }
 
   for (let index = 0; index < headerValue.length; index++) {
@@ -166,16 +176,14 @@ export function addressTokens(headerValue: string): string[] {
     }
 
     if (splitsHere) {
-      push(current)
-      current = ''
-    } else {
-      current += character
+      push(tokenStart, index)
+      tokenStart = index + 1
     }
     previousWasEscape = character === '\\' && !isEscaped
   }
 
-  push(current)
-  return tokens
+  push(tokenStart, headerValue.length)
+  return ranges
 }
 
 /** Where a mailbox's address sits in one address token. */
@@ -195,11 +203,13 @@ export interface MailboxAddressMatch {
  *    `<` restarts the angle-addr, so an unmatched bracket in a name never
  *    captures name text;
  * 2. else the first bare address outside quoted strings and comments;
- * 3. else the last `<…@…>` anywhere, quoted or not, which reads a token
- *    written wholly in quotes (`"John Doe <john@x.com>"`) and one whose quote
- *    or comment never closes. In the second case step 1 has already taken
- *    any address before the quote opened, so this is never the first of two
- *    addresses.
+ * 3. else, only where a quote or comment never closes, the last `<…@…>`
+ *    anywhere: step 1 has already taken any address before it opened, so this
+ *    is never the first of two addresses. A token whose quotes and comments
+ *    all close and that has no address outside them has none
+ *    (`"<boss@corp.example>"`, `"John Doe <john@x.com>"`): read as an address,
+ *    a quoted one became a mailbox of its own ahead of the real one
+ *    (`"<boss@corp.example>", <x@attacker.example>`).
  *
  * A display name is the sender's: `"Boss <boss@corp.example>"
  * <x@attacker.example>` is one legal mailbox, x@attacker.example, and taking
@@ -274,6 +284,7 @@ export function mailboxAddress(token: string): MailboxAddressMatch | null {
   const bare = firstBareEmailMatch(phrase)
   if (bare !== null) return { email: bare.email, angleStart: null }
 
+  if (mode !== 'quote' && mode !== 'comment') return null
   let lastBracketed: MailboxAddressMatch | null = null
   for (const match of token.matchAll(new RegExp(BRACKETED_EMAIL_SOURCE, 'g'))) {
     const email = match[1]
@@ -282,10 +293,27 @@ export function mailboxAddress(token: string): MailboxAddressMatch | null {
   return lastBracketed
 }
 
+/**
+ * The first mailbox of `value` that holds an address: the text from the first
+ * token through the first token with an address, and that address (port of
+ * EmailNormalizer.firstMailbox).
+ *
+ * Tokens before it hold no address at all (not even quoted), so they are a
+ * name with a comma no one quoted: `The River Club of NY, Inc <…>` in a
+ * forwarded message's From line, or an encoded word with a raw comma
+ * (`=?utf-8?Q?Doe,Jane?= <…>`). They stay in the name. Joining them adds no
+ * address: each starts in the phrase, where the comma left the scan, and none
+ * has an address for `mailboxAddress` to take. `parseEmailAddresses` reads
+ * each token alone, as the To and Cc parser always has.
+ */
 function firstMailbox(value: string): { token: string; match: MailboxAddressMatch } | null {
-  for (const token of addressTokens(value)) {
+  const ranges = addressTokenRanges(value)
+  const first = ranges[0]
+  for (const [start, end] of ranges) {
+    if (first === undefined || mailboxAddress(value.slice(start, end)) === null) continue
+    const token = value.slice(first[0], end)
     const match = mailboxAddress(token)
-    if (match !== null) return { token, match }
+    return match === null ? null : { token, match }
   }
   return null
 }

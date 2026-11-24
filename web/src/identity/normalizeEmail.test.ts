@@ -125,9 +125,20 @@ describe('extractEmail skips quoted names and comments', () => {
     expect(isEmailAddressShapedDisplayName(name ?? '')).toBe(true)
   })
 
-  it('still reads a mailbox written wholly in quotes', () => {
-    expect(extractEmail('"John Doe <john@x.com>"')).toBe('john@x.com')
-    expect(extractDisplayName('"John Doe <john@x.com>"')).toBe('John Doe')
+  // Revert-check: letting step 3 of `mailboxAddress` read a token whose
+  // quotes all close reads boss@corp.example first.
+  it('reads no address that sits only inside a closed quote', () => {
+    expect(extractEmail('"John Doe <john@x.com>"')).toBeNull()
+    expect(extractEmail('"<boss@corp.example>", <x@attacker.example>')).toBe('x@attacker.example')
+  })
+
+  // Revert-check: reading only the first token with an address in
+  // `firstMailbox` gives `Inc` and `Jane?=`.
+  it('keeps the part of a name before a comma no one quoted', () => {
+    const value = 'The River Club of NY, Inc <events@example.com>'
+    expect(extractDisplayName(value)).toBe('The River Club of NY, Inc')
+    expect(extractEmail(value)).toBe('events@example.com')
+    expect(extractDisplayName('=?utf-8?Q?Doe,Jane?= <jane@example.com>')).toBe('Doe,Jane')
   })
 
   it('reads the first mailbox of a list', () => {

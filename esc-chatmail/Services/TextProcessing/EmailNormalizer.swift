@@ -82,11 +82,13 @@ class EmailNormalizer {
     ///    nested `<` restarts the angle-addr, so an unmatched bracket in a
     ///    name never captures name text;
     /// 2. else the first bare address outside quoted strings and comments;
-    /// 3. else the last `<…@…>` anywhere, quoted or not, which reads a token
-    ///    written wholly in quotes (`"John Doe <john@x.com>"`) and one whose
-    ///    quote or comment never closes. In the second case step 1 has already
-    ///    taken any address before the quote opened, so this is never the
-    ///    first of two addresses.
+    /// 3. else, only where a quote or comment never closes, the last `<…@…>`
+    ///    anywhere: step 1 has already taken any address before it opened, so
+    ///    this is never the first of two addresses. A token whose quotes and
+    ///    comments all close and that has no address outside them has none
+    ///    (`"<boss@corp.example>"`, `"John Doe <john@x.com>"`): read as an
+    ///    address, a quoted one became a mailbox of its own ahead of the real
+    ///    one (`"<boss@corp.example>", <x@attacker.example>`).
     ///
     /// Quoted strings and comments follow RFC 5322 as `addressTokens` does:
     /// a backslash escapes the next character, comments nest, and inside the
@@ -171,6 +173,7 @@ class EmailNormalizer {
         if let bare = firstBareEmailMatch(in: String(phraseScalars)) {
             return MailboxAddressMatch(email: bare.email, angleStart: nil)
         }
+        guard mode == .quote || mode == .comment else { return nil }
         if let regex = bracketedEmailRegex,
            let match = regex.matches(in: token, range: NSRange(token.startIndex..., in: token)).last,
            let range = Range(match.range(at: 1), in: token),
@@ -180,12 +183,26 @@ class EmailNormalizer {
         return nil
     }
 
-    /// The first token of `string` that holds an address, with that address.
+    /// The first mailbox of `string` that holds an address: the text from the
+    /// first token through the first token with an address, and that address.
+    ///
+    /// Tokens before it hold no address at all (not even quoted), so they are
+    /// a name with a comma no one quoted: `The River Club of NY, Inc <…>` in a
+    /// forwarded message's From line, or an encoded word with a raw comma
+    /// (`=?utf-8?Q?Doe,Jane?= <…>`). They stay in the name. Read on their own
+    /// they gave a name of `Inc` or `Jane?=`. Joining them adds no address:
+    /// each starts in the phrase, where the comma left the scan, and none has
+    /// an address for `mailboxAddress(inToken:)` to take.
+    /// `EmailAddressListParser.mailboxes(from:)` reads each token alone, as
+    /// the To and Cc parser always has.
     private static func firstMailbox(in string: String) -> (token: String, match: MailboxAddressMatch)? {
-        for token in EmailAddressListParser.addressTokens(from: string) {
-            if let match = mailboxAddress(inToken: token) {
-                return (token, match)
-            }
+        let scalars = string.unicodeScalars
+        let ranges = EmailAddressListParser.addressTokenRanges(from: string)
+        for range in ranges {
+            guard mailboxAddress(inToken: String(scalars[range])) != nil else { continue }
+            let mailbox = String(scalars[ranges[0].lowerBound..<range.upperBound])
+            guard let match = mailboxAddress(inToken: mailbox) else { return nil }
+            return (mailbox, match)
         }
         return nil
     }

@@ -189,14 +189,23 @@ struct EmailAddressListParser {
     /// quotes, comments and escapes by the same rules, and so does the web
     /// app's port (`web/src/identity/normalizeEmail.ts`).
     static func addressTokens(from headerValue: String) -> [String] {
+        addressTokenRanges(from: headerValue).map { String(headerValue.unicodeScalars[$0]) }
+    }
+
+    /// Where each of `addressTokens(from:)`'s tokens sits in `headerValue`,
+    /// trimmed of whitespace, empty tokens left out.
+    static func addressTokenRanges(from headerValue: String) -> [Range<String.Index>] {
         enum Mode { case phrase, quote, comment, angle, angleQuote }
-        var tokens: [String] = []
-        var current = String.UnicodeScalarView()
+        let scalars = headerValue.unicodeScalars
+        var ranges: [Range<String.Index>] = []
+        var tokenStart = scalars.startIndex
         var mode = Mode.phrase
         var commentDepth = 0
         var previousWasEscape = false
 
-        for scalar in headerValue.unicodeScalars {
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
             let isEscaped = previousWasEscape
             var splitsHere = false
             switch mode {
@@ -239,17 +248,17 @@ struct EmailAddressListParser {
                 }
             }
 
+            let next = scalars.index(after: index)
             if splitsHere {
-                appendToken(String(current), to: &tokens)
-                current.removeAll(keepingCapacity: true)
-            } else {
-                current.append(scalar)
+                appendTrimmedRange(tokenStart..<index, of: scalars, to: &ranges)
+                tokenStart = next
             }
             previousWasEscape = scalar == "\\" && !isEscaped
+            index = next
         }
 
-        appendToken(String(current), to: &tokens)
-        return tokens
+        appendTrimmedRange(tokenStart..<scalars.endIndex, of: scalars, to: &ranges)
+        return ranges
     }
 
     /// Every mailbox in an address header value, with its normalized address
@@ -273,10 +282,21 @@ struct EmailAddressListParser {
         }
     }
 
-    private static func appendToken(_ token: String, to tokens: inout [String]) {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            tokens.append(trimmed)
+    private static func appendTrimmedRange(
+        _ range: Range<String.Index>,
+        of scalars: String.UnicodeScalarView,
+        to ranges: inout [Range<String.Index>]
+    ) {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+        while lower < upper, CharacterSet.whitespacesAndNewlines.contains(scalars[lower]) {
+            lower = scalars.index(after: lower)
+        }
+        while lower < upper, CharacterSet.whitespacesAndNewlines.contains(scalars[scalars.index(before: upper)]) {
+            upper = scalars.index(before: upper)
+        }
+        if lower < upper {
+            ranges.append(lower..<upper)
         }
     }
 }

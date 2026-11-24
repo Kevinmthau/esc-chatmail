@@ -966,9 +966,27 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(name ?? ""))
     }
 
-    func testExtractEmail_mailboxWrittenWhollyInQuotes_stillReadsItsAddress() {
-        XCTAssertEqual(EmailNormalizer.extractEmail(from: #""John Doe <john@x.com>""#), "john@x.com")
-        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: #""John Doe <john@x.com>""#), "John Doe")
+    /// Revert-check: letting step 3 of `mailboxAddress(inToken:)` read a
+    /// token whose quotes all close reads boss@corp.example first.
+    func testExtractEmail_addressOnlyInsideAClosedQuote_isNoAddress() {
+        XCTAssertNil(EmailNormalizer.extractEmail(from: #""John Doe <john@x.com>""#))
+        XCTAssertEqual(
+            EmailNormalizer.extractEmail(from: #""<boss@corp.example>", <x@attacker.example>"#),
+            "x@attacker.example"
+        )
+    }
+
+    /// A name with a comma no one quoted keeps the part before the comma.
+    /// Revert-check: reading only the first token with an address in
+    /// `EmailNormalizer.firstMailbox` gives `Inc` and `Jane?=`.
+    func testExtractDisplayName_unquotedCommaInName_keepsTheWholeName() {
+        let value = "The River Club of NY, Inc <events@example.com>"
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: value), "The River Club of NY, Inc")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: value), "events@example.com")
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "=?utf-8?Q?Doe,Jane?= <jane@example.com>"),
+            "Doe,Jane"
+        )
     }
 
     func testExtractEmail_list_readsTheFirstMailbox() {
