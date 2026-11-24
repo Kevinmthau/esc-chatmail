@@ -454,8 +454,9 @@ final class FullEmailReaderWebViewTests: XCTestCase {
     // MARK: WebContent process termination
 
     // Revert-check: fails if `FullEmailReaderWebView.Coordinator.webViewWebContentProcessDidTerminate`
-    // stops calling `discard` (the pool would re-host the dead view at dismantle: `reclaim` would
-    // check it in), stops calling `onLoadFailed` (the placeholder stays gone over a blank view), or
+    // stops calling `discard` (the pool keeps a checked-out entry for the dead view, which blocks
+    // every warm and prepaint of the message until LRU eviction), stops calling `onLoadFailed`
+    // (the placeholder stays gone over a blank view), or
     // stops reloading (the reader stays blank, because `needsReload` compares only the recorded
     // signature). Each was reverted on its own.
     func testWebContentTermination_adoptedReader_discardsPooledViewRestoresPlaceholderAndReloadsOwnContent() {
@@ -487,7 +488,7 @@ final class FullEmailReaderWebViewTests: XCTestCase {
             webView.loadedBaseURLs,
             [FullInteractiveEmailWebView.baseURL(message: message, senderEmail: nil)]
         )
-        XCTAssertTrue(webView.loadedRequests.isEmpty, "Nothing is loaded by URL, the base URL included")
+        XCTAssertTrue(webView.loadedRequests.isEmpty, "The coordinator loads no URL request")
         XCTAssertFalse(coordinator.reclaimPrerenderedWebViewIfNeeded(webView))
         XCTAssertTrue(adopter.checkins.isEmpty, "A dead view is never checked back in")
     }
@@ -582,9 +583,10 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertEqual(loadFinishedCount, 0)
     }
 
-    // Revert-check: fails if `didFail` loses its `isWebContentProcessTerminationError` guard: the
-    // failure resets the signature that the termination's reload recorded, and the next update
-    // loads the same content again behind the latch's back.
+    // Revert-check: fails if `didFail` or `didFailProvisionalNavigation` loses its
+    // `isWebContentProcessTerminationError` guard (each reverted on its own): the failure resets
+    // the signature that the termination's reload recorded, and the next update loads the same
+    // content again behind the latch's back.
     func testWebContentTermination_failureReportedForTheDeadNavigation_doesNotRearmAReload() {
         var loadFailedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(

@@ -606,8 +606,9 @@ protocol FullEmailWebViewAdopting: AnyObject {
     /// Forgets a checked-out web view whose WebContent process terminated, so the pool never
     /// re-hosts it or hands it out as ready again. The reader is the view's navigation delegate
     /// while it holds it, so the pool cannot hear of the termination itself. The entry is matched
-    /// by the view's identity and dropped with no teardown, because the reader still shows the view
-    /// and reloads its own content into it; the prepared payload is kept.
+    /// by the view's identity; a checked-out entry is dropped with no teardown, because the reader
+    /// still shows the view and reloads its own content into it (one still hosted off screen is
+    /// torn down as usual). The prepared payload is kept.
     func discard(messageId: String, webView: WKWebView)
 }
 

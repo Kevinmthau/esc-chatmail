@@ -967,7 +967,12 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
 
         delegate.webView?(checkout.webView, didFinish: nil)
         // Snapshots of a view complete in order, so this one returns after any `finalizeWarm` began.
-        _ = try? await checkout.webView.takeSnapshot(configuration: nil)
+        // Bounded, so a WebKit that leaves it pending fails the test rather than hanging the run.
+        let snapshotReturned = expectation(description: "The later snapshot returned")
+        checkout.webView.takeSnapshot(with: nil) { _, _ in
+            snapshotReturned.fulfill()
+        }
+        await fulfillment(of: [snapshotReturned], timeout: 10)
 
         XCTAssertFalse(manager.isWarmedForTesting(messageId: fixture.messageId))
         checkout.webView.removeFromSuperview()

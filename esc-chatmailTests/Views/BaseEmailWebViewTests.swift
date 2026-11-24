@@ -177,7 +177,7 @@ final class BaseEmailWebViewTests: XCTestCase {
             coordinator.webViewWebContentProcessDidTerminate(webView)
         }
         XCTAssertEqual(webView.loadedHTML, Array(repeating: "<p>Preview</p>", count: 1 + cap))
-        XCTAssertTrue(webView.loadedRequests.isEmpty, "Nothing is loaded by URL, the base URL included")
+        XCTAssertTrue(webView.loadedRequests.isEmpty, "The coordinator loads no URL request")
 
         coordinator.webViewWebContentProcessDidTerminate(webView)
         coordinator.updateParent(view)
