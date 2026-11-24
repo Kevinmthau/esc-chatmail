@@ -58,7 +58,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// A formatting element an end tag passes over stays counted, as the
     /// tree builder may rebuild it, so `<div><b>x</div>` over and over
     /// passes the limit for a tree it keeps shallow; the measured parse
-    /// admits it.
+    /// admits it. Its 800 kept `b`s are one name and attributes, of which
+    /// the active formatting list keeps three, so their rebuilding costs
+    /// little. Revert-check: `TokenizingScanner.sameFormattingKept` (counting
+    /// every kept `b` refuses this as too costly).
     func testParseDocument_overCountedShallowBody_isAdmittedByTheMeasuredParse() throws {
         let html = String(repeating: "<div><b>x</div>", count: 800)
         XCTAssertGreaterThan(EmailDOMParseAdmission.estimatedDepth(of: html), EmailDOMParseAdmission.maximumDepth)
@@ -208,6 +211,85 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 .tooCostlyToParse(work: cost.formattingCompareWork, limit: EmailDOMParseAdmission.maximumFormattingCompareWork)
             )
         }
+    }
+
+    /// A formatting element the tree builder closed but keeps is rebuilt
+    /// before every later run of text and start tag, and each rebuild
+    /// copies its attributes, quadratically (a `b` of 300 attributes left
+    /// open in a `p`, rebuilt 2,000 times, took 2.7 s; of 1,000, 30 s).
+    /// Revert-check: `rebuildCostAcrossTokens` in `EmailDOMParseAdmission.estimate`.
+    func testParseDocument_attributeHeavyFormattingRebuiltOften_isRefusedAsTooCostly() {
+        let attributes = (0..<300).map { " a\($0)=1" }.joined()
+        let html = "<p><b\(attributes)>" + String(repeating: "x</p><p>", count: 2_000)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertLessThanOrEqual(cost.formattingCompareWork, EmailDOMParseAdmission.maximumFormattingCompareWork)
+        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
+            )
+        }
+    }
+
+    /// Each rebuild first searches the open elements for each kept element,
+    /// so many kept elements under a deep stack cost their count × depth at
+    /// every token (1,000 `b`s left open below 1,000 `div`s, rebuilt 500
+    /// times, took 12 s for 18 KB).
+    /// Revert-check: `rebuildCandidatesAcrossTokens` in `EmailDOMParseAdmission.estimate`.
+    func testParseDocument_manyKeptFormattingElementsUnderADeepStack_isRefusedAsTooCostly() {
+        let html = String(repeating: "<div>", count: 1_000) + "<p>"
+            + (0..<1_000).map { "<b x=\($0)>" }.joined() + String(repeating: "x</p><p>", count: 500)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// Every run of text searches the open elements too, and `<?>` or a
+    /// comment splits text without a tag (`<b>`, 6,000 `<div>`s and 400,000
+    /// `x<?>` took 55 s; 500 `<div>`s, 5 s on the caller's thread).
+    /// Revert-check: `StartTagCount.tokenCount` counting every `<` (counting
+    /// only `<` and a letter admits this).
+    func testParseDocument_textSplitWithoutTags_isChargedPerRun() {
+        let html = "<b>" + String(repeating: "<div>", count: 500) + String(repeating: "x<?>", count: 400_000)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// Where the second scan cannot follow the markup (here after a
+    /// `select`), a formatting tag's attributes are read from every place
+    /// one could start, a `>` in a quoted value included, and every earlier
+    /// formatting tag counts as rebuilt at every token with the most of them.
+    /// Revert-check: `FormattingAttributeBound.maximumAttributeCount` (with
+    /// it returning 0 this is admitted, and its parse takes 2.7 s in Release).
+    func testParseDocument_attributeHeavyFormattingAfterASelect_isRefusedAsTooCostly() {
+        let attributes = (0..<300).map { " a\($0)=1" }.joined()
+        let html = "<select></select><p><b a=\">\"\(attributes)>" + String(repeating: "x</p><p>", count: 2_000)
+        XCTAssertFalse(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html).followed)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// Reading every place a formatting tag could start must stay linear
+    /// however the reads overlap: in `<b/a=y<b/a=y…` every one runs to the
+    /// end. On its own thread, so a regression fails by timeout.
+    /// HONEST SCOPE: the reads are merged by state by construction
+    /// (`FormattingAttributeBound`), so no single line reverts to the
+    /// quadratic reading; this pins that the estimate stays fast.
+    func testEstimatedCost_overlappingFormattingTagReadsAfterASelect_isLinear() {
+        let html = "<select><b/a=" + String(repeating: "y<b/a=", count: 200_000)
+        let done = expectation(description: "estimate")
+        let thread = Thread {
+            _ = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            done.fulfill()
+        }
+        thread.start()
+        wait(for: [done], timeout: 20)
     }
 
     /// An ordinary title costs next to nothing, in a body long enough that
@@ -461,20 +543,54 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         }
     }
 
-    /// A `noscript` is raw text in the head and markup in the body, which no
-    /// scan of the bytes can tell apart, so a body naming one keeps the first
-    /// scan's count. Here SwiftSoup reads the head's `<noscript><script>` as
-    /// text up to `</noscript>`, while the second scan takes the `script`
-    /// for a script that runs to the end, and misses the divs.
-    /// Revert-check: the `noscript` rule that sets `readModeDependentTag` in
-    /// `TokenizingScanner.openElement`.
-    func testEstimate_noscriptBody_keepsTheFirstScansCount() {
+    /// In the head SwiftSoup reads every tag inside a `noscript` as text,
+    /// so the head's `<noscript><script>` is text up to `</noscript>`, and
+    /// the divs after it are markup. The second scan follows that where the
+    /// tree builder is certainly still in the head; taking the `script` for
+    /// a script that runs to the end, it missed the divs.
+    /// Revert-check: `TokenizingScanner.headNoscriptTag`.
+    func testEstimate_noscriptInTheHead_isFollowed() {
         let html = "<noscript><script></noscript>" + String(repeating: "<div>", count: 600)
         let actual = Self.swiftSoupDocumentDepth(html)
         XCTAssertGreaterThan(actual, 600)
-        XCTAssertLessThan(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), actual)
+        let followed = EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html)
+        XCTAssertTrue(followed.followed)
+        XCTAssertGreaterThanOrEqual(followed.depth, actual)
         XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), actual)
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// Where the scan cannot be certain the tree builder is still in the
+    /// head (here a character reference, which SwiftSoup reads as the
+    /// whitespace it is), a `noscript` keeps the first scan's count, since
+    /// in the body its content is markup.
+    /// Revert-check: the text rule for `certainlyInHead` in
+    /// `TokenizingScanner.run`.
+    func testEstimate_noscriptWhereTheHeadIsUncertain_keepsTheFirstScansCount() {
+        let html = "&#32;<noscript><script></noscript>" + String(repeating: "<div>", count: 600)
+        let actual = Self.swiftSoupDocumentDepth(html)
+        XCTAssertGreaterThan(actual, 600)
+        XCTAssertFalse(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html).followed)
+        XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), actual)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// A newsletter whose head holds a `noscript` (a tracking pixel's
+    /// stylesheet) is read precisely and admitted. Counted as if every
+    /// earlier formatting tag were held at every token, this one was
+    /// refused as too costly and shown as escaped text.
+    /// Revert-check: the `certainlyInHead` branch of the `noscript` rule in
+    /// `TokenizingScanner.openElement` (the body then falls back to the
+    /// pessimistic count and is refused).
+    func testEstimate_newsletterWithNoscriptInTheHead_isAdmitted() {
+        let rows = String(
+            repeating: "<p><a href=\"https://example.com/a\" style=\"color:red\" target=_blank>Item</a> text</p>\n",
+            count: 1_500
+        )
+        let html = "<html><head><meta charset=utf-8><noscript><link rel=stylesheet href=x.css></noscript></head><body>"
+            + rows + "</body></html>"
+        XCTAssertNil(EmailDOMParseAdmission.estimatedCost(of: html).excessWork)
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html))
     }
 
     /// Only a `select` or `frameset` the tokenizer reads, or a `noscript` in
@@ -514,28 +630,30 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             // ran over a million documents off the suite before merging.
             for iteration in 0..<1_000 {
                 let html = generator.document(tokenCount: 40 + iteration % 260)
-                let tokenized = EmailDOMParseAdmission.tokenizedDepthEstimate(of: html)
+                // The second scan's depth is a bound on its own only where it
+                // followed the markup to the end (`readModeDependentTag`).
+                let tokenized = EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html)
                 let combined = EmailDOMParseAdmission.estimatedDepth(of: html)
-                // The second scan may defer to the first for these (`readModeDependentTag`).
-                let lowercased = html.lowercased()
-                let selectOrFrameset = ["<select", "<frameset", "<noscript"].contains { lowercased.contains($0) }
 
                 let documentDepth = Self.swiftSoupDocumentDepth(html)
-                if combined < documentDepth || (!selectOrFrameset && tokenized < documentDepth) {
-                    failures.append("document \(documentDepth) > estimate \(tokenized)/\(combined): \(html.debugDescription)")
+                if combined < documentDepth || (tokenized.followed && tokenized.depth < documentDepth) {
+                    failures.append("document \(documentDepth) > estimate \(tokenized.depth)/\(combined): \(html.debugDescription)")
                 }
+                // A body fragment starts in the body, as `parseBodyFragment` estimates it.
+                let bodyTokenized = EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html, readsHead: false)
+                let bodyCombined = EmailDOMParseAdmission.estimatedCost(of: html, readsHead: false).depth
                 let bodyDepth = Self.swiftSoupFragmentDepth(html, context: "body")
-                if combined < bodyDepth || (!selectOrFrameset && tokenized < bodyDepth) {
-                    failures.append("body fragment \(bodyDepth) > estimate \(tokenized)/\(combined): \(html.debugDescription)")
+                if bodyCombined < bodyDepth || (bodyTokenized.followed && bodyTokenized.depth < bodyDepth) {
+                    failures.append("body fragment \(bodyDepth) > estimate \(bodyTokenized.depth)/\(bodyCombined): \(html.debugDescription)")
                 }
                 // `EmailDOMFragmentParser`'s table-part contexts, estimated
                 // as `EmailDOMParseAdmission.parseFragment` estimates them.
-                let fragmentTokenized = EmailDOMParseAdmission.tokenizedDepthEstimate(of: html, isTableContextFragment: true)
+                let fragmentTokenized = EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: html, isTableContextFragment: true)
                 let fragmentCombined = EmailDOMParseAdmission.estimatedCost(of: html, isTableContextFragment: true).depth
                 for context in ["table", "tbody", "tr", "colgroup"] {
                     let fragmentDepth = Self.swiftSoupFragmentDepth(html, context: context)
-                    if fragmentCombined < fragmentDepth || (!selectOrFrameset && fragmentTokenized < fragmentDepth) {
-                        failures.append("\(context) fragment \(fragmentDepth) > estimate \(fragmentTokenized)/\(fragmentCombined): \(html.debugDescription)")
+                    if fragmentCombined < fragmentDepth || (fragmentTokenized.followed && fragmentTokenized.depth < fragmentDepth) {
+                        failures.append("\(context) fragment \(fragmentDepth) > estimate \(fragmentTokenized.depth)/\(fragmentCombined): \(html.debugDescription)")
                     }
                 }
                 if failures.count > 5 { break }
@@ -749,7 +867,10 @@ private struct TagSoupGenerator {
     }
 
     mutating func document(tokenCount: Int) -> String {
-        var html = ""
+        // A quarter open in the head, so a `noscript` is read as the head's.
+        var html = below(4) == 0
+            ? pick(["<head>", "<html><head><meta charset=utf-8>", " <!--x--><noscript>", "<noscript>", "<title>t</title><NOSCRIPT>"])
+            : ""
         for _ in 0..<tokenCount {
             html += token()
         }

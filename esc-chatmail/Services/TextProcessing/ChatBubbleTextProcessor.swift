@@ -90,7 +90,16 @@ enum ChatBubbleTextProcessor {
         let utf16 = text.utf16
         guard utf16.count > extractedTextUTF16Limit else { return text }
         let nsText = text as NSString
-        let cut = nsText.rangeOfComposedCharacterSequence(at: extractedTextUTF16Limit).location
+        var cut = nsText.rangeOfComposedCharacterSequence(at: extractedTextUTF16Limit).location
+        // One character can be any length (a base and 70,000 combining
+        // marks): cut inside it, between scalars, rather than drop the
+        // text before it.
+        if cut < extractedTextUTF16Limit / 2 {
+            cut = extractedTextUTF16Limit
+            if UTF16.isTrailSurrogate(nsText.character(at: cut)) {
+                cut -= 1
+            }
+        }
         let prefix = nsText.substring(to: cut) as NSString
         let secondHalf = NSRange(location: cut / 2, length: cut - cut / 2)
         let lastLineBreak = prefix.range(of: "\n", options: .backwards, range: secondHalf)

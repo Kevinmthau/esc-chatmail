@@ -241,9 +241,10 @@ export function formatSignOffLineBreaks(text: string): string {
 
 // Each pattern with `.+` starts at a line start, and one with two or three
 // of them bounds each, as in iOS's PlainTextQuoteRemover: unanchored, nested
-// `.+` made a crafted long line quadratic or cubic. Apple's quoted
-// "> On …, at …" stays unanchored (unwrapping can join it to the line above)
-// and is only bounded. Keep the two in step.
+// `.+` made a crafted long line quadratic or cubic. Apple Mail's quoted
+// attributions ("> On …, at …", "> Am … schrieb …" and the other languages')
+// stay unanchored (unwrapping can join them to the line above) and are only
+// bounded. Keep the two in step.
 const QUOTE_INDICATOR_PATTERNS: RegExp[] = [
   // Time-based quotes - English
   /(?:^|\n)On .+ wrote:/i,
@@ -254,11 +255,17 @@ const QUOTE_INDICATOR_PATTERNS: RegExp[] = [
 
   // International quote patterns
   /(?:^|\n)[ \t]*Am .{1,200} schrieb .{1,200}:/i,
+  /> Am .{1,200} schrieb .{1,200}:/i,
   /(?:^|\n)[ \t]*Le .+ a écrit\s*:/i,
+  /> Le .{1,200} a écrit\s*:/i,
   /(?:^|\n)[ \t]*El .+ escribió:/i,
+  /> El .{1,200} escribió:/i,
   /(?:^|\n)[ \t]*Il .+ ha scritto:/i,
+  /> Il .{1,200} ha scritto:/i,
   /(?:^|\n)[ \t]*Em .+ escreveu:/i,
+  /> Em .{1,200} escreveu:/i,
   /(?:^|\n)[ \t]*Op .{1,200} schreef .{1,200}:/i,
+  /> Op .{1,200} schreef .{1,200}:/i,
 
   // Header-based quotes
   /(?:^|\n)[ \t]*From: .+\nSent: .+\nTo: .+\nSubject: .+/i,

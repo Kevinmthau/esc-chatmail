@@ -18,11 +18,13 @@ enum PlainTextQuoteRemover {
     /// bounded, a line costs at most the product of its bounds
     /// (`PlainTextQuoteRemoverPatternCostTests`). An attribution in the middle
     /// of a line, or longer than the bounds, is no longer recognized here;
-    /// `web/src/mime/text.ts` keeps the same patterns. The one exception is
-    /// Apple's quoted "> On …, at …, … wrote:", which stays unanchored and is
-    /// only bounded: the line unwrapping ahead of this pass joins it to the
-    /// sign-off above it ("Jordan > On Feb 15, …"), and it starts at the
-    /// literal "> On ", so each try is bounded and the cost stays linear.
+    /// `web/src/mime/text.ts` keeps the same patterns. The exceptions are
+    /// Apple Mail's quoted attributions ("> On …, at …, … wrote:", "> Am …
+    /// schrieb …:" and the other languages'), which stay unanchored and are
+    /// only bounded: the line unwrapping ahead of this pass joins them to the
+    /// sign-off above ("Jordan > On Feb 15, …"), and each starts at its
+    /// literal "> On ", "> Am "…, so each try is bounded and the cost stays
+    /// linear.
     private static let quoteIndicatorPatternStrings = [
         // Time-based quotes - English
         // Require "On" at start of string or after newline to avoid mid-sentence matches
@@ -36,16 +38,22 @@ enum PlainTextQuoteRemover {
         // International quote patterns
         // German: "Am [date] schrieb [name]:"
         "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:",
+        "> Am .{1,200} schrieb .{1,200}:",
         // French: "Le [date] [name] a écrit :" or "Le [date], [name] a écrit :"
         "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:",
+        "> Le .{1,200} a écrit\\s*:",
         // Spanish: "El [date] [name] escribió:"
         "(?:^|\\n)[ \\t]*El .+ escribió:",
+        "> El .{1,200} escribió:",
         // Italian: "Il [date] [name] ha scritto:"
         "(?:^|\\n)[ \\t]*Il .+ ha scritto:",
+        "> Il .{1,200} ha scritto:",
         // Portuguese: "Em [date] [name] escreveu:"
         "(?:^|\\n)[ \\t]*Em .+ escreveu:",
+        "> Em .{1,200} escreveu:",
         // Dutch: "Op [date] schreef [name]:"
         "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:",
+        "> Op .{1,200} schreef .{1,200}:",
 
         // Header-based quotes - Outlook style (uses "Sent:")
         "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+",
@@ -102,11 +110,17 @@ enum PlainTextQuoteRemover {
         "(?:^|\\n)On .{1,200}, .{1,200} wrote:": " wrote:",
         "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:": " wrote:",
         "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "> Am .{1,200} schrieb .{1,200}:": " schrieb ",
         "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:": " a écrit",
+        "> Le .{1,200} a écrit\\s*:": " a écrit",
         "(?:^|\\n)[ \\t]*El .+ escribió:": " escribió:",
+        "> El .{1,200} escribió:": " escribió:",
         "(?:^|\\n)[ \\t]*Il .+ ha scritto:": " ha scritto:",
+        "> Il .{1,200} ha scritto:": " ha scritto:",
         "(?:^|\\n)[ \\t]*Em .+ escreveu:": " escreveu:",
+        "> Em .{1,200} escreveu:": " escreveu:",
         "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:": " schreef ",
+        "> Op .{1,200} schreef .{1,200}:": " schreef ",
         "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
         "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
         "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",

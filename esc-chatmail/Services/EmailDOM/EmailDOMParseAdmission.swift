@@ -74,10 +74,15 @@ import SwiftSoup
 ///   SwiftSoup reads raw text after some tags in one insertion mode and
 ///   markup in another (`style` inside `select`, anything in a frameset, a
 ///   `noscript` in the head), so once the second scan reads a `select` or
-///   `frameset` start tag, or a `noscript` one before the head has ended,
-///   the first scan's count decides. Up to that tag the second scan reads
-///   as SwiftSoup does, so a name inside a comment or an attribute, or a
-///   `noscript` in the body, changes nothing.
+///   `frameset` start tag, or a `noscript` one before the head has ended
+///   where it cannot be certain the tree builder is still in the head, the
+///   first scan's count decides. Up to that tag the second scan reads as
+///   SwiftSoup does, so a name inside a comment or an attribute, or a
+///   `noscript` in the body, changes nothing. A `noscript` read while the
+///   builder is certainly in the head (a document with nothing before it
+///   but whitespace, comments, declarations and the head's own tags) is
+///   followed: SwiftSoup reads every tag in it as text but `style`,
+///   `noframes` and its `</noscript>`.
 /// `EmailDOMParseAdmissionTests` compares the bound with the depth SwiftSoup
 /// builds over generated tag soup; a SwiftSoup upgrade must pass it again.
 enum EmailDOMParseAdmission {
@@ -107,7 +112,7 @@ enum EmailDOMParseAdmission {
 
     /// Parses a body fragment, unless it is nested too deeply (`EmailDOMParseRefusal`).
     static func parseBodyFragment(_ html: String) throws -> Document {
-        try admittedParse(html, rootDepth: 1, roots: { [$0] }) {
+        try admittedParse(html, readsHead: false, rootDepth: 1, roots: { [$0] }) {
             try SwiftSoup.parseBodyFragment(html)
         }
     }
@@ -116,7 +121,13 @@ enum EmailDOMParseAdmission {
     /// (`EmailDOMParseRefusal`). The nodes are measured as
     /// `EmailDOMFragmentParser` places them, under a document's `body`.
     static func parseFragment(_ html: String, context: Element) throws -> [Node] {
-        try admittedParse(html, isTableContextFragment: true, rootDepth: enclosingNodeCount + 1, roots: { $0 }) {
+        try admittedParse(
+            html,
+            isTableContextFragment: true,
+            readsHead: false,
+            rootDepth: enclosingNodeCount + 1,
+            roots: { $0 }
+        ) {
             try Parser.parseFragment(html, context, [UInt8]())
         }
     }
@@ -129,6 +140,7 @@ enum EmailDOMParseAdmission {
     private static func admittedParse<Parsed>(
         _ html: String,
         isTableContextFragment: Bool = false,
+        readsHead: Bool = true,
         rootDepth: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
@@ -136,7 +148,8 @@ enum EmailDOMParseAdmission {
         let cost = estimatedCost(
             of: html,
             limit: maximumBoundForMeasuredParse,
-            isTableContextFragment: isTableContextFragment
+            isTableContextFragment: isTableContextFragment,
+            readsHead: readsHead
         )
         let bound = cost.depth
         if bound > maximumBoundForMeasuredParse {
@@ -251,9 +264,19 @@ enum EmailDOMParseAdmission {
     /// bounded as well as depth. Each term is an upper bound on one of
     /// SwiftSoup 2.13.5's super-linear steps (all measured in a Release
     /// build by review of PR 453):
-    /// - `treeWork`, the depth bound times every `<` or `</` followed by a
-    ///   letter: most tags search the open elements (`<span>` × 8,000 then
-    ///   200,000 `</x>` took 83 s).
+    /// - `treeWork`, the depth bound times every `<`: most tags, and every
+    ///   run of text, search the open elements (`<span>` × 8,000 then
+    ///   200,000 `</x>` took 83 s; `<b>`, 6,000 `<div>`s and 400,000 `x<?>`
+    ///   took 55 s, `<?>` splitting the text with no tag). Added to it, the
+    ///   rebuilding of formatting elements the tree builder has closed but
+    ///   keeps (`reconstructFormattingElements`), at every token: a search
+    ///   of the open elements for each one that may be off the stack (at
+    ///   most three of one name and attributes, as the list keeps), and its
+    ///   attribute count squared for copying its attributes. Where the
+    ///   second scan cannot follow the markup (`readModeDependentTag`),
+    ///   every earlier formatting tag counts at every token, each with the
+    ///   most attributes any formatting tag could hold
+    ///   (`FormattingAttributeBound`).
     /// - `titleSearchBytes`: inside a `title`, SwiftSoup searches the rest of
     ///   the input for its end tag at every `<` and letter
     ///   (`RcdataLessthanSign`; `<title>` then 640 KB of `<br ` took 31 s).
@@ -305,27 +328,55 @@ enum EmailDOMParseAdmission {
 
     /// `isTableContextFragment`: parsed in a table part's context
     /// (`EmailDOMFragmentParser`), where SwiftSoup ignores table parts that
-    /// a document would insert.
-    static func estimatedCost(of html: String, limit: Int = .max, isTableContextFragment: Bool = false) -> ParseCost {
+    /// a document would insert. `readsHead`: parsed as a document, which
+    /// starts in the head; a fragment starts in the body.
+    static func estimatedCost(
+        of html: String,
+        limit: Int = .max,
+        isTableContextFragment: Bool = false,
+        readsHead: Bool = true
+    ) -> ParseCost {
         let bytes = html.utf8
+        let readsHead = readsHead && !isTableContextFragment
         if let cost = bytes.withContiguousStorageIfAvailable({ buffer in
-            estimate(in: buffer, limit: limit, isTableContextFragment: isTableContextFragment)
+            estimate(in: buffer, limit: limit, isTableContextFragment: isTableContextFragment, readsHead: readsHead)
         }) {
             return cost
         }
         return Array(bytes).withUnsafeBufferPointer {
-            estimate(in: $0, limit: limit, isTableContextFragment: isTableContextFragment)
+            estimate(in: $0, limit: limit, isTableContextFragment: isTableContextFragment, readsHead: readsHead)
         }
     }
 
     /// The second scan alone, without the first scan's shortcut or its
     /// rule for mode-dependent tags. Exposed for the comparison
     /// tests; only `estimatedDepth(of:limit:)` may route a parse.
-    static func tokenizedDepthEstimate(of html: String, isTableContextFragment: Bool = false) -> Int {
+    static func tokenizedDepthEstimate(
+        of html: String,
+        isTableContextFragment: Bool = false,
+        readsHead: Bool = true
+    ) -> Int {
+        followedTokenizedDepthEstimate(of: html, isTableContextFragment: isTableContextFragment, readsHead: readsHead).depth
+    }
+
+    /// The second scan's depth, and whether it followed the markup to the
+    /// end (it read no `readModeDependentTag`), where only then is the
+    /// depth a bound on its own. For the comparison tests.
+    static func followedTokenizedDepthEstimate(
+        of html: String,
+        isTableContextFragment: Bool = false,
+        readsHead: Bool = true
+    ) -> (depth: Int, followed: Bool) {
         let bytes = Array(html.utf8)
         return bytes.withUnsafeBufferPointer { buffer in
-            var scanner = TokenizingScanner(bytes: buffer, limit: .max, isTableContextFragment: isTableContextFragment)
-            return scanner.run()
+            var scanner = TokenizingScanner(
+                bytes: buffer,
+                limit: .max,
+                isTableContextFragment: isTableContextFragment,
+                readsHead: readsHead && !isTableContextFragment
+            )
+            let depth = scanner.run()
+            return (depth, !scanner.readModeDependentTag)
         }
     }
 
@@ -342,30 +393,48 @@ enum EmailDOMParseAdmission {
     private static func estimate(
         in bytes: UnsafeBufferPointer<UInt8>,
         limit: Int,
-        isTableContextFragment: Bool
+        isTableContextFragment: Bool,
+        readsHead: Bool
     ) -> ParseCost {
         let fixed = enclosingNodeCount + leafAllowance
         let count = StartTagCount(bytes: bytes)
         let countedBound = count.weight + fixed
         // The second scan always runs, for its costs; its depth counts only
         // where the first scan's does not already admit the parse here.
-        var scanner = TokenizingScanner(bytes: bytes, limit: limit, isTableContextFragment: isTableContextFragment)
+        var scanner = TokenizingScanner(
+            bytes: bytes,
+            limit: limit,
+            isTableContextFragment: isTableContextFragment,
+            readsHead: readsHead
+        )
         let tokenizedDepth = scanner.run()
         let depth: Int
         let formattingCompareWork: Int
+        let rebuildWork: Int
         if scanner.readModeDependentTag {
             depth = countedBound
             formattingCompareWork = Saturating.add(
                 Saturating.multiply(count.formattingTagCount, count.formattingTagCount * 16),
                 Saturating.multiply(count.formattingTagCount, bytes.count)
             )
+            // Every earlier formatting tag may be off the stack at every
+            // token, with as many attributes as any of them may have.
+            let attributes = FormattingAttributeBound.maximumAttributeCount(in: bytes, nameStarts: count.formattingNameStarts)
+            rebuildWork = Saturating.multiply(
+                Saturating.multiply(count.formattingTagsAcrossTokens, 2),
+                Saturating.add(depth, TokenizingScanner.rebuildCost(attributeCount: attributes))
+            )
         } else {
             depth = countedBound <= maximumDepth ? countedBound : min(tokenizedDepth, countedBound)
             formattingCompareWork = scanner.formattingCompareWork
+            rebuildWork = Saturating.add(
+                Saturating.multiply(scanner.rebuildCandidatesAcrossTokens, depth),
+                scanner.rebuildCostAcrossTokens
+            )
         }
         return ParseCost(
             depth: depth,
-            treeWork: Saturating.multiply(depth, count.tagCount),
+            treeWork: Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
             titleSearchBytes: TitleSearchCost.bytesRead(in: bytes),
             formattingCompareWork: formattingCompareWork
         )
@@ -429,6 +498,20 @@ private enum ScannedTagName {
     /// (measured).
     static let alwaysModeDependent: Set<[UInt8]> = Set(["select", "frameset"].map { Array($0.utf8) })
     static let noscript = Array("noscript".utf8)
+
+    /// The start tags SwiftSoup's head takes without leaving it
+    /// (`InHead`), from before the document's `html` on.
+    static let certainHeadStartTags: Set<[UInt8]> = Set([
+        "html", "head", "base", "basefont", "bgsound", "command", "link", "meta", "title", "noframes",
+        "style", "noscript", "script"
+    ].map { Array($0.utf8) })
+    /// The end tags after which the tree builder has left the head, or may
+    /// have.
+    static let headLeavingEndTags: Set<[UInt8]> = Set(["head", "body", "html", "br"].map { Array($0.utf8) })
+    /// The only start tags a `noscript` in the head makes elements of
+    /// (`InHeadNoscript`, by way of `InHead`); every other tag in it is
+    /// text. Of the empty ones it takes, none pushes, so only these count.
+    static let headNoscriptElements: Set<[UInt8]> = Set(["style", "noframes"].map { Array($0.utf8) })
 
     /// Start tags the head takes; any other one ends the head for good
     /// (`<body>` included).
@@ -649,6 +732,175 @@ private enum ScannedTagName {
     }
 }
 
+// MARK: - Attributes
+
+/// SwiftSoup 2.13.5's states inside a tag after its name, as one step, so
+/// the second scan and `FormattingAttributeBound` read tags alike.
+private enum TagAttributeReading {
+    enum State: Equatable {
+        case beforeName
+        case name
+        case afterName
+        case beforeValue
+        case quotedValue(UInt8)
+        case unquotedValue
+        case afterQuotedValue
+        case selfClosing
+    }
+
+    enum Step {
+        /// The byte is read; `startsAttribute` when it begins an attribute's name.
+        case consume(State, startsAttribute: Bool)
+        /// The byte is read again in the new state.
+        case reconsume(State)
+        /// The byte is the tag's `>`; `selfClosing` for `/>`.
+        case end(selfClosing: Bool)
+    }
+
+    static func step(_ state: State, _ byte: UInt8) -> Step {
+        let isWhitespace = ScannedTagName.isTokenizerWhitespace(byte)
+        switch state {
+        case .beforeName:
+            if isWhitespace { return .consume(.beforeName, startsAttribute: false) }
+            if byte == 0x2F { return .consume(.selfClosing, startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            // Quotes, "<", "=" and NUL start a name here as any other byte does.
+            return .consume(.name, startsAttribute: true)
+        case .name:
+            if isWhitespace { return .consume(.afterName, startsAttribute: false) }
+            if byte == 0x2F { return .consume(.selfClosing, startsAttribute: false) }
+            if byte == 0x3D { return .consume(.beforeValue, startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            return .consume(.name, startsAttribute: false)
+        case .afterName:
+            if isWhitespace { return .consume(.afterName, startsAttribute: false) }
+            if byte == 0x2F { return .consume(.selfClosing, startsAttribute: false) }
+            if byte == 0x3D { return .consume(.beforeValue, startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            return .consume(.name, startsAttribute: true)
+        case .beforeValue:
+            if isWhitespace { return .consume(.beforeValue, startsAttribute: false) }
+            if byte == 0x22 || byte == 0x27 { return .consume(.quotedValue(byte), startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            return .consume(.unquotedValue, startsAttribute: false)
+        case let .quotedValue(quote):
+            return .consume(byte == quote ? .afterQuotedValue : state, startsAttribute: false)
+        case .unquotedValue:
+            if isWhitespace { return .consume(.beforeName, startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            return .consume(.unquotedValue, startsAttribute: false)
+        case .afterQuotedValue:
+            if isWhitespace { return .consume(.beforeName, startsAttribute: false) }
+            if byte == 0x2F { return .consume(.selfClosing, startsAttribute: false) }
+            if byte == 0x3E { return .end(selfClosing: false) }
+            // Reconsumed as the start of the next attribute.
+            return .reconsume(.beforeName)
+        case .selfClosing:
+            if byte == 0x3E { return .end(selfClosing: true) }
+            // Reconsumed before an attribute name.
+            return .reconsume(.beforeName)
+        }
+    }
+}
+
+/// The most attribute names any formatting start tag could hold, for a body
+/// whose tokenizer states the second scan cannot follow: each formatting
+/// name is read as a tag from its first letter, as if the tokenizer were in
+/// its data state there. Every read is run at once, one reading per state,
+/// since reads in the same state at the same byte go on alike; so the cost
+/// is linear however the reads overlap (`<b/a=y<b/a=y…` has every read run
+/// to the end).
+private enum FormattingAttributeBound {
+    /// Positions in `counts`: the tag name, then each attribute state.
+    private static let stateCount = 10
+    private static let tagNameSlot = 0
+
+    private static func slot(of state: TagAttributeReading.State) -> Int {
+        switch state {
+        case .beforeName: return 1
+        case .name: return 2
+        case .afterName: return 3
+        case .beforeValue: return 4
+        case let .quotedValue(quote): return quote == 0x22 ? 5 : 6
+        case .unquotedValue: return 7
+        case .afterQuotedValue: return 8
+        case .selfClosing: return 9
+        }
+    }
+
+    private static let states: [TagAttributeReading.State?] = [
+        nil, .beforeName, .name, .afterName, .beforeValue,
+        .quotedValue(0x22), .quotedValue(0x27), .unquotedValue, .afterQuotedValue, .selfClosing
+    ]
+
+    static func maximumAttributeCount(in bytes: UnsafeBufferPointer<UInt8>, nameStarts: [Int]) -> Int {
+        var maximum = 0
+        // The most attributes begun so far by a read in each state, or -1.
+        var counts = [Int](repeating: -1, count: stateCount)
+        var next = [Int](repeating: -1, count: stateCount)
+        var startCursor = 0
+        var active = false
+        var index = 0
+        while index < bytes.count {
+            if startCursor < nameStarts.count, nameStarts[startCursor] == index {
+                counts[tagNameSlot] = max(counts[tagNameSlot], 0)
+                startCursor += 1
+                active = true
+            }
+            guard active else {
+                // Nothing is being read: go to the next name.
+                guard startCursor < nameStarts.count else { break }
+                index = nameStarts[startCursor]
+                continue
+            }
+            let byte = bytes[index]
+            for position in 0..<stateCount {
+                next[position] = -1
+            }
+            active = false
+            for position in 0..<stateCount where counts[position] >= 0 {
+                var attributes = counts[position]
+                var state = states[position]
+                // A name ends at whitespace, "/" or ">", which the attribute
+                // states then read; NUL and "<" go on in it.
+                if state == nil {
+                    if ScannedTagName.endsTagName(byte) {
+                        state = .beforeName
+                    } else {
+                        next[tagNameSlot] = max(next[tagNameSlot], attributes)
+                        active = true
+                        continue
+                    }
+                }
+                while let current = state {
+                    switch TagAttributeReading.step(current, byte) {
+                    case let .consume(following, startsAttribute):
+                        if startsAttribute {
+                            attributes += 1
+                        }
+                        let target = slot(of: following)
+                        next[target] = max(next[target], attributes)
+                        active = true
+                        state = nil
+                    case let .reconsume(following):
+                        state = following
+                    case .end:
+                        maximum = max(maximum, attributes)
+                        state = nil
+                    }
+                }
+            }
+            swap(&counts, &next)
+            index += 1
+        }
+        // A tag the input ended inside is never emitted; counted anyway.
+        for attributes in counts {
+            maximum = max(maximum, attributes)
+        }
+        return maximum
+    }
+}
+
 // MARK: - First scan
 
 /// Counts every `<` followed by an ASCII letter as an element that never
@@ -659,10 +911,17 @@ private struct StartTagCount {
     private static let nameLengthRead = 17
 
     private(set) var weight = 0
-    /// Every `<` or `</` followed by an ASCII letter.
-    private(set) var tagCount = 0
+    /// Every `<`. SwiftSoup reads no token but text without one, so this is
+    /// the most tags, comments and declarations it can read, and one fewer
+    /// than the most runs of text they can split (`x<?>` splits one; a run
+    /// of text costs the tree builder what a start tag does).
+    private(set) var tokenCount = 0
     /// Every `<` followed by a formatting element's name.
     private(set) var formattingTagCount = 0
+    /// Where each of those names starts.
+    private(set) var formattingNameStarts: [Int] = []
+    /// Over every `<`, the formatting tags before it.
+    private(set) var formattingTagsAcrossTokens = 0
 
     init(bytes: UnsafeBufferPointer<UInt8>) {
         let count = bytes.count
@@ -672,15 +931,13 @@ private struct StartTagCount {
                 index += 1
                 continue
             }
+            tokenCount += 1
+            formattingTagsAcrossTokens = Saturating.add(formattingTagsAcrossTokens, formattingTagCount)
             let nameStart = index + 1
             guard nameStart < count, ScannedTagName.isASCIIAlpha(bytes[nameStart]) else {
-                if nameStart + 1 < count, bytes[nameStart] == 0x2F, ScannedTagName.isASCIIAlpha(bytes[nameStart + 1]) {
-                    tagCount += 1
-                }
                 index += 1
                 continue
             }
-            tagCount += 1
             // At most `nameLengthRead` bytes: every name the scan looks up
             // is shorter, so a longer one counts as unknown either way. The
             // scan goes on from the next byte, not past the name, so reading
@@ -697,6 +954,7 @@ private struct StartTagCount {
             weight += ScannedTagName.weight(of: name)
             if ScannedTagName.formattingNames.contains(name) {
                 formattingTagCount += 1
+                formattingNameStarts.append(nameStart)
             }
             index = nameStart
         }
@@ -713,6 +971,8 @@ private struct TokenizingScanner {
         let weight: Int
         /// The `pushCount` after its push.
         let pushedAt: Int
+        /// For a formatting element, its `formattingKeys` entry; otherwise -1.
+        let formattingKey: Int
     }
 
     private struct Tag {
@@ -721,6 +981,8 @@ private struct TokenizingScanner {
         let selfClosing: Bool
         /// Index after the tag's `>`, or nil when the input ended inside it.
         let end: Int?
+        /// Attribute names begun, duplicates included.
+        let attributeCount: Int
     }
 
     private let bytes: UnsafeBufferPointer<UInt8>
@@ -743,6 +1005,34 @@ private struct TokenizingScanner {
     /// (`ghost`), by name: the active formatting list can hold no more.
     private var formattingHeldByName: [[UInt8]: Int] = [:]
     private var formattingHeld = 0
+    /// The formatting elements on `stack` that are certainly open, lowest
+    /// first, with their keys: every other held one may be off the tree
+    /// builder's stack, where SwiftSoup rebuilds it
+    /// (`reconstructFormattingElements`). Elements leave it from the top
+    /// only, since a possibly-closed mark covers everything above its index.
+    private var certainlyOpenFormatting: [(index: Int, key: Int)] = []
+    /// Formatting start tags by their bytes, `<` to `>`: the same bytes are
+    /// the same name and attributes, which is what SwiftSoup's active
+    /// formatting list compares (tags it would take as the same but written
+    /// differently get keys of their own, which only over-counts).
+    private var formattingKeys: [[UInt8]: Int] = [:]
+    /// By key: held, held and certainly open, and the rebuild cost.
+    private var heldByKey: [Int] = []
+    private var certainlyOpenByKey: [Int] = []
+    private var rebuildCostByKey: [Int] = []
+    /// Over the keys, the held elements that may be off the stack, at most
+    /// three of each: the active formatting list keeps no more than three
+    /// entries of one name and attributes after its last marker (Noah's
+    /// ark), and a rebuild stops at the marker. And those elements' rebuild
+    /// costs. `<div><b>x</div>` 800 times keeps three `b`s, not 800.
+    private var rebuildCandidates = 0
+    private var rebuildCandidatesCost = 0
+    /// Over every token, the held formatting elements that may be off the
+    /// tree builder's stack: each costs a search of the stack when SwiftSoup
+    /// looks for the last one on it.
+    private(set) var rebuildCandidatesAcrossTokens = 0
+    /// Over every token, the rebuild costs of those elements.
+    private(set) var rebuildCostAcrossTokens = 0
     /// `EmailDOMParseAdmission.ParseCost.formattingCompareWork`.
     private(set) var formattingCompareWork = 0
     /// Whether a start tag only the body takes has been read, so the tree
@@ -753,14 +1043,26 @@ private struct TokenizingScanner {
     /// a `noscript` in the head). Up to that tag this scan reads the bytes
     /// as SwiftSoup does; after it, nothing it says can be trusted.
     private(set) var readModeDependentTag = false
+    /// Whether the tree builder is certainly still in the head: a document
+    /// with nothing yet but whitespace, comments, declarations and the tags
+    /// the head takes (`ScannedTagName.certainHeadStartTags`). A `noscript`
+    /// read then is one in the head, which this scan follows
+    /// (`inHeadNoscript`); one read before the head has certainly ended
+    /// otherwise is mode-dependent.
+    private var certainlyInHead: Bool
+    /// Inside a `noscript` the head took: SwiftSoup reads every tag there as
+    /// text but `style` and `noframes` (raw text, as anywhere) and the
+    /// `</noscript>` that ends it.
+    private var inHeadNoscript = false
 
     private let isTableContextFragment: Bool
 
-    init(bytes: UnsafeBufferPointer<UInt8>, limit: Int, isTableContextFragment: Bool) {
+    init(bytes: UnsafeBufferPointer<UInt8>, limit: Int, isTableContextFragment: Bool, readsHead: Bool) {
         self.bytes = bytes
         self.count = bytes.count
         self.limit = limit
         self.isTableContextFragment = isTableContextFragment
+        self.certainlyInHead = readsHead
     }
 
     private var bound: Int {
@@ -770,13 +1072,20 @@ private struct TokenizingScanner {
     mutating func run() -> Int {
         var index = 0
         while index < count {
-            guard bytes[index] == 0x3C else {
+            let byte = bytes[index]
+            guard byte == 0x3C else {
+                // Text other than whitespace ends the head; in a `noscript`
+                // there it is the `noscript`'s.
+                if certainlyInHead, !inHeadNoscript, !ScannedTagName.isTokenizerWhitespace(byte) {
+                    certainlyInHead = false
+                }
                 index += 1
                 continue
             }
             guard let next = markup(at: index) else {
                 break
             }
+            chargeRebuilds()
             index = next
             if bound > limit {
                 break
@@ -792,10 +1101,29 @@ private struct TokenizingScanner {
         guard next < count else { return nil }
         let byte = bytes[next]
 
+        if inHeadNoscript,
+           ScannedTagName.isASCIIAlpha(byte)
+            || (byte == 0x2F && next + 1 < count && ScannedTagName.isASCIIAlpha(bytes[next + 1])) {
+            return headNoscriptTag(at: index)
+        }
+
         if ScannedTagName.isASCIIAlpha(byte) {
             let tag = readTag(nameStart: next, isEndTag: false)
             guard let end = tag.end else { return nil }
-            openElement(named: tag.name, tagLength: end - index, selfClosing: tag.selfClosing)
+            // A self-closing `html` or `head` is inserted empty, which
+            // leaves the head (measured), so only void tags may close.
+            if certainlyInHead,
+               !ScannedTagName.certainHeadStartTags.contains(tag.name)
+                || (tag.selfClosing && !ScannedTagName.voidNames.contains(tag.name)) {
+                certainlyInHead = false
+            }
+            openElement(
+                named: tag.name,
+                tagStart: index,
+                tagLength: end - index,
+                attributeCount: tag.attributeCount,
+                selfClosing: tag.selfClosing
+            )
             switch ScannedTagName.rawText(after: tag.name, selfClosing: tag.selfClosing) {
             case .none:
                 return end
@@ -816,6 +1144,9 @@ private struct TokenizingScanner {
             if ScannedTagName.isASCIIAlpha(first) {
                 let tag = readTag(nameStart: nameStart, isEndTag: true)
                 guard let end = tag.end else { return nil }
+                if ScannedTagName.headLeavingEndTags.contains(tag.name) {
+                    certainlyInHead = false
+                }
                 closeElement(named: tag.name)
                 return end
             }
@@ -828,8 +1159,45 @@ private struct TokenizingScanner {
         case 0x3F: // "<?"
             return endOfBogusComment(from: next)
         default:
+            // A "<" read as text.
+            if !inHeadNoscript {
+                certainlyInHead = false
+            }
             return next
         }
+    }
+
+    /// A start or end tag inside a `noscript` the head took; comments,
+    /// declarations and text there are read as anywhere. The `noscript`
+    /// ends where its `</noscript>` is read; every other end tag there is
+    /// ignored, and every start tag but `style` and `noframes` is text.
+    private mutating func headNoscriptTag(at index: Int) -> Int? {
+        let next = index + 1
+        if ScannedTagName.isASCIIAlpha(bytes[next]) {
+            let tag = readTag(nameStart: next, isEndTag: false)
+            guard let end = tag.end else { return nil }
+            guard ScannedTagName.headNoscriptElements.contains(tag.name) else { return end }
+            openElement(
+                named: tag.name,
+                tagStart: index,
+                tagLength: end - index,
+                attributeCount: tag.attributeCount,
+                selfClosing: tag.selfClosing
+            )
+            switch ScannedTagName.rawText(after: tag.name, selfClosing: tag.selfClosing) {
+            case .rcdataOrRawtext:
+                return endOfRawText(named: tag.name, from: end)
+            case .none, .scriptData, .plaintext:
+                return end
+            }
+        }
+        let tag = readTag(nameStart: next + 1, isEndTag: true)
+        guard let end = tag.end else { return nil }
+        if tag.name == ScannedTagName.noscript {
+            inHeadNoscript = false
+            closeElement(named: tag.name)
+        }
+        return end
     }
 
     // MARK: Tree
@@ -837,9 +1205,28 @@ private struct TokenizingScanner {
     /// Before a start tag is pushed: its implied closes, and its cost to the
     /// active formatting list. Void and document tags push nothing but may
     /// still close (`<hr>` may close a `p`).
-    private mutating func openElement(named name: [UInt8], tagLength: Int, selfClosing: Bool) {
-        if ScannedTagName.alwaysModeDependent.contains(name) || (name == ScannedTagName.noscript && !hasLeftHead) {
+    private mutating func openElement(
+        named name: [UInt8],
+        tagStart: Int,
+        tagLength: Int,
+        attributeCount: Int,
+        selfClosing: Bool
+    ) {
+        var entersHeadNoscript = false
+        if ScannedTagName.alwaysModeDependent.contains(name) {
             readModeDependentTag = true
+        } else if name == ScannedTagName.noscript, !hasLeftHead {
+            // A self-closing one leaves SwiftSoup's head in a state of its own.
+            if certainlyInHead, !selfClosing {
+                entersHeadNoscript = true
+            } else {
+                readModeDependentTag = true
+            }
+        }
+        defer {
+            if entersHeadNoscript {
+                inHeadNoscript = true
+            }
         }
         if !ScannedTagName.headStartTags.contains(name) {
             hasLeftHead = true
@@ -862,15 +1249,24 @@ private struct TokenizingScanner {
         // stays counted, but is not open.
         let mayBeIgnored = selfClosing || (ScannedTagName.tableStructure.contains(name)
             && (isTableContextFragment || (name != ScannedTagName.table && certainlyOpenTable() == nil)))
+        let isFormatting = ScannedTagName.formattingNames.contains(name)
+        let key = isFormatting
+            ? formattingKey(of: tagStart..<(tagStart + tagLength), attributeCount: attributeCount)
+            : -1
         pushCount += 1
         positionsByName[name, default: []].append(stack.count)
-        stack.append(OpenElement(name: name, weight: weight, pushedAt: pushCount))
-        if mayBeIgnored {
-            markPossiblyClosed(from: stack.count - 1)
-        }
-        if ScannedTagName.formattingNames.contains(name) {
+        stack.append(OpenElement(name: name, weight: weight, pushedAt: pushCount, formattingKey: key))
+        if isFormatting {
             formattingHeldByName[name, default: 0] += 1
             formattingHeld += 1
+            updateRebuildCandidates(key: key) {
+                $0.heldByKey[key] += 1
+                $0.certainlyOpenByKey[key] += 1
+            }
+            certainlyOpenFormatting.append((index: stack.count - 1, key: key))
+        }
+        if mayBeIgnored {
+            markPossiblyClosed(from: stack.count - 1)
         }
         openWeight += weight
         deepestOpenWeight = max(deepestOpenWeight, openWeight)
@@ -916,7 +1312,7 @@ private struct TokenizingScanner {
             }
             if ScannedTagName.formattingNames.contains(element.name) {
                 if insideMarker {
-                    releaseFormatting(named: element.name)
+                    releaseFormatting(element)
                 } else {
                     keptWeight += element.weight
                 }
@@ -927,22 +1323,84 @@ private struct TokenizingScanner {
             positionsByName[element.name]?.removeLast()
             openWeight -= element.weight
         }
+        dropCertainlyOpenFormatting(from: index)
         openWeight += keptWeight
         return true
     }
 
-    private mutating func releaseFormatting(named name: [UInt8]) {
-        formattingHeldByName[name, default: 0] -= 1
+    private mutating func releaseFormatting(_ element: OpenElement) {
+        formattingHeldByName[element.name, default: 0] -= 1
         formattingHeld -= 1
+        let key = element.formattingKey
+        updateRebuildCandidates(key: key) { $0.heldByKey[key] -= 1 }
     }
 
     private mutating func popInnermost() {
         guard let element = stack.popLast() else { return }
         positionsByName[element.name]?.removeLast()
         openWeight -= element.weight
+        dropCertainlyOpenFormatting(from: stack.count)
         if ScannedTagName.formattingNames.contains(element.name) {
-            releaseFormatting(named: element.name)
+            releaseFormatting(element)
         }
+    }
+
+    /// The formatting elements at `index` and above are no longer certainly
+    /// open on the tree builder's stack: popped, or possibly closed.
+    private mutating func dropCertainlyOpenFormatting(from index: Int) {
+        while let last = certainlyOpenFormatting.last, last.index >= index {
+            certainlyOpenFormatting.removeLast()
+            updateRebuildCandidates(key: last.key) { $0.certainlyOpenByKey[last.key] -= 1 }
+        }
+    }
+
+    private mutating func formattingKey(of range: Range<Int>, attributeCount: Int) -> Int {
+        let bytesOfTag = Array(bytes[range])
+        if let key = formattingKeys[bytesOfTag] {
+            return key
+        }
+        let key = heldByKey.count
+        formattingKeys[bytesOfTag] = key
+        heldByKey.append(0)
+        certainlyOpenByKey.append(0)
+        rebuildCostByKey.append(Self.rebuildCost(attributeCount: attributeCount))
+        return key
+    }
+
+    /// Applies `change` to one key's counts and keeps the capped totals.
+    private mutating func updateRebuildCandidates(key: Int, _ change: (inout TokenizingScanner) -> Void) {
+        let before = min(heldByKey[key] - certainlyOpenByKey[key], Self.sameFormattingKept)
+        change(&self)
+        let after = min(heldByKey[key] - certainlyOpenByKey[key], Self.sameFormattingKept)
+        rebuildCandidates += after - before
+        rebuildCandidatesCost = Saturating.add(
+            rebuildCandidatesCost,
+            Saturating.multiply(after - before, rebuildCostByKey[key])
+        )
+    }
+
+    /// Noah's ark: entries of one name and attributes kept after a marker.
+    private static let sameFormattingKept = 3
+
+    /// A formatting element's cost each time SwiftSoup rebuilds it: copying
+    /// its attributes searches the copy's for each one (`Attributes.addAll`,
+    /// quadratic; a `b` of 300 attributes rebuilt 2,000 times took 2.7 s).
+    static func rebuildCost(attributeCount: Int) -> Int {
+        Saturating.multiply(attributeCount, attributeCount)
+    }
+
+    /// After a token: the text that may follow it and the start tag after
+    /// that each rebuild the active formatting elements off the stack
+    /// (`reconstructFormattingElements`). Each such element costs a search
+    /// of the stack (`onStack`) and its rebuild: 1,000 left-open `b`s below
+    /// 1,000 `div`s, rebuilt 500 times, took 12 s. Held ones not certainly
+    /// open, at most three of one name and attributes, are all that can be
+    /// off the stack and rebuilt.
+    private mutating func chargeRebuilds() {
+        let candidates = rebuildCandidates
+        let cost = rebuildCandidatesCost
+        rebuildCandidatesAcrossTokens = Saturating.add(rebuildCandidatesAcrossTokens, Saturating.multiply(candidates, 2))
+        rebuildCostAcrossTokens = Saturating.add(rebuildCostAcrossTokens, Saturating.multiply(cost, 2))
     }
 
     private func innermostIs(_ name: [UInt8]) -> Bool {
@@ -1007,6 +1465,7 @@ private struct TokenizingScanner {
             possiblyClosedMarks.removeLast()
         }
         possiblyClosedMarks.append((index: index, pushCount: pushCount))
+        dropCertainlyOpenFormatting(from: index)
     }
 
     /// Open unless an event since its push may have closed it: the latest
@@ -1142,17 +1601,23 @@ private struct TokenizingScanner {
         // then ">" or "/" (optional whitespace) ">", the second self-closing.
         var probe = skipWhitespace(from: index)
         if probe < count, bytes[probe] == 0x3E {
-            return Tag(name: name, isEndTag: isEndTag, selfClosing: false, end: probe + 1)
+            return Tag(name: name, isEndTag: isEndTag, selfClosing: false, end: probe + 1, attributeCount: 0)
         }
         if probe < count, bytes[probe] == 0x2F {
             probe = skipWhitespace(from: probe + 1)
             if probe < count, bytes[probe] == 0x3E {
-                return Tag(name: name, isEndTag: isEndTag, selfClosing: true, end: probe + 1)
+                return Tag(name: name, isEndTag: isEndTag, selfClosing: true, end: probe + 1, attributeCount: 0)
             }
         }
 
-        let (end, selfClosing) = endOfAttributes(from: index)
-        return Tag(name: name, isEndTag: isEndTag, selfClosing: selfClosing, end: end)
+        let attributes = endOfAttributes(from: index)
+        return Tag(
+            name: name,
+            isEndTag: isEndTag,
+            selfClosing: attributes.selfClosing,
+            end: attributes.end,
+            attributeCount: attributes.attributeCount
+        )
     }
 
     private func skipWhitespace(from start: Int) -> Int {
@@ -1163,123 +1628,28 @@ private struct TokenizingScanner {
         return index
     }
 
-    private enum AttributeState {
-        case beforeName
-        case name
-        case afterName
-        case beforeValue
-        case quotedValue(UInt8)
-        case unquotedValue
-        case afterQuotedValue
-        case selfClosing
-    }
-
     /// From the byte after a tag name to the index after the tag's `>` (nil
-    /// at the end of the input) and whether `/>` closed it.
-    private func endOfAttributes(from start: Int) -> (Int?, Bool) {
+    /// at the end of the input), whether `/>` closed it, and how many
+    /// attribute names it began.
+    private func endOfAttributes(from start: Int) -> (end: Int?, selfClosing: Bool, attributeCount: Int) {
         var index = start
-        var state = AttributeState.beforeName
-        // The name ended at whitespace, "/" or ">".
-        if index < count, bytes[index] == 0x2F {
-            state = .selfClosing
-            index += 1
-        }
-
+        var state = TagAttributeReading.State.beforeName
+        var attributeCount = 0
         while index < count {
-            let byte = bytes[index]
-            switch state {
-            case .beforeName:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    index += 1
-                } else if byte == 0x2F {
-                    state = .selfClosing
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    // Quotes, "<", "=" and NUL start a name here as any
-                    // other byte does.
-                    state = .name
-                    index += 1
-                }
-            case .name:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    state = .afterName
-                    index += 1
-                } else if byte == 0x2F {
-                    state = .selfClosing
-                    index += 1
-                } else if byte == 0x3D {
-                    state = .beforeValue
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    index += 1
-                }
-            case .afterName:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    index += 1
-                } else if byte == 0x2F {
-                    state = .selfClosing
-                    index += 1
-                } else if byte == 0x3D {
-                    state = .beforeValue
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    state = .name
-                    index += 1
-                }
-            case .beforeValue:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    index += 1
-                } else if byte == 0x22 || byte == 0x27 {
-                    state = .quotedValue(byte)
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    state = .unquotedValue
-                    index += 1
-                }
-            case let .quotedValue(quote):
-                if byte == quote {
-                    state = .afterQuotedValue
-                }
+            switch TagAttributeReading.step(state, bytes[index]) {
+            case let .consume(next, startsAttribute):
+                state = next
                 index += 1
-            case .unquotedValue:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    state = .beforeName
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    index += 1
+                if startsAttribute {
+                    attributeCount += 1
                 }
-            case .afterQuotedValue:
-                if ScannedTagName.isTokenizerWhitespace(byte) {
-                    state = .beforeName
-                    index += 1
-                } else if byte == 0x2F {
-                    state = .selfClosing
-                    index += 1
-                } else if byte == 0x3E {
-                    return (index + 1, false)
-                } else {
-                    // Reconsumed as the start of the next attribute.
-                    state = .beforeName
-                }
-            case .selfClosing:
-                if byte == 0x3E {
-                    return (index + 1, true)
-                }
-                // Reconsumed before an attribute name.
-                state = .beforeName
+            case let .reconsume(next):
+                state = next
+            case let .end(selfClosing):
+                return (index + 1, selfClosing, attributeCount)
             }
         }
-        return (nil, false)
+        return (nil, false, attributeCount)
     }
 
     // MARK: Comments and declarations
@@ -1313,7 +1683,7 @@ private struct TokenizingScanner {
     }
 
     /// From the byte after `<!`.
-    private func endOfMarkupDeclaration(from start: Int) -> Int? {
+    private mutating func endOfMarkupDeclaration(from start: Int) -> Int? {
         if matches(Self.commentOpenRest, at: start) {
             return endOfComment(from: start + 2)
         }
@@ -1324,6 +1694,10 @@ private struct TokenizingScanner {
         }
         if matches(Self.cdataOpenRest, at: start) {
             // SwiftSoup reads CDATA anywhere, not only in foreign content.
+            // Its content is text, which may end the head.
+            if !inHeadNoscript {
+                certainlyInHead = false
+            }
             var index = start + 7
             while index + 2 < count {
                 if bytes[index] == 0x5D, bytes[index + 1] == 0x5D, bytes[index + 2] == 0x3E {

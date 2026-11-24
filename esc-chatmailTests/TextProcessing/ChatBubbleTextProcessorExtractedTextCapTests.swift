@@ -48,6 +48,31 @@ final class ChatBubbleTextProcessorExtractedTextCapTests: XCTestCase {
         XCTAssertLessThanOrEqual(capped.utf16.count, limit)
     }
 
+    /// One character can span the limit by any length: a base and 70,000
+    /// combining marks. Cut at its start, the text before it ("Hi") was all
+    /// that was left.
+    /// Revert-check: the `cut < extractedTextUTF16Limit / 2` branch in
+    /// `ChatBubbleTextProcessor.cappedExtractedText`.
+    func testCappedExtractedText_characterSpanningTheLimit_keepsTheTextBeforeTheLimit() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        let text = "Hi" + String(repeating: "\u{0301}", count: 70_000) + "\nreal message text"
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit)
+        // By scalars: as characters, "H" and "i" with its marks is not "Hi".
+        XCTAssertTrue(capped.unicodeScalars.starts(with: "Hi".unicodeScalars))
+    }
+
+    /// Cut inside a character, the cut still falls between scalars, never
+    /// inside a surrogate pair.
+    func testCappedExtractedText_longCharacterOfAstralMarks_neverSplitsASurrogatePair() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        // U+1D167, a combining mark outside the BMP (two UTF-16 units), after one ASCII base: the limit falls on a trail surrogate.
+        let text = "a" + String(repeating: "\u{1D167}", count: 40_000)
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit - 1)
+        XCTAssertEqual(capped.unicodeScalars.last, "\u{1D167}")
+    }
+
     func testPlainTextDerivation_megabyteBody_equalsTheDerivationOfItsCappedPrefix() {
         let body = Self.logBody()
         XCTAssertGreaterThan(body.utf16.count, 1_000_000)

@@ -634,9 +634,10 @@ final class EmailDocument {
 
 /// Parses standalone table-section fragments with their required parent
 /// context so SwiftSoup does not foster their cells into plain body text.
-/// Throws `EmailDOMParseRefusal` for HTML nested too deeply to parse safely
-/// (`EmailDOMParseAdmission`): the sanitizer then runs its legacy regex
-/// pass, and quote removal returns its input.
+/// Throws `EmailDOMParseRefusal` for HTML nested too deeply or too costly to
+/// parse safely (`EmailDOMParseAdmission`): the sanitizer then shows the
+/// body as escaped text (`HTMLSanitizerService.textOnlyReplacement`, never
+/// its legacy regex pass), and quote removal returns its input.
 enum EmailDOMFragmentParser {
     static func parse(_ html: String, inputIsFragment: Bool) throws -> Document {
         if inputIsFragment, let contextTagName = tableFragmentContextTagName(for: html) {
