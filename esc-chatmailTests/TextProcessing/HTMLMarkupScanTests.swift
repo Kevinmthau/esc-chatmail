@@ -60,7 +60,12 @@ final class HTMLMarkupScanTests: XCTestCase {
     }
 
     func testTagsEndingAtTagEnd_matchTheirRegexes() throws {
-        for (pattern, template) in [("<br[^>]*>", "\n"), ("<[^>]+>", "")] {
+        for (pattern, template) in [
+            ("<br[^>]*>", "\n"),
+            ("<[^>]+>", ""),
+            ("<[^>]+>", " "),
+            ("</?(?:div|span|br|p|a|b|i|strong|em|font|blockquote)[^>]*>", ""),
+        ] {
             let regex = try NSRegularExpression(pattern: pattern, options: [])
             var generator = MarkupGenerator(seed: 0x7A6)
             for _ in 0..<15_000 {
