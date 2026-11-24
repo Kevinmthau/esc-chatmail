@@ -57,14 +57,20 @@ import SwiftSoup
 ///   the raw text of `title`, `style`, `noframes`, `script` with its escape
 ///   states, and `plaintext`), so an end tag inside an attribute value or a
 ///   style sheet is never taken for a real one. Open elements are popped
-///   only by an end tag naming the innermost one, or by a start tag that
-///   always closes it (`<p>` closing a `p`, `<td>` a `td`, and so on). Every
-///   other closing the tree builder might do is ignored, which can only
-///   over-count: an unclosed formatting element stays counted, as the tree
-///   builder may reconstruct it any number of times (`<p><b>x</p>` on 1,000
-///   lines nests 1,000 deep). Tags the builder may add on its own are
-///   counted with the one that implies them (`td` as three: `tbody`, `tr`,
-///   `td`).
+///   by an end tag naming the innermost one, by a start tag that always
+///   closes the innermost one (`<p>` closing a `p`, `<td>` a `td`), or by an
+///   end tag whose handler pops everything above its element (`</td>` over
+///   a `<font>` left open), but only where that element is certainly open:
+///   every tag after which the tree builder may have closed something the
+///   scan still holds marks what it may have closed as no longer certain,
+///   and a table part pushed outside a certainly open table, or anything
+///   self-closing, is never certain (SwiftSoup ignores or closes those at
+///   once). Every other closing the tree builder might do is ignored, which
+///   can only over-count: a formatting element stays counted after an end
+///   tag passes over it, as the tree builder may reconstruct it any number
+///   of times (`<p><b>x</p>` on 1,000 lines nests 1,000 deep). Tags the
+///   builder may add on its own are counted with the one that implies them
+///   (`td` as three: `tbody`, `tr`, `td`).
 ///   SwiftSoup reads raw text after some tags in one insertion mode and
 ///   markup in another (`style` inside `select`, anything in a frameset, a
 ///   `noscript` in the head or the body), so a body naming `select`,
@@ -107,7 +113,7 @@ enum EmailDOMParseAdmission {
     /// (`EmailDOMParseRefusal`). The nodes are measured as
     /// `EmailDOMFragmentParser` places them, under a document's `body`.
     static func parseFragment(_ html: String, context: Element) throws -> [Node] {
-        try admittedParse(html, rootDepth: enclosingNodeCount + 1, roots: { $0 }) {
+        try admittedParse(html, isTableContextFragment: true, rootDepth: enclosingNodeCount + 1, roots: { $0 }) {
             try Parser.parseFragment(html, context, [UInt8]())
         }
     }
@@ -119,11 +125,16 @@ enum EmailDOMParseAdmission {
 
     private static func admittedParse<Parsed>(
         _ html: String,
+        isTableContextFragment: Bool = false,
         rootDepth: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
-        let cost = estimatedCost(of: html, limit: maximumBoundForMeasuredParse)
+        let cost = estimatedCost(
+            of: html,
+            limit: maximumBoundForMeasuredParse,
+            isTableContextFragment: isTableContextFragment
+        )
         let bound = cost.depth
         if bound > maximumBoundForMeasuredParse {
             throw refusal(depth: bound)
@@ -234,22 +245,34 @@ enum EmailDOMParseAdmission {
     ///
     /// SwiftSoup's parse is not linear in every input, and the gate runs
     /// before every parse site of a message a sync cannot cancel, so cost is
-    /// bounded as well as depth (both measured on SwiftSoup 2.13.5, Release,
-    /// by review of PR 453):
-    /// - Most start and end tags search the open elements, so a parse costs
-    ///   up to depth × tags: `<span>` × 8,000 then 200,000 `</x>` took 83 s.
-    ///   `treeWork` is the depth bound times every `<` or `</` followed by a
-    ///   letter, wherever it sits.
-    /// - Inside a `title`, SwiftSoup searches the rest of the input for an
-    ///   end tag at every `<` and letter (`RcdataLessthanSign`), so
-    ///   `<title>` then 1 MB of `<a ` took minutes. `titleSearchBytes` is
-    ///   the bytes those searches read, from the second scan.
+    /// bounded as well as depth. Each term is an upper bound on one of
+    /// SwiftSoup 2.13.5's super-linear steps (all measured in a Release
+    /// build by review of PR 453):
+    /// - `treeWork`, the depth bound times every `<` or `</` followed by a
+    ///   letter: most tags search the open elements (`<span>` × 8,000 then
+    ///   200,000 `</x>` took 83 s).
+    /// - `titleSearchBytes`: inside a `title`, SwiftSoup searches the rest of
+    ///   the input for its end tag at every `<` and letter
+    ///   (`RcdataLessthanSign`; `<title>` then 640 KB of `<br ` took 31 s).
+    ///   Computed from the bytes alone (`TitleSearchCost`), so no reading of
+    ///   the markup can hide one.
+    /// - `formattingCompareWork`: each formatting start tag is compared with
+    ///   the active formatting elements, attribute by attribute
+    ///   (`pushActiveFormattingElements`; 6,000 `<b>`s of 100 attributes
+    ///   took 50 s). Every element in that list is open or was closed by an
+    ///   end tag that crossed it, which the second scan keeps counting, so
+    ///   the scan charges, per formatting start tag, one comparison for each
+    ///   formatting element it holds and the tag's length for each of the
+    ///   same name. A body whose markup the second scan cannot follow
+    ///   (`namesWithModeDependentRawText`) is charged as if every earlier
+    ///   formatting tag were held, at the body's whole length.
     struct ParseCost: Equatable {
         let depth: Int
         let treeWork: Int
         let titleSearchBytes: Int
+        let formattingCompareWork: Int
 
-        /// The refusal past `maximumTreeWork` or `maximumTitleSearchBytes`.
+        /// The refusal past one of the work limits.
         var excessWork: EmailDOMParseRefusal? {
             if treeWork > EmailDOMParseAdmission.maximumTreeWork {
                 return .tooCostlyToParse(work: treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
@@ -257,35 +280,48 @@ enum EmailDOMParseAdmission {
             if titleSearchBytes > EmailDOMParseAdmission.maximumTitleSearchBytes {
                 return .tooCostlyToParse(work: titleSearchBytes, limit: EmailDOMParseAdmission.maximumTitleSearchBytes)
             }
+            if formattingCompareWork > EmailDOMParseAdmission.maximumFormattingCompareWork {
+                return .tooCostlyToParse(
+                    work: formattingCompareWork,
+                    limit: EmailDOMParseAdmission.maximumFormattingCompareWork
+                )
+            }
             return nil
         }
     }
 
     /// About a second of the stack searches in a Release build (measured at
-    /// about 30 million depth × tag units a second). A large old-style
-    /// newsletter, a few thousand levels of over-counted bound over ten
-    /// thousand tags, stays under it.
+    /// about 30 million depth × tag units a second).
     static let maximumTreeWork = 50_000_000
-    /// About a quarter of a second of byte comparisons.
-    static let maximumTitleSearchBytes = 200_000_000
+    /// About half a second of byte comparisons (measured at about two
+    /// billion a second).
+    static let maximumTitleSearchBytes = 1_000_000_000
+    /// About half a second of attribute comparisons (measured at about two
+    /// hundred million bytes a second).
+    static let maximumFormattingCompareWork = 100_000_000
 
-    static func estimatedCost(of html: String, limit: Int = .max) -> ParseCost {
+    /// `isTableContextFragment`: parsed in a table part's context
+    /// (`EmailDOMFragmentParser`), where SwiftSoup ignores table parts that
+    /// a document would insert.
+    static func estimatedCost(of html: String, limit: Int = .max, isTableContextFragment: Bool = false) -> ParseCost {
         let bytes = html.utf8
         if let cost = bytes.withContiguousStorageIfAvailable({ buffer in
-            estimate(in: buffer, limit: limit)
+            estimate(in: buffer, limit: limit, isTableContextFragment: isTableContextFragment)
         }) {
             return cost
         }
-        return Array(bytes).withUnsafeBufferPointer { estimate(in: $0, limit: limit) }
+        return Array(bytes).withUnsafeBufferPointer {
+            estimate(in: $0, limit: limit, isTableContextFragment: isTableContextFragment)
+        }
     }
 
     /// The second scan alone, without the first scan's shortcut or its
     /// `select`, `frameset` and `noscript` rule. Exposed for the comparison
     /// tests; only `estimatedDepth(of:limit:)` may route a parse.
-    static func tokenizedDepthEstimate(of html: String) -> Int {
+    static func tokenizedDepthEstimate(of html: String, isTableContextFragment: Bool = false) -> Int {
         let bytes = Array(html.utf8)
         return bytes.withUnsafeBufferPointer { buffer in
-            var scanner = TokenizingScanner(bytes: buffer, limit: .max)
+            var scanner = TokenizingScanner(bytes: buffer, limit: .max, isTableContextFragment: isTableContextFragment)
             return scanner.run()
         }
     }
@@ -300,24 +336,35 @@ enum EmailDOMParseAdmission {
     /// The first scan's count where it already admits a parse here or the
     /// second scan cannot be trusted; otherwise the tighter of the two, both
     /// being upper bounds.
-    private static func estimate(in bytes: UnsafeBufferPointer<UInt8>, limit: Int) -> ParseCost {
+    private static func estimate(
+        in bytes: UnsafeBufferPointer<UInt8>,
+        limit: Int,
+        isTableContextFragment: Bool
+    ) -> ParseCost {
         let fixed = enclosingNodeCount + leafAllowance
         let count = StartTagCount(bytes: bytes)
         let countedBound = count.weight + fixed
+        // The second scan always runs, for its costs; its depth counts only
+        // where the first scan's does not already admit the parse here.
+        var scanner = TokenizingScanner(bytes: bytes, limit: limit, isTableContextFragment: isTableContextFragment)
+        let tokenizedDepth = scanner.run()
         let depth: Int
-        var titleSearchBytes = 0
-        if countedBound <= maximumDepth || count.namesTagWithModeDependentRawText {
+        let formattingCompareWork: Int
+        if count.namesTagWithModeDependentRawText {
             depth = countedBound
+            formattingCompareWork = Saturating.add(
+                Saturating.multiply(count.formattingTagCount, count.formattingTagCount * 16),
+                Saturating.multiply(count.formattingTagCount, bytes.count)
+            )
         } else {
-            var scanner = TokenizingScanner(bytes: bytes, limit: limit)
-            depth = min(scanner.run(), countedBound)
-            titleSearchBytes = scanner.titleSearchBytes
+            depth = countedBound <= maximumDepth ? countedBound : min(tokenizedDepth, countedBound)
+            formattingCompareWork = scanner.formattingCompareWork
         }
-        let (treeWork, overflow) = depth.multipliedReportingOverflow(by: count.tagCount)
         return ParseCost(
             depth: depth,
-            treeWork: overflow ? .max : treeWork,
-            titleSearchBytes: titleSearchBytes
+            treeWork: Saturating.multiply(depth, count.tagCount),
+            titleSearchBytes: TitleSearchCost.bytesRead(in: bytes),
+            formattingCompareWork: formattingCompareWork
         )
     }
 }
@@ -378,6 +425,7 @@ private enum ScannedTagName {
     /// body (measured).
     static let namesWithModeDependentRawText: Set<[UInt8]> = Set(["select", "frameset", "noscript"].map { Array($0.utf8) })
 
+    static let table = Array("table".utf8)
     static let td = Array("td".utf8)
     static let th = Array("th".utf8)
     static let tr = Array("tr".utf8)
@@ -388,6 +436,142 @@ private enum ScannedTagName {
     static let option = Array("option".utf8)
     static let optgroup = Array("optgroup".utf8)
     static let tableSections: Set<[UInt8]> = Set(["tbody", "thead", "tfoot"].map { Array($0.utf8) })
+
+    private static func names(_ list: [String]) -> Set<[UInt8]> {
+        Set(list.map { Array($0.utf8) })
+    }
+
+    /// The active formatting elements' names.
+    static let formattingNames = names([
+        "a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"
+    ])
+
+    /// Elements that put a marker in the active formatting list, which
+    /// their closing clears back to.
+    static let markers = names(["td", "th", "caption", "applet", "marquee", "object", "template"])
+
+    static let tableStructure = names([
+        "table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption", "colgroup", "col"
+    ])
+
+    /// What "generate implied end tags" closes.
+    static let impliedEndTagNames = names(["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"])
+
+    /// HTML's default scope boundaries, with `select` and the foreign
+    /// integration points as well.
+    private static let defaultScopeBoundaries = names([
+        "applet", "caption", "html", "table", "td", "th", "marquee", "object", "template", "select",
+        "svg", "math", "mi", "mo", "mn", "ms", "mtext", "annotation-xml", "foreignobject", "desc", "title"
+    ])
+
+    /// End tags whose handler, once the element is in scope, generates
+    /// implied end tags and pops everything above it.
+    private static let blockClosers = names([
+        "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div", "dl",
+        "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "listing", "main", "menu",
+        "nav", "ol", "pre", "section", "summary", "ul", "dd", "dt"
+    ])
+
+    /// For an end tag that pops everything above its element once that is
+    /// in scope, the names that end the scope: crossing one, the tree
+    /// builder would ignore the end tag. Nil for any other end tag.
+    static func scopeBoundaries(crossedByEndTagOf name: [UInt8]) -> Set<[UInt8]>? {
+        if name == td || name == th || tableSections.contains(name) || name == tr
+            || name == Array("caption".utf8) {
+            return names(["table", "template", "html", "select"])
+        }
+        if name == Array("table".utf8) {
+            return names(["template", "html", "select"])
+        }
+        if name == p {
+            return defaultScopeBoundaries.union(names(["button"]))
+        }
+        if name == li {
+            return defaultScopeBoundaries.union(names(["ol", "ul"]))
+        }
+        if headings.contains(name) {
+            return defaultScopeBoundaries.union(headings)
+        }
+        if blockClosers.contains(name) {
+            return defaultScopeBoundaries
+        }
+        return nil
+    }
+
+    /// The names whose nearest held element the tree builder may close for
+    /// the end tag `name`, with everything above it. A table part's end tag
+    /// also closes the parts it contains, which the scan may hold without
+    /// the part (a `td`'s weight stands for its implied `tr` and `tbody`).
+    static func endTagTargets(_ name: [UInt8]) -> Set<[UInt8]> {
+        if headings.contains(name) {
+            return headings
+        }
+        if name == tr {
+            return names(["tr", "td", "th"])
+        }
+        if tableSections.contains(name) {
+            return names(["tbody", "thead", "tfoot", "tr", "td", "th"])
+        }
+        return [name]
+    }
+
+    /// How the tree builder may close held elements for a start tag:
+    /// `targets` found looking down from the current node, a search that
+    /// stops at the first of `stopsAt` (each one an element the builder's own
+    /// search stops at); or, with `clearsAboveStop`, everything above the
+    /// nearest of `stopsAt`.
+    struct ClosingRule {
+        let targets: Set<[UInt8]>
+        let stopsAt: Set<[UInt8]>
+        var clearsAboveStop = false
+        /// The builder looks only at the current node.
+        var currentNodeOnly = false
+    }
+
+    private static let listItemStops = names(["ul", "ol", "dl", "table", "td", "th", "caption", "button"])
+    private static let buttonScopeBoundaries = defaultScopeBoundaries.union(names(["button"]))
+
+    static func closingRules(forStartTag name: [UInt8]) -> [ClosingRule] {
+        var rules: [ClosingRule] = []
+        if closesParagraph.contains(name) || mayCloseParagraph.contains(name) {
+            rules.append(ClosingRule(targets: [p], stopsAt: buttonScopeBoundaries))
+        }
+        if name == li {
+            rules.append(ClosingRule(targets: [li], stopsAt: listItemStops))
+        }
+        if name == dd || name == dt {
+            rules.append(ClosingRule(targets: names(["dd", "dt"]), stopsAt: listItemStops))
+        }
+        if headings.contains(name) {
+            rules.append(ClosingRule(targets: headings, stopsAt: [], currentNodeOnly: true))
+        }
+        if name == option || name == optgroup {
+            rules.append(ClosingRule(targets: [option], stopsAt: [], currentNodeOnly: true))
+        }
+        if name == Array("menuitem".utf8) {
+            rules.append(ClosingRule(targets: [name], stopsAt: [], currentNodeOnly: true))
+        }
+        if name == Array("button".utf8) {
+            rules.append(ClosingRule(targets: [name], stopsAt: defaultScopeBoundaries))
+        }
+        if name == Array("a".utf8) || name == Array("nobr".utf8) {
+            rules.append(ClosingRule(targets: [name], stopsAt: markers))
+        }
+        if impliedEndTagStarts.contains(name) {
+            rules.append(ClosingRule(targets: impliedEndTagNames, stopsAt: []))
+        }
+        if name == template {
+            rules.append(ClosingRule(targets: [], stopsAt: [], clearsAboveStop: true))
+        }
+        return rules
+    }
+
+    private static let template = Array("template".utf8)
+    /// Start tags that close a `p` in some modes or builds (`table` not in
+    /// quirks mode): never popped for, but a `p` held may be closed.
+    private static let mayCloseParagraph = names(["table", "hr", "isindex", "image", "input", "keygen"])
+    /// Start tags that generate implied end tags.
+    private static let impliedEndTagStarts = names(["rb", "rtc", "rp", "rt"])
     static let headings: Set<[UInt8]> = Set(["h1", "h2", "h3", "h4", "h5", "h6"].map { Array($0.utf8) })
 
     /// Start tags that close a `p` in button scope (HTML's list; SwiftSoup's
@@ -454,6 +638,8 @@ private struct StartTagCount {
     private(set) var weight = 0
     /// Every `<` or `</` followed by an ASCII letter.
     private(set) var tagCount = 0
+    /// Every `<` followed by a formatting element's name.
+    private(set) var formattingTagCount = 0
     private(set) var namesTagWithModeDependentRawText = false
 
     init(bytes: UnsafeBufferPointer<UInt8>) {
@@ -487,6 +673,9 @@ private struct StartTagCount {
                 nameEnd += 1
             }
             weight += ScannedTagName.weight(of: name)
+            if ScannedTagName.formattingNames.contains(name) {
+                formattingTagCount += 1
+            }
             if ScannedTagName.namesWithModeDependentRawText.contains(name) {
                 namesTagWithModeDependentRawText = true
             }
@@ -503,6 +692,8 @@ private struct TokenizingScanner {
     private struct OpenElement {
         let name: [UInt8]
         let weight: Int
+        /// The `pushCount` after its push.
+        let pushedAt: Int
     }
 
     private struct Tag {
@@ -519,18 +710,30 @@ private struct TokenizingScanner {
     private var stack: [OpenElement] = []
     private var openWeight = 0
     private var deepestOpenWeight = 0
-    /// What SwiftSoup's searches for a title's end tag read
-    /// (`EmailDOMParseAdmission.ParseCost`).
-    private(set) var titleSearchBytes = 0
-    /// The next `</title` and `</TITLE` at or after the last position asked
-    /// about (`count` for none), or -1 before the first ask.
-    private var nextLowercaseTitleEndTag = -1
-    private var nextUppercaseTitleEndTag = -1
+    /// Counts pushes; an element records it when pushed (`OpenElement.pushedAt`).
+    private var pushCount = 0
+    /// Events after which the tree builder may have closed the elements this
+    /// stack holds from `index` up: `pushCount` then, and that index. Kept
+    /// with both rising, as a later event from a lower index covers an
+    /// earlier one from a higher (`markPossiblyClosed(from:)`).
+    private var possiblyClosedMarks: [(index: Int, pushCount: Int)] = []
+    /// Where each name sits in `stack`, lowest first, so no lookup walks
+    /// the stack: the scan must stay linear in what a sender writes.
+    private var positionsByName: [[UInt8]: [Int]] = [:]
+    /// Formatting elements held, open or kept after an end tag crossed them
+    /// (`ghost`), by name: the active formatting list can hold no more.
+    private var formattingHeldByName: [[UInt8]: Int] = [:]
+    private var formattingHeld = 0
+    /// `EmailDOMParseAdmission.ParseCost.formattingCompareWork`.
+    private(set) var formattingCompareWork = 0
 
-    init(bytes: UnsafeBufferPointer<UInt8>, limit: Int) {
+    private let isTableContextFragment: Bool
+
+    init(bytes: UnsafeBufferPointer<UInt8>, limit: Int, isTableContextFragment: Bool) {
         self.bytes = bytes
         self.count = bytes.count
         self.limit = limit
+        self.isTableContextFragment = isTableContextFragment
     }
 
     private var bound: Int {
@@ -565,7 +768,7 @@ private struct TokenizingScanner {
         if ScannedTagName.isASCIIAlpha(byte) {
             let tag = readTag(nameStart: next, isEndTag: false)
             guard let end = tag.end else { return nil }
-            openElement(named: tag.name)
+            openElement(named: tag.name, tagLength: end - index, selfClosing: tag.selfClosing)
             switch ScannedTagName.rawText(after: tag.name, selfClosing: tag.selfClosing) {
             case .none:
                 return end
@@ -604,24 +807,109 @@ private struct TokenizingScanner {
 
     // MARK: Tree
 
-    private mutating func openElement(named name: [UInt8]) {
+    /// Before a start tag is pushed: its implied closes, and its cost to the
+    /// active formatting list. Void and document tags push nothing but may
+    /// still close (`<hr>` may close a `p`).
+    private mutating func openElement(named name: [UInt8], tagLength: Int, selfClosing: Bool) {
+        closeImpliedElements(before: name)
+        if ScannedTagName.formattingNames.contains(name) {
+            let sameName = formattingHeldByName[name, default: 0]
+            formattingCompareWork = Saturating.add(
+                formattingCompareWork,
+                Saturating.add(Saturating.multiply(formattingHeld, 16), Saturating.multiply(sameName, tagLength))
+            )
+        }
         let weight = ScannedTagName.weight(of: name)
         guard weight > 0 else { return }
-        closeImpliedElements(before: name)
-        stack.append(OpenElement(name: name, weight: weight))
+        // Outside a table SwiftSoup ignores a table part's start tag, and in
+        // a table part's fragment context it ignores a table's too (and the
+        // parts its mode does not take). Held but perhaps never inserted,
+        // such an element is not certainly open from the start.
+        // SwiftSoup closes a self-closing element at once (`<table/>`): it
+        // stays counted, but is not open.
+        let mayBeIgnored = selfClosing || (ScannedTagName.tableStructure.contains(name)
+            && (isTableContextFragment || (name != ScannedTagName.table && certainlyOpenTable() == nil)))
+        pushCount += 1
+        positionsByName[name, default: []].append(stack.count)
+        stack.append(OpenElement(name: name, weight: weight, pushedAt: pushCount))
+        if mayBeIgnored {
+            markPossiblyClosed(from: stack.count - 1)
+        }
+        if ScannedTagName.formattingNames.contains(name) {
+            formattingHeldByName[name, default: 0] += 1
+            formattingHeld += 1
+        }
         openWeight += weight
         deepestOpenWeight = max(deepestOpenWeight, openWeight)
     }
 
+    /// An end tag closes the innermost element of its name; or, for the end
+    /// tags whose handler pops everything above the element (`</div>` over a
+    /// `<p>` left open, `</td>` over a `<font>`), the nearest one with
+    /// everything above it, where that is certain to be what the tree
+    /// builder does (`crossingClose`). Otherwise nothing is closed here, and
+    /// what the tree builder may have closed is marked.
     private mutating func closeElement(named name: [UInt8]) {
         if stack.last?.name == name {
             popInnermost()
+            return
         }
+        if crossingClose(named: name) {
+            return
+        }
+        markPossiblyClosed(by: name, lowestTarget: lowestPosition(of: ScannedTagName.endTagTargets(name)))
+    }
+
+    /// Pops the nearest `name` and everything above it, when the tree
+    /// builder certainly does the same: the element is certainly open (no
+    /// event since its push may have closed it out of this scan's sight),
+    /// its end tag's handler pops everything above it once it is in scope,
+    /// and nothing above it ends that scope. A formatting element popped
+    /// this way stays counted (`kept`) unless a marker it is inside (`td`,
+    /// `th`, `caption`…) is popped with it: the tree builder keeps it in its
+    /// active formatting list and may rebuild it.
+    private mutating func crossingClose(named name: [UInt8]) -> Bool {
+        guard let boundaries = ScannedTagName.scopeBoundaries(crossedByEndTagOf: name),
+              let index = positionsByName[name]?.last,
+              isCertainlyOpen(at: index),
+              !boundaries.contains(where: { (positionsByName[$0]?.last ?? -1) > index }) else {
+            return false
+        }
+        var insideMarker = ScannedTagName.markers.contains(name)
+        var keptWeight = 0
+        for element in stack[(index + 1)...] {
+            if ScannedTagName.markers.contains(element.name) {
+                insideMarker = true
+            }
+            if ScannedTagName.formattingNames.contains(element.name) {
+                if insideMarker {
+                    releaseFormatting(named: element.name)
+                } else {
+                    keptWeight += element.weight
+                }
+            }
+        }
+        while stack.count > index {
+            let element = stack.removeLast()
+            positionsByName[element.name]?.removeLast()
+            openWeight -= element.weight
+        }
+        openWeight += keptWeight
+        return true
+    }
+
+    private mutating func releaseFormatting(named name: [UInt8]) {
+        formattingHeldByName[name, default: 0] -= 1
+        formattingHeld -= 1
     }
 
     private mutating func popInnermost() {
         guard let element = stack.popLast() else { return }
+        positionsByName[element.name]?.removeLast()
         openWeight -= element.weight
+        if ScannedTagName.formattingNames.contains(element.name) {
+            releaseFormatting(named: element.name)
+        }
     }
 
     private func innermostIs(_ name: [UInt8]) -> Bool {
@@ -632,10 +920,84 @@ private struct TokenizingScanner {
         stack.last.map { names.contains($0.name) } ?? false
     }
 
+    /// The lowest position of any of `names`, or nil.
+    private func lowestPosition(of names: Set<[UInt8]>) -> Int? {
+        names.compactMap { positionsByName[$0]?.first }.min()
+    }
+
+    /// The highest position of any of `names`, or nil.
+    private func highestPosition(of names: Set<[UInt8]>) -> Int? {
+        names.compactMap { positionsByName[$0]?.last }.max()
+    }
+
+    /// The lowest position of any of `names` at or above `floor`, or nil.
+    private func lowestPosition(of names: Set<[UInt8]>, atOrAbove floor: Int) -> Int? {
+        names.compactMap { name -> Int? in
+            guard let positions = positionsByName[name] else { return nil }
+            var low = 0
+            var high = positions.count
+            while low < high {
+                let middle = (low + high) / 2
+                if positions[middle] < floor {
+                    low = middle + 1
+                } else {
+                    high = middle
+                }
+            }
+            return low < positions.count ? positions[low] : nil
+        }.min()
+    }
+
+    /// After a tag the scan did not fully follow, the tree builder may have
+    /// closed the element at `lowestTarget` and everything above it. A
+    /// formatting element kept after an end tag crossed it may have been
+    /// rebuilt anywhere since, so a tag that can close one of its name
+    /// marks the whole stack.
+    private mutating func markPossiblyClosed(by name: [UInt8], lowestTarget: Int?) {
+        let keptOfName = formattingHeldByName[name, default: 0] - (positionsByName[name]?.count ?? 0)
+        // Inside a `template` the builder's modes are its own; anything it
+        // holds may be closed.
+        let template = positionsByName[Self.template]?.first
+        if ScannedTagName.formattingNames.contains(name), keptOfName > 0 {
+            markPossiblyClosed(from: 0)
+        } else if let lowest = [lowestTarget, template].compactMap({ $0 }).min() {
+            markPossiblyClosed(from: lowest)
+        }
+    }
+
+    private static let template = Array("template".utf8)
+
+    /// The tree builder may have closed the elements this stack holds from
+    /// `index` up, so none of them is certainly open any more.
+    private mutating func markPossiblyClosed(from index: Int) {
+        while let last = possiblyClosedMarks.last, last.index >= index {
+            possiblyClosedMarks.removeLast()
+        }
+        possiblyClosedMarks.append((index: index, pushCount: pushCount))
+    }
+
+    /// Open unless an event since its push may have closed it: the latest
+    /// mark from at or below its index is the one that covers it.
+    private func isCertainlyOpen(at index: Int) -> Bool {
+        var low = 0
+        var high = possiblyClosedMarks.count
+        while low < high {
+            let middle = (low + high) / 2
+            if possiblyClosedMarks[middle].index <= index {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        guard low > 0 else { return true }
+        return stack[index].pushedAt > possiblyClosedMarks[low - 1].pushCount
+    }
+
     /// Closes the innermost element where the tree builder always closes it
     /// before inserting `name`. Each rule pops only an element that is the
     /// innermost one, where the builder's own rule (close a `p` in button
-    /// scope, close the cell, and so on) is certain to close it too.
+    /// scope, close the cell, and so on) is certain to close it too. What
+    /// the builder may close beyond that is marked.
     private mutating func closeImpliedElements(before name: [UInt8]) {
         typealias N = ScannedTagName
         if N.closesParagraph.contains(name), innermostIs(N.p) {
@@ -669,6 +1031,63 @@ private struct TokenizingScanner {
         if name == N.option || name == N.optgroup, innermostIs(N.option) {
             popInnermost()
         }
+        markPossiblyClosed(by: name, lowestTarget: lowestTargetOfStartTag(name))
+    }
+
+    /// The lowest element held that the tree builder may close for the
+    /// start tag `name`, beyond what `closeImpliedElements` did.
+    ///
+    /// The builder looks for its target from the current node down and
+    /// stops at the first of `rule.stopsAt`; where the highest of those held
+    /// is certainly open, it is in the builder's stack too, so nothing below
+    /// it is reached. A rule that clears back to its stop closes everything
+    /// above that stop.
+    private func lowestTargetOfStartTag(_ name: [UInt8]) -> Int? {
+        var lowest = ScannedTagName.closingRules(forStartTag: name).compactMap(lowestTarget(of:)).min()
+        if ScannedTagName.tableStructure.contains(name), !stack.isEmpty {
+            // In the table modes a table part's start tag closes the cell,
+            // the row or the section it is in, or clears everything above
+            // the table, fostered elements too; in a table part's fragment
+            // context everything held. Above a certainly open table, or all.
+            let floor: Int
+            if !isTableContextFragment, let table = certainlyOpenTable() {
+                floor = name == ScannedTagName.table ? table : table + 1
+            } else {
+                floor = 0
+            }
+            if floor < stack.count {
+                lowest = min(lowest ?? floor, floor)
+            }
+        }
+        return lowest
+    }
+
+    /// The highest held `table`, when it is certainly open.
+    private func certainlyOpenTable() -> Int? {
+        guard let table = positionsByName[ScannedTagName.table]?.last, isCertainlyOpen(at: table) else {
+            return nil
+        }
+        return table
+    }
+
+    private func lowestTarget(of rule: ScannedTagName.ClosingRule) -> Int? {
+        guard !stack.isEmpty else { return nil }
+        if rule.currentNodeOnly {
+            // A certainly open innermost element is the builder's current
+            // node too (it holds nothing above it but rebuilt formatting).
+            return isCertainlyOpen(at: stack.count - 1) ? nil : lowestPosition(of: rule.targets)
+        }
+        if rule.clearsAboveStop {
+            guard !rule.stopsAt.isEmpty else { return 0 }
+            guard let highestStop = highestPosition(of: rule.stopsAt) else { return nil }
+            let stop = isCertainlyOpen(at: highestStop) ? highestStop : (lowestPosition(of: rule.stopsAt) ?? highestStop)
+            return stop + 1 < stack.count ? stop + 1 : nil
+        }
+        var floor = 0
+        if let highestStop = highestPosition(of: rule.stopsAt), isCertainlyOpen(at: highestStop) {
+            floor = rule.targets.contains(stack[highestStop].name) ? highestStop : highestStop + 1
+        }
+        return lowestPosition(of: rule.targets, atOrAbove: floor)
     }
 
     // MARK: Tags
@@ -976,59 +1395,15 @@ private struct TokenizingScanner {
                 }
                 if endsAtStartTagWithoutEndTag,
                    index + 1 < count,
-                   ScannedTagName.isASCIIAlpha(bytes[index + 1]) {
-                    countTitleEndTagSearch(from: index + 1)
-                    if lastTitleEndTagStart < index + 1 {
-                        closeElement(named: name)
-                        return index
-                    }
+                   ScannedTagName.isASCIIAlpha(bytes[index + 1]),
+                   lastTitleEndTagStart < index + 1 {
+                    closeElement(named: name)
+                    return index
                 }
             }
             index += 1
         }
         return nil
-    }
-
-    /// Adds what SwiftSoup's `containsIgnoreCase` reads from `position`: up
-    /// to the next `</title`, or else all the rest and then up to the next
-    /// `</TITLE` (it tries those two spellings, in that order).
-    private mutating func countTitleEndTagSearch(from position: Int) {
-        let lowercase = Self.nextOccurrence(
-            of: Self.lowercaseTitleEndTag, in: bytes, from: position, cursor: &nextLowercaseTitleEndTag
-        )
-        var searched = lowercase - position
-        if lowercase == count {
-            let uppercase = Self.nextOccurrence(
-                of: Self.uppercaseTitleEndTag, in: bytes, from: position, cursor: &nextUppercaseTitleEndTag
-            )
-            searched += uppercase - position
-        }
-        titleSearchBytes = titleSearchBytes.addingReportingOverflow(searched).overflow ? .max : titleSearchBytes + searched
-    }
-
-    /// The first index at or after `position` where `pattern` starts, or
-    /// `count`. Positions asked about only grow, so the cursor makes all the
-    /// searches of one scan linear together.
-    private static func nextOccurrence(
-        of pattern: [UInt8],
-        in bytes: UnsafeBufferPointer<UInt8>,
-        from position: Int,
-        cursor: inout Int
-    ) -> Int {
-        if cursor >= position {
-            return cursor
-        }
-        var index = max(position, cursor)
-        search: while index + pattern.count <= bytes.count {
-            for offset in 0..<pattern.count where bytes[index + offset] != pattern[offset] {
-                index += 1
-                continue search
-            }
-            cursor = index
-            return index
-        }
-        cursor = bytes.count
-        return bytes.count
     }
 
     private static let title = Array("title".utf8)
@@ -1156,5 +1531,98 @@ private struct TokenizingScanner {
             return nil
         }
         return delimiterIndex + 1
+    }
+}
+
+// MARK: - Work arithmetic
+
+private enum Saturating {
+    static func add(_ lhs: Int, _ rhs: Int) -> Int {
+        let (sum, overflow) = lhs.addingReportingOverflow(rhs)
+        return overflow ? .max : sum
+    }
+
+    static func multiply(_ lhs: Int, _ rhs: Int) -> Int {
+        let (product, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        return overflow ? .max : product
+    }
+}
+
+// MARK: - Title search cost
+
+/// An upper bound on the bytes SwiftSoup's title end-tag searches read,
+/// from the bytes alone.
+///
+/// In a title's raw text SwiftSoup searches, at every `<` and ASCII letter,
+/// from the letter on for `</title`, and where there is none for `</TITLE`
+/// (`containsIgnoreCase`). Before the last occurrence of either spelling,
+/// every such position is charged that search, whether or not it is in a
+/// title: a superset of where SwiftSoup searches. After it, a title's text
+/// ends at its first `<` and letter (no end tag follows), so each `<title`
+/// there is charged one search of twice the rest. Positions before the first
+/// `<title` are not charged: no title's text starts before it.
+private enum TitleSearchCost {
+    private static let lowercaseEndTag = Array("</title".utf8)
+    private static let uppercaseEndTag = Array("</TITLE".utf8)
+    private static let startTagName = Array("title".utf8)
+
+    static func bytesRead(in bytes: UnsafeBufferPointer<UInt8>) -> Int {
+        let count = bytes.count
+        guard let firstTitle = firstTitleStartTag(in: bytes) else { return 0 }
+        var nextLowercase = count
+        var nextUppercase = count
+        var total = 0
+        var index = count - 1
+        while index >= firstTitle {
+            if matches(lowercaseEndTag, in: bytes, at: index) {
+                nextLowercase = index
+            }
+            if matches(uppercaseEndTag, in: bytes, at: index) {
+                nextUppercase = index
+            }
+            if bytes[index] == 0x3C, index + 1 < count, ScannedTagName.isASCIIAlpha(bytes[index + 1]) {
+                let position = index + 1
+                if nextLowercase < count {
+                    total = Saturating.add(total, nextLowercase - position)
+                } else if nextUppercase < count {
+                    total = Saturating.add(total, (count - position) + (nextUppercase - position))
+                } else if isTitleStartTag(in: bytes, at: index) {
+                    total = Saturating.add(total, 2 * (count - position))
+                }
+            }
+            index -= 1
+        }
+        return total
+    }
+
+    private static func firstTitleStartTag(in bytes: UnsafeBufferPointer<UInt8>) -> Int? {
+        var index = 0
+        while index < bytes.count {
+            if bytes[index] == 0x3C, isTitleStartTag(in: bytes, at: index) {
+                return index
+            }
+            index += 1
+        }
+        return nil
+    }
+
+    /// `<title` in any case, followed by what ends a tag name or by the end.
+    private static func isTitleStartTag(in bytes: UnsafeBufferPointer<UInt8>, at index: Int) -> Bool {
+        let nameStart = index + 1
+        let nameEnd = nameStart + startTagName.count
+        guard nameEnd <= bytes.count else { return false }
+        for offset in 0..<startTagName.count
+        where ScannedTagName.lowercasedASCII(bytes[nameStart + offset]) != startTagName[offset] {
+            return false
+        }
+        return nameEnd == bytes.count || ScannedTagName.endsTagName(bytes[nameEnd])
+    }
+
+    private static func matches(_ pattern: [UInt8], in bytes: UnsafeBufferPointer<UInt8>, at index: Int) -> Bool {
+        guard index + pattern.count <= bytes.count else { return false }
+        for offset in 0..<pattern.count where bytes[index + offset] != pattern[offset] {
+            return false
+        }
+        return true
     }
 }

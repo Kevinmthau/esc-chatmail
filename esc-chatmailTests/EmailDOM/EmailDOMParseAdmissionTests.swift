@@ -55,16 +55,17 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
 
     // MARK: - Between the bounds the real depth decides
 
-    /// Optional end tags left out (`<ul><li>a</ul>`) keep the scan from
-    /// closing what the tree builder closes, so the bound passes the limit
-    /// for a shallow tree; the measured parse admits it.
+    /// A formatting element an end tag passes over stays counted, as the
+    /// tree builder may rebuild it, so `<div><b>x</div>` over and over
+    /// passes the limit for a tree it keeps shallow; the measured parse
+    /// admits it.
     func testParseDocument_overCountedShallowBody_isAdmittedByTheMeasuredParse() throws {
-        let html = String(repeating: "<div><ul><li>a<li>b</ul><table><tr><td><font>x</td></tr></table></div>", count: 200)
+        let html = String(repeating: "<div><b>x</div>", count: 800)
         XCTAssertGreaterThan(EmailDOMParseAdmission.estimatedDepth(of: html), EmailDOMParseAdmission.maximumDepth)
 
         let document = try EmailDOMParseAdmission.parseDocument(html)
         XCTAssertLessThan(EmailDOMParseAdmission.measuredDepth(of: [document], rootDepth: 1), 20)
-        XCTAssertEqual(try document.select("li").count, 400)
+        XCTAssertEqual(try document.select("div").count, 800)
     }
 
     /// A tree past the limit but within the measured parse's bound is built,
@@ -98,6 +99,46 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(results.text.map { $0.contains(Self.sentinel) }, true)
     }
 
+    /// What the second scan closes when an end tag skips an element left
+    /// open (`<ul><li>a</ul>`, `<td><font>x</td>`): valid HTML of this kind
+    /// is common and must not pile up until the body is refused.
+    /// Revert-check: `TokenizingScanner.crossingClose`.
+    func testTokenizedEstimate_endTagsOverLeftOpenElements_stayShallow() {
+        let shapes = [
+            "<table>" + String(repeating: "<tr><td><font>x</td></tr>", count: 1_400) + "</table>",
+            String(repeating: "<table><tr><td>x</table>", count: 1_400),
+            String(repeating: "<div><p>text</div>", count: 4_200),
+            String(repeating: "<ul><li>a<li>b</ul>", count: 2_000),
+        ]
+        for html in shapes {
+            XCTAssertLessThan(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), 20, String(html.prefix(40)))
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(40)))
+        }
+    }
+
+    /// An admitted body close to the limit, through ingest's DOM work on a
+    /// 512 KB thread: the margin `maximumDepth` leaves for the walkers.
+    func testIngestDerivation_bodyNearTheLimit_completesOnA512KBStack() {
+        let html = String(repeating: "<div>", count: EmailDOMParseAdmission.maximumDepth - 12) + Self.sentinel
+        XCTAssertLessThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), EmailDOMParseAdmission.maximumDepth)
+        let done = expectation(description: "derivation on a 512 KB thread")
+        let results = LockedResults()
+        let thread = Thread {
+            results.preview = MessageProcessor.deriveHTMLChatPreview(from: html)
+            results.text = TextProcessing.extractPlainText(from: html)
+            results.quoteRemoved = EmailDOMQuoteRemover.removeQuotes(from: html)
+            results.sanitized = HTMLSanitizerService.shared.sanitize(html)
+            results.isRich = RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
+            done.fulfill()
+        }
+        thread.stackSize = 512 * 1024
+        thread.start()
+        wait(for: [done], timeout: 120)
+        XCTAssertEqual(results.text.map { $0.contains(Self.sentinel) }, true)
+        XCTAssertEqual(results.preview.map { $0.contains(Self.sentinel) }, true)
+        XCTAssertNotNil(results.isRich)
+    }
+
     // MARK: - Cost
 
     /// Most tags make SwiftSoup search the open elements, so a body of
@@ -120,10 +161,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// Inside a `title` SwiftSoup searches the rest of the input for its end
     /// tag at every `<` and letter, so a long title of tags parses in
     /// quadratic time though it is one level deep.
-    /// Revert-check: `TokenizingScanner.countTitleEndTagSearch` (the body is
-    /// then admitted on its depth and parsed).
+    /// Revert-check: `TitleSearchCost.bytesRead` (the body is then admitted
+    /// on its depth and parsed).
     func testParseDocument_titleFullOfTags_isRefusedAsTooCostly() {
-        let html = "<title>" + String(repeating: "<a ", count: 20_000) + "</title><p>body</p>"
+        let html = "<title>" + String(repeating: "<a ", count: 40_000) + "</title><p>body</p>"
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
         XCTAssertGreaterThan(cost.titleSearchBytes, EmailDOMParseAdmission.maximumTitleSearchBytes)
@@ -131,6 +172,40 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             XCTAssertEqual(
                 error as? EmailDOMParseRefusal,
                 .tooCostlyToParse(work: cost.titleSearchBytes, limit: EmailDOMParseAdmission.maximumTitleSearchBytes)
+            )
+        }
+    }
+
+    /// The title search is charged from the bytes, so a title of void tags,
+    /// which the first scan does not count, is caught too (`<title>` then
+    /// 640 KB of `<br ` took 31 s).
+    /// Revert-check: `TitleSearchCost.bytesRead` in `ParseCost`.
+    func testParseDocument_titleFullOfVoidTags_isRefusedAsTooCostly() {
+        let html = "<title>" + String(repeating: "<br ", count: 40_000) + "</title><p>x</p>"
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertGreaterThan(cost.titleSearchBytes, EmailDOMParseAdmission.maximumTitleSearchBytes)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.titleSearchBytes, limit: EmailDOMParseAdmission.maximumTitleSearchBytes)
+            )
+        }
+    }
+
+    /// Each formatting start tag is compared, attribute by attribute, with
+    /// the active formatting elements (6,000 `<b>`s of 100 attributes took
+    /// 50 s). Revert-check: `formattingCompareWork` in `ParseCost.excessWork`.
+    func testParseDocument_manyAttributeHeavyFormattingTags_isRefusedAsTooCostly() {
+        let attributes = (0..<100).map { " a\($0)=1" }.joined()
+        let html = String(repeating: "<b\(attributes)>", count: 1_500)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertGreaterThan(cost.formattingCompareWork, EmailDOMParseAdmission.maximumFormattingCompareWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.formattingCompareWork, limit: EmailDOMParseAdmission.maximumFormattingCompareWork)
             )
         }
     }
@@ -313,14 +388,12 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
 
         // A large old-style newsletter: thousands of tags, unclosed cells,
         // fonts and list items, conditional comments and a commented style
-        // sheet. The scan over-counts what it leaves open, so this one is
-        // measured rather than admitted on the bound.
+        // sheet.
         var newsletter = "<html><head><style><!-- td { color: red } --></style></head><body>"
         for row in 0..<300 {
             newsletter += "<!--[if mso]><table><tr><td><![endif]--><table><tr><td><font face=Arial>row \(row)<td>cell<tr><td><ul><li>a<li>b</ul></table><!--[if mso]></td></tr></table><![endif]--><p>para<p>next"
         }
         newsletter += "</body></html>"
-        XCTAssertGreaterThan(EmailDOMParseAdmission.estimatedDepth(of: newsletter), EmailDOMParseAdmission.maximumDepth)
         XCTAssertNoThrow(try EmailDOMParseAdmission.admit(newsletter))
     }
 
@@ -368,6 +441,11 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             "<script><!--</script</script x><plaintext></script>" + String(repeating: "<span>", count: 300),
             "<noframes></noframes\u{e9}</noframes x><plaintext></noframes>" + String(repeating: "<span>", count: 300),
             String(repeating: "<div><title></title<b></title>", count: 300),
+            // Outside a table SwiftSoup ignores a table part, and it closes a
+            // self-closing element at once: neither may close what is above.
+            String(repeating: "<tr><span><span><span></tr>", count: 300),
+            String(repeating: "<div><table/><span><span></table>", count: 300),
+            String(repeating: "<caption><b><b></caption>", count: 300),
             // SwiftSoup's double escape matches `script` in lowercase only.
             String(repeating: "<div><script><!--<SCRIPT></script>", count: 300),
             String(repeating: "<div><script><!--<script></SCRIPT></script></div>--></script>", count: 300),
@@ -421,10 +499,18 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 if combined < documentDepth || (!selectOrFrameset && tokenized < documentDepth) {
                     failures.append("document \(documentDepth) > estimate \(tokenized)/\(combined): \(html.debugDescription)")
                 }
-                for context in ["table", "tbody", "tr", "colgroup", "body"] {
+                let bodyDepth = Self.swiftSoupFragmentDepth(html, context: "body")
+                if combined < bodyDepth || (!selectOrFrameset && tokenized < bodyDepth) {
+                    failures.append("body fragment \(bodyDepth) > estimate \(tokenized)/\(combined): \(html.debugDescription)")
+                }
+                // `EmailDOMFragmentParser`'s table-part contexts, estimated
+                // as `EmailDOMParseAdmission.parseFragment` estimates them.
+                let fragmentTokenized = EmailDOMParseAdmission.tokenizedDepthEstimate(of: html, isTableContextFragment: true)
+                let fragmentCombined = EmailDOMParseAdmission.estimatedCost(of: html, isTableContextFragment: true).depth
+                for context in ["table", "tbody", "tr", "colgroup"] {
                     let fragmentDepth = Self.swiftSoupFragmentDepth(html, context: context)
-                    if combined < fragmentDepth || (!selectOrFrameset && tokenized < fragmentDepth) {
-                        failures.append("\(context) fragment \(fragmentDepth) > estimate \(tokenized)/\(combined): \(html.debugDescription)")
+                    if fragmentCombined < fragmentDepth || (!selectOrFrameset && fragmentTokenized < fragmentDepth) {
+                        failures.append("\(context) fragment \(fragmentDepth) > estimate \(fragmentTokenized)/\(fragmentCombined): \(html.debugDescription)")
                     }
                 }
                 if failures.count > 5 { break }

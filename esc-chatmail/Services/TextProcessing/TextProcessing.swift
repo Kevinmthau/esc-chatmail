@@ -274,13 +274,19 @@ enum TextProcessing {
     /// depends on, so the answer is the same
     /// (`TextProcessingUnclosedTagTests` compares the two).
     static func containsUnclosedOpeningTag(_ html: String) -> Bool {
-        let characters = Array(html)
+        // The state is for the character after the one being read; walked in
+        // place, as an `Array` of `Character`s cost 16 bytes a character.
         var reachesEndOutsideQuotes = false
         var reachesEndInDoubleQuote = false
         var reachesEndInSingleQuote = false
-        var index = characters.count - 1
-        while index >= 0 {
-            let character = characters[index]
+        var following: Character?
+        var index = html.endIndex
+        while index > html.startIndex {
+            index = html.index(before: index)
+            let character = html[index]
+            if character == "<", following?.isLetter == true, !reachesEndOutsideQuotes {
+                return true
+            }
             let outsideQuotes: Bool
             switch character {
             case ">": outsideQuotes = true
@@ -295,10 +301,7 @@ enum TextProcessing {
                 reachesEndInSingleQuote = reachesEndOutsideQuotes
             }
             reachesEndOutsideQuotes = outsideQuotes
-            if index > 0, characters[index - 1] == "<", character.isLetter, !outsideQuotes {
-                return true
-            }
-            index -= 1
+            following = character
         }
         return false
     }
