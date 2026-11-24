@@ -593,8 +593,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 // than shown as signed out. With no stored address there is no
                 // evidence of an account (a fresh install whose keychain query
                 // failed), and the sign-in screen shows as before.
+                // An address that cannot be read either decides nothing: an account
+                // already held stays held, as through an unreadable marker.
+                // HONEST SCOPE: that fallback has no test; the mock keychain's error
+                // is one-shot and is spent on the first marker read.
                 if currentOrPersistedUserEmail() != nil {
                     heldFailure = .couldNotRestore
+                } else {
+                    heldFailure = heldAccount?.failure
                 }
                 return .retryableFailure
             case .present:
