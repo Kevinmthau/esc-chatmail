@@ -122,6 +122,12 @@ struct SyncConfig {
     /// the processed result remains serialized to preserve conversation-routing order.
     static let maxConcurrentMessageProcessing = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 6))
 
+    /// Text and HTML body bytes past which a message is prepared on its own,
+    /// one such message at a time (`MessagePersister.prepareMessagesConcurrently`).
+    /// Unmeasured: chosen so ordinary newsletters (tens to a few hundred KB)
+    /// never wait, while a batch of multi-megabyte bodies is not derived six at once.
+    static let oversizedPreparationBodyBytes = 1_048_576
+
     /// Delay before retrying failed message fetches (in seconds)
     static let retryDelaySeconds: UInt64 = 1_000_000_000
 
