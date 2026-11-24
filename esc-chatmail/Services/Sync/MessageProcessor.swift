@@ -88,7 +88,9 @@ class MessageProcessor: @unchecked Sendable {
             processedMessage.isUnread = labelIds.contains("UNREAD")
         }
 
-        // Check for attachments (exclude body parts that we fetched as content)
+        // `hasAttachments` counts any attachmentId, a large body's included:
+        // it is the bubble's cue to recover HTML for a row with no body.
+        // `extractAttachments` leaves body parts out.
         processedMessage.hasAttachments = checkForAttachments(in: payload)
         processedMessage.attachmentInfo = extractAttachments(from: payload)
         if !processedMessage.attachmentInfo.isEmpty {
@@ -450,29 +452,15 @@ class MessageProcessor: @unchecked Sendable {
         EmailAddressListParser.mailboxes(from: headerValue)
     }
     
-    private struct ExtractedMessageContent: Sendable {
-        var html: String?
-        var plainText: String?
-
-        var hasAnyContent: Bool {
-            html != nil || plainText != nil
-        }
-
-        mutating func mergeMissing(from other: ExtractedMessageContent) {
-            if html == nil {
-                html = other.html
-            }
-            if plainText == nil {
-                plainText = other.plainText
-            }
-        }
-    }
-
     private func extractContent(
         from part: MessagePart,
         messageId: String,
         fetchMemo: AttachmentFetchMemo
     ) async throws -> (html: String?, plainText: String?) {
+        // Every leaf the body takes, a continuation segment's included, is
+        // decoded or fetched under `fetchLargeBodyContent`'s contract: a
+        // transient failure throws, and only a 404 or an undecodable response
+        // leaves that one part out (`MIMEBodyExtractor`).
         func decodedBody(_ part: MessagePart) async throws -> String? {
             if let data = part.body?.data {
                 return decodeBody(data, headers: part.headers)
@@ -490,49 +478,7 @@ class MessageProcessor: @unchecked Sendable {
             return nil
         }
 
-        func normalizedNonEmpty(_ value: String?) -> String? {
-            guard let value else { return nil }
-
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : value
-        }
-
-        func extract(from part: MessagePart) async throws -> ExtractedMessageContent {
-            let resolvedMimeType = resolvedMimeType(for: part)
-
-            if isAttachmentContentPart(part) {
-                return ExtractedMessageContent()
-            }
-
-            if isHTMLMimeType(resolvedMimeType) {
-                return ExtractedMessageContent(
-                    html: normalizedNonEmpty(try await decodedBody(part)),
-                    plainText: nil
-                )
-            } else if isPlainTextMimeType(resolvedMimeType) {
-                return ExtractedMessageContent(
-                    html: nil,
-                    plainText: normalizedNonEmpty(try await decodedBody(part))
-                )
-            }
-
-            guard let parts = part.parts, !parts.isEmpty else {
-                return ExtractedMessageContent()
-            }
-
-            var extracted = ExtractedMessageContent()
-            for subpart in parts {
-                let childContent = try await extract(from: subpart)
-                extracted.mergeMissing(from: childContent)
-                if extracted.html != nil && extracted.plainText != nil {
-                    break
-                }
-            }
-
-            return extracted
-        }
-
-        var extracted = try await extract(from: part)
+        var extracted = try await MIMEBodyExtractor.extract(from: part, decodedBody: decodedBody)
 
         // Don't clean HTML content here - preserve original for display
         // The cleaning will be done only when creating snippets
@@ -662,7 +608,7 @@ class MessageProcessor: @unchecked Sendable {
         // Fetch only body-content parts. File attachments (PDFs, images,
         // archives) are never message bodies — downloading them just to probe
         // for embedded HTML wastes bandwidth and adds needless failure modes.
-        if let attachmentId = part.body?.attachmentId, !isAttachmentContentPart(part) {
+        if let attachmentId = part.body?.attachmentId, !MIMEBodyExtractor.isAttachmentContentPart(part) {
             return try await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
@@ -839,60 +785,6 @@ class MessageProcessor: @unchecked Sendable {
         }
 
         return decodedData
-    }
-
-    private func resolvedMimeType(for part: MessagePart) -> String? {
-        if let directMimeType = part.mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !directMimeType.isEmpty {
-            return directMimeType
-        }
-
-        guard let contentType = part.headers?
-            .first(where: { $0.name.lowercased() == "content-type" })?
-            .value
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !contentType.isEmpty else {
-            return nil
-        }
-
-        return contentType
-    }
-
-    private func isHTMLMimeType(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !mimeType.isEmpty else {
-            return false
-        }
-
-        return mimeType.hasPrefix("text/html")
-    }
-
-    private func isPlainTextMimeType(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !mimeType.isEmpty else {
-            return false
-        }
-
-        return mimeType.hasPrefix("text/plain")
-    }
-
-    private func isAttachmentContentPart(_ part: MessagePart) -> Bool {
-        let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedFilename.isEmpty {
-            return true
-        }
-
-        let contentDisposition = part.headers?
-            .first(where: { $0.name.lowercased() == "content-disposition" })?
-            .value
-            .lowercased() ?? ""
-
-        return contentDisposition.contains("attachment")
     }
 
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {
@@ -1129,8 +1021,21 @@ class MessageProcessor: @unchecked Sendable {
 
             // Only process actual file parts, not multipart containers.
             // Also skip duplicate attachment IDs.
+            //
+            // A body is not a file. Gmail serves a text part over about 25 KB
+            // by attachmentId, as it does a file, and the body walk follows
+            // that indirection (`fetchLargeBodyContent`); taken for a file it
+            // became an `attachment.html` or `.txt` card that the post-sync
+            // sweep downloaded a second time (architecture review
+            // gap-message-shape-extremes#3). So a text/html or text/plain part
+            // with no filename and no `attachment` disposition is never one,
+            // whether or not the walk took it for the body: the same rule as
+            // web's `isServerAttachmentPart`. A nameless text/calendar part is
+            // still a file (it drives the invite and reservation cards), and
+            // `hasAttachments`, which counts any attachmentId, is left as it is.
             if let attachmentId = part.body?.attachmentId,
                !(part.mimeType?.hasPrefix("multipart/") ?? false),
+               MIMEBodyExtractor.bodyLeafKind(of: part) == nil,
                !seenIds.contains(attachmentId) {
                 seenIds.insert(attachmentId)
 

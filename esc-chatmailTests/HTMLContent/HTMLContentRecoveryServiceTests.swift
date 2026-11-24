@@ -430,6 +430,136 @@ final class HTMLContentRecoveryServiceTests: XCTestCase {
         XCTAssertTrue(contentHandler.loadHTML(for: messageId)?.contains("HTML_TOKEN_LARGE_ATTACHMENT_CANDIDATE") == true)
     }
 
+    /// A body split around an inline PDF is recovered whole, and as the HTML
+    /// sync stores for the same payload: before, recovery kept the one
+    /// fragment with the most visible text, so the reader showed another body
+    /// than the bubble (architecture review gap-mime-decoding-i18n#4).
+    ///
+    /// Revert-check: the `MIMEBodyExtractor.extract` step in
+    /// `HTMLContentRecoveryService.performRecoveryToCompletion` (going
+    /// straight to the scored candidates).
+    func testRecoverHTMLContent_splitBody_recoversTheHTMLSyncStores() async throws {
+        let messageId = "html-recovery-split-body-\(UUID().uuidString)"
+        let continuationAttachmentId = "continuation-\(UUID().uuidString)"
+        let fragmentA = "<html><body><div>SEG_A short</div></body></html>"
+        let fragmentB = """
+        <html><body><div>SEG_B is the longer fragment, which the scoring alone would pick \
+        over the first one because visible text dominates its score.</div></body></html>
+        """
+        let message = GmailMessage(
+            id: messageId,
+            threadId: "\(messageId)-thread",
+            labelIds: ["INBOX"],
+            snippet: "Split",
+            historyId: "1",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "0",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0.0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 5, data: Data("SEG_A".utf8).base64EncodedString(), attachmentId: nil),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "0.1",
+                        mimeType: "multipart/mixed",
+                        filename: nil,
+                        headers: nil,
+                        body: nil,
+                        parts: [
+                            inlineHTMLPart(partId: "0.1.0", html: fragmentA),
+                            MessagePart(
+                                partId: "0.1.1",
+                                mimeType: "application/pdf",
+                                filename: "plan.pdf",
+                                headers: [MessageHeader(name: "Content-Disposition", value: "inline; filename=plan.pdf")],
+                                body: MessageBody(size: 4, data: nil, attachmentId: "pdf-\(UUID().uuidString)"),
+                                parts: nil
+                            ),
+                            attachmentHTMLPart(partId: "0.1.2", attachmentId: continuationAttachmentId)
+                        ]
+                    )
+                ]
+            ),
+            sizeEstimate: nil
+        )
+
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = message
+        mockAPIClient.attachmentResponses["\(messageId):\(continuationAttachmentId)"] = Data(fragmentB.utf8)
+
+        let processor = MessageProcessor(fetchAttachmentData: { _, attachmentId in
+            XCTAssertEqual(attachmentId, continuationAttachmentId)
+            return Data(fragmentB.utf8)
+        })
+        let processed = try await processor.processGmailMessage(message, myAliases: [])
+        let storedHTML = try XCTUnwrap(processed?.storedHTML)
+
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler
+        )
+
+        let recoveredHTML = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recoveredHTML, storedHTML)
+        XCTAssertTrue(storedHTML.contains("SEG_A") && storedHTML.contains("SEG_B"))
+        XCTAssertEqual(
+            mockAPIClient.getAttachmentCallCount,
+            1,
+            "Recovery fetches the continuation once and never the PDF"
+        )
+    }
+
+    /// The walk sync uses reads the first HTML part; when it shows nothing,
+    /// the scoring reads every part again. A part served by attachmentId is
+    /// fetched once for both.
+    ///
+    /// Revert-check: the lookup in `HTMLContentRecoveryService.RecoveryBodyFetches`
+    /// (`decodedTextualBody` fetching every time).
+    func testRecoverHTMLContent_fetchesAPartOnceWhenTheScoringReadsItAgain() async {
+        let messageId = "html-recovery-fetch-once-\(UUID().uuidString)"
+        let hiddenAttachmentId = "hidden-html-\(UUID().uuidString)"
+        let meaningfulHTML = "<html><body><h1>HTML_TOKEN_SECOND_ALTERNATIVE</h1></body></html>"
+
+        let mockAPIClient = MockGmailAPIClient()
+        mockAPIClient.getMessageResponses[messageId] = makeHTMLCandidatesMessage(
+            id: messageId,
+            htmlParts: [
+                attachmentHTMLPart(partId: "0.0", attachmentId: hiddenAttachmentId),
+                inlineHTMLPart(partId: "0.1", html: meaningfulHTML)
+            ]
+        )
+        mockAPIClient.attachmentResponses["\(messageId):\(hiddenAttachmentId)"] = Data(
+            "<html><body><div hidden>Hidden only</div></body></html>".utf8
+        )
+
+        let contentHandler = HTMLContentHandler()
+        defer { contentHandler.deleteHTML(for: messageId) }
+        let service = HTMLContentRecoveryService(
+            gmailAPIClientProvider: { mockAPIClient },
+            contentHandler: contentHandler
+        )
+
+        let recoveredHTML = await service.recoverHTMLContent(messageId: messageId)
+
+        XCTAssertEqual(recoveredHTML, meaningfulHTML)
+        XCTAssertEqual(mockAPIClient.getAttachmentCallCount, 1)
+    }
+
     func testRecoverHTMLContent_doesNotFetchNonTextAttachmentsWhileCollectingCandidates() async {
         let messageId = "html-recovery-skip-image-attachment-\(UUID().uuidString)"
         let imageAttachmentId = "image-attachment-\(UUID().uuidString)"
