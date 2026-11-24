@@ -93,6 +93,8 @@ final class HTMLSanitizerService {
     private func removeDangerousElementsAndEventHandlers(_ html: String) -> String {
         do {
             return try dangerousMarkupSanitizer(html)
+        } catch is EmailDOMParseRefusal {
+            return Self.textOnlyReplacement(forRefusedHTML: html)
         } catch {
             return removeDangerousElementsAndEventHandlersWithLegacyRegex(html)
         }
@@ -101,9 +103,28 @@ final class HTMLSanitizerService {
     func removeOriginalReaderActiveMarkupAndEventHandlers(_ html: String) -> String {
         do {
             return try originalReaderActiveMarkupSanitizer(html)
+        } catch is EmailDOMParseRefusal {
+            return Self.textOnlyReplacement(forRefusedHTML: html)
         } catch {
             return removeOriginalReaderActiveMarkupAndEventHandlersWithLegacyRegex(html)
         }
+    }
+
+    /// What is shown of a body `EmailDOMParseAdmission` refused as nested too
+    /// deeply to parse: its text, recovered without the DOM, escaped, with
+    /// line breaks kept. None of the sender's markup survives.
+    ///
+    /// Never the legacy regex pass. It removes each tag in one pass, so a tag
+    /// split around itself re-forms afterwards (`<me<meta>ta http-equiv=
+    /// "refresh" …>` becomes a meta refresh, and the web views allow that
+    /// navigation). Before the admission gate a sender could not reach it,
+    /// because SwiftSoup does not fail on malformed HTML; a refusal is
+    /// something any sender can cause, by nesting deep enough.
+    static func textOnlyReplacement(forRefusedHTML html: String) -> String {
+        let text = TextProcessing.extractPlainText(from: html)
+        return escapeHTML(text)
+            .components(separatedBy: "\n")
+            .joined(separator: "<br>\n")
     }
 
     func sanitizeOriginalReaderURLs(_ html: String) -> String {

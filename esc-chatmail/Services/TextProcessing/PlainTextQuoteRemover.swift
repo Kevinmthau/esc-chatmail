@@ -8,46 +8,69 @@ enum PlainTextQuoteRemover {
     // MARK: - Quote Indicator Patterns
 
     /// Regex patterns that indicate quoted content (string form for reference)
+    ///
+    /// Each pattern with `.+` starts at a line start (`(?:^|\n)`, with the
+    /// line's leading spaces), and a pattern with two or three of them bounds
+    /// each one. Unanchored, a pattern was tried at every occurrence of its
+    /// first word ("le ", "am ", "from: "…) with `.+` running to the end of
+    /// the line, and nested `.+` made each try quadratic or cubic in the line:
+    /// one crafted 30,000-character line held a sync for 43 s. Anchored and
+    /// bounded, a line costs at most the product of its bounds
+    /// (`PlainTextQuoteRemoverPatternCostTests`). An attribution in the middle
+    /// of a line, or longer than the bounds, is no longer recognized here;
+    /// `web/src/mime/text.ts` keeps the same patterns. The exceptions are
+    /// Apple Mail's quoted attributions ("> On …, at …, … wrote:", "> Am …
+    /// schrieb …:" and the other languages'), which stay unanchored and are
+    /// only bounded: the line unwrapping ahead of this pass joins them to the
+    /// sign-off above ("Jordan > On Feb 15, …"), and each starts at its
+    /// literal "> On ", "> Am "…, so each try is bounded and the cost stays
+    /// linear.
     private static let quoteIndicatorPatternStrings = [
         // Time-based quotes - English
         // Require "On" at start of string or after newline to avoid mid-sentence matches
         // (e.g., "I need to reload on the Chablis" should not match)
         "(?:^|\\n)On .+ wrote:",
-        "(?:^|\\n)On .+, .+ wrote:",
-        "> On .+, at .+, .+ wrote:",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:",
         // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
         "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
 
         // International quote patterns
         // German: "Am [date] schrieb [name]:"
-        "Am .+ schrieb .+:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:",
+        "> Am .{1,200} schrieb .{1,200}:",
         // French: "Le [date] [name] a écrit :" or "Le [date], [name] a écrit :"
-        "Le .+ a écrit\\s*:",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:",
+        "> Le .{1,200} a écrit\\s*:",
         // Spanish: "El [date] [name] escribió:"
-        "El .+ escribió:",
+        "(?:^|\\n)[ \\t]*El .+ escribió:",
+        "> El .{1,200} escribió:",
         // Italian: "Il [date] [name] ha scritto:"
-        "Il .+ ha scritto:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:",
+        "> Il .{1,200} ha scritto:",
         // Portuguese: "Em [date] [name] escreveu:"
-        "Em .+ escreveu:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:",
+        "> Em .{1,200} escreveu:",
         // Dutch: "Op [date] schreef [name]:"
-        "Op .+ schreef .+:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:",
+        "> Op .{1,200} schreef .{1,200}:",
 
         // Header-based quotes - Outlook style (uses "Sent:")
-        "From: .+\nSent: .+\nTo: .+\nSubject: .+",
-        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
         // Header-based quotes - Apple Mail style (uses "Date:")
-        "From: .+\nDate: .+\nTo: .+\nSubject: .+",
-        "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
         "-----Original Message-----",
         "________________________________",
 
         // International header patterns
         // German
-        "Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
         // French
-        "De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
+        "(?:^|\\n)[ \\t]*De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
         // Spanish
-        "De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
 
         // Forward indicators - English
         "Begin forwarded message:",
@@ -55,12 +78,14 @@ enum PlainTextQuoteRemover {
         // "---------- Forwarded message ---------"
         // "---------- Forwarded message"
         // "----- Forwarded message -----"
-        "(?:^|\\n)\\s*-{2,}\\s*Forwarded message\\b.*",
+        // Leading spaces only: a `\s*` here crossed newlines, and a run of
+        // blank lines before the marker cost the run's length at each of them.
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Forwarded message\\b.*",
         // Handles soft-wrapped variants where the marker appears inline after intro text.
         "\\s-{2,}\\s*Forwarded message\\b.*",
         "---------- Forwarded message ---------",
         "------ Original Message ------",
-        "(?:^|\\n)\\s*-{2,}\\s*Original Message\\b.*",
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Original Message\\b.*",
 
         // Forward indicators - International
         "Weitergeleitete Nachricht",   // German
@@ -71,10 +96,58 @@ enum PlainTextQuoteRemover {
         "Doorgestuurd bericht",         // Dutch
     ]
 
+    /// A run of literal characters that every match of the pattern contains,
+    /// for the patterns whose `.+` makes a miss expensive. `Le .+ a écrit`
+    /// is tried at every "le " in the text (no anchor, no word boundary, any
+    /// case), each try reading to the end of the line, so a long joined
+    /// paragraph cost one line's length per "table ", "people " or "simple ".
+    /// The literal is searched once, with the same options; where it is
+    /// absent the pattern cannot match and is skipped, so the result is the
+    /// same. Each literal is the pattern's own run of literal characters,
+    /// between two non-literal atoms, so case folding treats it alike in both.
+    private static let requiredLiteralByPattern: [String: String] = [
+        "(?:^|\\n)On .+ wrote:": " wrote:",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:": " wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:": " wrote:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "> Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:": " a écrit",
+        "> Le .{1,200} a écrit\\s*:": " a écrit",
+        "(?:^|\\n)[ \\t]*El .+ escribió:": " escribió:",
+        "> El .{1,200} escribió:": " escribió:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:": " ha scritto:",
+        "> Il .{1,200} ha scritto:": " ha scritto:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:": " escreveu:",
+        "> Em .{1,200} escreveu:": " escreveu:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:": " schreef ",
+        "> Op .{1,200} schreef .{1,200}:": " schreef ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+": "\nGesendet: ",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+": "\nEnviado: ",
+    ]
+
+    private struct QuotePattern {
+        let regex: NSRegularExpression
+        /// The `requiredLiteralByPattern` entry and its compiled search.
+        let requiredLiteral: (text: String, regex: NSRegularExpression)?
+    }
+
     /// Pre-compiled regex patterns for performance (compiled once at class load)
-    private static let compiledQuotePatterns: [NSRegularExpression] = {
-        quoteIndicatorPatternStrings.compactMap {
-            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+    private static let compiledQuotePatterns: [QuotePattern] = {
+        quoteIndicatorPatternStrings.compactMap { pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            let requiredLiteral = requiredLiteralByPattern[pattern].flatMap { literal in
+                (try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: literal),
+                    options: [.caseInsensitive]
+                )).map { (text: literal, regex: $0) }
+            }
+            return QuotePattern(regex: regex, requiredLiteral: requiredLiteral)
         }
     }()
 
@@ -227,13 +300,28 @@ enum PlainTextQuoteRemover {
         return findEarliestPatternMatchWithAttribution(in: text).0
     }
 
-    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution
-    private static func findEarliestPatternMatchWithAttribution(in text: String) -> (Int, String?) {
+    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution.
+    /// `skipsPatternsMissingTheirLiteral` is false only in the test that shows the
+    /// `requiredLiteralByPattern` shortcut changes no answer.
+    static func findEarliestPatternMatchWithAttribution(
+        in text: String,
+        skipsPatternsMissingTheirLiteral: Bool = true
+    ) -> (Int, String?) {
         var earliestIndex = text.count
         var attribution: String?
         let range = NSRange(location: 0, length: text.utf16.count)
+        var literalIsPresent: [String: Bool] = [:]
 
-        for regex in compiledQuotePatterns {
+        for pattern in compiledQuotePatterns {
+            if skipsPatternsMissingTheirLiteral, let literal = pattern.requiredLiteral {
+                let isPresent = literalIsPresent[literal.text] ?? {
+                    let found = literal.regex.firstMatch(in: text, options: [], range: range) != nil
+                    literalIsPresent[literal.text] = found
+                    return found
+                }()
+                guard isPresent else { continue }
+            }
+            let regex = pattern.regex
             if let match = regex.firstMatch(in: text, options: [], range: range),
                let matchRange = Range(match.range, in: text) {
                 let index = text.distance(from: text.startIndex, to: matchRange.lowerBound)
