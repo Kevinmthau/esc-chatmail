@@ -91,7 +91,17 @@ function firstBareEmailMatch(value: string): BareEmailMatch | null {
 }
 
 const BRACKETED_EMAIL_SOURCE = '<((?:"(?:[^"\\\\]|\\\\.)*"|[^<>"])+@[^<>]+)>'
-const ANGLE_ADDRESS_CONTENT_RE = /^(?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+$/
+// A quoted-pair is `\\[\s\S]`, as in the Swift pattern, whose ICU `.` leaves
+// out U+000B, U+000C and U+0085.
+const ANGLE_ADDRESS_CONTENT_RE = /^(?:"(?:[^"\\]|\\[\s\S])*"|[^<>"])+@[^<>]+$/
+/**
+ * What blanked text becomes in `scanMailbox`'s phrase: neither an address
+ * character nor one the bare-address pattern takes as the end or start of an
+ * address. A space ended one, so `me@corp.com(x).attacker.example`, whose
+ * domain RFC 5322's obsolete syntax makes corp.com.attacker.example, read as
+ * me@corp.com.
+ */
+const BLANK = '\u0001'
 
 type AddressScanMode =
   'phrase' | 'quote' | 'comment' | 'angle' | 'angleQuote' | 'angleComment' | 'domainLiteral'
@@ -243,9 +253,8 @@ export function mailboxAddress(token: string): MailboxAddressMatch | null {
  *    user's own mail);
  * 2. else the first bare address outside quoted strings, comments, angle-addr
  *    comments and domain literals;
- * 3. else, only where a quote or comment never closes, the last `<…@…>`
- *    anywhere: step 1 has already taken any address before it opened, so this
- *    is never the first of two addresses. A token whose quotes and comments
+ * 3. else, only where a quote or comment never closes and no `@` is outside
+ *    quotes and comments, the last `<…@…>` anywhere. A token whose quotes and comments
  *    all close and that has no address outside them has none
  *    (`"<boss@corp.example>"`, `"John Doe <john@x.com>"`): read as an address,
  *    a quoted one became a mailbox of its own ahead of the real one
@@ -274,6 +283,9 @@ function scanMailbox(token: string): MailboxScan {
   // and every complete angle-addr that is not an address, for step 2.
   const phrase: string[] = []
   let angleSegmentStart = 0
+  // Whether the current angle-addr opened a quoted local part, a comment or a
+  // domain literal.
+  let angleOpenedStructure = false
 
   for (let index = 0; index < token.length; index++) {
     const character = token.charAt(index)
@@ -283,17 +295,18 @@ function scanMailbox(token: string): MailboxScan {
       case 'phrase':
         if (character === '"') {
           mode = 'quote'
-          phrase.push(' ')
+          phrase.push(BLANK)
         } else if (character === '(') {
           mode = 'comment'
           commentDepth = 1
-          phrase.push(' ')
+          phrase.push(BLANK)
         } else {
           if (character === '<') {
             mode = 'angle'
             angleStart = index
             angleContent = ''
             angleHadComment = false
+            angleOpenedStructure = false
             angleSegmentStart = phrase.length
           }
           phrase.push(character)
@@ -301,12 +314,12 @@ function scanMailbox(token: string): MailboxScan {
         break
       case 'quote':
         escapes = true
-        phrase.push(' ')
+        phrase.push(BLANK)
         if (character === '"' && !isEscaped) mode = 'phrase'
         break
       case 'comment':
         escapes = true
-        phrase.push(' ')
+        phrase.push(BLANK)
         if (character === '(' && !isEscaped) {
           commentDepth += 1
         } else if (character === ')' && !isEscaped) {
@@ -317,22 +330,26 @@ function scanMailbox(token: string): MailboxScan {
       case 'angle':
         if (character === '"') {
           mode = 'angleQuote'
+          angleOpenedStructure = true
           angleContent += character
-          phrase.push(' ')
+          phrase.push(BLANK)
         } else if (character === '(') {
           mode = 'angleComment'
           commentDepth = 1
           angleHadComment = true
-          phrase.push(' ')
+          angleOpenedStructure = true
+          phrase.push(BLANK)
         } else if (character === '[') {
           mode = 'domainLiteral'
+          angleOpenedStructure = true
           angleContent += character
-          phrase.push(' ')
+          phrase.push(BLANK)
         } else if (character === '<') {
           if (angleContent.includes('@')) abandonedAngleHeldAddress = true
           angleStart = index
           angleContent = ''
           angleHadComment = false
+          angleOpenedStructure = false
           angleSegmentStart = phrase.length
           phrase.push(character)
         } else if (character === '>') {
@@ -343,7 +360,8 @@ function scanMailbox(token: string): MailboxScan {
           if (content.includes('@') && ANGLE_ADDRESS_CONTENT_RE.test(content)) {
             completes.push({ email: content, angleStart })
           } else {
-            for (let blank = angleSegmentStart; blank < phrase.length; blank++) phrase[blank] = ' '
+            for (let position = angleSegmentStart; position < phrase.length; position++)
+              phrase[position] = BLANK
           }
           mode = 'phrase'
         } else {
@@ -354,12 +372,12 @@ function scanMailbox(token: string): MailboxScan {
       case 'angleQuote':
         escapes = true
         angleContent += character
-        phrase.push(' ')
+        phrase.push(BLANK)
         if (character === '"' && !isEscaped) mode = 'angle'
         break
       case 'angleComment':
         escapes = true
-        phrase.push(' ')
+        phrase.push(BLANK)
         if (character === '(' && !isEscaped) {
           commentDepth += 1
         } else if (character === ')' && !isEscaped) {
@@ -370,24 +388,39 @@ function scanMailbox(token: string): MailboxScan {
       case 'domainLiteral':
         escapes = true
         angleContent += character
-        phrase.push(' ')
+        phrase.push(BLANK)
         if (character === ']' && !isEscaped) mode = 'angle'
         break
     }
     previousWasEscape = escapes && character === '\\' && !isEscaped
   }
 
+  // An address abandoned for a nested `<` is a second address, whatever
+  // follows it.
+  if (abandonedAngleHeldAddress) return 'ambiguous'
   const first = completes[0]
   if (first !== undefined) {
     const addresses = new Set(completes.map((complete) => normalizeEmail(complete.email)))
-    if (addresses.size > 1 || abandonedAngleHeldAddress) return 'ambiguous'
+    if (addresses.size > 1) return 'ambiguous'
     return first
+  }
+  // An angle-addr that never closed after it opened a quoted local part, a
+  // comment or a domain literal is not text for step 2: read there,
+  // `<me@gmail.com"> <x@attacker.example>` was the user's own mail. One that
+  // opened none (`Name <a@b.com`) still is.
+  if (mode !== 'phrase' && mode !== 'quote' && mode !== 'comment' && angleOpenedStructure) {
+    for (let position = angleSegmentStart; position < phrase.length; position++)
+      phrase[position] = BLANK
   }
 
   const bare = firstBareEmailMatch(phrase.join(''))
   if (bare !== null) return { email: bare.email, angleStart: null }
 
-  if (mode !== 'quote' && mode !== 'comment') return 'none'
+  // Step 3 reads inside an unclosed quote or comment only where nothing
+  // outside them has an `@`: a real address the bare-address pattern does not
+  // know (`x@attacker.xn--p1ai (<me@gmail.com>`) is still the mailbox's, and
+  // reading past it took the quoted one.
+  if ((mode !== 'quote' && mode !== 'comment') || phrase.includes('@')) return 'none'
   let lastBracketed: MailboxAddressMatch | null = null
   for (const match of token.matchAll(new RegExp(BRACKETED_EMAIL_SOURCE, 'g'))) {
     const email = match[1]

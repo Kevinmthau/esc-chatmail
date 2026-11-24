@@ -125,14 +125,29 @@ describe('extractEmail skips quoted names and comments', () => {
     expect(extractEmail(value)).toBe('x@attacker.example')
   })
 
-  // Revert-check: returning the first or the last complete angle-addr in
-  // `scanMailbox` in place of 'ambiguous' fails one of the two orders;
-  // dropping the 'domainLiteral' mode reads me@gmail.com.
+  // Revert-check, each in `scanMailbox`: returning the first or the last
+  // complete angle-addr in place of 'ambiguous' fails one of the two orders;
+  // returning 'ambiguous' for an abandoned address only beside a complete one
+  // fails `<me@gmail.com <x@attacker.example (>`; leaving an unclosed
+  // angle-addr's text to step 2 fails `Me <me@gmail.com
+  // (<x@attacker.example>`; blanking with a space fails `me@corp.com(x)…` and
+  // `me@corp.com"x"…`; letting step 3 read past an `@` fails the
+  // `(<me@gmail.com>` rows. The NFD row pins parity with Swift.
   it.each([
     'Boss <boss@corp.example> <x@attacker.example>',
     '<x@attacker.example> <me@gmail.com>',
     '<x@attacker.example <me@gmail.com>>',
     '<x@[><me@gmail.com>]>',
+    '<me@gmail.com"> <x@attacker.example>',
+    '<me@gmail.com(> <x@attacker.example>',
+    '<me@gmail.com[> <x@attacker.example>',
+    'Me <me@gmail.com (<x@attacker.example>',
+    '<me@gmail.com <x@attacker.example (>',
+    'me@corp.com(x).attacker.example',
+    'me@corp.com"x".attacker.example',
+    'x@attacker.xn--p1ai (<me@gmail.com>',
+    '"x"@attacker.example (<me@gmail.com>',
+    '<\u00e9@x.com> <e\u0301@x.com>',
   ])('reads no address from the ambiguous or literal %s', (value) => {
     expect(extractEmail(value)).toBeNull()
   })
@@ -141,6 +156,7 @@ describe('extractEmail skips quoted names and comments', () => {
     expect(extractEmail('Ann <a@x.com> <A@x.com>')).toBe('a@x.com')
     expect(extractEmail('<ops@[192.168.0.1]>')).toBe('ops@[192.168.0.1]')
     expect(extractEmail('<ops@[(]>')).toBe('ops@[(]')
+    expect(extractEmail('Name <a@b.com')).toBe('a@b.com')
   })
 
   it('keeps the embedded address in the display name, where it is hidden', () => {
