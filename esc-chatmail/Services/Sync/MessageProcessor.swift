@@ -81,31 +81,12 @@ class MessageProcessor: @unchecked Sendable {
             plainText: content.plainText,
             html: content.html
         )
-        try Task.checkCancellation()
-        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
-        try Task.checkCancellation()
-        processedMessage.chatPreviewText = createChatPreviewText(
-            html: content.html,
-            plainText: content.plainText,
-            snippet: gmailMessage.snippet,
-            isOutgoingForward: processedMessage.headers.isFromMe &&
-                ForwardingHeuristics.isForwardedSubject(processedMessage.headers.subject)
-        )
 
         // Process labels
         if let labelIds = gmailMessage.labelIds {
             processedMessage.labelIds = labelIds
             processedMessage.isUnread = labelIds.contains("UNREAD")
         }
-
-        try Task.checkCancellation()
-        // Detect if this is a newsletter/promotion
-        processedMessage.isNewsletter = isNewsletterOrPromotion(
-            labelIds: processedMessage.labelIds,
-            headers: processedMessage.headers,
-            html: content.html,
-            plainText: content.plainText
-        )
 
         // Check for attachments (exclude body parts that we fetched as content)
         processedMessage.hasAttachments = checkForAttachments(in: payload)
@@ -119,11 +100,60 @@ class MessageProcessor: @unchecked Sendable {
         )
         processedMessage.inlineCIDPrefetchContentIDs = inlineCIDPrefetchTargets.contentIDs
         processedMessage.inlineCIDPrefetchAttachmentIDs = inlineCIDPrefetchTargets.attachmentIDs
-        try Task.checkCancellation()
+        // Ahead of the text derivation: its HTML (`storedHTML`) is the string
+        // the preview and the rich-content pre-run are derived from.
         processedMessage.canonicalContent = canonicalContent(
             html: content.html,
             plainText: content.plainText,
             attachmentInfo: processedMessage.attachmentInfo
+        )
+
+        try Task.checkCancellation()
+        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
+
+        // One cleanup of the stored HTML gives both the chat preview and the
+        // rich-content pre-run (content-pipeline-cpu#2), which used to run the
+        // cleanup chain again in `MessagePersister`. Derived from the trimmed
+        // string the persister saves and `ChatPreviewRepair` re-derives from,
+        // never the untrimmed part: the two derive alike
+        // (`IngestCleanupSharingTests`), and the pre-run is reused only for
+        // the exact string it was computed on.
+        try Task.checkCancellation()
+        let classifiesRichContent = MessagePersister.richContentPrerunApplies(to: processedMessage)
+        var storedHTMLDerivation: ChatBubbleTextProcessingResult?
+        let storedHTML = processedMessage.storedHTML
+        func derivedFromStoredHTML() -> ChatBubbleTextProcessingResult {
+            if let storedHTMLDerivation {
+                return storedHTMLDerivation
+            }
+            let derived = Self.deriveHTMLChatPreviewAndVerdict(
+                from: storedHTML,
+                classifiesRichContent: classifiesRichContent
+            )
+            storedHTMLDerivation = derived
+            return derived
+        }
+        processedMessage.chatPreviewText = createChatPreviewText(
+            htmlPreview: { derivedFromStoredHTML().mainText },
+            plainText: content.plainText,
+            snippet: gmailMessage.snippet,
+            isOutgoingForward: processedMessage.headers.isFromMe &&
+                ForwardingHeuristics.isForwardedSubject(processedMessage.headers.subject)
+        )
+        if classifiesRichContent, let storedHTML {
+            processedMessage.richContentPrerun = RichContentPrerun(
+                html: storedHTML,
+                isRich: derivedFromStoredHTML().hasRichContent
+            )
+        }
+
+        try Task.checkCancellation()
+        // Detect if this is a newsletter/promotion
+        processedMessage.isNewsletter = isNewsletterOrPromotion(
+            labelIds: processedMessage.labelIds,
+            headers: processedMessage.headers,
+            html: content.html,
+            plainText: content.plainText
         )
 
         return processedMessage
@@ -926,7 +956,7 @@ class MessageProcessor: @unchecked Sendable {
     }
 
     private func createChatPreviewText(
-        html: String?,
+        htmlPreview: () -> String?,
         plainText: String?,
         snippet: String?,
         isOutgoingForward: Bool = false
@@ -941,7 +971,7 @@ class MessageProcessor: @unchecked Sendable {
             }
         }
 
-        if let htmlPreview = Self.deriveHTMLChatPreview(from: html) {
+        if let htmlPreview = htmlPreview() {
             return htmlPreview
         }
 
@@ -962,10 +992,22 @@ class MessageProcessor: @unchecked Sendable {
 
     /// Shared by ingest and the versioned repair; never mutates canonical HTML.
     static func deriveHTMLChatPreview(from html: String?) -> String? {
+        deriveHTMLChatPreviewAndVerdict(from: html, classifiesRichContent: false).mainText
+    }
+
+    /// `deriveHTMLChatPreview` and, with `classifiesRichContent`, the
+    /// rich-content classifier's answer over the same cleanup
+    /// (`RichContentClassifier.hasGenuineRichContentAfterCleanup`), from one
+    /// pass of the cleanup chain. The preview does not depend on whether the
+    /// verdict is asked for.
+    static func deriveHTMLChatPreviewAndVerdict(
+        from html: String?,
+        classifiesRichContent: Bool
+    ) -> ChatBubbleTextProcessingResult {
         ChatBubbleTextProcessor.htmlCompatibilityFallback(
             from: html,
-            classifyRichContent: false
-        ).mainText
+            classifyRichContent: classifiesRichContent
+        )
     }
 
     private func createOutgoingForwardChatPreviewText(

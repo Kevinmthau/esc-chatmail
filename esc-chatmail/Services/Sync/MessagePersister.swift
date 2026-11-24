@@ -461,38 +461,46 @@ actor MessagePersister {
         // The pre-run is one more cleanup of the whole body: a cancelled run
         // stops ahead of it rather than after it (no verdict, as above).
         try Task.checkCancellation()
+        // The processor's pre-run, taken from the cleanup its preview already
+        // ran, is kept when it is for the exact string persistence saves;
+        // otherwise (stub processors, hand-built values) it is computed here.
+        if let prerun = processedMessage.richContentPrerun,
+           prerun.html == processedMessage.storedHTML,
+           Self.richContentPrerunApplies(to: processedMessage) {
+            return .processed(processedMessage)
+        }
         processedMessage.richContentPrerun = Self.richContentPrerun(for: processedMessage)
         return .processed(processedMessage)
     }
 
-    /// Runs the rich-content classifier here, in the concurrent preparation
-    /// phase, on the exact string persistence will save, so stamping the
-    /// verdict (`stampRichContentVerdict`) does not run a DOM cleanup in the
-    /// strictly sequential persistence phase.
+    /// Runs the rich-content classifier in the concurrent preparation phase,
+    /// on the exact string persistence will save, so stamping the verdict
+    /// (`stampRichContentVerdict`) does not run a DOM cleanup in the strictly
+    /// sequential persistence phase. `MessageProcessor.processGmailMessage`
+    /// normally supplies it from the cleanup its preview derivation ran over
+    /// that same string; this computes it where it did not.
     ///
-    /// Here rather than inside `MessageProcessor.processGmailMessage`: this
-    /// sees `storedHTML`, the trimmed string the persister saves, where the
-    /// processor's preview derivation sees the untrimmed part, and a result
-    /// keyed to the wrong string is silently never reused. It also covers stub
-    /// processors. The cost is a second cleanup of the HTML that preview
-    /// derivation already cleaned; sharing that pass would move preview
-    /// derivation onto the trimmed string, which the golden corpus pins.
-    ///
-    /// Skipped when the answer cannot matter: own rows are never rich, and a
-    /// body that reads like a newsletter's fallback text decides the verdict
-    /// without the classifier once the HTML is stored.
+    /// Skipped when the answer cannot matter (`richContentPrerunApplies`).
     nonisolated static func richContentPrerun(for processedMessage: ProcessedMessage) -> RichContentPrerun? {
-        guard !processedMessage.headers.isFromMe,
-              let html = processedMessage.storedHTML,
-              !NewsletterFallbackText.looksLikeFallbackText(
-                  processedMessage.plainTextBody ?? processedMessage.snippet
-              ) else {
+        guard richContentPrerunApplies(to: processedMessage),
+              let html = processedMessage.storedHTML else {
             return nil
         }
         return RichContentPrerun(
             html: html,
             isRich: RichContentClassifier.hasGenuineRichContentAfterCleanup(html)
         )
+    }
+
+    /// Whether a pre-run's answer can matter: there is stored HTML, own rows are
+    /// never rich, and a body that reads like a newsletter's fallback text
+    /// decides the verdict without the classifier once the HTML is stored.
+    nonisolated static func richContentPrerunApplies(to processedMessage: ProcessedMessage) -> Bool {
+        !processedMessage.headers.isFromMe &&
+            processedMessage.storedHTML != nil &&
+            !NewsletterFallbackText.looksLikeFallbackText(
+                processedMessage.plainTextBody ?? processedMessage.snippet
+            )
     }
 
     /// Prepares messages concurrently with bounded parallelism, preserving input order.
