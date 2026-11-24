@@ -1452,6 +1452,69 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // The crash-resume pair signs Google out through the injected seam, in its place in
+    // the teardown: after the drains, before the downloads close. It called the SDK
+    // singleton directly, which no stub covered, and in a Mac test host that would delete
+    // the installed MushMail's Google keychain item (inferred, not measured; architecture
+    // review 2026-11, account-boundary-auth#5).
+    // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` or
+    // `resumeInterruptedCredentialCleanupIfNeeded()` goes back to
+    // `GIDSignIn.sharedInstance.signOut()` in place of `signOutGoogleSession()`
+    // (no "google-sign-out" is recorded for that marker). Run that revert-check on the iOS
+    // simulator only: reverted, a Mac test host would delete the installed app's Google
+    // session, which is the damage this test exists to prevent.
+    func testRestoreResumedCleanup_signsGoogleOutThroughTheSeamBeforeDownloadsClose() async throws {
+        for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
+            let keychain = MockKeychainService()
+            try keychain.save(Data([1]), for: key.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                keychainService: keychain,
+                signOutGoogleSession: { cleanup.record("google-sign-out") },
+                clearParticipantCaches: { cleanup.record("participants-closed") },
+                cleanupDownloads: { cleanup.record("downloads-closed") }
+            )
+
+            let outcome = await session.restorePreviousSignIn()
+
+            XCTAssertEqual(outcome, .terminalNoSession, key.rawValue)
+            // The participant drain is the last one before the sign-out.
+            XCTAssertEqual(
+                cleanup.events
+                    .filter { ["participants-closed", "google-sign-out", "downloads-closed"].contains($0) }
+                    .prefix(3),
+                ["participants-closed", "google-sign-out", "downloads-closed"],
+                key.rawValue
+            )
+            XCTAssertEqual(cleanup.events.filter { $0 == "google-sign-out" }.count, 1, key.rawValue)
+        }
+    }
+
+    // In AuthSession.swift the SDK's sign-out is called only as the seam's production
+    // default, and its disconnect not at all, so neither reaches the real Google session
+    // past a test's stub. Comment lines are skipped, so a note may quote the call.
+    // HONEST SCOPE: this reads one spelling; an alias of the singleton would slip past.
+    // Revert-check: fails if a `GIDSignIn.sharedInstance.signOut()` or `.disconnect` is
+    // added to AuthSession.swift outside the `signOutGoogleSession` default.
+    func testGoogleSDKSignOut_isCalledOnlyFromTheSeamDefault() throws {
+        let fullSource = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+        let source = fullSource
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        let call = "GIDSignIn.sharedInstance.signOut()"
+        XCTAssertEqual(source.components(separatedBy: call).count - 1, 1)
+        XCTAssertFalse(source.contains("GIDSignIn.sharedInstance.disconnect"))
+        let seamDefault = try XCTUnwrap(source.range(of: "signOutGoogleSession: @escaping @MainActor @Sendable () -> Void = {"))
+        let callSite = try XCTUnwrap(source.range(of: call))
+        XCTAssertLessThan(seamDefault.lowerBound, callSite.lowerBound)
+        XCTAssertLessThan(
+            source.distance(from: seamDefault.upperBound, to: callSite.lowerBound),
+            40,
+            "The one SDK sign-out is the body of the seam's default closure"
+        )
+    }
+
     // Revert-check: fails if `clearFailedGoogleSession()` drops its
     // `cancelBackgroundTaskRequests()` step. A restore rejected with an
     // invalidated credential concludes signed out with tokens cleared, so every
