@@ -6,7 +6,7 @@ import CoreData
 extension DatabaseMaintenanceService {
 
     func performCleanup() async -> Bool {
-        await StoreMaintenanceCoordinator.shared.runExclusivelyWhenStoreIsIdle(operationName: "database cleanup") {
+        await storeMaintenanceCoordinator.runExclusivelyWhenStoreIsIdle(operationName: "database cleanup") {
             await self.performCleanupWhileStoreIsIdle()
         }
     }
@@ -21,7 +21,7 @@ extension DatabaseMaintenanceService {
             Log.info("Database cleanup skipped: the store is not loaded", category: .coreData)
             return false
         }
-        let htmlContentHandler = HTMLContentHandler.shared
+        let htmlContentHandler = self.htmlContentHandler
         let htmlAccountGeneration = htmlContentHandler.captureAccountGeneration()
         let context = coreDataStack.newBackgroundContext()
         let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
@@ -29,9 +29,10 @@ extension DatabaseMaintenanceService {
         guard !Task.isCancelled else { return false }
 
         // The flag is not a witness (`CoreDataStack.requireAttachedStore(in:)`).
-        // Nothing below runs against a coordinator with no store: what the
-        // history purge and the batch delete do there is not known, and the
-        // sweeps would read every file as an orphan.
+        // Nothing below runs against a coordinator with no store: the batch
+        // delete raises there (`deleteOrphanedAttachments`), what the history
+        // purge does there is not known, and the sweeps would read every file
+        // as an orphan.
         guard await context.perform({ CoreDataStack.hasAttachedStore(context) }) else {
             Log.error("Database cleanup skipped: no store is attached", category: .coreData)
             return false
@@ -102,7 +103,7 @@ extension DatabaseMaintenanceService {
             Log.info("Database cleanup cancelled before its attachment-file sweep", category: .coreData)
             return false
         }
-        await AttachmentDownloader.shared.cleanupOrphanedFiles()
+        await sweepOrphanedAttachmentFiles()
         return true
     }
 
@@ -113,8 +114,10 @@ extension DatabaseMaintenanceService {
         in context: NSManagedObjectContext,
         leases: ComposeAttachmentLeaseRegistry = .shared
     ) throws -> [NSManagedObjectID] {
-        // What a batch delete does on a coordinator with no store is not
-        // known; it is never asked.
+        // A batch delete on a coordinator with no store raises
+        // NSInternalInconsistencyException ("has no persistent stores"),
+        // which Swift cannot catch: measured on the iOS 27.0 simulator
+        // (AttachedStoreGuardTests' revert-check), it crashed the process.
         try CoreDataStack.requireAttachedStore(in: context)
         return try leases.withProtectedResources { resources in
             let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")

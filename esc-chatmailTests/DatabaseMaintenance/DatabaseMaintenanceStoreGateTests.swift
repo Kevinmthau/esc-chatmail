@@ -8,10 +8,11 @@ import XCTest
 /// load (and any migration or recovery-ladder step) ahead of the fresh-install cleanup,
 /// and carried on against a coordinator with no store when that load was kept as failed.
 ///
-/// Every test injects the stack and the readiness: the default readiness runs the real
-/// `FreshInstallHandler`. None of them gives a run a store with files to lose. Keep this
-/// suite out of `Mac.xctestplan`: the maintenance run's sweeps walk the host's real
-/// Application Support.
+/// Every test injects everything `DatabaseMaintenanceService` reaches (`makeService`): the
+/// stack, the readiness, a run coordinator of its own, an HTML boundary over a temporary
+/// directory and a recording attachment sweep. The defaults are the host's shared run
+/// boundary and its real `Messages`, `Attachments` and `Previews`. Keep this suite out of
+/// `Mac.xctestplan` all the same.
 @MainActor
 final class DatabaseMaintenanceStoreGateTests: XCTestCase {
     private var directoriesToRemove: [URL] = []
@@ -33,10 +34,12 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
         let stack = CoreDataStack(unloadedPersistentContainerForTesting: container)
         let readiness = ReadinessProbe(answer: false)
         let registry = CapturingTaskRegistry()
-        let service = DatabaseMaintenanceService(
-            taskRegistry: registry,
-            coreDataStack: stack,
-            persistenceReadiness: { await readiness.ask() }
+        let sweep = SweepRecorder()
+        let service = makeService(
+            registry: registry,
+            stack: stack,
+            readiness: { await readiness.ask() },
+            sweep: sweep
         )
 
         let analyzed = try await registry.run(DatabaseMaintenanceService.analyzeTaskIdentifier)
@@ -50,6 +53,7 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
             FileManager.default.fileExists(atPath: storeURL.path),
             "A handler whose persistence is not ready must not start the store's load"
         )
+        XCTAssertEqual(sweep.count, 0)
         withExtendedLifetime(service) {}
     }
 
@@ -65,11 +69,8 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
             unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL)
         )
         let registry = CapturingTaskRegistry()
-        let service = DatabaseMaintenanceService(
-            taskRegistry: registry,
-            coreDataStack: stack,
-            persistenceReadiness: { true }
-        )
+        let sweep = SweepRecorder()
+        let service = makeService(registry: registry, stack: stack, readiness: { true }, sweep: sweep)
 
         let analyzed = try await registry.run(DatabaseMaintenanceService.analyzeTaskIdentifier)
         XCTAssertFalse(analyzed)
@@ -78,6 +79,7 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
         let cleaned = try await registry.run(DatabaseMaintenanceService.cleanupTaskIdentifier)
         XCTAssertFalse(cleaned)
         try await assertNoLoadWasAttempted(stack)
+        XCTAssertEqual(sweep.count, 0)
         withExtendedLifetime(service) {}
     }
 
@@ -89,19 +91,64 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
     func testCleanup_flagSaysLoadedButNoStoreIsAttached_returnsFalse() async {
         let (container, storeURL) = TestCoreDataStack.makeStorelessContainer()
         directoriesToRemove.append(storeURL.deletingLastPathComponent())
-        let service = DatabaseMaintenanceService(
-            taskRegistry: CapturingTaskRegistry(),
-            coreDataStack: CoreDataStack(persistentContainerForTesting: container),
-            persistenceReadiness: { true }
+        let sweep = SweepRecorder()
+        let service = makeService(
+            stack: CoreDataStack(persistentContainerForTesting: container),
+            readiness: { true },
+            sweep: sweep
         )
 
         let cleaned = await service.performCleanup()
 
         XCTAssertFalse(cleaned)
         XCTAssertTrue(container.persistentStoreCoordinator.persistentStores.isEmpty)
+        XCTAssertEqual(sweep.count, 0)
+    }
+
+    /// The control for the refusals above: with a loaded store, the same injected run,
+    /// boundary and sweep run both tasks to the end, so a refusal is the guard's and not
+    /// the harness's.
+    func testHandlers_loadedStore_runToTheEnd() async throws {
+        let testStack = TestCoreDataStack(storeKind: .sqlite)
+        let registry = CapturingTaskRegistry()
+        let sweep = SweepRecorder()
+        let service = makeService(
+            registry: registry,
+            stack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            readiness: { true },
+            sweep: sweep
+        )
+        let orphanBody = try XCTUnwrap(service.htmlContentHandler.saveHTML("<p>orphan</p>", for: "orphan"))
+
+        let analyzed = try await registry.run(DatabaseMaintenanceService.analyzeTaskIdentifier)
+        let cleaned = try await registry.run(DatabaseMaintenanceService.cleanupTaskIdentifier)
+
+        XCTAssertTrue(analyzed)
+        XCTAssertTrue(cleaned)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: orphanBody.path))
+        XCTAssertEqual(sweep.count, 1)
     }
 
     // MARK: - Helpers
+
+    private func makeService(
+        registry: CapturingTaskRegistry? = nil,
+        stack: CoreDataStack,
+        readiness: @escaping @Sendable () async -> Bool,
+        sweep: SweepRecorder
+    ) -> DatabaseMaintenanceService {
+        let messagesDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("DatabaseMaintenanceStoreGateTests-\(UUID().uuidString)", isDirectory: true)
+        directoriesToRemove.append(messagesDirectory)
+        return DatabaseMaintenanceService(
+            taskRegistry: registry ?? CapturingTaskRegistry(),
+            coreDataStack: stack,
+            persistenceReadiness: readiness,
+            storeMaintenanceCoordinator: StoreMaintenanceCoordinator(syncRunCoordinator: SyncRunCoordinator()),
+            htmlContentHandler: HTMLContentHandler(messagesDirectory: messagesDirectory),
+            sweepOrphanedAttachmentFiles: { sweep.record() }
+        )
+    }
 
     /// A load that was started on the unopenable store latches its failure; one that was
     /// never started leaves nothing latched, and the wait times out.
@@ -121,6 +168,25 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
                 line: line
             )
         }
+    }
+}
+
+/// Counts the attachment sweeps the cleanup asked for, in place of the real one.
+private final class SweepRecorder: @unchecked Sendable {
+    /// `@unchecked Sendable`: `lock` guards `recorded`.
+    private let lock = NSLock()
+    private var recorded = 0
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded
+    }
+
+    func record() {
+        lock.lock()
+        recorded += 1
+        lock.unlock()
     }
 }
 

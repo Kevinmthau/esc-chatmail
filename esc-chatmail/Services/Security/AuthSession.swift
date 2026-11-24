@@ -184,6 +184,9 @@ private enum ProductionLocalMailboxStoreInspector {
 
     static func inspect() async throws -> LocalMailboxStoreInspection {
         try await CoreDataStack.shared.performBackgroundTask { context in
+            // An empty answer here, beside stored files, resets the store and
+            // removes the files: it must come from a store that is attached.
+            try CoreDataStack.requireAttachedStore(in: context)
             let accountEmails = try context.fetch(Account.fetchRequest()).map(\.email)
             var hasAccountScopedMailboxData = false
 

@@ -41,6 +41,12 @@ final class DatabaseMaintenanceService: ObservableObject {
     /// end in a background task, and never the auth restore, which takes the
     /// account boundary that the maintenance run waits on.
     let persistenceReadiness: @Sendable () async -> Bool
+    /// The exclusive maintenance run both tasks take. `.shared` in the app.
+    let storeMaintenanceCoordinator: StoreMaintenanceCoordinator
+    /// The boundary the cleanup's body sweep removes files through.
+    let htmlContentHandler: HTMLContentHandler
+    /// The cleanup's last step, the sweep of `Attachments` and `Previews`.
+    let sweepOrphanedAttachmentFiles: @Sendable () async -> Void
 
     /// Internal (not private) only so tests can inject a seamed registry.
     /// Never construct a second instance against the default `.shared`
@@ -53,19 +59,33 @@ final class DatabaseMaintenanceService: ObservableObject {
     /// the Mac registry's `shared` is main-actor isolated, and a default
     /// argument is evaluated outside this initializer's isolation.
     ///
-    /// `coreDataStack` and `persistenceReadiness` are for tests too. A test
-    /// injects both, because the default readiness runs the real
-    /// `FreshInstallHandler` on the host's defaults.
+    /// The other parameters are for tests too. A test that runs a handler or
+    /// `performCleanup()` injects all of them: the defaults are the app's
+    /// shared run boundary and its real `Messages`, `Attachments` and
+    /// `Previews` directories, and the default readiness, which refuses in a
+    /// unit-test host, would otherwise run the real `FreshInstallHandler` on
+    /// the host's defaults.
     init(
         taskRegistry: (any BackgroundTaskRegistering)? = nil,
         coreDataStack: CoreDataStack = .shared,
         persistenceReadiness: @escaping @Sendable () async -> Bool = {
-            await AppStartupBootstrap.shared.preparePersistenceIfNeeded()
+            // A task the system delivers to a unit-test host must not run
+            // the launch bootstrap there.
+            guard !RuntimeEnvironment.isRunningUnitTests else { return false }
+            return await AppStartupBootstrap.shared.preparePersistenceIfNeeded()
+        },
+        storeMaintenanceCoordinator: StoreMaintenanceCoordinator = .shared,
+        htmlContentHandler: HTMLContentHandler = .shared,
+        sweepOrphanedAttachmentFiles: @escaping @Sendable () async -> Void = {
+            await AttachmentDownloader.shared.cleanupOrphanedFiles()
         }
     ) {
         self.taskRegistry = taskRegistry ?? PlatformBackgroundTaskRegistry.shared
         self.coreDataStack = coreDataStack
         self.persistenceReadiness = persistenceReadiness
+        self.storeMaintenanceCoordinator = storeMaintenanceCoordinator
+        self.htmlContentHandler = htmlContentHandler
+        self.sweepOrphanedAttachmentFiles = sweepOrphanedAttachmentFiles
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }

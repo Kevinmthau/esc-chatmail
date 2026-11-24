@@ -17,6 +17,12 @@ extension CoreDataStack {
     /// nor the bootstrap's readiness proves the store is there: a stack built for tests sets
     /// the flag with no load, and the bootstrap stays ready after a reset's reload fails.
     /// The context's own coordinator is the witness.
+    ///
+    /// The check and the read after it are two reads of the coordinator, not one: a store
+    /// removed between them still answers `[]`. What keeps a removal out of that gap is the
+    /// caller's: the sweeps run inside the exclusive maintenance run, which a reset's
+    /// quiescence drains first, and the deleted-row removers' account generation is closed
+    /// before a sign-out destroys the store.
     static func requireAttachedStore(in context: NSManagedObjectContext) throws {
         guard hasAttachedStore(context) else {
             throw CoreDataError.storeNotAttached
