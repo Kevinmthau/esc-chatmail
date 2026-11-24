@@ -246,8 +246,9 @@ extension VirtualScrollState {
     /// cover it. Returns whether it started an extension load.
     ///
     /// A load asks for `VirtualScrollWindowPolicy.requestedRows`: the
-    /// position's rows, every row whose view is in the hierarchy, and some
-    /// slack beyond those, so a viewport taller than the position's rows
+    /// position's rows, the rows whose views are in the hierarchy running on
+    /// from them, and some slack beyond those, so a viewport taller than the
+    /// position's rows
     /// keeps its on-screen rows through a replace. Whether a load is needed
     /// at all is decided from the position's rows alone
     /// (`VirtualScrollWindowPolicy.positionRows`), as it always was: the rows

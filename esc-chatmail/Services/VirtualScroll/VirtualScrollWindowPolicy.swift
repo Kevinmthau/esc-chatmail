@@ -31,7 +31,9 @@ import Foundation
 /// ended at the viewport's edge, where a row appearing there is within
 /// `preloadThreshold` of the window's end, and a reader who turned back had no
 /// row beyond the edge to appear and move the window (the iPhone keeps about
-/// 20 rows of it below the viewport while scrolling up). Only a run on from
+/// 20 rows of it below the viewport while scrolling up). A viewport whose edge
+/// is exactly the position rows' edge keeps no slack there, as before: it
+/// reaches no further than the position's rows. Only a run on from
 /// the position's rows: the rows on screen are one, while a realized row
 /// apart from it is a record the view has not cleared yet (an `onDisappear`
 /// still to come after a jump, or one never delivered), and keeping its row

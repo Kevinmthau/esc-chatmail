@@ -4983,7 +4983,8 @@ final class VirtualScrollStateTests: XCTestCase {
     /// iPad): scrolling down, the position is the bottom edge, and the
     /// sliding replace kept only `bufferSize` rows above it, so rows still on
     /// screen left the `ForEach` (architecture review 2026-11,
-    /// chat-transcript-ui#1). A replace keeps every realized row.
+    /// chat-transcript-ui#1). A replace keeps the realized rows running on
+    /// from the position's rows.
     ///
     /// Revert-check: returning `positionRows` from
     /// `VirtualScrollWindowPolicy.requestedRows` (no realized span) publishes
@@ -5024,6 +5025,50 @@ final class VirtualScrollStateTests: XCTestCase {
             state.visibleMessages.map(\.objectID),
             Array(messages[9..<18]).map(\.objectID)
         )
+    }
+
+    /// A 7-row viewport, taller than the 5 position rows, scrolled down row
+    /// by row as the transcript reports it: each row entering at the bottom
+    /// appears (`markIndexVisible`, then `markRowRealized`) as the row
+    /// leaving at the top disappears. Every replace keeps the viewport and a
+    /// row of slack above it, and the window slides at one width instead of
+    /// growing.
+    ///
+    /// Revert-check: returning `positionRows` from
+    /// `VirtualScrollWindowPolicy.requestedRows` publishes 16..<21 at the
+    /// first replace and times out here; making `updateVisibleMessages`
+    /// extend on every step (`extendsWindowOnOverlap` defaulting to true)
+    /// keeps 7..<21 there.
+    func testMarkIndexVisible_scrollingDownTallViewportRowByRow_slidesAtOneWidth() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 7..<18, scrollPosition: 14)
+        defer { state.cleanup() }
+        func rowID(_ absoluteIndex: Int) -> ChatMessageDisplayIdentity {
+            .message(messages[absoluteIndex].objectID)
+        }
+        // Rows 8...14 on screen, the reader at the bottom edge.
+        for index in 8...14 {
+            state.markRowRealized(rowID(index))
+        }
+
+        var position = 14
+        var replaceCount = 0
+        for bottomEdge in 15...26 {
+            state.markRowUnrealized(rowID(bottomEdge - 7))
+            state.markIndexVisible(bottomEdge)
+            state.markRowRealized(rowID(bottomEdge))
+            guard bottomEdge - position > 2 else { continue }
+            position = bottomEdge
+            replaceCount += 1
+            await waitUntil {
+                !state.isLoadingMore && state.visibleRangeStartIndex == bottomEdge - 7
+            }
+            XCTAssertEqual(
+                state.visibleMessages.map(\.objectID),
+                Array(messages[(bottomEdge - 7)..<(bottomEdge + 4)]).map(\.objectID),
+                "replace at row \(bottomEdge)"
+            )
+        }
+        XCTAssertEqual(replaceCount, 4)
     }
 
     /// A row whose view left (`markRowUnrealized`, from its `onDisappear`) is
