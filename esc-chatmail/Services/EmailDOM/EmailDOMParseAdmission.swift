@@ -292,11 +292,25 @@ enum EmailDOMParseAdmission {
     ///   same name. A body whose markup the second scan cannot follow
     ///   (`readModeDependentTag`) is charged as if every earlier
     ///   formatting tag were held, at the body's whole length.
+    /// - `childMoveWork`: the adoption agency (a formatting end tag that is
+    ///   not the innermost element, or an `<a>` while one is held) moves
+    ///   every child of its furthest block, one at a time, and each move
+    ///   takes the first child out of the block's list and renumbers the
+    ///   rest (`removeChild(at: 0)`, `reindexChildren`), so a
+    ///   block of n children costs n² (`<b><div>` and 100,000 `<br>`s then
+    ///   `</b>` took 14 s, a megabyte 153 s). The second scan counts the
+    ///   nodes each held element may have been given (`childPrefix`) and
+    ///   charges, at each such tag, the square of the most any element that
+    ///   may be the furthest block holds, once for each formatting element
+    ///   of that name the agency may go through. Where the second scan
+    ///   cannot follow the markup, every node of the body is counted in one
+    ///   block.
     struct ParseCost: Equatable {
         let depth: Int
         let treeWork: Int
         let titleSearchBytes: Int
         let formattingCompareWork: Int
+        let childMoveWork: Int
 
         /// The refusal past one of the work limits.
         var excessWork: EmailDOMParseRefusal? {
@@ -312,6 +326,9 @@ enum EmailDOMParseAdmission {
                     limit: EmailDOMParseAdmission.maximumFormattingCompareWork
                 )
             }
+            if childMoveWork > EmailDOMParseAdmission.maximumChildMoveWork {
+                return .tooCostlyToParse(work: childMoveWork, limit: EmailDOMParseAdmission.maximumChildMoveWork)
+            }
             return nil
         }
     }
@@ -325,6 +342,9 @@ enum EmailDOMParseAdmission {
     /// About half a second of attribute comparisons (measured at about two
     /// hundred million bytes a second).
     static let maximumFormattingCompareWork = 100_000_000
+    /// About half a second of child moves (measured at about eight hundred
+    /// million children² a second).
+    static let maximumChildMoveWork = 400_000_000
 
     /// `isTableContextFragment`: parsed in a table part's context
     /// (`EmailDOMFragmentParser`), where SwiftSoup ignores table parts that
@@ -411,6 +431,7 @@ enum EmailDOMParseAdmission {
         let depth: Int
         let formattingCompareWork: Int
         let rebuildWork: Int
+        let childMoveWork: Int
         if scanner.readModeDependentTag {
             depth = countedBound
             formattingCompareWork = Saturating.add(
@@ -424,6 +445,20 @@ enum EmailDOMParseAdmission {
                 Saturating.multiply(count.formattingTagsAcrossTokens, 2),
                 Saturating.add(depth, TokenizingScanner.rebuildCost(attributeCount: attributes))
             )
+            // Every node of the body in one block: each `<` gives an element
+            // at most the run of text before it and itself, and each pass of
+            // the adoption agency an adopter and a moved block, at most one
+            // pass for each formatting start tag. A block's children are
+            // moved together once, so this bounds the sum of the squares too.
+            if count.mayRunAdoptionAgency {
+                let nodes = Saturating.add(
+                    Saturating.add(Saturating.multiply(count.tokenCount, 2), 1),
+                    Saturating.multiply(count.formattingTagCount, 2)
+                )
+                childMoveWork = Saturating.multiply(nodes, nodes)
+            } else {
+                childMoveWork = 0
+            }
         } else {
             depth = countedBound <= maximumDepth ? countedBound : min(tokenizedDepth, countedBound)
             formattingCompareWork = scanner.formattingCompareWork
@@ -431,12 +466,14 @@ enum EmailDOMParseAdmission {
                 Saturating.multiply(scanner.rebuildCandidatesAcrossTokens, depth),
                 scanner.rebuildCostAcrossTokens
             )
+            childMoveWork = scanner.childMoveWork
         }
         return ParseCost(
             depth: depth,
             treeWork: Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
             titleSearchBytes: TitleSearchCost.bytesRead(in: bytes),
-            formattingCompareWork: formattingCompareWork
+            formattingCompareWork: formattingCompareWork,
+            childMoveWork: childMoveWork
         )
     }
 }
@@ -530,6 +567,7 @@ private enum ScannedTagName {
     static let dt = Array("dt".utf8)
     static let option = Array("option".utf8)
     static let optgroup = Array("optgroup".utf8)
+    static let form = Array("form".utf8)
     static let tableSections: Set<[UInt8]> = Set(["tbody", "thead", "tfoot"].map { Array($0.utf8) })
 
     private static func names(_ list: [String]) -> Set<[UInt8]> {
@@ -544,10 +582,59 @@ private enum ScannedTagName {
     /// Elements that put a marker in the active formatting list, which
     /// their closing clears back to.
     static let markers = names(["td", "th", "caption", "applet", "marquee", "object", "template"])
+    /// Markers SwiftSoup may pop without clearing the active formatting
+    /// list back to them (a `</table>` over an `object`), which leaves their
+    /// marker in the list: a cell closed later then clears only back to it.
+    static let markersLeftInTheList = names(["applet", "marquee", "object", "template"])
+    static let cells = names(["td", "th"])
 
     static let tableStructure = names([
         "table", "tbody", "thead", "tfoot", "tr", "td", "th", "caption", "colgroup", "col"
     ])
+
+    /// SwiftSoup 2.13.5's special elements (`TagSets.special`), the only ones
+    /// the adoption agency takes as its furthest block.
+    static let specialNames = names([
+        "address", "applet", "area", "article", "aside", "base", "basefont", "bgsound", "blockquote", "body",
+        "br", "button", "caption", "center", "col", "colgroup", "command", "dd", "details", "dir", "div", "dl",
+        "dt", "embed", "fieldset", "figcaption", "figure", "footer", "form", "frame", "frameset", "h1", "h2",
+        "h3", "h4", "h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe", "img", "input", "isindex",
+        "li", "link", "listing", "marquee", "menu", "meta", "nav", "noembed", "noframes", "noscript", "object",
+        "ol", "p", "param", "plaintext", "pre", "script", "section", "select", "style", "summary", "table",
+        "tbody", "td", "textarea", "tfoot", "th", "thead", "title", "tr", "ul", "wbr", "xmp"
+    ])
+
+    /// Table parts whose content SwiftSoup may foster parent, so the text
+    /// and elements read while one is innermost may go to an element below
+    /// the table (`colgroup` hands "anything else" back to the table).
+    static let fosteringTableParts = names(["table", "tbody", "thead", "tfoot", "tr", "colgroup"])
+
+    /// Start tags the body may drop or insert without leaving them open,
+    /// which this scan otherwise holds as open: a `form` while SwiftSoup's
+    /// form pointer is set or in a table, a `frame`, and an `isindex`
+    /// (built from a form it closes).
+    static let mayNotStayOpen = names(["form", "frame", "isindex"])
+
+    /// The elements SwiftSoup may close for the tag that closed one named
+    /// `name`: the scan closes the innermost, and where that one may already
+    /// be closed the tree builder may close a lower one of these instead.
+    static func closingKind(of name: [UInt8]) -> Set<[UInt8]> {
+        if headings.contains(name) {
+            return headings
+        }
+        if name == dd || name == dt {
+            return definitionTargets
+        }
+        if name == td || name == th || name == tr || tableSections.contains(name) {
+            return sectionEndTargets
+        }
+        if name == option || name == optgroup {
+            return optionKinds
+        }
+        return endTagTargets(name).union([name])
+    }
+
+    private static let optionKinds = names(["option", "optgroup"])
 
     /// What "generate implied end tags" closes.
     static let impliedEndTagNames = names(["dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"])
@@ -634,7 +721,7 @@ private enum ScannedTagName {
     private static let caption = Array("caption".utf8)
     private static let menuitem = Array("menuitem".utf8)
     private static let button = Array("button".utf8)
-    private static let anchor = Array("a".utf8)
+    static let anchor = Array("a".utf8)
     private static let nobr = Array("nobr".utf8)
 
     static func closingRules(forStartTag name: [UInt8]) -> [ClosingRule] {
@@ -680,13 +767,15 @@ private enum ScannedTagName {
     private static let impliedEndTagStarts = names(["rb", "rtc", "rp", "rt"])
     static let headings: Set<[UInt8]> = Set(["h1", "h2", "h3", "h4", "h5", "h6"].map { Array($0.utf8) })
 
-    /// Start tags that close a `p` in button scope (HTML's list; SwiftSoup's
-    /// `InBodyStartPClosers` plus the others whose handlers close one).
+    /// Start tags that close a `p` in button scope: SwiftSoup 2.13.5's
+    /// `InBodyStartPClosers` plus the others whose handlers close one. Not
+    /// HTML's list: SwiftSoup inserts `dialog`, `main` and `xmp` as any
+    /// other element, and a `p` closed for one here stayed open there.
     static let closesParagraph: Set<[UInt8]> = Set([
-        "address", "article", "aside", "blockquote", "center", "details", "dialog", "dir", "div",
-        "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "main", "menu",
+        "address", "article", "aside", "blockquote", "center", "details", "dir", "div",
+        "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "menu",
         "nav", "ol", "p", "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre",
-        "listing", "form", "li", "dd", "dt", "plaintext", "xmp"
+        "listing", "form", "li", "dd", "dt", "plaintext"
     ].map { Array($0.utf8) })
 
     /// Raw text SwiftSoup's tree builder switches its tokenizer to after
@@ -922,6 +1011,9 @@ private struct StartTagCount {
     private(set) var formattingNameStarts: [Int] = []
     /// Over every `<`, the formatting tags before it.
     private(set) var formattingTagsAcrossTokens = 0
+    /// Whether any `</` and a formatting element's name, or `<a`, occurs:
+    /// the tags that can run the adoption agency.
+    private(set) var mayRunAdoptionAgency = false
 
     init(bytes: UnsafeBufferPointer<UInt8>) {
         let count = bytes.count
@@ -933,6 +1025,12 @@ private struct StartTagCount {
             }
             tokenCount += 1
             formattingTagsAcrossTokens = Saturating.add(formattingTagsAcrossTokens, formattingTagCount)
+            if !mayRunAdoptionAgency,
+               index + 2 < count,
+               bytes[index + 1] == 0x2F,
+               ScannedTagName.formattingNames.contains(Self.name(in: bytes, from: index + 2)) {
+                mayRunAdoptionAgency = true
+            }
             let nameStart = index + 1
             guard nameStart < count, ScannedTagName.isASCIIAlpha(bytes[nameStart]) else {
                 index += 1
@@ -955,9 +1053,24 @@ private struct StartTagCount {
             if ScannedTagName.formattingNames.contains(name) {
                 formattingTagCount += 1
                 formattingNameStarts.append(nameStart)
+                if name == ScannedTagName.anchor {
+                    mayRunAdoptionAgency = true
+                }
             }
             index = nameStart
         }
+    }
+
+    /// The lowercased name starting at `start`, at most `nameLengthRead`
+    /// bytes of it (longer than any formatting element's name).
+    private static func name(in bytes: UnsafeBufferPointer<UInt8>, from start: Int) -> [UInt8] {
+        var name: [UInt8] = []
+        var index = start
+        while index < bytes.count, index - start < nameLengthRead, !ScannedTagName.endsTagName(bytes[index]) {
+            name.append(ScannedTagName.lowercasedASCII(bytes[index]))
+            index += 1
+        }
+        return name
     }
 }
 
@@ -973,6 +1086,11 @@ private struct TokenizingScanner {
         let pushedAt: Int
         /// For a formatting element, its `formattingKeys` entry; otherwise -1.
         let formattingKey: Int
+        /// Where the nearest marker below it sat when it was pushed, if the
+        /// tree builder certainly held that marker then (so its entry in the
+        /// active formatting list follows the marker's, and goes when the
+        /// marker closes); otherwise -1.
+        let clearedWithMarkerAt: Int
     }
 
     private struct Tag {
@@ -1055,6 +1173,54 @@ private struct TokenizingScanner {
     /// `</noscript>` that ends it.
     private var inHeadNoscript = false
 
+    // Child moves (`ParseCost.childMoveWork`).
+    //
+    // Every node the tree builder inserts goes to its current node, which is
+    // the element this scan holds innermost or one below it the scan still
+    // holds though the builder closed it (or an element the scan does not
+    // hold, never a furthest block). So each node is counted on the
+    // innermost element, and `childPrefix[k]` is the count over
+    // `stack[0...k]`: what may have been given to an element is the count
+    // from it up. When an element is popped, its count goes to the element
+    // below it, unless the builder certainly held it from its push to its
+    // pop (`isRobustlyOpen`), so everything counted on it went to it or to
+    // elements above it. A table part the builder held all along passes on
+    // only what it may have foster parented below the table
+    // (`fosterableCounts`). `childPrefix` is a running sum, so every step is
+    // constant work.
+    //
+    // `possiblyClosedMarks` is not enough for that: the depth bound only
+    // needs this scan never to close what the tree builder keeps, and it
+    // closes a held element the builder may already have closed, where the
+    // builder may close a lower one instead (`<div><div/></div>`). So
+    // `robustMarks` holds every mark and, where this scan closes an element
+    // that may already be closed, a mark from the lowest element the builder
+    // may close in its place (`doubtClosing(of:)`).
+    private var childPrefix: [Int] = []
+    /// By position in `stack`, for a table part that fosters
+    /// (`ScannedTagName.fosteringTableParts`): the nodes counted on it that
+    /// the builder may have foster parented (text other than whitespace,
+    /// tags other than table parts), and what it was passed from above.
+    private var fosterableCounts: [Int] = []
+    /// Bytes of text read since the last markup, and whether any of them
+    /// is not whitespace (SwiftSoup fosters only such a run in a table).
+    private var readTextSinceMarkup = false
+    private var readNonWhitespaceSinceMarkup = false
+    private var robustMarks: [(index: Int, pushCount: Int)] = []
+    /// Where the special elements held sit in `stack`, lowest first.
+    private var specialPositions: [Int] = []
+    /// Where the markers held sit in `stack`, lowest first.
+    private var markerPositions: [Int] = []
+    /// The `pushCount` after the latest push of a marker SwiftSoup may have
+    /// left in its active formatting list: one of
+    /// `ScannedTagName.markersLeftInTheList`, or any marker pushed before a
+    /// `</td>` or `</th>` whose cell may not be in table scope, which
+    /// SwiftSoup answers by leaving the open cell for the row's mode, where
+    /// the cell is later popped without the clear.
+    private var latestMarkerPossiblyLeftInTheList = 0
+    /// `EmailDOMParseAdmission.ParseCost.childMoveWork`.
+    private(set) var childMoveWork = 0
+
     private let isTableContextFragment: Bool
 
     init(bytes: UnsafeBufferPointer<UInt8>, limit: Int, isTableContextFragment: Bool, readsHead: Bool) {
@@ -1076,11 +1242,23 @@ private struct TokenizingScanner {
             guard byte == 0x3C else {
                 // Text other than whitespace ends the head; in a `noscript`
                 // there it is the `noscript`'s.
-                if certainlyInHead, !inHeadNoscript, !ScannedTagName.isTokenizerWhitespace(byte) {
+                let isWhitespace = ScannedTagName.isTokenizerWhitespace(byte)
+                if certainlyInHead, !inHeadNoscript, !isWhitespace {
                     certainlyInHead = false
+                }
+                readTextSinceMarkup = true
+                if !isWhitespace {
+                    readNonWhitespaceSinceMarkup = true
                 }
                 index += 1
                 continue
+            }
+            // The run of text before this markup is one node (the tokenizer
+            // emits a run as one token, and the tree builder appends it).
+            if readTextSinceMarkup {
+                countChildren(1, fosterable: readNonWhitespaceSinceMarkup)
+                readTextSinceMarkup = false
+                readNonWhitespaceSinceMarkup = false
             }
             guard let next = markup(at: index) else {
                 break
@@ -1153,16 +1331,23 @@ private struct TokenizingScanner {
             if first == 0x3E {
                 return nameStart + 1
             }
+            // Comments and declarations are a node each, which a table
+            // keeps (CDATA is text, fostered: counted as one anyway).
+            countChildren(1)
             return endOfBogusComment(from: nameStart)
         case 0x21: // "<!"
+            countChildren(1)
             return endOfMarkupDeclaration(from: next + 1)
         case 0x3F: // "<?"
+            countChildren(1)
             return endOfBogusComment(from: next)
         default:
             // A "<" read as text.
             if !inHeadNoscript {
                 certainlyInHead = false
             }
+            readTextSinceMarkup = true
+            readNonWhitespaceSinceMarkup = true
             return next
         }
     }
@@ -1231,7 +1416,18 @@ private struct TokenizingScanner {
         if !ScannedTagName.headStartTags.contains(name) {
             hasLeftHead = true
         }
+        // An `<a>` while one is in the active formatting list first runs the
+        // adoption agency for it (SwiftSoup 2.13.5 inserts a `<nobr>` as any
+        // other element).
+        if name == ScannedTagName.anchor {
+            chargeAdoptionAgency(for: name)
+        }
         closeImpliedElements(before: name)
+        // The element (or the empty one) goes to the current node once the
+        // implied closes are done; in a table, all but a table part may be
+        // foster parented (a `table` closes the one it is in, and goes
+        // below it).
+        countChildren(1, fosterable: name == ScannedTagName.table || !ScannedTagName.tableStructure.contains(name))
         if ScannedTagName.formattingNames.contains(name) {
             let sameName = formattingHeldByName[name, default: 0]
             formattingCompareWork = Saturating.add(
@@ -1253,9 +1449,33 @@ private struct TokenizingScanner {
         let key = isFormatting
             ? formattingKey(of: tagStart..<(tagStart + tagLength), attributeCount: attributeCount)
             : -1
+        var clearedWithMarkerAt = -1
+        if isFormatting, let marker = markerPositions.last, isRobustlyOpen(at: marker) {
+            clearedWithMarkerAt = marker
+        }
         pushCount += 1
         positionsByName[name, default: []].append(stack.count)
-        stack.append(OpenElement(name: name, weight: weight, pushedAt: pushCount, formattingKey: key))
+        stack.append(OpenElement(
+            name: name,
+            weight: weight,
+            pushedAt: pushCount,
+            formattingKey: key,
+            clearedWithMarkerAt: clearedWithMarkerAt
+        ))
+        childPrefix.append(childPrefix.last ?? 0)
+        fosterableCounts.append(0)
+        if ScannedTagName.specialNames.contains(name) {
+            specialPositions.append(stack.count - 1)
+        }
+        if ScannedTagName.markers.contains(name) {
+            markerPositions.append(stack.count - 1)
+        }
+        if ScannedTagName.markersLeftInTheList.contains(name) {
+            latestMarkerPossiblyLeftInTheList = pushCount
+        }
+        if ScannedTagName.mayNotStayOpen.contains(name) {
+            markDoubtful(from: stack.count - 1)
+        }
         if isFormatting {
             formattingHeldByName[name, default: 0] += 1
             formattingHeld += 1
@@ -1279,7 +1499,21 @@ private struct TokenizingScanner {
     /// builder does (`crossingClose`). Otherwise nothing is closed here, and
     /// what the tree builder may have closed is marked.
     private mutating func closeElement(named name: [UInt8]) {
+        if ScannedTagName.formattingNames.contains(name) {
+            chargeAdoptionAgency(for: name)
+        }
+        if ScannedTagName.cells.contains(name), !isCertainlyInTableScope(name) {
+            latestMarkerPossiblyLeftInTheList = pushCount
+        }
+        // `</p>` with no `p` in scope inserts one, `</br>` a `br`; no other
+        // end tag inserts anything.
+        if name == ScannedTagName.p || name == Self.br {
+            countChildren(1)
+        }
         if stack.last?.name == name {
+            if !isRobustlyOpen(at: stack.count - 1) {
+                doubtClosing(of: name)
+            }
             popInnermost()
             return
         }
@@ -1294,9 +1528,11 @@ private struct TokenizingScanner {
     /// event since its push may have closed it out of this scan's sight),
     /// its end tag's handler pops everything above it once it is in scope,
     /// and nothing above it ends that scope. A formatting element popped
-    /// this way stays counted (`kept`) unless a marker it is inside (`td`,
-    /// `th`, `caption`…) is popped with it: the tree builder keeps it in its
-    /// active formatting list and may rebuild it.
+    /// this way stays counted (`kept`) unless a marker it was pushed inside
+    /// (`td`, `th`, `caption`), while the builder certainly held that
+    /// marker, is popped with it, and no marker pushed since that one may
+    /// have been left in the active formatting list: the tree builder keeps
+    /// it in that list and may rebuild it.
     private mutating func crossingClose(named name: [UInt8]) -> Bool {
         guard let boundaries = ScannedTagName.scopeBoundaries(crossedByEndTagOf: name),
               let index = positionsByName[name]?.last,
@@ -1304,14 +1540,21 @@ private struct TokenizingScanner {
               !boundaries.contains(where: { (positionsByName[$0]?.last ?? -1) > index }) else {
             return false
         }
-        var insideMarker = ScannedTagName.markers.contains(name)
+        if !isRobustlyOpen(at: index) {
+            doubtClosing(of: name)
+        }
         var keptWeight = 0
         for element in stack[(index + 1)...] {
-            if ScannedTagName.markers.contains(element.name) {
-                insideMarker = true
-            }
             if ScannedTagName.formattingNames.contains(element.name) {
-                if insideMarker {
+                // Only a marker the builder held when this element was
+                // pushed takes its entry when it closes: a `caption` it had
+                // closed already (`<caption><tbody><font></table>`) is
+                // still held here, and the `font` after it stays in the
+                // list, rebuilt by the next text. Nor does one pushed before
+                // a marker that may have been left in the list, where a
+                // clear stops.
+                if element.clearedWithMarkerAt >= index,
+                   stack[element.clearedWithMarkerAt].pushedAt > latestMarkerPossiblyLeftInTheList {
                     releaseFormatting(element)
                 } else {
                     keptWeight += element.weight
@@ -1319,6 +1562,7 @@ private struct TokenizingScanner {
             }
         }
         while stack.count > index {
+            releaseChildren()
             let element = stack.removeLast()
             positionsByName[element.name]?.removeLast()
             openWeight -= element.weight
@@ -1336,13 +1580,172 @@ private struct TokenizingScanner {
     }
 
     private mutating func popInnermost() {
-        guard let element = stack.popLast() else { return }
+        guard !stack.isEmpty else { return }
+        releaseChildren()
+        let element = stack.removeLast()
         positionsByName[element.name]?.removeLast()
         openWeight -= element.weight
         dropCertainlyOpenFormatting(from: stack.count)
         if ScannedTagName.formattingNames.contains(element.name) {
             releaseFormatting(element)
         }
+    }
+
+    /// Pops the innermost element for a start tag that closes it, where the
+    /// tree builder may close a lower one of its kind instead if this one
+    /// may already be closed.
+    private mutating func popInnermostForStartTag() {
+        guard let element = stack.last else { return }
+        if !isRobustlyOpen(at: stack.count - 1) {
+            doubtClosing(of: element.name)
+        }
+        popInnermost()
+    }
+
+    // MARK: Children
+
+    private static let br = Array("br".utf8)
+
+    /// `count` nodes the tree builder may append to its current node;
+    /// `fosterable` where, in a table, it may append them below the table
+    /// instead.
+    private mutating func countChildren(_ count: Int, fosterable: Bool = true) {
+        guard let last = childPrefix.indices.last else { return }
+        childPrefix[last] = Saturating.add(childPrefix[last], count)
+        if fosterable, ScannedTagName.fosteringTableParts.contains(stack[last].name) {
+            fosterableCounts[last] = Saturating.add(fosterableCounts[last], count)
+        }
+    }
+
+    /// Before the innermost element is popped: what was counted on it goes
+    /// to the element below, unless the tree builder certainly held it all
+    /// along, when only what a table part may have fostered does.
+    private mutating func releaseChildren() {
+        let index = stack.count - 1
+        let total = childPrefix.removeLast()
+        let fosterable = fosterableCounts.removeLast()
+        let robustlyOpen = isRobustlyOpen(at: index)
+        if specialPositions.last == index {
+            specialPositions.removeLast()
+        }
+        if markerPositions.last == index {
+            markerPositions.removeLast()
+        }
+        guard let below = childPrefix.indices.last else { return }
+        let passedOn: Int
+        if !robustlyOpen {
+            passedOn = total - childPrefix[below]
+        } else if ScannedTagName.fosteringTableParts.contains(stack[index].name) {
+            passedOn = fosterable
+        } else {
+            passedOn = 0
+        }
+        // Passed on whole: what a table part below it may have fostered too.
+        countChildren(passedOn)
+    }
+
+    /// Before a tag that may run SwiftSoup's adoption agency for the
+    /// formatting element `name` (`ParseCost.childMoveWork`).
+    ///
+    /// The agency finds the last `name` in the active formatting list and
+    /// takes the first special element above it as the furthest block, so
+    /// that is one held above the lowest `name` held, or anywhere where one
+    /// was closed but kept (and may be rebuilt anywhere). None is moved
+    /// where the innermost element is a `name` the builder certainly holds:
+    /// it, or a rebuilt one above it, is the one found, with nothing
+    /// special above. The agency runs once for each `name` in the list, at
+    /// most eight times, and each pass appends an adopter to its block and
+    /// a moved element to the block's common ancestor, which a later pass
+    /// may move again.
+    private mutating func chargeAdoptionAgency(for name: [UInt8]) {
+        let held = formattingHeldByName[name, default: 0]
+        guard held > 0 else { return }
+        if stack.last?.name == name, isRobustlyOpen(at: stack.count - 1) {
+            return
+        }
+        let onStack = positionsByName[name] ?? []
+        let floor = held > onStack.count ? 0 : (onStack.first ?? 0)
+        let passes = min(Self.adoptionAgencyPasses, held)
+        if let block = lowest(of: specialPositions, atOrAbove: floor), let top = childPrefix.last {
+            // A later pass may move a block an earlier one appended to.
+            let children = Saturating.add(
+                top - (block > 0 ? childPrefix[block - 1] : 0),
+                Saturating.multiply(passes, 2)
+            )
+            childMoveWork = Saturating.add(
+                childMoveWork,
+                Saturating.multiply(passes, Saturating.multiply(children, children))
+            )
+        }
+        countChildren(Saturating.multiply(passes, 2))
+    }
+
+    /// SwiftSoup's adoption agency loop runs at most eight times.
+    private static let adoptionAgencyPasses = 8
+
+    /// The lowest of the ascending `positions` at or above `floor`.
+    private func lowest(of positions: [Int], atOrAbove floor: Int) -> Int? {
+        var low = 0
+        var high = positions.count
+        while low < high {
+            let middle = (low + high) / 2
+            if positions[middle] < floor {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        return low < positions.count ? positions[low] : nil
+    }
+
+    /// Where this scan closes an element the tree builder may already have
+    /// closed, the builder may close the lowest one of its kind held, and
+    /// everything above it, instead (a formatting element kept after an end
+    /// tag crossed it may be rebuilt anywhere).
+    private mutating func doubtClosing(of name: [UInt8]) {
+        let keptOfName = formattingHeldByName[name, default: 0] - (positionsByName[name]?.count ?? 0)
+        if ScannedTagName.formattingNames.contains(name), keptOfName > 0 {
+            markDoubtful(from: 0)
+            return
+        }
+        let lowest = lowestPosition(of: ScannedTagName.closingKind(of: name)) ?? (stack.count - 1)
+        markDoubtful(from: max(0, min(lowest, stack.count - 1)))
+    }
+
+    /// The tree builder may have closed the elements held from `index` up,
+    /// or never inserted them.
+    private mutating func markDoubtful(from index: Int) {
+        while let last = robustMarks.last, last.index >= index {
+            robustMarks.removeLast()
+        }
+        robustMarks.append((index: index, pushCount: pushCount))
+    }
+
+    /// Whether the tree builder has certainly held the element at `index`
+    /// from its push on: no event since may have closed it, this scan's
+    /// own closes included.
+    private func isRobustlyOpen(at index: Int) -> Bool {
+        var low = 0
+        var high = robustMarks.count
+        while low < high {
+            let middle = (low + high) / 2
+            if robustMarks[middle].index <= index {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        guard low > 0 else { return true }
+        return stack[index].pushedAt > robustMarks[low - 1].pushCount
+    }
+
+    /// Whether the tree builder certainly holds a `name` in table scope.
+    private func isCertainlyInTableScope(_ name: [UInt8]) -> Bool {
+        guard let index = positionsByName[name]?.last, isRobustlyOpen(at: index),
+              let boundaries = ScannedTagName.scopeBoundaries(crossedByEndTagOf: name) else {
+            return false
+        }
+        return !boundaries.contains(where: { (positionsByName[$0]?.last ?? -1) > index })
     }
 
     /// The formatting elements at `index` and above are no longer certainly
@@ -1465,6 +1868,7 @@ private struct TokenizingScanner {
             possiblyClosedMarks.removeLast()
         }
         possiblyClosedMarks.append((index: index, pushCount: pushCount))
+        markDoubtful(from: index)
         dropCertainlyOpenFormatting(from: index)
     }
 
@@ -1492,36 +1896,39 @@ private struct TokenizingScanner {
     /// the builder may close beyond that is marked.
     private mutating func closeImpliedElements(before name: [UInt8]) {
         typealias N = ScannedTagName
-        if N.closesParagraph.contains(name), innermostIs(N.p) {
-            popInnermost()
+        // In a table's modes SwiftSoup inserts a `form` without closing a
+        // `p` (a table part's fragment holds one open over it), so a `form`
+        // only marks the `p` as possibly closed.
+        if N.closesParagraph.contains(name), name != N.form, innermostIs(N.p) {
+            popInnermostForStartTag()
         }
         if N.headings.contains(name), innermostIs(in: N.headings) {
-            popInnermost()
+            popInnermostForStartTag()
         }
         if name == N.li, innermostIs(N.li) {
-            popInnermost()
+            popInnermostForStartTag()
         }
         if name == N.dd || name == N.dt, innermostIs(N.dd) || innermostIs(N.dt) {
-            popInnermost()
+            popInnermostForStartTag()
         }
         if name == N.td || name == N.th, innermostIs(N.td) || innermostIs(N.th) {
-            popInnermost()
+            popInnermostForStartTag()
         }
         if name == N.tr || N.tableSections.contains(name) {
             if innermostIs(N.td) || innermostIs(N.th) {
-                popInnermost()
+                popInnermostForStartTag()
             }
             if innermostIs(N.tr) {
-                popInnermost()
+                popInnermostForStartTag()
             }
             if N.tableSections.contains(name), innermostIs(in: N.tableSections) {
-                popInnermost()
+                popInnermostForStartTag()
             }
         }
         // Outside `select` an `optgroup` closes only an `option`, never
         // another `optgroup` (inside `select` the first scan decides).
         if name == N.option || name == N.optgroup, innermostIs(N.option) {
-            popInnermost()
+            popInnermostForStartTag()
         }
         markPossiblyClosed(by: name, lowestTarget: lowestTargetOfStartTag(name))
     }

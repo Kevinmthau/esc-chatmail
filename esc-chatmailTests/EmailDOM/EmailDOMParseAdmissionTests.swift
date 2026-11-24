@@ -260,6 +260,96 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
     }
 
+    /// A formatting end tag over a special element runs the adoption agency,
+    /// which moves that block's children one at a time, and SwiftSoup
+    /// renumbers the rest after each, so a block of n children costs n²
+    /// though the tree is two levels deep (`<b><div>` and 100,000 `<br>`s
+    /// then `</b>` took 14 s in a Release build, a megabyte 153 s; these,
+    /// with 40,000, about 2 s each). An `<a>` while one is held runs the
+    /// agency too, and comments are children as `<br>`s are.
+    /// Revert-check: `TokenizingScanner.chargeAdoptionAgency` (returning at
+    /// once, all three are admitted and parsed).
+    func testParseDocument_formattingEndTagOverAWideBlock_isRefusedAsTooCostly() {
+        let shapes = [
+            "<b><div>" + String(repeating: "<br>", count: 40_000) + "</b>",
+            "<a><div>" + String(repeating: "<br>", count: 40_000) + "<a>",
+            "<b><div>" + String(repeating: "<!---->", count: 40_000) + "</b>",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+            XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+            XCTAssertGreaterThan(cost.childMoveWork, EmailDOMParseAdmission.maximumChildMoveWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+                XCTAssertEqual(
+                    error as? EmailDOMParseRefusal,
+                    .tooCostlyToParse(work: cost.childMoveWork, limit: EmailDOMParseAdmission.maximumChildMoveWork)
+                )
+            }
+        }
+    }
+
+    /// The children are counted on the element the scan holds innermost,
+    /// so where the tree builder gave them to an element below it, they
+    /// must reach that one. Each shape gives a block 1,001 children
+    /// (measured against SwiftSoup), then moves them all.
+    /// - A `div` closed at once (`<div/>`) makes the next `</div>` close the
+    ///   one around it, so the `<br>`s the scan counts on that one go to the
+    ///   `li`. Revert-check: `doubtClosing(of:)` in `closeElement`.
+    /// - Text and tags in a table are foster parented before it, in the
+    ///   `div`. Revert-check: the `fosterableCounts` branch of
+    ///   `releaseChildren`.
+    /// - SwiftSoup ignores a second `<form>` while its form pointer is set,
+    ///   so the `<br>`s go to the first. Revert-check:
+    ///   `ScannedTagName.mayNotStayOpen`.
+    /// - SwiftSoup 2.13.5 inserts an `xmp` as any other element, closing no
+    ///   `p`. Revert-check: `xmp` back in `ScannedTagName.closesParagraph`.
+    /// - In a table part's fragment SwiftSoup inserts a `form` without
+    ///   closing the `p`. Revert-check: the `name != N.form` in
+    ///   `closeImpliedElements`.
+    func testChildMoveWork_childrenGivenToALowerElement_reachIt() {
+        let children = 1_001
+        let brs = String(repeating: "<br>", count: 1_000)
+        let shapes: [(html: String, isTableContextFragment: Bool)] = [
+            ("<b><li><div><div/></div>" + brs + "</div></b>", false),
+            ("<b><div><table>" + String(repeating: "x<br>", count: 1_000) + "</table></b>", false),
+            ("<b><div><form><form></form>" + brs + "</form></b>", false),
+            ("<b><p>" + brs + "<xmp></b>", false),
+            ("<b><p>" + brs + "<form></b>", true),
+        ]
+        for shape in shapes {
+            XCTAssertGreaterThanOrEqual(
+                EmailDOMParseAdmission.estimatedCost(of: shape.html, isTableContextFragment: shape.isTableContextFragment)
+                    .childMoveWork,
+                children * children,
+                String(shape.html.prefix(40))
+            )
+        }
+    }
+
+    /// Misnested formatting is common in old mail, and is charged for the
+    /// children of the blocks it may move, not for everything under them: a
+    /// `p` closed inside a `b` on every line moves one child (2,000 in all,
+    /// measured against SwiftSoup), and is charged about one percent of the
+    /// limit, each `</b>` counting up to eight passes over the `b`s held. A
+    /// wrapper closed out of order moves its 4,000 children (two a line,
+    /// 16,000,000), not the tables' content.
+    func testChildMoveWork_ordinaryMisnesting_isChargedOnlyTheMovedChildren() {
+        let lines = String(repeating: "<b><p>some text</b> more</p>\n", count: 2_000)
+        XCTAssertLessThan(
+            EmailDOMParseAdmission.estimatedCost(of: lines).childMoveWork,
+            EmailDOMParseAdmission.maximumChildMoveWork / 20
+        )
+
+        let wrapper = "<font face=Arial><div>"
+            + String(repeating: "<table><tr><td>cell<br>text</td></tr></table>\n", count: 2_000)
+            + "</font></div>"
+        let cost = EmailDOMParseAdmission.estimatedCost(of: wrapper)
+        XCTAssertGreaterThanOrEqual(cost.childMoveWork, 16_000_000)
+        XCTAssertLessThanOrEqual(cost.childMoveWork, 4 * 16_000_000)
+        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(wrapper))
+    }
+
     /// Where the second scan cannot follow the markup (here after a
     /// `select`), a formatting tag's attributes are read from every place
     /// one could start, a `>` in a quoted value included, and every earlier
@@ -539,6 +629,36 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 actual,
                 String(html.prefix(60)).debugDescription
             )
+            XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), actual)
+        }
+    }
+
+    /// A formatting element popped with a marker stays in SwiftSoup's
+    /// active formatting list wherever the marker's own clear does not reach
+    /// it, and is rebuilt at the next text under the divs that follow: 200
+    /// of each built 404 levels where the second scan said about 210.
+    /// - A `caption` closed by a table part is still held by the scan, and
+    ///   the fonts after it were taken as cleared with it at `</table>`.
+    ///   Revert-check: `OpenElement.clearedWithMarkerAt` in `crossingClose`
+    ///   (releasing every formatting element above a marker popped with it).
+    /// - A `</td>` with no `td` in scope leaves the `th` for the row's mode,
+    ///   whose `</table>` pops it without the clear. Revert-check: the
+    ///   `isCertainlyInTableScope` line in `closeElement`.
+    /// - An `object` popped by `</table>` leaves its marker in the list, and
+    ///   the cell's clear stops there. Revert-check:
+    ///   `ScannedTagName.markersLeftInTheList`.
+    func testEstimate_formattingPoppedWithAMarkerItsClearMisses_staysCounted() {
+        let fonts = (0..<200).map { "<font class=f\($0)>" }.joined()
+        let divs = String(repeating: "<div>", count: 200) + "x"
+        let shapes = [
+            "<table><caption><tbody>" + fonts + "</table>" + divs,
+            "<table><tr><th>" + fonts + "</td></table>" + divs,
+            "<table><tr><td>" + fonts + "<object></table>" + divs,
+        ]
+        for html in shapes {
+            let actual = Self.swiftSoupDocumentDepth(html)
+            XCTAssertGreaterThan(actual, 400)
+            XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), actual, String(html.prefix(20)))
             XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), actual)
         }
     }
