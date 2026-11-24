@@ -22,9 +22,14 @@ import Foundation
 /// kill while suspended): such a death lands on whichever row was in flight, and
 /// a row is quarantined only once that has happened to it three times.
 ///
-/// Every key embeds the pass's migration key, which embeds its derivation
-/// version or verdict epoch, so a version bump gives every row a fresh chance
-/// under the new code. What a pass writes is bounded: one mark, at most
+/// Every key embeds the pass's migration key. The re-derivation's and the
+/// verdict backfill's embed their derivation version and verdict epoch, so a
+/// bump gives every row a fresh chance under the new code; the blank-preview
+/// backfill's key is fixed, and that pass runs once.
+///
+/// One guard per run of a pass, and the passes' running flags keep two runs
+/// of one pass apart: a guard built while another run of its pass had a row
+/// in flight would clear that run's mark. What a pass writes is bounded: one mark, at most
 /// `maximumRememberedRows` struck rows and as many quarantined ones.
 ///
 /// HONEST SCOPE: whether a mark written just before a crash reaches the disk

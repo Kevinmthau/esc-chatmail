@@ -423,6 +423,42 @@ enum HTMLMarkupScan {
 
     private static let whitespaceRunRegex = try? NSRegularExpression(pattern: "\\s*", options: [])
 
+    // MARK: - Runs of whitespace
+
+    /// `(\s*\n\s*){2,}` replaced by "\n\n", linearly. A match of that regex
+    /// is whitespace holding two or more newlines, and the regex tried each
+    /// run of whitespace at its start, where it takes the whole run (the
+    /// first `\s*` from the run's start, the last to its end) or, with fewer
+    /// than two newlines in the run, nothing at any start in it. So every
+    /// run of whitespace with two newlines or more becomes "\n\n". The regex
+    /// found that out by trying every split of the run between its nested
+    /// `\s*`, which was cubic in the run.
+    static func collapsingLineBreakRuns(in text: String) -> String {
+        guard let whitespaceRunRegex = whitespaceRunsRegex else { return text }
+        let nsText = text as NSString
+        var result = ""
+        var copiedThrough = 0
+        for run in whitespaceRunRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
+            var lineBreaks = 0
+            var location = run.range.location
+            while location < NSMaxRange(run.range), lineBreaks < 2 {
+                if nsText.character(at: location) == 0x0A {
+                    lineBreaks += 1
+                }
+                location += 1
+            }
+            guard lineBreaks >= 2 else { continue }
+            result += nsText.substring(with: NSRange(location: copiedThrough, length: run.range.location - copiedThrough))
+            result += "\n\n"
+            copiedThrough = NSMaxRange(run.range)
+        }
+        guard copiedThrough > 0 else { return text }
+        result += nsText.substring(from: copiedThrough)
+        return result
+    }
+
+    private static let whitespaceRunsRegex = try? NSRegularExpression(pattern: "\\s+", options: [])
+
     // MARK: - Hidden elements
 
     private static let hidingDeclarationPattern =

@@ -50,6 +50,8 @@ final class LaunchPassRowQuarantineTests: XCTestCase {
 
     /// Deaths on different rows are each one row's, never added together: a
     /// force quit lands on whichever row was in flight.
+    /// Revert-check: the `$0 == row` filter on the death count in
+    /// `recoveringFromEarlierLaunches` (the third row is then quarantined).
     func testDeathsOnDifferentRows_doNotAddUp() {
         dieDeriving("R", launch: "1")
         dieDeriving("S", launch: "2")
@@ -71,6 +73,8 @@ final class LaunchPassRowQuarantineTests: XCTestCase {
         XCTAssertNil(store.string(forKey: LaunchPassRowQuarantine.deathsKey(forPassKey: passKey)))
     }
 
+    // Revert-check: the clearing write in `LaunchPassRowQuarantine.endRow`
+    // (every launch's finished row then counts as a death).
     func testEndRow_clearsTheMark_soAFinishedRowIsNeverCounted() {
         for launch in ["1", "2", "3"] {
             let guardForLaunch = recover(launch: launch)
@@ -81,6 +85,8 @@ final class LaunchPassRowQuarantineTests: XCTestCase {
         XCTAssertNil(store.string(forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: passKey)))
     }
 
+    // Revert-check: the `suffix(maximumRememberedRows)` on the quarantined list
+    // in `recoveringFromEarlierLaunches`.
     func testRememberedRows_areBounded() {
         let limit = LaunchPassRowQuarantine.maximumRememberedRows
         var launch = 0

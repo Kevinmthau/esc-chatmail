@@ -84,9 +84,17 @@ enum TextProcessing {
     /// per-call replacements passed only `.regularExpression`, so no options.
     private static let whitespaceNormalizationRules: [ReplacementRule] = compiledRules([
         ("[ \\t]+", " ", []),
-        ("\\n[ \\t]*\\n", "\n\n", []),
-        ("(\\s*\\n\\s*){2,}", "\n\n", [])
+        ("\\n[ \\t]*\\n", "\n\n", [])
     ])
+
+    /// The three whitespace-collapse steps: `whitespaceNormalizationRules`,
+    /// then `(\s*\n\s*){2,}` → "\n\n" through
+    /// `HTMLMarkupScan.collapsingLineBreakRuns`, with that regex's result. The
+    /// regex was cubic on whitespace the first rule leaves (a run of 1,600
+    /// no-break spaces around a newline took 69 s).
+    private static func normalizingWhitespace(_ text: String) -> String {
+        HTMLMarkupScan.collapsingLineBreakRuns(in: applying(whitespaceNormalizationRules, to: text))
+    }
 
     /// The block rules of recoverPlainTextFromMalformedHTML, in its order:
     /// `<head\b[^>]*>[\s\S]*?</head>` and `<!--[\s\S]*?-->` (both
@@ -151,7 +159,7 @@ enum TextProcessing {
             scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
         }.map { String($0) }.joined()
 
-        normalized = applying(whitespaceNormalizationRules, to: normalized)
+        normalized = normalizingWhitespace(normalized)
         normalized = normalized.split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: "\n")
@@ -201,7 +209,7 @@ enum TextProcessing {
 
         // Clean up whitespace: collapse runs of spaces/tabs, whitespace-only
         // lines to a single newline, then any newline sequence to at most two.
-        text = applying(whitespaceNormalizationRules, to: text)
+        text = normalizingWhitespace(text)
 
         // Trim whitespace from each line to clean up artifacts like " \n" from decoded &nbsp;
         text = text.split(separator: "\n", omittingEmptySubsequences: false)

@@ -92,8 +92,7 @@ final class ChatPreviewRepairTests: XCTestCase {
     }
 
     /// A row an earlier launch died deriving three times is passed over: it keeps
-    /// its stored preview, the rows around it are derived, the pass completes,
-    /// and its checkpoint keys are left as they were.
+    /// its stored preview, the rows around it are derived, and the pass completes.
     /// Revert-check: the `rowQuarantine?.isQuarantined` guard in
     /// `ChatPreviewRepair.applyDerivedPreview` (the row is then derived), and
     /// `beginRow`/`endRow` around the derivation (no mark is written).

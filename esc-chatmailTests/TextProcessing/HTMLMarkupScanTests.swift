@@ -202,6 +202,37 @@ final class HTMLMarkupScanTests: XCTestCase {
         }
     }
 
+    func testLineBreakRuns_matchTheRegex() throws {
+        let regex = try NSRegularExpression(pattern: "(\\s*\\n\\s*){2,}", options: [])
+        let pieces = [" ", "\t", "\n", "\n", "\r", "\r\n", "\u{A0}", "\u{2028}", "\u{2029}", "\u{85}", "\u{3000}", "\u{B}", "\u{C}",
+                      "a", "b", "\u{301}", "\u{1F600}", "<", ">"]
+        var state: UInt64 = 0x5EED
+        for _ in 0..<30_000 {
+            var text = ""
+            for _ in 0..<Int(Self.splitMix(&state) % 24) {
+                text += pieces[Int(Self.splitMix(&state) % UInt64(pieces.count))]
+            }
+            XCTAssertEqual(
+                HTMLMarkupScan.collapsingLineBreakRuns(in: text),
+                Self.replacing(regex, in: text, with: "\n\n"),
+                text.debugDescription
+            )
+        }
+    }
+
+    /// The regex tried every split of a run between its nested `\s*`: 1,600
+    /// no-break spaces around one newline took 69 s, and `[ \t]+` ahead of it
+    /// leaves them (`&nbsp;` decodes to them).
+    /// Revert-check: `HTMLMarkupScan.collapsingLineBreakRuns` in
+    /// `TextProcessing.normalizingWhitespace` (the regex then runs for minutes).
+    func testNoBreakSpaceRuns_normalizeQuickly() {
+        let run = String(repeating: "\u{A0}", count: 20_000)
+        let started = Date()
+        _ = TextProcessing.extractPlainText(from: "a" + run + "\n" + run + "b")
+        _ = TextProcessing.extractPlainText(from: "a" + run + "\n" + run + "b<x")
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
     // MARK: - Linear on crafted markup
 
     /// Each of these held a message's ingest for seconds to tens of seconds
@@ -262,6 +293,15 @@ final class HTMLMarkupScanTests: XCTestCase {
             return lhs.length < rhs.length
         }
         return lhs.location < rhs.location
+    }
+
+    /// SplitMix64.
+    private static func splitMix(_ state: inout UInt64) -> UInt64 {
+        state &+= 0x9E37_79B9_7F4A_7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
+        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
+        return z ^ (z >> 31)
     }
 
     private static func replacing(_ regex: NSRegularExpression, in text: String, with template: String) -> String {
