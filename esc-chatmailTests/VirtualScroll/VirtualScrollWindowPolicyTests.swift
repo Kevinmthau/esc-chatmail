@@ -179,12 +179,32 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     }
 
     /// A position past the dataset's end (a count that shrank under it) asks
-    /// for an end below its start, which a load refuses; realized rows do not
-    /// turn it into a range a load would accept.
+    /// for an empty or inverted range, which a load refuses; realized rows do
+    /// not turn it into a range a load would accept.
+    ///
+    /// Revert-check: letting `start == end` through the guard in
+    /// `VirtualScrollWindowPolicy.requestedRows` asks for 10..<20 in the
+    /// second case, a load that replaces the window.
     func testRequestedRows_positionPastTheEnd_isLeftForTheLoadToRefuse() {
         XCTAssertEqual(
             requestedRows(scrollPosition: 30, totalCount: 20, realizedRows: 15...19, window: rows(10, 20)),
             rows(29, 20)
+        )
+        // Exactly `bufferSize` past the end: the position's rows are empty.
+        XCTAssertEqual(
+            requestedRows(
+                scrollPosition: 30,
+                totalCount: 20,
+                configuration: VirtualScrollConfiguration(
+                    visibleItemCount: 3,
+                    bufferSize: 10,
+                    pageSize: 3,
+                    preloadThreshold: 0
+                ),
+                realizedRows: 15...19,
+                window: rows(10, 35)
+            ),
+            rows(20, 20)
         )
     }
 

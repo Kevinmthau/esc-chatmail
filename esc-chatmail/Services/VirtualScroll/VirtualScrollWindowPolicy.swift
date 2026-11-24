@@ -35,8 +35,13 @@ import Foundation
 /// row the window already holds, so this adds no load, prepend or preload, and
 /// it does not change whether a window covers the position (`positionRows`):
 /// it changes only which rows a replace keeps. Where the realized rows lie
-/// within the position's rows, as on a phone showing about ten, a replace is
-/// exactly what it was.
+/// within the position's rows a replace is exactly what it was: scrolling
+/// down, no more than `bufferSize` rows realized above the bottom edge, about
+/// ten on a phone. A phone that realizes more (short rows on a Pro Max, a
+/// small text size) widens as a tall viewport does, which has not been
+/// measured on a phone. What a wider replace costs is its rows: every replace
+/// re-fetches and re-maps all of them on the main actor, about 70 instead of
+/// 40 for a Mac viewport of 33 rows.
 ///
 /// Not growth on every step: extending the window at each step grew it to the
 /// cap and front-trimmed rows far above the reader (iPhone simulator, 11 of 40
@@ -91,9 +96,10 @@ enum VirtualScrollWindowPolicy {
             totalCount: totalCount,
             configuration: configuration
         )
-        // A position past the end asks for nothing a load accepts; leave it
-        // for `loadWindow` to refuse, as before.
-        guard let realizedRows, position.startIndex <= position.endIndex else {
+        // A position at or past the end asks for nothing a load accepts
+        // (an empty or inverted range); leave it for `loadWindow` to refuse,
+        // as before, rather than widen it into a load that succeeds.
+        guard let realizedRows, position.startIndex < position.endIndex else {
             return position
         }
         let heldStartIndex = max(0, windowRows.startIndex)
