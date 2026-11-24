@@ -344,7 +344,10 @@ final class CoreDataStack: @unchecked Sendable {
               container.persistentStoreCoordinator.persistentStores.isEmpty else {
             return
         }
-        if Self.isDeterministicLoadFailure(loadError), !consumeDeterministicReloadPermit() {
+        // Consumed by every retry, so a permit Try Again gave a retry that did
+        // not need it is not left for a later timed one.
+        let isPermitted = consumeDeterministicReloadPermit()
+        if Self.isDeterministicLoadFailure(loadError), !isPermitted {
             Log.debug("Not reloading a store whose migration cannot succeed until the user asks", category: .coreData)
             return
         }
@@ -511,6 +514,9 @@ final class CoreDataStack: @unchecked Sendable {
                     Log.error("Failed to load Core Data store async", category: .coreData, error: error)
                     continuation.resume(throwing: CoreDataError.storeLoadFailed(error))
                 } else {
+                    if let self {
+                        self.stampCurrentModelOrdinal(on: self.persistentContainer, storeURL: storeDescription.url)
+                    }
                     self?.setStoreLoaded(true)
                     self?.loadAttempts = 0
                     Log.info("Core Data store loaded successfully (async): \(storeDescription)", category: .coreData)

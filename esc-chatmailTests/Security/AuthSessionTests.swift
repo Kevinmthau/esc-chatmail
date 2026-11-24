@@ -2259,29 +2259,22 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(fixture.storeReset.attemptCount, 1)
     }
 
-    // Revert-check: the do/catch around `isStoreRecoveryOfAccount` in
-    // `prepareLocalStoreForAuthenticatedAccount` (with `try?` in its place the read failure
-    // runs the full cleanup, which moves the start and removes the backup of what may be
-    // this account's mailbox).
-    func testAccountPreparation_recoveryMarkerButKeychainUnreadable_failsClosedAndKeepsEverything() async {
+    // Revert-check: `AuthSession.isStoreRecoveryOfAccount` taking an unreadable keychain
+    // for the account being prepared. A keychain that cannot be read is not proof that the
+    // files are this account's, so they get the full cleanup, as before the exception.
+    // (Throwing instead would not defer the decision: the restore's catch clears the failed
+    // Google session, which deletes the keychain's account.)
+    func testAccountPreparation_recoveryMarkerButKeychainUnreadable_runsFullCleanup() async throws {
         let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com")
         let session = fixture.makeSession(
             in: self,
             keychainService: EmailReadFailingKeychain(wrapping: fixture.keychain)
         )
 
-        do {
-            try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
-            XCTFail("An unreadable keychain proves nothing either way")
-        } catch AuthError.localAccountIsolationFailed {
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
 
-        XCTAssertEqual(fixture.storeReset.attemptCount, 0)
-        XCTAssertEqual(fixture.htmlCleanup.attemptCount, 0)
-        XCTAssertEqual(fixture.defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), fixture.mailboxStart)
-        XCTAssertTrue(StoreRecoveryResetMarker.isMarked(in: fixture.defaults), "A later attempt decides")
+        XCTAssertEqual(fixture.storeReset.attemptCount, 1)
+        XCTAssertFalse(StoreRecoveryResetMarker.isMarked(in: fixture.defaults))
     }
 
     // Revert-check: the `StoreRecoveryResetMarker.clear` in the no-reset path of

@@ -178,7 +178,7 @@ enum AppLoadingPolicy {
         case .migrationFailed:
             return StoreLoadFailureNotice(
                 title: "Can't Open Your Mail",
-                message: "MushMail couldn't update its mailbox for this version. Try again in a moment.",
+                message: "MushMail couldn't update its mailbox for this version. Tap Try Again to try once more.",
                 offersMailboxReset: false
             )
         case .storeUnavailable where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
