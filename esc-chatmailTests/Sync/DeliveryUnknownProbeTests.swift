@@ -113,7 +113,9 @@ final class DeliveryUnknownProbeTests: XCTestCase {
     // missing-message guard: it would write a Not-sent marker that
     // `retainDefinitelyUnsentOptimisticMessage` never writes for a record
     // without its message, and cold recovery would then restore the
-    // conversation's pre-send rollup days later.
+    // conversation's pre-send rollup days later. Also fails if the probe stops
+    // stamping `deliveryProbedAt` on such a record, which would then hold the
+    // run's lookups for good.
     func testRun_recordWhoseMessageIsGone_isLeftDeliveryUnknown() async throws {
         try seedSend(id: "orphan", admittedAgo: 2 * 60 * 60)
         let deleteContext = stack.newBackgroundContext()
@@ -132,6 +134,66 @@ final class DeliveryUnknownProbeTests: XCTestCase {
             try Self.record(id: "orphan", in: probeContext)?.remoteCommittedMessageId
         }
         XCTAssertEqual(marker, OutboundSendRemoteState.ambiguousMessageID)
+        let probedAt = try await probeContext.perform {
+            try Self.record(id: "orphan", in: probeContext)?.deliveryProbedAt
+        }
+        XCTAssertEqual(probedAt, runStart, "Spaced like any unresolved lookup, or it would starve the rest")
+    }
+
+    // MARK: - The store's own witnesses
+
+    // Revert-check: fails if `DeliveryUnknownResolution.storeAgreesItWasNotSent`
+    // stops refusing while a sync ledger row recorded since the send exists:
+    // that row may be the send's echo, which the history witness cannot see.
+    func testRun_ledgerRowSinceTheSend_refusesNotSent() async throws {
+        try seedSend(id: "maybe-abandoned-echo", admittedAgo: 2 * 60 * 60)
+        try seedLedgerRow(abandonedAgo: 90 * 60)
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.unresolved, ["maybe-abandoned-echo"])
+        let staged = try state(of: "maybe-abandoned-echo", in: context)
+        XCTAssertEqual(staged.marker, OutboundSendRemoteState.ambiguousMessageID)
+        XCTAssertEqual(staged.probedAt, runStart)
+    }
+
+    func testRun_ledgerRowFromBeforeTheSend_isNoWitness() async throws {
+        try seedSend(id: "lost-send", admittedAgo: 2 * 60 * 60)
+        try seedLedgerRow(abandonedAgo: 5 * 60 * 60)
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.resolvedAsNotSent, ["lost-send"])
+    }
+
+    // Revert-check: fails if `DeliveryUnknownResolution.storeAgreesItWasNotSent`
+    // stops refusing on a message from the user in the send's conversation,
+    // dated around the send, without one of the app's Message-IDs: what the
+    // echo looks like if Gmail did not keep ours, when the search cannot find
+    // it either.
+    func testRun_ownMessageAroundTheSendWithoutOurMessageID_refusesNotSent() async throws {
+        try seedSend(id: "rewritten", admittedAgo: 2 * 60 * 60)
+        try seedOwnMessage(nextTo: "rewritten", id: "gmail-rewritten-echo", sentAgo: 2 * 60 * 60 - 30, messageId: "<CAgmail-rewritten@mail.gmail.com>")
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.unresolved, ["rewritten"])
+        XCTAssertEqual(try state(of: "rewritten", in: context).marker, OutboundSendRemoteState.ambiguousMessageID)
+    }
+
+    func testRun_echoOfAnotherAppSendInTheConversation_isNoWitness() async throws {
+        try seedSend(id: "lost-send", admittedAgo: 2 * 60 * 60)
+        try seedOwnMessage(
+            nextTo: "lost-send",
+            id: "gmail-other-send",
+            sentAgo: 2 * 60 * 60 - 30,
+            messageId: MimeBuilder.messageId(forOptimisticMessageID: "another-send")
+        )
+        try seedOwnMessage(nextTo: "lost-send", id: "gmail-much-later", sentAgo: 30 * 60, messageId: "<CAlater@mail.gmail.com>")
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.resolvedAsNotSent, ["lost-send"])
     }
 
     // The production client puts Spam and Trash in the search: a sent copy the
@@ -340,11 +402,51 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         record.remoteCommittedMessageId = marker
         record.admittedAt = admittedAt
         record.replyEnvelopeData = envelope
-        let message = MessageBuilder().withId(id).fromMe().build(in: context)
+        let conversation = ConversationBuilder().build(in: context)
+        conversation.participantHash = "p|\(id)@example.com"
+        let message = MessageBuilder().withId(id).fromMe().withDate(createdAt).inConversation(conversation).build(in: context)
         message.messageId = MimeBuilder.messageId(forOptimisticMessageID: id)
         let attachment = AttachmentBuilder().withId("local_\(id)").withFilename("photo.jpg").build(in: context)
         attachment.state = .uploaded
         message.addToAttachments(attachment)
+        try context.save()
+    }
+
+    private func seedLedgerRow(abandonedAgo: TimeInterval) throws {
+        let seedContext = stack.newBackgroundContext()
+        let abandonedAt = runStart.addingTimeInterval(-abandonedAgo)
+        try seedContext.performAndWait {
+            let row = NSEntityDescription.insertNewObject(forEntityName: "AbandonedSyncMessage", into: seedContext)
+            row.setValue(UUID(), forKey: "id")
+            row.setValue("gmail-unstored-\(UUID().uuidString)", forKey: "gmailMessageId")
+            row.setValue(abandonedAt, forKey: "abandonedAt")
+            row.setValue("abandoned", forKey: "state")
+            try seedContext.save()
+        }
+    }
+
+    private func seedOwnMessage(nextTo optimisticID: String, id: String, sentAgo: TimeInterval, messageId: String) throws {
+        let seedContext = stack.newBackgroundContext()
+        let date = runStart.addingTimeInterval(-sentAgo)
+        try seedContext.performAndWait {
+            try Self.insertOwnMessage(nextTo: optimisticID, id: id, date: date, messageId: messageId, in: seedContext)
+        }
+    }
+
+    private static func insertOwnMessage(
+        nextTo optimisticID: String,
+        id: String,
+        date: Date,
+        messageId: String,
+        in context: NSManagedObjectContext
+    ) throws {
+        let request = Message.fetchRequest()
+        request.predicate = MessagePredicates.id(optimisticID)
+        guard let conversation = try context.fetch(request).first?.conversation else {
+            throw CocoaError(.coderValueNotFound)
+        }
+        let message = MessageBuilder().withId(id).fromMe().sent().withDate(date).inConversation(conversation).build(in: context)
+        message.messageId = messageId
         try context.save()
     }
 

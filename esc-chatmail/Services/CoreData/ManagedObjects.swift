@@ -139,9 +139,9 @@ extension OutboundSendMutationRecord {
     @NSManaged public var conversationId: UUID?
     @NSManaged public var conversationURI: String?
     @NSManaged public var createdAt: Date
-    /// When the probe last found this send in Gmail without its echo consuming
-    /// the record; it waits `DeliveryUnknownProbePolicy.reprobeInterval` before
-    /// asking again.
+    /// When the probe last asked about this send without resolving it (found
+    /// but not consumed by its echo, or no verdict); it waits
+    /// `DeliveryUnknownProbePolicy.reprobeInterval` before asking again.
     @NSManaged public var deliveryProbedAt: Date?
     @NSManaged public var displayName: String?
     @NSManaged public var hidden: Bool

@@ -20,7 +20,11 @@ import Foundation
 /// - this run's history was complete and clean (`allowsProbing`): a terminal
 ///   slice with no failed fetch, after which a committed send's echo is in the
 ///   store, because while a record is ambiguous history admits even the
-///   messages it would exclude (`HistoryProcessor`).
+///   messages it would exclude (`HistoryProcessor`), unless sync could not
+///   store it, which leaves a ledger row, or Gmail did not keep our
+///   Message-ID, which leaves a message from the user that does not carry it.
+///   `DeliveryUnknownResolution.storeAgreesItWasNotSent` refuses the verdict
+///   on either.
 /// And it is asked only after a quiet period long past the send's own cap
 /// (`NetworkConfig.sendResourceTimeout`), so that Gmail has finished with any
 /// request it was still processing when the app gave up on it, and its search
@@ -74,7 +78,7 @@ enum DeliveryUnknownProbePolicy {
     /// Never an in-flight record (a live send until cold recovery converts
     /// it), never one without `admittedAt` (admitted before model 7; the oldest
     /// carried another Message-ID, so a search for the deterministic one proves
-    /// nothing about them), and never a found one within `reprobeInterval`.
+    /// nothing about them), and never one asked within `reprobeInterval`.
     static func isEligible(_ candidate: Candidate, runStartedAt: Date) -> Bool {
         guard candidate.remoteCommittedMessageId == OutboundSendRemoteState.ambiguousMessageID,
               candidate.remoteCommittedThreadId == nil,

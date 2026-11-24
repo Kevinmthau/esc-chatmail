@@ -58,6 +58,55 @@ enum DeliveryUnknownResolution {
         return true
     }
 
+    /// How far around the send the store is read for a message the search may
+    /// have missed: device and Gmail clocks, and Gmail's own processing.
+    static let storeWitnessSlack: TimeInterval = 15 * 60
+
+    /// The store's own witnesses that Gmail never committed this send, asked
+    /// before an empty search is taken as "Not sent". Either one says no:
+    /// - a sync ledger row (`AbandonedSyncMessage`, deferred or abandoned)
+    ///   recorded since the send: a message sync could not store, which may be
+    ///   this send's echo, and the history witness cannot see it;
+    /// - a message from the user in the send's own conversation, dated within
+    ///   the send's request lifetime (two `sendResourceTimeout`s) of its
+    ///   admission, that does not carry one of the app's deterministic
+    ///   Message-IDs: what this send's echo would look like if Gmail had not
+    ///   kept our Message-ID, in which case the search could not find it
+    ///   either. An echo of another of the app's sends carries its own ID and
+    ///   is no witness.
+    /// Call inside the context's `perform`.
+    static func storeAgreesItWasNotSent(
+        optimisticMessageID: String,
+        admittedAt: Date,
+        in context: NSManagedObjectContext
+    ) throws -> Bool {
+        let since = admittedAt.addingTimeInterval(-storeWitnessSlack)
+        let ledgerRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "AbandonedSyncMessage")
+        ledgerRequest.predicate = NSPredicate(format: "abandonedAt >= %@", since as NSDate)
+        ledgerRequest.includesPendingChanges = true
+        guard try context.count(for: ledgerRequest) == 0 else { return false }
+
+        let ownRequest = Message.fetchRequest()
+        ownRequest.predicate = MessagePredicates.id(optimisticMessageID)
+        ownRequest.includesPendingChanges = true
+        guard let conversation = try context.fetch(ownRequest).first(where: { !$0.isDeleted })?.conversation else {
+            return false
+        }
+        let until = admittedAt.addingTimeInterval(2 * NetworkConfig.sendResourceTimeout + storeWitnessSlack)
+        let request = Message.fetchRequest()
+        request.predicate = NSPredicate(
+            format: "conversation == %@ AND isFromMe == YES AND internalDate >= %@ AND internalDate <= %@ AND id != %@",
+            conversation.objectID, since as NSDate, until as NSDate, optimisticMessageID
+        )
+        request.includesPendingChanges = true
+        for message in try context.fetch(request) where !message.isDeleted {
+            guard message.messageIdValue.flatMap(MimeBuilder.optimisticMessageID(from:)) != nil else {
+                return false
+            }
+        }
+        return true
+    }
+
     /// Records that the probe asked about this send without resolving it here
     /// (found, whose echo may not consume it, or no verdict), so it is not
     /// asked again for `DeliveryUnknownProbePolicy.reprobeInterval`. Still

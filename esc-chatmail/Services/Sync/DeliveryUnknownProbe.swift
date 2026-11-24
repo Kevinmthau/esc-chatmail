@@ -98,10 +98,27 @@ struct DeliveryUnknownProbe {
                 outcome.foundMessageIDs.append(contentsOf: messageIDs)
             case .notFound:
                 let staged = try await context.perform {
-                    try DeliveryUnknownResolution.stageNotSent(
+                    if let admittedAt = candidate.admittedAt,
+                       try DeliveryUnknownResolution.storeAgreesItWasNotSent(
+                           optimisticMessageID: candidate.optimisticMessageID,
+                           admittedAt: admittedAt,
+                           in: context
+                       ),
+                       try DeliveryUnknownResolution.stageNotSent(
+                           optimisticMessageID: candidate.optimisticMessageID,
+                           in: context
+                       ) {
+                        return true
+                    }
+                    // The store holds something the search could have missed,
+                    // or the record cannot be resolved here (its message row
+                    // is gone): no verdict, spaced like any other.
+                    try DeliveryUnknownResolution.stageLookedUp(
                         optimisticMessageID: candidate.optimisticMessageID,
+                        probedAt: runStartedAt,
                         in: context
                     )
+                    return false
                 }
                 if staged {
                     outcome.resolvedAsNotSent.append(candidate.optimisticMessageID)
