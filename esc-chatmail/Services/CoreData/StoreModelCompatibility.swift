@@ -4,21 +4,23 @@ import Foundation
 /// Tells a store saved by a newer build from one whose migration failed, after a
 /// migration-family load error (`CoreDataErrorClassifier.RecoveryAction.migrationFailed`).
 ///
-/// The answer decides only what the launch screen offers. The store is kept either way:
+/// The answer decides only what the launch screen says. The store is kept either way, and
+/// either may be reset by the user behind the confirmation once retrying has not helped
+/// (Kevin, 2026-11-24):
 ///
 /// - The store says a newer model wrote it: the model ordinal stamped in its metadata
 ///   (`modelOrdinalMetadataKey`) is above this build's. `PersistentStoreLoadError
-///   .storeFromNewerVersion`, which nothing resets; only a build that knows its model can
-///   open it (Kevin, 2026-11-24).
+///   .storeFromNewerVersion`, whose notice asks the user to update MushMail.
 /// - Anything else that could be read: the migration to this build's model failed.
-///   `.migrationFailed`, which the user may reset behind the confirmation.
+///   `.migrationFailed`.
 /// - The store's metadata could not be read: `.unavailable`, today's answer for a store
 ///   that cannot be read, with the reset that goes with it.
 ///
 /// "Newer" is decided on that positive evidence alone, never on the store's entity hashes
 /// matching no model this build bundles: the first model version was edited in place eight
 /// times while it shipped (2026-01 to 2026-07), so a store an old build wrote matches no
-/// bundled version either, and taken for a newer build's it could never be reset. The same
+/// bundled version either, and its notice would tell the user to install an update that
+/// does not exist. The same
 /// goes for a store a development build wrote with a model version that changed again
 /// before it shipped. A store no build has stamped yet (every store written before this
 /// stamp existed) is never "newer".

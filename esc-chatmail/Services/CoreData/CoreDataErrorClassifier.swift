@@ -144,9 +144,10 @@ enum CoreDataErrorClassifier {
         /// build's model. The store is kept, never deleted automatically,
         /// whether the launch is in the foreground or a background task's.
         /// `CoreDataStack` reads the store's metadata to tell a store saved by
-        /// a newer build (`PersistentStoreLoadError.storeFromNewerVersion`,
-        /// which nothing resets) from a migration that failed on the user's
-        /// data (`.migrationFailed`, which the user may reset). This used to
+        /// a newer build (`PersistentStoreLoadError.storeFromNewerVersion`)
+        /// from a migration that failed (`.migrationFailed`), for the launch
+        /// screen's words; the user may reset either behind the confirmation
+        /// once retrying has not helped. This used to
         /// back the store up and delete it on the first failure, and a
         /// downgraded build lost the mailbox, its queued actions and drafts.
         case migrationFailed

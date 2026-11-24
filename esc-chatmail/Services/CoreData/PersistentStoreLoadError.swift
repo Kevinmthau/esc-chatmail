@@ -19,8 +19,8 @@ enum PersistentStoreLoadError: LocalizedError {
     case migrationFailed(Error)
     /// A migration-family error on a store whose model this build does not
     /// bundle: a newer MushMail saved it (a downgrade, or a development build
-    /// sharing the Mac's container). Only a build that knows its model can
-    /// open it, so nothing ever offers to reset it (Kevin, 2026-11-24).
+    /// sharing the Mac's container). Updating opens it as it is; the user may
+    /// also reset it, as for `.migrationFailed` (Kevin, 2026-11-24).
     case storeFromNewerVersion(Error)
 
     init(classifying error: Error) {

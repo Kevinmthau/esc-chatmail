@@ -11,15 +11,20 @@ import Foundation
 /// never clears) would otherwise leave the user on this screen for good,
 /// with deleting the app, which loses the same data, as the only way out.
 ///
-/// A migration-family load error keeps the store too. One whose migration failed
-/// on the user's data is offered the reset in the same way; one a newer
-/// MushMail saved is told to update and is never offered it (Kevin, 2026-11-24).
+/// A migration-family load error keeps the store too, and is offered the reset
+/// in the same way as any other (Kevin, 2026-11-24): never deleted
+/// automatically, and offered behind the confirmation once retrying has not
+/// helped. A store a newer MushMail saved differs in its words alone: the
+/// notice asks the user to update, and the confirmation says that updating
+/// keeps the mailbox and the reset removes it.
 enum AppLoadingPolicy {
     struct StoreLoadFailureNotice: Equatable {
         let title: String
         let message: String
         /// Shows Reset Mailbox beside Try Again.
         let offersMailboxReset: Bool
+        /// What the confirmation behind Reset Mailbox says.
+        var resetConfirmation: MailboxResetConfirmation = AppLoadingPolicy.mailboxResetConfirmation
     }
 
     /// What a load failure says about the way out of it.
@@ -37,8 +42,8 @@ enum AppLoadingPolicy {
         case migrationFailed
         /// A newer MushMail saved the store
         /// (`PersistentStoreLoadError.storeFromNewerVersion`). Updating is the
-        /// fix, and a reset is never offered, however often it fails
-        /// (Kevin, 2026-11-24).
+        /// fix that keeps the mailbox; the reset is offered as for any other
+        /// failure, in words that say so (Kevin, 2026-11-24).
         case storeFromNewerVersion
         /// Any other error. `CoreDataStack.resetStoreAfterLoadFailure()`
         /// refuses to reset these, so the screen does not offer it.
@@ -64,6 +69,14 @@ enum AppLoadingPolicy {
         confirmButtonTitle: "Reset Mailbox"
     )
 
+    /// The confirmation for a mailbox a newer MushMail saved: updating opens
+    /// it as it is, and the reset deletes it.
+    static let newerVersionMailboxResetConfirmation = MailboxResetConfirmation(
+        title: "Reset Mailbox?",
+        message: "Updating MushMail keeps your mailbox on this device as it is. Resetting deletes it and downloads your mail again from Gmail; changes that haven't synced yet, drafts, and messages that haven't finished sending will be lost.",
+        confirmButtonTitle: "Reset Mailbox"
+    )
+
     /// Shown when a confirmed reset could not back up the store, so nothing
     /// was deleted. Still offers the reset: the backup can fail for a reason
     /// that passes.
@@ -85,11 +98,6 @@ enum AppLoadingPolicy {
             $0 < StoreVolumeFreeSpace.lowStorageThresholdBytes
         } ?? false
         let loadError = unwrappedLoadError(error)
-        // Ahead of the storage check: the cause is known, and a device low on
-        // space would otherwise be told to free space it does not need.
-        if case PersistentStoreLoadError.storeFromNewerVersion = loadError {
-            return .storeFromNewerVersion
-        }
         if isInsufficientStorage(loadError) || isLowOnStorage {
             return .insufficientStorage
         }
@@ -98,6 +106,8 @@ enum AppLoadingPolicy {
             return .storeUnavailable
         case PersistentStoreLoadError.migrationFailed:
             return .migrationFailed
+        case PersistentStoreLoadError.storeFromNewerVersion:
+            return .storeFromNewerVersion
         default:
             return .other
         }
@@ -105,9 +115,8 @@ enum AppLoadingPolicy {
 
     /// The count of consecutive failures toward `mailboxResetFailureThreshold`
     /// after one more failure of `kind`. Only the kinds a reset is offered for
-    /// count (`offersResetPastThreshold`); a storage, newer-build or
-    /// unrecognized failure ends the streak, so no number of failures of a
-    /// store a newer build saved can bring the offer up. A failure while protected data is unavailable (a cold
+    /// count (`offersResetPastThreshold`); a storage or unrecognized failure
+    /// ends the streak. A failure while protected data is unavailable (a cold
     /// background launch before first unlock, or a locked device) neither
     /// counts nor ends it: data protection alone explains it, so it says
     /// nothing about the file. Nor does one whose free space could not be
@@ -146,11 +155,19 @@ enum AppLoadingPolicy {
                 message: "MushMail needs more free space to open your mail. Free up storage in Settings, then try again.",
                 offersMailboxReset: false
             )
+        case .storeFromNewerVersion where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
+            return StoreLoadFailureNotice(
+                title: "Update MushMail",
+                message: "Your mailbox on this device was saved by a newer version of MushMail. Update MushMail to open it, or reset the mailbox and download your mail again from Gmail.",
+                offersMailboxReset: true,
+                resetConfirmation: newerVersionMailboxResetConfirmation
+            )
         case .storeFromNewerVersion:
             return StoreLoadFailureNotice(
                 title: "Update MushMail",
                 message: "Your mailbox on this device was saved by a newer version of MushMail. Update MushMail to open it.",
-                offersMailboxReset: false
+                offersMailboxReset: false,
+                resetConfirmation: newerVersionMailboxResetConfirmation
             )
         case .migrationFailed where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
             return StoreLoadFailureNotice(
@@ -184,9 +201,9 @@ enum AppLoadingPolicy {
     /// `CoreDataStack.allowsResetAfterLoadFailure` accepts.
     static func offersResetPastThreshold(_ kind: StoreLoadFailureKind) -> Bool {
         switch kind {
-        case .storeUnavailable, .migrationFailed:
+        case .storeUnavailable, .migrationFailed, .storeFromNewerVersion:
             return true
-        case .insufficientStorage, .storeFromNewerVersion, .other:
+        case .insufficientStorage, .other:
             return false
         }
     }

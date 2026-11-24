@@ -27,41 +27,29 @@ final class AppLoadingModelTests: XCTestCase {
         )
     )
 
-    /// Kevin, 2026-11-24: a store a newer MushMail saved is never offered a
-    /// reset, however often it fails: the foreground retry loop alone fails it
-    /// past the threshold in about 15 seconds.
+    /// Kevin, 2026-11-24: one rule for every migration-class error. A store a
+    /// newer MushMail saved is offered the confirmed reset past the threshold,
+    /// as any other failure is, and never before; only the words differ.
     ///
-    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering true
-    /// for `.storeFromNewerVersion` (it then counts toward the threshold), with
-    /// the `.storeFromNewerVersion` notice in `storeLoadFailureNotice` falling
-    /// through to the migration-failure case.
-    func testShowStoreLoadFailure_storeFromNewerVersion_neverOffersResetAndAsksToUpdate() {
+    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering
+    /// false for `.storeFromNewerVersion` (the failures then never count).
+    func testShowStoreLoadFailure_storeFromNewerVersion_offersResetAtThresholdAndAsksToUpdate() {
         let harness = Harness()
 
-        for _ in 0..<(threshold * 4) {
+        for _ in 0..<(threshold - 1) {
             harness.model.showStoreLoadFailure(newerBuildFailure)
             XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
         }
-
         XCTAssertEqual(harness.model.storeLoadFailure?.title, "Update MushMail")
-    }
-
-    /// A streak of a store that could not be opened, which a reset is offered
-    /// for, cannot carry over to a newer build's store: the newer-build failure
-    /// ends it, and the next failure of the first kind starts again from one.
-    ///
-    /// Revert-check: the `offersResetPastThreshold` guard in
-    /// `AppLoadingPolicy.resetEligibleFailureCount`.
-    func testShowStoreLoadFailure_newerBuildFailureMidStreak_endsStreak() {
-        let harness = Harness()
-        for _ in 0..<(threshold - 1) {
-            harness.model.showStoreLoadFailure(keptStoreFailure)
-        }
 
         harness.model.showStoreLoadFailure(newerBuildFailure)
-        harness.model.showStoreLoadFailure(keptStoreFailure)
-
-        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Update MushMail")
+        XCTAssertEqual(
+            harness.model.storeLoadFailure?.resetConfirmation,
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation
+        )
+        XCTAssertEqual(harness.resetCallCount, 0, "Nothing is reset until the user confirms")
     }
 
     /// Kevin, 2026-11-24: a migration that fails on the user's data is offered

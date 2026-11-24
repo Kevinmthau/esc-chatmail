@@ -176,23 +176,6 @@ final class AppLoadingPolicyTests: XCTestCase {
         }
     }
 
-    /// A newer build's store is told to update, on a device short of space
-    /// too: the cause is known, and freeing space would not open it.
-    ///
-    /// Revert-check: moving the `.storeFromNewerVersion` check in
-    /// `AppLoadingPolicy.storeLoadFailureKind` below the storage check.
-    func testStoreLoadFailureKind_storeFromNewerVersionOnNearlyFullDevice_isStoreFromNewerVersion() {
-        let error = CoreDataError.storeLoadFailed(
-            PersistentStoreLoadError.storeFromNewerVersion(
-                NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
-            )
-        )
-
-        let kind = AppLoadingPolicy.storeLoadFailureKind(for: error, availableCapacityBytes: 1)
-
-        XCTAssertEqual(kind, .storeFromNewerVersion)
-    }
-
     func testStoreLoadFailureKind_migrationFailedWithSpace_isMigrationFailed() {
         let error = CoreDataError.storeLoadFailed(
             PersistentStoreLoadError.migrationFailed(NSError(domain: NSCocoaErrorDomain, code: NSMigrationError))
@@ -203,18 +186,39 @@ final class AppLoadingPolicyTests: XCTestCase {
         XCTAssertEqual(kind, .migrationFailed)
     }
 
-    // Revert-check: the `.storeFromNewerVersion` case of
-    // `AppLoadingPolicy.storeLoadFailureNotice` falling through to the
-    // migration-failure notice, which offers the reset past the threshold.
-    func testStoreLoadFailureNotice_storeFromNewerVersion_neverOffersReset() {
-        let notice = AppLoadingPolicy.storeLoadFailureNotice(
+    /// The words are what differs for a newer build's store: the notice asks to
+    /// update, and the confirmation says that updating keeps the mailbox.
+    ///
+    /// Revert-check: the `where` clause of the first `.storeFromNewerVersion`
+    /// case in `AppLoadingPolicy.storeLoadFailureNotice` (dropped, the offer
+    /// comes before the threshold), and its `resetConfirmation:` argument.
+    func testStoreLoadFailureNotice_storeFromNewerVersion_offersResetOnlyFromThresholdInItsOwnWords() {
+        let below = AppLoadingPolicy.storeLoadFailureNotice(
             for: .storeFromNewerVersion,
-            resetEligibleFailureCount: threshold * 10,
+            resetEligibleFailureCount: threshold - 1,
+            isFreeSpaceKnown: true
+        )
+        let atThreshold = AppLoadingPolicy.storeLoadFailureNotice(
+            for: .storeFromNewerVersion,
+            resetEligibleFailureCount: threshold,
             isFreeSpaceKnown: true
         )
 
-        XCTAssertFalse(notice.offersMailboxReset)
-        XCTAssertEqual(notice.title, "Update MushMail")
+        XCTAssertFalse(below.offersMailboxReset)
+        XCTAssertTrue(atThreshold.offersMailboxReset)
+        XCTAssertEqual(atThreshold.title, "Update MushMail")
+        XCTAssertEqual(atThreshold.resetConfirmation, AppLoadingPolicy.newerVersionMailboxResetConfirmation)
+        XCTAssertTrue(
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation.message.contains("Updating MushMail keeps your mailbox")
+        )
+        XCTAssertNotEqual(
+            AppLoadingPolicy.storeLoadFailureNotice(
+                for: .migrationFailed,
+                resetEligibleFailureCount: threshold,
+                isFreeSpaceKnown: true
+            ).resetConfirmation,
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation
+        )
     }
 
     /// The launch screen and the stack offer and allow a reset for the same

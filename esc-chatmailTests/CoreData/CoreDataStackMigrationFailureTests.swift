@@ -6,9 +6,8 @@ import SQLite3
 /// A migration-family load error keeps the store, in every launch: it used to back the
 /// store up and delete it on the first failure, so a downgraded build (an older TestFlight
 /// build, a development build sharing the Mac's container) or a migration that failed on
-/// the user's data emptied the mailbox with no word. Kevin, 2026-11-24: a store a newer
-/// build saved is never reset; one whose migration failed may be, by the user, behind the
-/// confirmation.
+/// the user's data emptied the mailbox with no word. Kevin, 2026-11-24: either may be reset
+/// by the user, behind the confirmation, and never by the app.
 ///
 /// The stores are real SQLite files on the process-wide model. A newer build's store is
 /// this model's store with one entity hash added to its metadata and a model ordinal above
@@ -48,26 +47,33 @@ final class CoreDataStackMigrationFailureTests: XCTestCase {
         XCTAssertEqual(marker.count, 0)
     }
 
-    // Revert-check: `CoreDataStack.allowsResetAfterLoadFailure` accepting
-    // `.storeFromNewerVersion`. A newer build's store is then removed.
-    func testResetStoreAfterLoadFailure_storeFromNewerModel_isRefusedAndKeepsStore() async throws {
+    /// Kevin, 2026-11-24: a newer build's store is reset as any other is, once the user
+    /// confirms: the reset removes it by path and the next load opens an empty store.
+    ///
+    /// Revert-check: `CoreDataStack.allowsResetAfterLoadFailure` refusing
+    /// `.storeFromNewerVersion` (the reset is then refused and the store stays).
+    func testResetStoreAfterLoadFailure_storeFromNewerModel_removesStoreOnceConfirmed() async throws {
         let storeURL = try makeStore(labelCount: 1)
         try stampAsWrittenByANewerBuild(storeAt: storeURL)
         let marker = MarkerProbe()
         let stack = makeStack(storeURL: storeURL, marker: marker)
-        _ = stack.persistentContainer
+        let container = stack.persistentContainer
         _ = try await latchedLoadError(of: stack)
 
-        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable)
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .removed)
+        stack.retryLoadAfterFailure()
 
-        XCTAssertEqual(storedLabelCount(inSQLiteFileAt: storeURL), 1)
-        XCTAssertEqual(marker.count, 0)
+        try await stack.waitForStoreToLoad(timeout: 5)
+        let labelCount = try await countLabels(in: container)
+        XCTAssertEqual(labelCount, 0)
+        XCTAssertEqual(marker.count, 1)
+        XCTAssertEqual(CoreDataBackupManager.listBackups(for: storeURL).count, 1, "The reset keeps its backup")
     }
 
     // Revert-check: the `.notNewer` branch of
     // `StoreModelCompatibility.loadError(forMigrationFailure:…)` (answer
-    // `.storeFromNewerVersion` there and the user can never reset a store whose
-    // migration failed), and the `.migrationFailed` case of
+    // `.storeFromNewerVersion` there and a failed migration is told to update to a
+    // build that does not exist), and the `.migrationFailed` case of
     // `CoreDataStack.handleStoreLoadError` (the store is then deleted on the spot).
     func testLoad_migrationFromBundledVersionFails_keepsStoreAndLatchesMigrationFailed() async throws {
         let storeURL = try makeStore(labelCount: 3)

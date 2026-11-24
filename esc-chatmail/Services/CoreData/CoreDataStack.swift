@@ -375,11 +375,9 @@ final class CoreDataStack: @unchecked Sendable {
     /// same backup-then-remove path as a corrupt store; the caller then calls
     /// `retryLoadAfterFailure()`.
     ///
-    /// Refuses unless an `.unavailable` or `.migrationFailed` failure is
+    /// Refuses unless a resettable failure (`allowsResetAfterLoadFailure`) is
     /// latched and no store is attached, so it never deletes an open store or
-    /// one a timeout retry is about to load. A store saved by a newer build
-    /// (`.storeFromNewerVersion`) is never reset: only a build that knows its
-    /// model can open it. Also refuses unless the volume measurably has
+    /// one a timeout retry is about to load. Also refuses unless the volume measurably has
     /// `StoreVolumeFreeSpace.lowStorageThresholdBytes` free: a full disk
     /// usually latches `.unavailable` (SQLite reports CANTOPEN, not FULL), so
     /// the latched error alone cannot rule one out, and there freeing space
@@ -446,11 +444,13 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     /// The latched load errors the launch screen's Reset Mailbox may remove
-    /// the store for. Never `.insufficientStorage` (freeing space keeps the
-    /// data) or `.storeFromNewerVersion` (a newer build opens it).
+    /// the store for: every migration-class error, a store a newer build
+    /// saved included (Kevin, 2026-11-24), and a store kept unopened. Never
+    /// `.insufficientStorage`: freeing space keeps the data.
     static func allowsResetAfterLoadFailure(_ loadError: Error) -> Bool {
         switch loadError {
-        case PersistentStoreLoadError.unavailable, PersistentStoreLoadError.migrationFailed:
+        case PersistentStoreLoadError.unavailable, PersistentStoreLoadError.migrationFailed,
+             PersistentStoreLoadError.storeFromNewerVersion:
             return true
         default:
             return false
