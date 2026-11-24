@@ -632,11 +632,12 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         candidates.append(HTMLRecoveryCandidate(html: trimmed, source: source))
     }
 
-    /// The bodies one recovery attempt fetched, by attachmentId, failures
-    /// included: the walk sync uses and the scoring after it read the same
-    /// parts, and a part is fetched once. Lives for one attempt, on the actor.
+    /// The bodies one recovery attempt fetched, by attachmentId: the walk
+    /// sync uses and the scoring after it read the same parts, and a part is
+    /// fetched once. A failure is not kept, so a later pass tries the part
+    /// again. Lives for one attempt, on the actor.
     private final class RecoveryBodyFetches {
-        var bodies: [String: String?] = [:]
+        var bodies: [String: String] = [:]
     }
 
     private func decodedTextualBody(
@@ -659,7 +660,9 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 headers: part.headers,
                 apiClient: apiClient
             )
-            fetches.bodies[attachmentId] = .some(fetched)
+            if let fetched {
+                fetches.bodies[attachmentId] = fetched
+            }
             return fetched
         }
 

@@ -275,6 +275,65 @@ final class MessageProcessorSplitBodyTests: XCTestCase {
         XCTAssertEqual(processed.storedHTML, Self.fragmentA)
     }
 
+    /// A refused continuation counts toward the bound: it was fetched
+    /// before it could be refused, so a sender could otherwise have any
+    /// number of blank or invisible fragments fetched, each a fresh chance of
+    /// a transient failure that blocks the message.
+    ///
+    /// Revert-check: counting only joined continuations in
+    /// `MIMEBodyExtractor.joiningContinuation` (moving the `readCount`
+    /// increment after the join).
+    func testRefusedContinuations_countTowardTheBound() async throws {
+        var parts = [textPart("0", "text/html", Self.fragmentA)]
+        for index in 1...100 {
+            parts.append(inlinePhoto("i\(index)"))
+            parts.append(largeTextPart("h\(index)", "text/html", attachmentId: "hidden-\(index)"))
+        }
+        let fetches = FetchCounter()
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in
+            fetches.increment()
+            return Data("<html><body><div hidden>x</div></body></html>".utf8)
+        })
+
+        let processed = try await XCTUnwrapAsync(
+            await processor.processGmailMessage(makeMessage(parts: parts), myAliases: [])
+        )
+
+        XCTAssertEqual(processed.storedHTML, Self.fragmentA)
+        XCTAssertEqual(fetches.count, MIMEBodyExtractor.maximumContinuationsPerKind)
+    }
+
+    /// A container walked only for the kind still missing is not asked for
+    /// the other: its HTML would be dropped, so its continuations were
+    /// fetched for nothing, and they spent the bound that a later
+    /// continuation recovery joins (recovery asks for HTML alone).
+    ///
+    /// Revert-check: passing `kinds` rather than `missingKinds` to the
+    /// child's walk in `MIMEBodyExtractor.walk`.
+    func testContainerWalkedForPlainText_fetchesNoHTMLContinuation() async throws {
+        let message = makeMessage(parts: [
+            textPart("0.0", "text/html", Self.fragmentA),
+            MessagePart(
+                partId: "0.1",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: nil,
+                body: nil,
+                parts: [
+                    textPart("0.1.0", "text/html", Self.fragmentB),
+                    inlinePhoto("0.1.1"),
+                    largeTextPart("0.1.2", "text/html", attachmentId: "dropped-anyway"),
+                    textPart("0.1.3", "text/plain", "PLAIN")
+                ]
+            )
+        ])
+
+        let processed = try await process(message)
+
+        XCTAssertEqual(processed.storedHTML, Self.fragmentA)
+        XCTAssertEqual(processed.plainTextBody, "PLAIN")
+    }
+
     // MARK: - Joining HTML
 
     func testJoinedHTML_putsTheFragmentsBodyContentBeforeTheClosingBodyTag() {
@@ -320,6 +379,23 @@ final class MessageProcessorSplitBodyTests: XCTestCase {
             MIMEBodyExtractor.joinedHTML("<body>Ünïcödé 😀</body>", appending: "<body>İstanbul ſ</body>"),
             "<body>Ünïcödé 😀İstanbul ſ</body>"
         )
+    }
+
+    /// The seam is trimmed by a scan, not a regular expression, which
+    /// backtracked through every run of line breaks in the sender's text: a
+    /// run of 40,000 took 15 s in ICU (review round 1 of PR 466).
+    ///
+    /// Revert-check: trimming with `[\\r\\n]+\\z` again in
+    /// `MIMEBodyExtractor.joinedPlainText`. HONEST SCOPE: this asserts a time,
+    /// with a margin of about a hundred times the linear scan's.
+    func testJoinedPlainText_aLongRunOfLineBreaksInsideTheBaseIsLinear() {
+        let base = "A" + String(repeating: "\n", count: 60_000) + "x\n\n"
+        let start = Date()
+
+        let joined = MIMEBodyExtractor.joinedPlainText(base, appending: "B")
+
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        XCTAssertEqual(joined, "A" + String(repeating: "\n", count: 60_000) + "x\n\nB")
     }
 
     func testJoinedPlainText_makesTheSeamOneBlankLine() {
@@ -406,6 +482,25 @@ final class MessageProcessorSplitBodyTests: XCTestCase {
             body: MessageBody(size: 4, data: Data([0xFF, 0xD8, 0xFF, 0xD9]).base64EncodedString(), attachmentId: nil),
             parts: nil
         )
+    }
+}
+
+/// Counts attachment fetches from the processor's `@Sendable` closure.
+/// `@unchecked Sendable`: `lock` guards `value`.
+private final class FetchCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    func increment() {
+        lock.lock()
+        value += 1
+        lock.unlock()
+    }
+
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
 

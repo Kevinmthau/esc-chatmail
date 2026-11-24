@@ -293,6 +293,52 @@ describe('split bodies', () => {
   })
 })
 
+describe('continuation bounds and kinds', () => {
+  // Revert-check: counting only joined continuations (readCount after the join).
+  it('counts a refused continuation toward the bound', async () => {
+    const parts = [textPart('0', 'text/html', fragmentA)]
+    for (let index = 1; index <= 100; index++) {
+      parts.push(
+        inlinePhoto(`i${index}`),
+        largeTextPart(`h${index}`, 'text/html', `hidden-${index}`),
+      )
+    }
+    let fetches = 0
+    const parsed = await parseGmailMessage(message(parts), {
+      fetchLargeBody: () => {
+        fetches += 1
+        return Promise.resolve(b64url('<html><body><div hidden>x</div></body></html>'))
+      },
+    })
+
+    expect(parsed!.html).toBe(fragmentA)
+    expect(fetches).toBe(MAXIMUM_CONTINUATIONS_PER_KIND)
+  })
+
+  // Revert-check: passing `kinds` rather than `missingKinds` to the child's walk.
+  it('fetches no HTML continuation in a container walked for plain text', async () => {
+    const parsed = await parseGmailMessage(
+      message([
+        textPart('0.0', 'text/html', fragmentA),
+        {
+          partId: '0.1',
+          mimeType: 'multipart/mixed',
+          parts: [
+            textPart('0.1.0', 'text/html', fragmentB),
+            inlinePhoto('0.1.1'),
+            largeTextPart('0.1.2', 'text/html', 'dropped-anyway'),
+            textPart('0.1.3', 'text/plain', 'PLAIN'),
+          ],
+        },
+      ]),
+      { fetchLargeBody: () => Promise.reject(new Error('must not be fetched')) },
+    )
+
+    expect(parsed!.html).toBe(fragmentA)
+    expect(parsed!.plainText).toBe('PLAIN')
+  })
+})
+
 describe('joinedHtml', () => {
   it("puts the fragment's body content before the closing body tag", () => {
     expect(
@@ -330,6 +376,16 @@ describe('joinedHtml', () => {
 })
 
 describe('joinedPlainText', () => {
+  // Revert-check: trimming with /[\r\n]+$/ again. HONEST SCOPE: asserts a
+  // time, about a hundred times the linear scan's.
+  it('is linear in a long run of line breaks inside the base', () => {
+    const run = '\n'.repeat(120_000)
+    const started = performance.now()
+    const joined = joinedPlainText(`A${run}x\n\n`, 'B')
+    expect(performance.now() - started).toBeLessThan(1000)
+    expect(joined).toBe(`A${run}x\n\nB`)
+  })
+
   it('makes the seam one blank line', () => {
     expect(joinedPlainText('A\r\n\r\n', '\n\nB\n')).toBe('A\n\nB\n')
   })

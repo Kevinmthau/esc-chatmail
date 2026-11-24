@@ -1029,8 +1029,9 @@ class MessageProcessor: @unchecked Sendable {
             // sweep downloaded a second time (architecture review
             // gap-message-shape-extremes#3). So a text/html or text/plain part
             // with no filename and no `attachment` disposition is never one,
-            // whether or not the walk took it for the body: the same rule as
-            // web's `isServerAttachmentPart`. A nameless text/calendar part is
+            // whether or not the walk took it for the body, as on web
+            // (`isServerAttachmentPart`, which reads `mimeType` alone where
+            // this also reads the Content-Type header). A nameless text/calendar part is
             // still a file (it drives the invite and reservation cards), and
             // `hasAttachments`, which counts any attachmentId, is left as it is.
             if let attachmentId = part.body?.attachmentId,

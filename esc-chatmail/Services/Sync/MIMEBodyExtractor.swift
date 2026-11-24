@@ -6,7 +6,8 @@ import Foundation
 /// (`HTMLContentRecoveryService`) both read a body through it, so the HTML
 /// recovered after a body file was lost is the HTML sync stored
 /// (architecture review gap-message-shape-extremes#3 and
-/// gap-mime-decoding-i18n#4). `web/src/mime/parse.ts` ports it rule for rule.
+/// gap-mime-decoding-i18n#4). `web/src/mime/mimeBody.ts` ports it rule for
+/// rule.
 ///
 /// It does no I/O of its own. `decodedBody` is the caller's, and so is the
 /// failure policy: sync's throws on a transient fetch failure, a continuation
@@ -35,7 +36,9 @@ import Foundation
 /// list server's footer after an attached file is not the sender's words.
 /// The join is bounded (`maximumContinuationsPerKind`,
 /// `maximumContinuationUTF8Bytes`), and a continuation past either bound is
-/// not fetched at all.
+/// not fetched at all. The count bound counts every continuation read, joined
+/// or not: a blank or invisible fragment is refused only after it was
+/// fetched, and a sender could otherwise have any number of them fetched.
 enum MIMEBodyExtractor {
     /// The two kinds of body the walk can be asked for.
     enum Kind: Sendable, Hashable {
@@ -65,7 +68,8 @@ enum MIMEBodyExtractor {
         }
     }
 
-    /// Continuations joined to a body of one kind, at most, in one message.
+    /// Continuations read for a body of one kind, at most, in one message,
+    /// whether or not each was joined.
     static let maximumContinuationsPerKind = 15
 
     /// Bytes of continuation joined to a body of one kind, at most, in one
@@ -74,7 +78,7 @@ enum MIMEBodyExtractor {
     static let maximumContinuationUTF8Bytes = 2 * 1024 * 1024
 
     private struct ContinuationBudget {
-        var joinedCount: [Kind: Int] = [:]
+        var readCount: [Kind: Int] = [:]
         var joinedBytes: [Kind: Int] = [:]
 
         func remainingBytes(for kind: Kind) -> Int {
@@ -82,7 +86,7 @@ enum MIMEBodyExtractor {
         }
 
         func admitsAnother(_ kind: Kind) -> Bool {
-            joinedCount[kind, default: 0] < MIMEBodyExtractor.maximumContinuationsPerKind &&
+            readCount[kind, default: 0] < MIMEBodyExtractor.maximumContinuationsPerKind &&
                 remainingBytes(for: kind) > 0
         }
     }
@@ -146,14 +150,20 @@ enum MIMEBodyExtractor {
             }
 
             // Once every kind asked for has a body, only a continuation can
-            // still change it, and nothing else is walked or fetched.
-            guard !kinds.allSatisfy({ body[$0] != nil }) else {
+            // still change it, and nothing else is walked or fetched. A child
+            // is asked only for the kinds still missing: what it found of
+            // another kind would be dropped, and joining it would spend that
+            // kind's bound on fetches whose result is dropped, so sync (both
+            // kinds) could refuse a continuation that recovery (HTML only)
+            // joins.
+            let missingKinds = kinds.filter { body[$0] == nil }
+            guard !missingKinds.isEmpty else {
                 continue
             }
 
-            let childBody = try await walk(child, kinds: kinds, budget: &budget, decodedBody: decodedBody)
+            let childBody = try await walk(child, kinds: missingKinds, budget: &budget, decodedBody: decodedBody)
             let childLeafKind = bodyLeafKind(of: child)
-            for kind in kinds where body[kind] == nil {
+            for kind in missingKinds {
                 guard let value = childBody[kind] else { continue }
                 body[kind] = value
                 if childLeafKind == kind {
@@ -178,6 +188,7 @@ enum MIMEBodyExtractor {
             return base
         }
 
+        budget.readCount[kind, default: 0] += 1
         guard let fragment = nonBlank(try await decodedBody(part)) else {
             return base
         }
@@ -194,7 +205,6 @@ enum MIMEBodyExtractor {
             }
             joined = joinedHTML(base, appending: fragment)
         }
-        budget.joinedCount[kind, default: 0] += 1
         budget.joinedBytes[kind, default: 0] += fragmentBytes
         return joined
     }
@@ -202,19 +212,20 @@ enum MIMEBodyExtractor {
     // MARK: - Joining
 
     /// `base`, then a blank line, then `fragment`, with the line breaks at the
-    /// seam made exactly one blank line.
+    /// seam made exactly one blank line. The breaks are taken off by a scan
+    /// from each end, never a regular expression: `[\r\n]+\z` backtracks
+    /// through every run of line breaks the sender's text holds, and 40,000
+    /// of them took 15 s in ICU.
     static func joinedPlainText(_ base: String, appending fragment: String) -> String {
-        let head = base.replacingOccurrences(
-            of: "[\\r\\n]+\\z",
-            with: "",
-            options: .regularExpression
-        )
-        let tail = fragment.replacingOccurrences(
-            of: "\\A[\\r\\n]+",
-            with: "",
-            options: .regularExpression
-        )
-        return head + "\n\n" + tail
+        var head = base.unicodeScalars[...]
+        while let last = head.last, last == "\r" || last == "\n" {
+            head.removeLast()
+        }
+        var tail = fragment.unicodeScalars[...]
+        while let first = tail.first, first == "\r" || first == "\n" {
+            tail.removeFirst()
+        }
+        return String(head) + "\n\n" + String(tail)
     }
 
     /// `base` with the content of `fragment`'s `<body>` put before `base`'s

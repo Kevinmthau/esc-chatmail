@@ -10,7 +10,8 @@
 // joins after a blank line, HTML as the content of its <body> before the first
 // fragment's </body>. A blank fragment, or HTML with nothing visible, is left
 // out, and nothing stands in for the file. The join is bounded, and a
-// continuation past either bound is not fetched.
+// continuation past either bound is not fetched; the count bound counts every
+// continuation read, joined or not.
 
 import type { GmailPart } from '../gmail/types'
 import { isAttachmentPart } from './attachments'
@@ -23,14 +24,14 @@ export interface MimeBody {
   plainText: string | null
 }
 
-/** Continuations joined to a body of one kind, at most, in one message. */
+/** Continuations read for a body of one kind, at most, joined or not. */
 export const MAXIMUM_CONTINUATIONS_PER_KIND = 15
 
 /** UTF-8 bytes of continuation joined to a body of one kind, at most. */
 export const MAXIMUM_CONTINUATION_UTF8_BYTES = 2 * 1024 * 1024
 
 interface ContinuationBudget {
-  joinedCount: Record<BodyKind, number>
+  readCount: Record<BodyKind, number>
   joinedBytes: Record<BodyKind, number>
 }
 
@@ -39,9 +40,7 @@ function remainingBytes(budget: ContinuationBudget, kind: BodyKind): number {
 }
 
 function admitsAnother(budget: ContinuationBudget, kind: BodyKind): boolean {
-  return (
-    budget.joinedCount[kind] < MAXIMUM_CONTINUATIONS_PER_KIND && remainingBytes(budget, kind) > 0
-  )
+  return budget.readCount[kind] < MAXIMUM_CONTINUATIONS_PER_KIND && remainingBytes(budget, kind) > 0
 }
 
 const ALL_KINDS: readonly BodyKind[] = ['html', 'plainText']
@@ -57,7 +56,7 @@ export async function extractMimeBody(
   kinds: readonly BodyKind[] = ALL_KINDS,
 ): Promise<MimeBody> {
   const budget: ContinuationBudget = {
-    joinedCount: { html: 0, plainText: 0 },
+    readCount: { html: 0, plainText: 0 },
     joinedBytes: { html: 0, plainText: 0 },
   }
   return walk(part, kinds, budget, decodedBody)
@@ -111,17 +110,21 @@ async function walk(
         budget,
         decodedBody,
       )
-    } else if (!kinds.every((kind) => body[kind] !== null)) {
+    } else {
       // Once every kind asked for has a body, only a continuation can still
-      // change it, and nothing else is walked or fetched.
-      const childBody = await walk(child, kinds, budget, decodedBody)
-      for (const kind of kinds) {
-        if (body[kind] !== null) continue
-        const value = childBody[kind]
-        if (value === null) continue
-        body[kind] = value
-        if (childLeafKind === kind) {
-          kindsFromOwnLeaves.add(kind)
+      // change it, and nothing else is walked or fetched. A child is asked
+      // only for the kinds still missing, so no fetch is spent on a body that
+      // would be dropped and sync joins what recovery (HTML only) joins.
+      const missingKinds = kinds.filter((kind) => body[kind] === null)
+      if (missingKinds.length > 0) {
+        const childBody = await walk(child, missingKinds, budget, decodedBody)
+        for (const kind of missingKinds) {
+          const value = childBody[kind]
+          if (value === null) continue
+          body[kind] = value
+          if (childLeafKind === kind) {
+            kindsFromOwnLeaves.add(kind)
+          }
         }
       }
     }
@@ -143,6 +146,7 @@ async function joiningContinuation(
   const declaredSize = part.body?.size
   if (declaredSize !== undefined && declaredSize > remaining) return base
 
+  budget.readCount[kind] += 1
   const fragment = nonBlank(await decodedBody(part))
   if (fragment === null) return base
   const fragmentBytes = utf8Length(fragment)
@@ -155,7 +159,6 @@ async function joiningContinuation(
     if (!hasMeaningfulContent(fragment)) return base
     joined = joinedHtml(base, fragment)
   }
-  budget.joinedCount[kind] += 1
   budget.joinedBytes[kind] += fragmentBytes
   return joined
 }
@@ -166,9 +169,22 @@ function utf8Length(text: string): number {
 
 // MARK: - Joining
 
-/** `base`, a blank line, then `fragment`, with the seam made one blank line. */
+function isLineBreak(code: number): boolean {
+  return code === 0x0d || code === 0x0a
+}
+
+/**
+ * `base`, a blank line, then `fragment`, with the seam made one blank line.
+ * The breaks are taken off by a scan from each end, never a regular
+ * expression: `/[\r\n]+$/` backtracks through every run of line breaks the
+ * sender's text holds (80,000 took 3.6 s in V8).
+ */
 export function joinedPlainText(base: string, fragment: string): string {
-  return base.replace(/[\r\n]+$/, '') + '\n\n' + fragment.replace(/^[\r\n]+/, '')
+  let end = base.length
+  while (end > 0 && isLineBreak(base.charCodeAt(end - 1))) end--
+  let start = 0
+  while (start < fragment.length && isLineBreak(fragment.charCodeAt(start))) start++
+  return base.slice(0, end) + '\n\n' + fragment.slice(start)
 }
 
 /**
