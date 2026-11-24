@@ -109,13 +109,15 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         XCTAssertEqual(staged.probedAt, runStart)
     }
 
-    // Revert-check: fails if `DeliveryUnknownResolution.stageNotSent` drops its
-    // missing-message guard: it would write a Not-sent marker that
-    // `retainDefinitelyUnsentOptimisticMessage` never writes for a record
-    // without its message, and cold recovery would then restore the
-    // conversation's pre-send rollup days later. Also fails if the probe stops
-    // stamping `deliveryProbedAt` on such a record, which would then hold the
-    // run's lookups for good.
+    // A record whose message row is gone must not become Not sent:
+    // `retainDefinitelyUnsentOptimisticMessage` never writes that marker for
+    // one, and cold recovery would then restore the conversation's pre-send
+    // rollup days later.
+    // Revert-check: fails if the probe stops stamping `deliveryProbedAt` on
+    // such a record, which would then hold the run's lookups for good.
+    // HONEST SCOPE: `storeAgreesItWasNotSent` refuses a record without its
+    // message before `stageNotSent` is asked, so removing `stageNotSent`'s own
+    // missing-message guard leaves this green; it is a second guard.
     func testRun_recordWhoseMessageIsGone_isLeftDeliveryUnknown() async throws {
         try seedSend(id: "orphan", admittedAgo: 2 * 60 * 60)
         let deleteContext = stack.newBackgroundContext()
@@ -179,6 +181,38 @@ final class DeliveryUnknownProbeTests: XCTestCase {
 
         XCTAssertEqual(outcome.unresolved, ["rewritten"])
         XCTAssertEqual(try state(of: "rewritten", in: context).marker, OutboundSendRemoteState.ambiguousMessageID)
+    }
+
+    // Revert-check: fails if `DeliveryUnknownResolution.storeAgreesItWasNotSent`
+    // stops refusing on a stored row carrying this send's own Message-ID, in
+    // any conversation: an echo the persister kept without consuming the
+    // record.
+    func testRun_storedEchoWithThisSendsMessageIDElsewhere_refusesNotSent() async throws {
+        try seedSend(id: "kept-echo", admittedAgo: 2 * 60 * 60)
+        try seedSend(id: "unrelated", admittedAgo: nil)
+        try seedOwnMessage(
+            nextTo: "unrelated",
+            id: "gmail-kept-echo",
+            sentAgo: 2 * 60 * 60 - 30,
+            messageId: MimeBuilder.messageId(forOptimisticMessageID: "kept-echo")
+        )
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.unresolved, ["kept-echo"])
+        XCTAssertEqual(try state(of: "kept-echo", in: context).marker, OutboundSendRemoteState.ambiguousMessageID)
+    }
+
+    // The history witness is the orchestrator's to pass: a terminal slice
+    // with no failed fetch. Pinned from source because no test drives the
+    // whole orchestrator into the reconciliation phase with a stored record.
+    // Revert-check: fails if `IncrementalSyncOrchestrator.performSync` passes
+    // anything else for either argument.
+    func testOrchestrator_passesTheHistoryWitnessToTheProbeGate() throws {
+        let source = try repositorySource("esc-chatmail/Services/Sync/IncrementalSyncOrchestrator.swift")
+        XCTAssertTrue(source.contains("historySliceIsTerminal: historyResult.nextPageToken == nil"))
+        XCTAssertTrue(source.contains("hadFetchFailures: fetchResult.hasFailures"))
+        XCTAssertTrue(source.contains("allowsExpensiveWork: allowsExpensiveRecovery"))
     }
 
     func testRun_echoOfAnotherAppSendInTheConversation_isNoWitness() async throws {

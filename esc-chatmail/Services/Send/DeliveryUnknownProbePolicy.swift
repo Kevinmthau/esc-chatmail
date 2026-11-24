@@ -21,10 +21,13 @@ import Foundation
 ///   slice with no failed fetch, after which a committed send's echo is in the
 ///   store, because while a record is ambiguous history admits even the
 ///   messages it would exclude (`HistoryProcessor`), unless sync could not
-///   store it, which leaves a ledger row, or Gmail did not keep our
-///   Message-ID, which leaves a message from the user that does not carry it.
-///   `DeliveryUnknownResolution.storeAgreesItWasNotSent` refuses the verdict
-///   on either.
+///   store it, or stored it without consuming the record, or Gmail did not
+///   keep our Message-ID. `DeliveryUnknownResolution.storeAgreesItWasNotSent`
+///   refuses the verdict on what those leave in the store: a ledger row still
+///   on record, a row carrying our Message-ID, or a message from the user
+///   that does not carry one. A failure whose retries ran out, or an
+///   unprocessable message, leaves no row, and then the search is the only
+///   witness.
 /// And it is asked only after a quiet period long past the send's own cap
 /// (`NetworkConfig.sendResourceTimeout`), so that Gmail has finished with any
 /// request it was still processing when the app gave up on it, and its search

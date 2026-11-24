@@ -66,7 +66,11 @@ enum DeliveryUnknownResolution {
     /// before an empty search is taken as "Not sent". Either one says no:
     /// - a sync ledger row (`AbandonedSyncMessage`, deferred or abandoned)
     ///   recorded since the send: a message sync could not store, which may be
-    ///   this send's echo, and the history witness cannot see it;
+    ///   this send's echo, and the history witness cannot see it (a row whose
+    ///   retries ran out is deleted, and an unprocessable message leaves none,
+    ///   so this covers only failures still on record);
+    /// - a stored message, anywhere, carrying this send's own Message-ID: its
+    ///   echo, kept without consuming the record;
     /// - a message from the user in the send's own conversation, dated within
     ///   the send's request lifetime (two `sendResourceTimeout`s) of its
     ///   admission, that does not carry one of the app's deterministic
@@ -85,6 +89,19 @@ enum DeliveryUnknownResolution {
         ledgerRequest.predicate = NSPredicate(format: "abandonedAt >= %@", since as NSDate)
         ledgerRequest.includesPendingChanges = true
         guard try context.count(for: ledgerRequest) == 0 else { return false }
+
+        // A stored row carrying this send's own Message-ID is its echo, which
+        // the persister keeps without consuming the record in some routes
+        // (an unresolved anchor). Store-wide: the echo may be in another
+        // conversation. Unindexed, but asked at most a few times a run.
+        let echoRequest = Message.fetchRequest()
+        echoRequest.predicate = NSPredicate(
+            format: "messageId == %@ AND id != %@",
+            MimeBuilder.messageId(forOptimisticMessageID: optimisticMessageID),
+            optimisticMessageID
+        )
+        echoRequest.includesPendingChanges = true
+        guard try context.fetch(echoRequest).allSatisfy(\.isDeleted) else { return false }
 
         let ownRequest = Message.fetchRequest()
         ownRequest.predicate = MessagePredicates.id(optimisticMessageID)
