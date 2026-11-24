@@ -89,6 +89,28 @@ describe('preparePersistPlan', () => {
     expect(plan.bodyHtml).toBeNull()
   })
 
+  // Architecture review gap-mime-decoding-i18n#2: an address inside a quoted
+  // display name is not the mailbox's. Revert-check: reading the first
+  // `<…@…>` anywhere again in `extractEmail` (`firstAddressAnywhere`) makes
+  // the message the user's own, from the user, in note-to-self.
+  it('reads the sender past an address quoted in its display name', async () => {
+    const plan = (await preparePersistPlan(
+      textMessage({
+        id: 'm1',
+        from: `"Me <${ME}>" <x@attacker.example>`,
+        to: [ME],
+      }),
+      ctx,
+    )) as MessagePersistPlan
+    expect(plan.kind).toBe('message')
+    expect(plan.message.isFromMe).toBe(0)
+    expect(plan.message.senderEmail).toBe('x@attacker.example')
+    expect(plan.participants.filter((p) => p.kind === 'from').map((p) => p.email)).toEqual([
+      'x@attacker.example',
+    ])
+    expect(plan.identity.participants).toEqual(['x@attacker.example'])
+  })
+
   it('keys identity by From+To+Cc minus self, BCC excluded, Hide-My-Email dropped', async () => {
     const plan = (await preparePersistPlan(
       textMessage({

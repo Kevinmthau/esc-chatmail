@@ -49,20 +49,173 @@ class EmailNormalizer {
         return try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
     }()
 
+    /// The address of the first mailbox in an address header value (a whole
+    /// From, To or Cc value, or one token of it).
+    ///
+    /// A display name is the sender's: a quoted name or a comment can hold an
+    /// address of its own (`"Boss <boss@corp.example>" <x@attacker.example>`
+    /// is one legal mailbox, x@attacker.example, and SPF, DKIM and DMARC align
+    /// on it). Taking the first `<…@…>` anywhere in the value read that one as
+    /// boss@corp.example, so the message keyed into Boss's chat, showed as
+    /// Boss's, and with the user's own address in the quotes was drawn as sent
+    /// by the user. So the value is split into mailboxes first
+    /// (`EmailAddressListParser.addressTokens`, which knows quoted strings and
+    /// comments), and the first mailbox's address is read by
+    /// `mailboxAddress(inToken:)`, which skips them.
     static func extractEmail(from string: String) -> String? {
+        firstMailbox(in: string)?.match.email
+    }
+
+    /// Where a mailbox's address sits in one address token.
+    struct MailboxAddressMatch: Equatable {
+        /// The address as written (not normalized).
+        let email: String
+        /// The `<` that opens the angle-addr, or nil for a bare address. The
+        /// display name is the text before it.
+        let angleStart: String.Index?
+    }
+
+    /// The address of the one mailbox in `token` (a value
+    /// `EmailAddressListParser.addressTokens` returned), in this order:
+    ///
+    /// 1. the LAST complete `<…@…>` outside quoted strings and comments: a
+    ///    nested `<` restarts the angle-addr, so an unmatched bracket in a
+    ///    name never captures name text;
+    /// 2. else the first bare address outside quoted strings and comments;
+    /// 3. else the last `<…@…>` anywhere, quoted or not, which reads a token
+    ///    written wholly in quotes (`"John Doe <john@x.com>"`) and one whose
+    ///    quote or comment never closes. In the second case step 1 has already
+    ///    taken any address before the quote opened, so this is never the
+    ///    first of two addresses.
+    ///
+    /// Quoted strings and comments follow RFC 5322 as `addressTokens` does:
+    /// a backslash escapes the next character, comments nest, and inside the
+    /// angle-addr a quoted local part may hold `<`, `>` and `,`. Characters
+    /// are read as Unicode scalars, never `Character`s: a quote followed by a
+    /// combining mark is one `Character` that is not a quote, and the web
+    /// app (`web/src/identity/normalizeEmail.ts`, which must match this
+    /// scanner rule for rule) reads it as a quote.
+    static func mailboxAddress(inToken token: String) -> MailboxAddressMatch? {
+        enum Mode { case phrase, quote, comment, angle, angleQuote }
+        var mode = Mode.phrase
+        var commentDepth = 0
+        var previousWasEscape = false
+        var angleStart = token.startIndex
+        var lastComplete: MailboxAddressMatch?
+        // The token with every quoted string and comment blanked, for step 2.
+        var phraseScalars = String.UnicodeScalarView()
+
+        let scalars = token.unicodeScalars
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            let isEscaped = previousWasEscape
+            switch mode {
+            case .phrase:
+                phraseScalars.append(scalar)
+                if scalar == "\"" && !isEscaped {
+                    mode = .quote
+                    phraseScalars.removeLast()
+                    phraseScalars.append(" ")
+                } else if scalar == "(" && !isEscaped {
+                    mode = .comment
+                    commentDepth = 1
+                    phraseScalars.removeLast()
+                    phraseScalars.append(" ")
+                } else if scalar == "<" {
+                    mode = .angle
+                    angleStart = index
+                }
+            case .quote:
+                phraseScalars.append(" ")
+                if scalar == "\"" && !isEscaped {
+                    mode = .phrase
+                }
+            case .comment:
+                phraseScalars.append(" ")
+                if scalar == "(" && !isEscaped {
+                    commentDepth += 1
+                } else if scalar == ")" && !isEscaped {
+                    commentDepth -= 1
+                    if commentDepth == 0 {
+                        mode = .phrase
+                    }
+                }
+            case .angle:
+                phraseScalars.append(scalar)
+                if scalar == "\"" && !isEscaped {
+                    mode = .angleQuote
+                } else if scalar == "<" {
+                    angleStart = index
+                } else if scalar == ">" {
+                    let contentStart = scalars.index(after: angleStart)
+                    let content = String(scalars[contentStart..<index])
+                    if isAngleAddressContent(content) {
+                        lastComplete = MailboxAddressMatch(email: content, angleStart: angleStart)
+                    }
+                    mode = .phrase
+                }
+            case .angleQuote:
+                phraseScalars.append(scalar)
+                if scalar == "\"" && !isEscaped {
+                    mode = .angle
+                }
+            }
+            previousWasEscape = scalar == "\\" && !isEscaped
+            index = scalars.index(after: index)
+        }
+
+        if let lastComplete {
+            return lastComplete
+        }
+        if let bare = firstBareEmailMatch(in: String(phraseScalars)) {
+            return MailboxAddressMatch(email: bare.email, angleStart: nil)
+        }
+        if let regex = bracketedEmailRegex,
+           let match = regex.matches(in: token, range: NSRange(token.startIndex..., in: token)).last,
+           let range = Range(match.range(at: 1), in: token),
+           let whole = Range(match.range, in: token) {
+            return MailboxAddressMatch(email: String(token.unicodeScalars[range]), angleStart: whole.lowerBound)
+        }
+        return nil
+    }
+
+    /// The first token of `string` that holds an address, with that address.
+    private static func firstMailbox(in string: String) -> (token: String, match: MailboxAddressMatch)? {
+        for token in EmailAddressListParser.addressTokens(from: string) {
+            if let match = mailboxAddress(inToken: token) {
+                return (token, match)
+            }
+        }
+        return nil
+    }
+
+    private static let angleAddressContentRegex: NSRegularExpression? = {
+        try? NSRegularExpression(pattern: #"\A(?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+\z"#)
+    }()
+
+    /// The bracketed pattern's rule for what may sit between `<` and `>`.
+    private static func isAngleAddressContent(_ content: String) -> Bool {
+        guard content.contains("@"), let regex = angleAddressContentRegex else { return false }
+        return regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)) != nil
+    }
+
+    /// The first address anywhere in free text, quoted or not: the leftmost
+    /// `<…@…>`, else the first bare address. This is what `extractEmail` was
+    /// before it learned quoted names, and it is right only for text that is
+    /// not an address header: `isEmailAddressShapedDisplayName` asks it
+    /// whether a display name embeds an address, which is the reading that
+    /// hides `Boss <boss@corp.example>` and `Acme (support@acme.com)` as
+    /// names. Never use it on a header value.
+    private static func firstAddressAnywhere(in string: String) -> String? {
         if let regex = bracketedEmailRegex,
            let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),
            let range = Range(match.range(at: 1), in: string) {
             return String(string[range])
         }
-
-        if let match = firstBareEmailMatch(in: string) {
-            return match.email
-        }
-        
-        return nil
+        return firstBareEmailMatch(in: string)?.email
     }
-    
+
     static func extractAllEmails(from string: String) -> [String] {
         var emails: [String] = []
         
@@ -80,7 +233,34 @@ class EmailNormalizer {
         return emails
     }
     
+    /// The display name of the first mailbox in an address header value: the
+    /// text before the `<` that `extractEmail` read the address from, so an
+    /// address inside a quoted name stays in the name (where
+    /// `isEmailAddressShapedDisplayName` hides it) and never becomes the
+    /// mailbox's address.
     static func extractDisplayName(from string: String) -> String? {
+        guard let (token, match) = firstMailbox(in: string) else {
+            return displayNameWithoutAngleAddress(from: string)
+        }
+        return displayName(inToken: token, match: match)
+    }
+
+    /// The display name of the mailbox `match` read from `token`.
+    static func displayName(inToken token: String, match: MailboxAddressMatch) -> String? {
+        guard let angleStart = match.angleStart else {
+            return displayNameWithoutAngleAddress(from: token)
+        }
+        // Sliced by scalars, as the scanner read it: a `String` slice rounds
+        // an index inside a grapheme down to the grapheme's start.
+        let name = String(token.unicodeScalars[..<angleStart]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitized = sanitizeDisplayName(name)
+        return sanitized.isEmpty ? nil : sanitized
+    }
+
+    /// The name of a value whose address is bare (`a@b.com (Name)`,
+    /// `Name a@b.com`) or missing, as `extractDisplayName` read every value
+    /// before it learned quoted names.
+    private static func displayNameWithoutAngleAddress(from string: String) -> String? {
         if let emailStartIndex = string.firstIndex(of: "<") {
             let name = String(string[..<emailStartIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
             let sanitized = sanitizeDisplayName(name)
@@ -365,7 +545,7 @@ class EmailNormalizer {
     /// The match both `isEmailAddressShapedDisplayName` overloads share, on a
     /// value whose wrapping quotes are already peeled.
     private static func embedsBareOrBracketedAddress(_ candidate: String) -> Bool {
-        candidate.contains("@") && extractEmail(from: candidate) != nil
+        candidate.contains("@") && firstAddressAnywhere(in: candidate) != nil
     }
 
     private static let wrappingQuotePairs: [(open: Character, close: Character)] = [

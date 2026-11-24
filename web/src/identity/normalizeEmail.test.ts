@@ -88,6 +88,59 @@ describe('extractEmail', () => {
   })
 })
 
+// Port of EmailNormalizerTests' quoted-name cases (architecture review
+// gap-mime-decoding-i18n#2). Revert-check: taking the first `<…@…>` anywhere
+// again in `extractEmail` (`firstAddressAnywhere`) fails every forged case.
+describe('extractEmail skips quoted names and comments', () => {
+  it.each([
+    ['quoted name holding another address', '"Boss <boss@corp.example>" <x@attacker.example>'],
+    ['quoted name holding the own address', '"Me <me@gmail.com>" <x@attacker.example>'],
+    ['comment holding another address', '(Boss <boss@corp.example>) <x@attacker.example>'],
+    ['nested comment', '(a (Boss <boss@corp.example>) b) <x@attacker.example>'],
+    [
+      'escaped quote inside the name',
+      String.raw`"Boss \" <boss@corp.example>" <x@attacker.example>`,
+    ],
+    [
+      'escaped paren inside a comment',
+      String.raw`(Boss \) <boss@corp.example>) <x@attacker.example>`,
+    ],
+    ['comma inside a comment', '(<boss@corp.example>, x) <x@attacker.example>'],
+    ['quote that never closes', '"Boss <boss@corp.example> <x@attacker.example>'],
+    ['comment that never closes', '(Boss <boss@corp.example> <x@attacker.example>'],
+    ['address before a quote that never closes', '<x@attacker.example> "Boss <boss@corp.example>'],
+    ['bare address after a quoted address', '"Boss boss@corp.example" x@attacker.example'],
+    ['a quote followed by a combining mark', '"́Boss <boss@corp.example>" <x@attacker.example>'],
+    ['two angle-addrs in the phrase', 'Boss <boss@corp.example> <x@attacker.example>'],
+    ['comment after the angle-addr', '"Boss" <x@attacker.example> (<boss@corp.example>)'],
+    ['quoted string after the angle-addr', '<x@attacker.example> "<boss@corp.example>"'],
+  ])('reads the mailbox address past a %s', (_name, value) => {
+    expect(extractEmail(value)).toBe('x@attacker.example')
+  })
+
+  it('keeps the embedded address in the display name, where it is hidden', () => {
+    const value = '"Boss <boss@corp.example>" <x@attacker.example>'
+    const name = extractDisplayName(value)
+    expect(name).toBe('Boss <boss@corp.example>')
+    expect(isEmailAddressShapedDisplayName(name ?? '')).toBe(true)
+  })
+
+  it('still reads a mailbox written wholly in quotes', () => {
+    expect(extractEmail('"John Doe <john@x.com>"')).toBe('john@x.com')
+    expect(extractDisplayName('"John Doe <john@x.com>"')).toBe('John Doe')
+  })
+
+  it('reads the first mailbox of a list', () => {
+    expect(extractEmail('"A <a@x.com>" <b@x.com>, <c@x.com>')).toBe('b@x.com')
+    expect(extractEmail('words, Carol <carol@x.com>')).toBe('carol@x.com')
+  })
+
+  it('still treats a name that embeds an address as address-shaped', () => {
+    expect(isEmailAddressShapedDisplayName('Acme (support@acme.com)')).toBe(true)
+    expect(isEmailAddressShapedDisplayName('Boss <boss@corp.example>')).toBe(true)
+  })
+})
+
 describe('extractAllEmails', () => {
   it('splits comma-separated recipients', () => {
     expect(extractAllEmails('A <a@x.com>, b@y.com, "C" <c@z.org>')).toEqual([

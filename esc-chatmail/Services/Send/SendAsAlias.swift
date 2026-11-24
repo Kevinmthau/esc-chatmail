@@ -175,37 +175,94 @@ actor SendAsAliasManager {
 }
 
 struct EmailAddressListParser {
+    /// Splits an address header into one token per mailbox, at every comma
+    /// outside a quoted string, a comment and an angle-addr.
+    ///
+    /// Comments are skipped as RFC 5322 has them, nested and with backslash
+    /// escapes: a comma inside one does not end the mailbox. Splitting there
+    /// made the text before it a mailbox of its own, so
+    /// `(<boss@corp.example>, x) <x@attacker.example>` (one mailbox, whose
+    /// address is x@attacker.example) read as boss@corp.example first. A
+    /// comment that never closes runs to the end, as a quote that never
+    /// closes always has. Read as Unicode scalars, for the reason
+    /// `EmailNormalizer.mailboxAddress(inToken:)` gives; that scanner reads
+    /// quotes, comments and escapes by the same rules, and so does the web
+    /// app's port (`web/src/identity/normalizeEmail.ts`).
     static func addressTokens(from headerValue: String) -> [String] {
+        enum Mode { case phrase, quote, comment, angle, angleQuote }
         var tokens: [String] = []
-        var current = ""
-        var isInQuotes = false
-        var angleDepth = 0
+        var current = String.UnicodeScalarView()
+        var mode = Mode.phrase
+        var commentDepth = 0
         var previousWasEscape = false
 
-        for character in headerValue {
-            if character == "\"" && !previousWasEscape {
-                isInQuotes.toggle()
-                current.append(character)
-            } else if character == "<" && !isInQuotes {
-                // Mailbox delimiters cannot nest. Restart at the newest '<'
-                // so an unmatched display-name bracket cannot swallow later recipients.
-                angleDepth = 1
-                current.append(character)
-            } else if character == ">" && !isInQuotes {
-                angleDepth = max(0, angleDepth - 1)
-                current.append(character)
-            } else if character == "," && !isInQuotes && angleDepth == 0 {
-                appendToken(current, to: &tokens)
-                current.removeAll(keepingCapacity: true)
-            } else {
-                current.append(character)
+        for scalar in headerValue.unicodeScalars {
+            let isEscaped = previousWasEscape
+            var splitsHere = false
+            switch mode {
+            case .phrase:
+                if scalar == "\"" && !isEscaped {
+                    mode = .quote
+                } else if scalar == "(" && !isEscaped {
+                    mode = .comment
+                    commentDepth = 1
+                } else if scalar == "<" {
+                    mode = .angle
+                } else if scalar == "," {
+                    splitsHere = true
+                }
+            case .quote:
+                if scalar == "\"" && !isEscaped {
+                    mode = .phrase
+                }
+            case .comment:
+                if scalar == "(" && !isEscaped {
+                    commentDepth += 1
+                } else if scalar == ")" && !isEscaped {
+                    commentDepth -= 1
+                    if commentDepth == 0 {
+                        mode = .phrase
+                    }
+                }
+            case .angle:
+                // Mailbox delimiters cannot nest: a nested '<' restarts the
+                // angle-addr, so an unmatched display-name bracket cannot
+                // swallow later recipients.
+                if scalar == "\"" && !isEscaped {
+                    mode = .angleQuote
+                } else if scalar == ">" {
+                    mode = .phrase
+                }
+            case .angleQuote:
+                if scalar == "\"" && !isEscaped {
+                    mode = .angle
+                }
             }
 
-            previousWasEscape = character == "\\" && !previousWasEscape
+            if splitsHere {
+                appendToken(String(current), to: &tokens)
+                current.removeAll(keepingCapacity: true)
+            } else {
+                current.append(scalar)
+            }
+            previousWasEscape = scalar == "\\" && !isEscaped
         }
 
-        appendToken(current, to: &tokens)
+        appendToken(String(current), to: &tokens)
         return tokens
+    }
+
+    /// Every mailbox in an address header value, with its normalized address
+    /// and its display name: how a message's From, To, Cc and Bcc are read
+    /// for its rows and for its conversation's participant hash.
+    static func mailboxes(from headerValue: String) -> [EmailAddress] {
+        addressTokens(from: headerValue).compactMap { token in
+            guard let match = EmailNormalizer.mailboxAddress(inToken: token) else { return nil }
+            return EmailAddress(
+                email: EmailNormalizer.normalize(match.email),
+                displayName: EmailNormalizer.displayName(inToken: token, match: match)
+            )
+        }
     }
 
     static func emailAddresses(from headerValue: String) -> [String] {

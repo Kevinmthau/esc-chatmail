@@ -90,14 +90,228 @@ function firstBareEmailMatch(value: string): BareEmailMatch | null {
   return { email, index: match.index + match[0].length - email.length }
 }
 
-/** Extracts the address from a header value: prefers `<...>`, falls back to a bare address. */
-export function extractEmail(value: string): string | null {
-  // Quoted local parts can contain brackets and escaped quotes. Consume
-  // them as a unit, but never capture an unquoted nested '<' from a name.
-  const angled = /<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>/.exec(value)
-  const angledEmail = angled?.[1]
-  if (angledEmail !== undefined) return angledEmail
+const BRACKETED_EMAIL_SOURCE = '<((?:"(?:[^"\\\\]|\\\\.)*"|[^<>"])+@[^<>]+)>'
+const ANGLE_ADDRESS_CONTENT_RE = /^(?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+$/
 
+type AddressScanMode = 'phrase' | 'quote' | 'comment' | 'angle' | 'angleQuote'
+
+/**
+ * Splits an address header into one token per mailbox, at every comma
+ * outside a quoted string, a comment and an angle-addr (port of
+ * EmailAddressListParser.addressTokens).
+ *
+ * Comments are skipped as RFC 5322 has them, nested and with backslash
+ * escapes: a comma inside one does not end the mailbox. Splitting there made
+ * the text before it a mailbox of its own, so `(<boss@corp.example>, x)
+ * <x@attacker.example>` (one mailbox, whose address is x@attacker.example)
+ * read as boss@corp.example first. A comment that never closes runs to the
+ * end, as a quote that never closes always has. The delimiters are ASCII, so
+ * reading UTF-16 code units here finds them where Swift's Unicode scalars do.
+ */
+export function addressTokens(headerValue: string): string[] {
+  const tokens: string[] = []
+  let current = ''
+  let mode: AddressScanMode = 'phrase'
+  let commentDepth = 0
+  let previousWasEscape = false
+
+  const push = (token: string) => {
+    const trimmed = token.trim()
+    if (trimmed.length > 0) {
+      tokens.push(trimmed)
+    }
+  }
+
+  for (let index = 0; index < headerValue.length; index++) {
+    const character = headerValue.charAt(index)
+    const isEscaped: boolean = previousWasEscape
+    let splitsHere = false
+    switch (mode) {
+      case 'phrase':
+        if (character === '"' && !isEscaped) {
+          mode = 'quote'
+        } else if (character === '(' && !isEscaped) {
+          mode = 'comment'
+          commentDepth = 1
+        } else if (character === '<') {
+          mode = 'angle'
+        } else if (character === ',') {
+          splitsHere = true
+        }
+        break
+      case 'quote':
+        if (character === '"' && !isEscaped) mode = 'phrase'
+        break
+      case 'comment':
+        if (character === '(' && !isEscaped) {
+          commentDepth += 1
+        } else if (character === ')' && !isEscaped) {
+          commentDepth -= 1
+          if (commentDepth === 0) mode = 'phrase'
+        }
+        break
+      case 'angle':
+        // Mailbox delimiters cannot nest: a nested '<' restarts the
+        // angle-addr, so an unmatched display-name bracket cannot swallow
+        // later recipients.
+        if (character === '"' && !isEscaped) {
+          mode = 'angleQuote'
+        } else if (character === '>') {
+          mode = 'phrase'
+        }
+        break
+      case 'angleQuote':
+        if (character === '"' && !isEscaped) mode = 'angle'
+        break
+    }
+
+    if (splitsHere) {
+      push(current)
+      current = ''
+    } else {
+      current += character
+    }
+    previousWasEscape = character === '\\' && !isEscaped
+  }
+
+  push(current)
+  return tokens
+}
+
+/** Where a mailbox's address sits in one address token. */
+export interface MailboxAddressMatch {
+  /** The address as written (not normalized). */
+  email: string
+  /** Index of the `<` that opens the angle-addr, or null for a bare address. */
+  angleStart: number | null
+}
+
+/**
+ * The address of the one mailbox in `token` (a value `addressTokens`
+ * returned), in this order (port of EmailNormalizer.mailboxAddress(inToken:),
+ * which it must match rule for rule):
+ *
+ * 1. the LAST complete `<…@…>` outside quoted strings and comments: a nested
+ *    `<` restarts the angle-addr, so an unmatched bracket in a name never
+ *    captures name text;
+ * 2. else the first bare address outside quoted strings and comments;
+ * 3. else the last `<…@…>` anywhere, quoted or not, which reads a token
+ *    written wholly in quotes (`"John Doe <john@x.com>"`) and one whose quote
+ *    or comment never closes. In the second case step 1 has already taken
+ *    any address before the quote opened, so this is never the first of two
+ *    addresses.
+ *
+ * A display name is the sender's: `"Boss <boss@corp.example>"
+ * <x@attacker.example>` is one legal mailbox, x@attacker.example, and taking
+ * the first `<…@…>` anywhere keyed it into Boss's chat as Boss's message.
+ */
+export function mailboxAddress(token: string): MailboxAddressMatch | null {
+  let mode: AddressScanMode = 'phrase'
+  let commentDepth = 0
+  let previousWasEscape = false
+  let angleStart = 0
+  let lastComplete: MailboxAddressMatch | null = null
+  // The token with every quoted string and comment blanked, for step 2.
+  let phrase = ''
+
+  for (let index = 0; index < token.length; index++) {
+    const character = token.charAt(index)
+    const isEscaped: boolean = previousWasEscape
+    switch (mode) {
+      case 'phrase':
+        if (character === '"' && !isEscaped) {
+          mode = 'quote'
+          phrase += ' '
+        } else if (character === '(' && !isEscaped) {
+          mode = 'comment'
+          commentDepth = 1
+          phrase += ' '
+        } else {
+          phrase += character
+          if (character === '<') {
+            mode = 'angle'
+            angleStart = index
+          }
+        }
+        break
+      case 'quote':
+        phrase += ' '
+        if (character === '"' && !isEscaped) mode = 'phrase'
+        break
+      case 'comment':
+        phrase += ' '
+        if (character === '(' && !isEscaped) {
+          commentDepth += 1
+        } else if (character === ')' && !isEscaped) {
+          commentDepth -= 1
+          if (commentDepth === 0) mode = 'phrase'
+        }
+        break
+      case 'angle':
+        phrase += character
+        if (character === '"' && !isEscaped) {
+          mode = 'angleQuote'
+        } else if (character === '<') {
+          angleStart = index
+        } else if (character === '>') {
+          const content = token.slice(angleStart + 1, index)
+          if (content.includes('@') && ANGLE_ADDRESS_CONTENT_RE.test(content)) {
+            lastComplete = { email: content, angleStart }
+          }
+          mode = 'phrase'
+        }
+        break
+      case 'angleQuote':
+        phrase += character
+        if (character === '"' && !isEscaped) mode = 'angle'
+        break
+    }
+    previousWasEscape = character === '\\' && !isEscaped
+  }
+
+  if (lastComplete !== null) return lastComplete
+
+  const bare = firstBareEmailMatch(phrase)
+  if (bare !== null) return { email: bare.email, angleStart: null }
+
+  let lastBracketed: MailboxAddressMatch | null = null
+  for (const match of token.matchAll(new RegExp(BRACKETED_EMAIL_SOURCE, 'g'))) {
+    const email = match[1]
+    if (email !== undefined) lastBracketed = { email, angleStart: match.index }
+  }
+  return lastBracketed
+}
+
+function firstMailbox(value: string): { token: string; match: MailboxAddressMatch } | null {
+  for (const token of addressTokens(value)) {
+    const match = mailboxAddress(token)
+    if (match !== null) return { token, match }
+  }
+  return null
+}
+
+/**
+ * The address of the first mailbox in an address header value (a whole
+ * From, To or Cc value, or one token of it): the value is split into
+ * mailboxes by `addressTokens`, and the first mailbox's address is read by
+ * `mailboxAddress`, which skips quoted strings and comments.
+ */
+export function extractEmail(value: string): string | null {
+  return firstMailbox(value)?.match.email ?? null
+}
+
+/**
+ * The first address anywhere in free text, quoted or not: the leftmost
+ * `<…@…>`, else the first bare address. This is what `extractEmail` was before
+ * it learned quoted names, and it is right only for text that is not an
+ * address header: `isEmailAddressShapedDisplayName` asks it whether a display
+ * name embeds an address, which is the reading that hides `Boss
+ * <boss@corp.example>` and `Acme (support@acme.com)` as names. Never use it on
+ * a header value.
+ */
+function firstAddressAnywhere(value: string): string | null {
+  const angledEmail = new RegExp(BRACKETED_EMAIL_SOURCE).exec(value)?.[1]
+  if (angledEmail !== undefined) return angledEmail
   return firstBareEmailMatch(value)?.email ?? null
 }
 
@@ -112,10 +326,31 @@ export function extractAllEmails(value: string): string[] {
 }
 
 /**
- * Extracts a display name from `"Name" <a@b>`, `a@b (Name)`, or `Name a@b`
- * header shapes. Returns null when no usable name is present.
+ * The display name of the first mailbox in an address header value: the text
+ * before the `<` that `extractEmail` read the address from, so an address
+ * inside a quoted name stays in the name (where
+ * `isEmailAddressShapedDisplayName` hides it) and never becomes the mailbox's
+ * address. Returns null when no usable name is present.
  */
 export function extractDisplayName(value: string): string | null {
+  const mailbox = firstMailbox(value)
+  if (mailbox === null) return displayNameWithoutAngleAddress(value)
+  return displayNameInToken(mailbox.token, mailbox.match)
+}
+
+/** The display name of the mailbox `match` read from `token`. */
+export function displayNameInToken(token: string, match: MailboxAddressMatch): string | null {
+  if (match.angleStart === null) return displayNameWithoutAngleAddress(token)
+  const name = sanitizeDisplayName(token.slice(0, match.angleStart))
+  return name === '' ? null : name
+}
+
+/**
+ * The name of a value whose address is bare (`a@b (Name)`, `Name a@b`) or
+ * missing, as `extractDisplayName` read every value before it learned quoted
+ * names.
+ */
+function displayNameWithoutAngleAddress(value: string): string | null {
   const emailStartIndex = value.indexOf('<')
   if (emailStartIndex !== -1) {
     const name = sanitizeDisplayName(value.slice(0, emailStartIndex))
@@ -319,7 +554,7 @@ export function isBetterDisplayNameForEmail(
 export function isEmailAddressShapedDisplayName(displayName: string, email?: string): boolean {
   const candidate = stripWrappingQuotes(displayName)
   if (!candidate.includes('@')) return false
-  if (extractEmail(candidate) !== null) return true
+  if (firstAddressAnywhere(candidate) !== null) return true
   return email !== undefined && normalizeEmail(candidate) === normalizeEmail(email)
 }
 

@@ -51,7 +51,12 @@ corepack pnpm test src/mime/corpus.golden.test.ts src/lib/displayPolicy.test.ts 
 ## Shared identity and display contracts
 
 `ConversationIdentityTests` and `web/src/identity/participantSet.test.ts` replay
-`conversationIdentityCases` through each platform's production header path.
+`conversationIdentityCases` through each platform's production header path
+(on iOS twice: raw headers through `makeConversationIdentity(from:)`, and
+`MessageProcessor`'s parsed headers through the router's
+`ConversationManager.createConversationIdentity`, which is what sync runs).
+Address cases with a quoted name, a comment or an encoded name that holds an
+address pin that both platforms read the mailbox's own address.
 The fixed hashes include Gmail normalization, self/BCC/Hide My Email exclusion,
 malformed display-name brackets, and Swift Unicode ordering. These cases cover
 participant identities (`listId: null`); the web app does not yet implement the

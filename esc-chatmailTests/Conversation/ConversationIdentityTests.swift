@@ -29,6 +29,55 @@ final class ConversationIdentityTests: XCTestCase {
         }
     }
 
+    /// The corpus again, through the path sync takes: `MessageProcessor`
+    /// parses the headers, and the router builds the identity from what it
+    /// parsed (`ConversationManager.createConversationIdentity`). The replay
+    /// above feeds raw headers to `makeConversationIdentity(from:)`, which sync
+    /// never called, so a rebuild of the parsed To/Cc in between (which added
+    /// phantom participants and dropped nameless internationalized ones) went
+    /// unseen; web replays the corpus through its production path too.
+    ///
+    /// Revert-check: rebuilding To/Cc as `name <email>` in
+    /// `ConversationManager.createConversationIdentity` again fails
+    /// `recipient_name_with_address_and_comma_adds_no_participant`,
+    /// `encoded_recipient_name_cannot_replace_address` and
+    /// `nameless_internationalized_recipient_is_a_participant`.
+    func testCreateConversationIdentity_goldenCorpusThroughTheSyncPath_pinsSharedHashes() async throws {
+        let url = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "golden_message_corpus", withExtension: "json"))
+        let corpus = try JSONDecoder().decode(ConversationIdentityCorpus.self, from: Data(contentsOf: url))
+        let manager = ConversationManager(contactLinks: { .none })
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in Data() })
+
+        for scenario in corpus.conversationIdentityCases {
+            let message = GmailMessage(
+                id: "corpus-\(scenario.id)",
+                threadId: "thread-\(scenario.id)",
+                labelIds: ["INBOX"],
+                snippet: "Body",
+                historyId: "1",
+                internalDate: "1700000000000",
+                payload: MessagePart(
+                    partId: "",
+                    mimeType: "text/plain",
+                    filename: nil,
+                    headers: scenario.headers,
+                    body: MessageBody(size: 4, data: Data("Body".utf8).base64EncodedString(), attachmentId: nil),
+                    parts: nil
+                ),
+                sizeEstimate: nil
+            )
+            let processed = try await processor.processGmailMessage(message, myAliases: Set(scenario.myAliases))
+            let headers = try XCTUnwrap(processed?.headers, scenario.id)
+
+            let identity = manager.createConversationIdentity(from: headers, myAliases: Set(scenario.myAliases))
+
+            XCTAssertEqual(identity.participants, scenario.expected.participants, scenario.id)
+            XCTAssertEqual(identity.participantHash, scenario.expected.participantHash, scenario.id)
+            XCTAssertEqual(identity.type.rawValue, scenario.expected.type, scenario.id)
+            XCTAssertEqual(identity.listId, scenario.expected.listId, scenario.id)
+        }
+    }
+
     func testMakeConversationIdentity_unbalancedAngleBracketInDisplayName_preservesParticipantIdentity() {
         // Revert-check: EmailNormalizer.extractEmail's angle-bracket capture
         // must not include display-name text in the participant address/hash.

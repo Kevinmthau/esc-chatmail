@@ -27,4 +27,27 @@ describe('addressTokens', () => {
       'bob@example.com',
     ])
   })
+
+  // Revert-check: dropping the 'comment' mode from `addressTokens` splits each
+  // of these at the comma inside the comment.
+  it.each([
+    ['a comma inside a comment', '(<boss@corp.example>, x) <x@attacker.example>'],
+    ['a nested comment', '(a (b, c) d) <x@attacker.example>'],
+    ['an escaped paren inside a comment', String.raw`(a \), b) <x@attacker.example>`],
+  ])('keeps %s inside its mailbox', (_name, first) => {
+    expect(addressTokens(`${first}, bob@example.com`)).toEqual([first, 'bob@example.com'])
+  })
+
+  it('runs a comment that never closes to the end, as a quote that never closes does', () => {
+    expect(addressTokens('(a, <b@example.com>, c@example.com')).toEqual([
+      '(a, <b@example.com>, c@example.com',
+    ])
+  })
+
+  it('treats a quote inside a comment as text', () => {
+    expect(addressTokens('(") <a@example.com>, <b@example.com>')).toEqual([
+      '(") <a@example.com>',
+      '<b@example.com>',
+    ])
+  })
 })

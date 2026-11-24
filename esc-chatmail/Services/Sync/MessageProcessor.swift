@@ -404,13 +404,7 @@ class MessageProcessor: @unchecked Sendable {
     }
     
     private func parseEmailAddresses(from headerValue: String) -> [EmailAddress] {
-        EmailAddressListParser.addressTokens(from: headerValue).compactMap { trimmed in
-            guard let email = emailNormalizer.extractEmail(from: trimmed) else { return nil }
-            return EmailAddress(
-                email: emailNormalizer.normalize(email),
-                displayName: emailNormalizer.extractDisplayName(from: trimmed)
-            )
-        }
+        EmailAddressListParser.mailboxes(from: headerValue)
     }
     
     private struct ExtractedMessageContent: Sendable {
