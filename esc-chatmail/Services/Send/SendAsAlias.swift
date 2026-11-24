@@ -197,13 +197,16 @@ struct EmailAddressListParser {
     /// Where each of `addressTokens(from:)`'s tokens sits in `headerValue`,
     /// trimmed of whitespace, empty tokens left out.
     static func addressTokenRanges(from headerValue: String) -> [Range<String.Index>] {
-        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral }
+        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral, phraseLiteral }
         let scalars = headerValue.unicodeScalars
         var ranges: [Range<String.Index>] = []
         var tokenStart = scalars.startIndex
         var mode = Mode.phrase
         var commentDepth = 0
         var previousWasEscape = false
+        // As in `EmailNormalizer.scanMailbox`: a `[` right after an `@` in
+        // the phrase opens a bare address's domain literal.
+        var lastPhraseScalar: Unicode.Scalar?
 
         var index = scalars.startIndex
         while index < scalars.endIndex {
@@ -218,10 +221,17 @@ struct EmailAddressListParser {
                 } else if scalar == "(" {
                     mode = .comment
                     commentDepth = 1
+                } else if scalar == "[" && lastPhraseScalar == "@" {
+                    mode = .phraseLiteral
                 } else if scalar == "<" {
                     mode = .angle
                 } else if scalar == "," {
                     splitsHere = true
+                    lastPhraseScalar = nil
+                }
+                if !splitsHere && (mode == .phrase || mode == .angle)
+                    && !CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                    lastPhraseScalar = scalar
                 }
             case .quote:
                 escapes = true
@@ -262,6 +272,11 @@ struct EmailAddressListParser {
                 if scalar == "]" && !isEscaped {
                     mode = .angle
                 }
+            case .phraseLiteral:
+                escapes = true
+                if scalar == "]" && !isEscaped {
+                    mode = .phrase
+                }
             }
 
             let next = scalars.index(after: index)
@@ -281,8 +296,11 @@ struct EmailAddressListParser {
     /// and its display name: how a message's From, To, Cc and Bcc are read
     /// for its rows and for its conversation's participant hash.
     static func mailboxes(from headerValue: String) -> [EmailAddress] {
-        addressTokens(from: headerValue).compactMap { token in
-            guard let match = EmailNormalizer.mailboxAddress(inToken: token) else { return nil }
+        let tokens = addressTokens(from: headerValue)
+        return tokens.compactMap { token in
+            guard let match = EmailNormalizer.mailboxAddress(inToken: token, isOnlyMailbox: tokens.count == 1) else {
+                return nil
+            }
             return EmailAddress(
                 email: EmailNormalizer.normalize(match.email),
                 displayName: EmailNormalizer.displayName(inToken: token, match: match)

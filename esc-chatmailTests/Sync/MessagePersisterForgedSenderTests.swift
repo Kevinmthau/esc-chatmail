@@ -59,6 +59,26 @@ final class MessagePersisterForgedSenderTests: XCTestCase {
         XCTAssertEqual(stored.senderName, "Boss <boss@corp.example>")
     }
 
+    /// A real From address the scanner cannot read (a quoted local part),
+    /// then a comma and a comment holding the user's address: one mailbox
+    /// to Gmail, and the comment's address was read in its place.
+    ///
+    /// HONEST SCOPE: two rules each keep this from the user's address, so
+    /// this fails only with both reverted: reading on to the next token after
+    /// an `.unreadable` one in `EmailNormalizer.firstMailbox`, and letting
+    /// step 3 of `scanMailbox` run on a header of more than one token. Each
+    /// alone is pinned in `EmailNormalizerTests`.
+    func testCreate_unreadableFromFollowedByCommentedUserAddress_isNotFromMe() async throws {
+        let stored = try await persist(headers: [
+            MessageHeader(name: "From", value: #""x"@attacker.example, (<me@gmail.com>"#),
+            MessageHeader(name: "To", value: Self.myAddress)
+        ])
+
+        XCTAssertFalse(stored.isFromMe)
+        XCTAssertNil(stored.senderEmail)
+        XCTAssertEqual(stored.fromEmails, [])
+    }
+
     /// A To name that decodes to `<boss@corp.example> (` replaced the
     /// recipient's address once the persister joined the decoded name to the
     /// address and parsed the result again: the open comment hides the real

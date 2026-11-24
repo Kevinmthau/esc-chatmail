@@ -82,6 +82,20 @@ final class SendAsReplyFromTests: XCTestCase {
         )
     }
 
+    /// Revert-check: dropping the `.phraseLiteral` mode from
+    /// `EmailAddressListParser.addressTokens` splits the bare address's
+    /// domain literal at its comma.
+    func testAddressTokens_bareAddressDomainLiteral_staysWholeOnlyAfterAnAt() {
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: "x@[a,b], c@d.com"),
+            ["x@[a,b]", "c@d.com"]
+        )
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: "[Ops, West] <o@x.com>"),
+            ["[Ops", "West] <o@x.com>"]
+        )
+    }
+
     func testAddressTokens_quoteInsideComment_isText() {
         XCTAssertEqual(
             EmailAddressListParser.addressTokens(from: #"(") <a@example.com>, <b@example.com>"#),

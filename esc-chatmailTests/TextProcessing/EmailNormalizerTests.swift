@@ -977,7 +977,13 @@ final class EmailNormalizerTests: XCTestCase {
     /// `Me <me@gmail.com (<x@attacker.example>`; blanking with a space fails
     /// `me@corp.com(x)…` and `me@corp.com"x"…`; letting step 3 read past an `@` fails the
     /// `(<me@gmail.com>` rows; comparing by `String` equality fails the NFD
-    /// row.
+    /// row; reading on to the next token after an `.unreadable` one in
+    /// `firstMailbox` fails `"x"@attacker.example, <me@gmail.com>`; letting
+    /// step 3 run on a header of more than one token fails the `mailboxes`
+    /// assertion below; dropping `.phraseLiteral`
+    /// fails `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress`
+    /// fails the obsolete-syntax rows; dropping its ambiguity fails
+    /// `me@gmail.com x@attacker.example`.
     func testExtractEmail_ambiguousOrLiteralAngleAddresses_readNoAddress() {
         let values = [
             "Boss <boss@corp.example> <x@attacker.example>",
@@ -993,7 +999,19 @@ final class EmailNormalizerTests: XCTestCase {
             #"me@corp.com"x".attacker.example"#,
             "x@attacker.xn--p1ai (<me@gmail.com>",
             #""x"@attacker.example (<me@gmail.com>"#,
-            "<\u{E9}@x.com> <e\u{301}@x.com>"
+            "<\u{E9}@x.com> <e\u{301}@x.com>",
+            #""x"@attacker.example, (<me@gmail.com>"#,
+            #""x"@attacker.example, <me@gmail.com>"#,
+            "x@attacker.xn--p1ai, (<me@gmail.com>",
+            #"x@[1.2.3.4], "Kevin <me@gmail.com>"#,
+            "x@[me@gmail.com]",
+            "x@[foo, me@gmail.com]",
+            "me@gmail.com.(x)attacker.example",
+            "me@gmail.com .attacker.example",
+            "me@gmail.com. attacker.example",
+            "me@gmail.com\r\n .attacker.example",
+            "x. me@gmail.com",
+            "me@gmail.com x@attacker.example"
         ]
         for value in values {
             XCTAssertNil(EmailNormalizer.extractEmail(from: value), value)
@@ -1002,6 +1020,13 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertEqual(EmailNormalizer.extractEmail(from: "<ops@[192.168.0.1]>"), "ops@[192.168.0.1]")
         XCTAssertEqual(EmailNormalizer.extractEmail(from: "<ops@[(]>"), "ops@[(]")
         XCTAssertEqual(EmailNormalizer.extractEmail(from: "Name <a@b.com"), "a@b.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "a@b.com."), "a@b.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "[EXTERNAL] John <j@x.com>"), "j@x.com")
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: "[EXTERNAL] John <j@x.com>"), "[EXTERNAL] John")
+        XCTAssertEqual(
+            EmailAddressListParser.mailboxes(from: #""x"@attacker.example, (<me@gmail.com>"#).map(\.email),
+            []
+        )
     }
 
     /// Revert-check: dropping the `.angleComment` mode from

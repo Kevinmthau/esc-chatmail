@@ -81,8 +81,9 @@ export interface ParseGmailMessageOptions {
  */
 export function parseEmailAddresses(headerValue: string): ParsedAddress[] {
   const result: ParsedAddress[] = []
-  for (const token of addressTokens(headerValue)) {
-    const match = mailboxAddress(token)
+  const tokens = addressTokens(headerValue)
+  for (const token of tokens) {
+    const match = mailboxAddress(token, tokens.length === 1)
     if (match === null) continue
     result.push({
       email: normalizeEmail(match.email),

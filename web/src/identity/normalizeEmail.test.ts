@@ -132,7 +132,13 @@ describe('extractEmail skips quoted names and comments', () => {
   // angle-addr's text to step 2 fails `Me <me@gmail.com
   // (<x@attacker.example>`; blanking with a space fails `me@corp.com(x)…` and
   // `me@corp.com"x"…`; letting step 3 read past an `@` fails the
-  // `(<me@gmail.com>` rows. The NFD row pins parity with Swift.
+  // `(<me@gmail.com>` rows; reading on to the next token after an unreadable
+  // one in `firstMailbox` fails `"x"@attacker.example, <me@gmail.com>`;
+  // letting step 3 run on a header of more than one token fails the
+  // parseEmailAddresses case in mime/address.test.ts; dropping 'phraseLiteral' fails
+  // `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress` fails the
+  // obsolete-syntax rows; dropping its ambiguity fails `me@gmail.com
+  // x@attacker.example`. The NFD row pins parity with Swift.
   it.each([
     'Boss <boss@corp.example> <x@attacker.example>',
     '<x@attacker.example> <me@gmail.com>',
@@ -148,6 +154,18 @@ describe('extractEmail skips quoted names and comments', () => {
     'x@attacker.xn--p1ai (<me@gmail.com>',
     '"x"@attacker.example (<me@gmail.com>',
     '<\u00e9@x.com> <e\u0301@x.com>',
+    '"x"@attacker.example, (<me@gmail.com>',
+    '"x"@attacker.example, <me@gmail.com>',
+    'x@attacker.xn--p1ai, (<me@gmail.com>',
+    'x@[1.2.3.4], "Kevin <me@gmail.com>',
+    'x@[me@gmail.com]',
+    'x@[foo, me@gmail.com]',
+    'me@gmail.com.(x)attacker.example',
+    'me@gmail.com .attacker.example',
+    'me@gmail.com. attacker.example',
+    'me@gmail.com\r\n .attacker.example',
+    'x. me@gmail.com',
+    'me@gmail.com x@attacker.example',
   ])('reads no address from the ambiguous or literal %s', (value) => {
     expect(extractEmail(value)).toBeNull()
   })
@@ -157,6 +175,9 @@ describe('extractEmail skips quoted names and comments', () => {
     expect(extractEmail('<ops@[192.168.0.1]>')).toBe('ops@[192.168.0.1]')
     expect(extractEmail('<ops@[(]>')).toBe('ops@[(]')
     expect(extractEmail('Name <a@b.com')).toBe('a@b.com')
+    expect(extractEmail('a@b.com.')).toBe('a@b.com')
+    expect(extractEmail('[EXTERNAL] John <j@x.com>')).toBe('j@x.com')
+    expect(extractDisplayName('[EXTERNAL] John <j@x.com>')).toBe('[EXTERNAL] John')
   })
 
   it('keeps the embedded address in the display name, where it is hidden', () => {

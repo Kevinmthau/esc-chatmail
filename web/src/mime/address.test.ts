@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { addressTokens } from './address'
+import { parseEmailAddresses } from './parse'
 
 describe('addressTokens', () => {
   it.each(['Tom <3 Jerry <tom@x.com>', 'Tom <<3 Jerry <tom@x.com>'])(
@@ -46,10 +47,26 @@ describe('addressTokens', () => {
     ])
   })
 
+  // Revert-check: dropping the 'phraseLiteral' mode from `addressTokens`
+  // splits the bare address's domain literal at its comma.
+  it("keeps a bare address's domain literal whole, and only after an @", () => {
+    expect(addressTokens('x@[a,b], c@d.com')).toEqual(['x@[a,b]', 'c@d.com'])
+    expect(addressTokens('[Ops, West] <o@x.com>')).toEqual(['[Ops', 'West] <o@x.com>'])
+  })
+
   it('treats a quote inside a comment as text', () => {
     expect(addressTokens('(") <a@example.com>, <b@example.com>')).toEqual([
       '(") <a@example.com>',
       '<b@example.com>',
     ])
+  })
+})
+
+// Revert-check: letting step 3 of `scanMailbox` read inside the unclosed
+// comment of a header with more than one token reads me@gmail.com in place of
+// the quoted-local-part address it cannot read.
+describe('parseEmailAddresses', () => {
+  it('reads no mailbox from a commented address after an unreadable one', () => {
+    expect(parseEmailAddresses('"x"@attacker.example, (<me@gmail.com>')).toEqual([])
   })
 })

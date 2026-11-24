@@ -90,7 +90,7 @@ function firstBareEmailMatch(value: string): BareEmailMatch | null {
   return { email, index: match.index + match[0].length - email.length }
 }
 
-const BRACKETED_EMAIL_SOURCE = '<((?:"(?:[^"\\\\]|\\\\.)*"|[^<>"])+@[^<>]+)>'
+const BRACKETED_EMAIL_SOURCE = '<((?:"(?:[^"\\\\]|\\\\[\\s\\S])*"|[^<>"])+@[^<>]+)>'
 // A quoted-pair is `\\[\s\S]`, as in the Swift pattern, whose ICU `.` leaves
 // out U+000B, U+000C and U+0085.
 const ANGLE_ADDRESS_CONTENT_RE = /^(?:"(?:[^"\\]|\\[\s\S])*"|[^<>"])+@[^<>]+$/
@@ -104,7 +104,14 @@ const ANGLE_ADDRESS_CONTENT_RE = /^(?:"(?:[^"\\]|\\[\s\S])*"|[^<>"])+@[^<>]+$/
 const BLANK = '\u0001'
 
 type AddressScanMode =
-  'phrase' | 'quote' | 'comment' | 'angle' | 'angleQuote' | 'angleComment' | 'domainLiteral'
+  | 'phrase'
+  | 'quote'
+  | 'comment'
+  | 'angle'
+  | 'angleQuote'
+  | 'angleComment'
+  | 'domainLiteral'
+  | 'phraseLiteral'
 
 /** One character of Swift's `CharacterSet.whitespacesAndNewlines`. */
 const SWIFT_WHITESPACE_CHARACTER = /^[\t\n\v\f\r\u0085\p{Z}]$/u
@@ -140,6 +147,9 @@ export function addressTokenRanges(headerValue: string): Array<[number, number]>
   let mode: AddressScanMode = 'phrase'
   let commentDepth = 0
   let previousWasEscape = false
+  // As in `scanMailbox`: a `[` right after an `@` in the phrase opens a bare
+  // address's domain literal.
+  let lastPhraseCharacter: string | null = null
 
   const push = (start: number, end: number) => {
     let lower = start
@@ -162,10 +172,20 @@ export function addressTokenRanges(headerValue: string): Array<[number, number]>
         } else if (character === '(') {
           mode = 'comment'
           commentDepth = 1
+        } else if (character === '[' && lastPhraseCharacter === '@') {
+          mode = 'phraseLiteral'
         } else if (character === '<') {
           mode = 'angle'
         } else if (character === ',') {
           splitsHere = true
+          lastPhraseCharacter = null
+        }
+        if (
+          !splitsHere &&
+          (mode === 'phrase' || mode === 'angle') &&
+          !SWIFT_WHITESPACE_CHARACTER.test(character)
+        ) {
+          lastPhraseCharacter = character
         }
         break
       case 'quote':
@@ -205,6 +225,10 @@ export function addressTokenRanges(headerValue: string): Array<[number, number]>
         escapes = true
         if (character === ']' && !isEscaped) mode = 'angle'
         break
+      case 'phraseLiteral':
+        escapes = true
+        if (character === ']' && !isEscaped) mode = 'phrase'
+        break
     }
 
     if (splitsHere) {
@@ -227,16 +251,26 @@ export interface MailboxAddressMatch {
 }
 
 /**
- * What `scanMailbox` found in one token: an address, none at all, or
+ * What `scanMailbox` found in one token: an address; none at all;
  * `'ambiguous'` (two different addresses outside quoted strings and comments,
  * or an address in an angle-addr abandoned for a second `<`), where which one
- * is the mailbox's is the sender's choice, so neither is taken.
+ * is the mailbox's is the sender's choice, so neither is taken; or
+ * `'unreadable'` (an `@` outside quoted strings and comments and no address
+ * the scan can read: a quoted local part, a punycode TLD, a domain literal, an
+ * obsolete-syntax domain that goes on past a comment or a space), which is
+ * still the mailbox's address, so nothing else in the header may stand in for
+ * it.
  */
-type MailboxScan = MailboxAddressMatch | 'none' | 'ambiguous'
+type MailboxScan = MailboxAddressMatch | 'none' | 'ambiguous' | 'unreadable'
 
-/** The address of the one mailbox in `token` (a value `addressTokens` returned), or null. */
-export function mailboxAddress(token: string): MailboxAddressMatch | null {
-  const scan = scanMailbox(token)
+/**
+ * The address of the one mailbox in `token` (a value `addressTokens`
+ * returned), or null. `isOnlyMailbox` says the token is its header's only one,
+ * which alone lets step 3 of `scanMailbox` read inside a quote or comment that
+ * never closes.
+ */
+export function mailboxAddress(token: string, isOnlyMailbox: boolean): MailboxAddressMatch | null {
+  const scan = scanMailbox(token, isOnlyMailbox)
   return typeof scan === 'string' ? null : scan
 }
 
@@ -251,11 +285,18 @@ export function mailboxAddress(token: string): MailboxAddressMatch | null {
  *    ambiguous: taking the first or the last lets the sender pick, by order,
  *    which one the app reads (`<x@attacker.example> <me@gmail.com>` was the
  *    user's own mail);
- * 2. else the first bare address outside quoted strings, comments, angle-addr
- *    comments and domain literals;
- * 3. else, only where a quote or comment never closes and no `@` is outside
- *    quotes and comments, the last `<…@…>` anywhere. A token whose quotes and comments
- *    all close and that has no address outside them has none
+ * 2. else the bare address outside quoted strings, comments, angle-addr
+ *    comments and domain literals; ambiguous where two different ones are
+ *    written, and unreadable where a `.` goes on from one of them past a space
+ *    or a blanked comment (RFC 5322's obsolete syntax lets a domain or local
+ *    part do that: `me@gmail.com.(x)attacker.example` is at
+ *    gmail.com.attacker.example);
+ * 3. else, only where the token is its header's only mailbox, a quote or
+ *    comment never closes, and no `@` is outside quotes and comments, the last
+ *    `<…@…>` anywhere. Its header's only mailbox: a token before it may be a
+ *    real address the scan cannot read (`"x"@attacker.example,
+ *    (<me@gmail.com>`). A token whose quotes and comments all close and that
+ *    has no address outside them has none
  *    (`"<boss@corp.example>"`, `"John Doe <john@x.com>"`): read as an address,
  *    a quoted one became a mailbox of its own ahead of the real one
  *    (`"<boss@corp.example>", <x@attacker.example>`).
@@ -269,7 +310,7 @@ export function mailboxAddress(token: string): MailboxAddressMatch | null {
  * anywhere, `x\"<me@gmail.com>" <x@attacker.example>` hid the quote that opens
  * the name.
  */
-function scanMailbox(token: string): MailboxScan {
+function scanMailbox(token: string, isOnlyMailbox: boolean): MailboxScan {
   let mode: AddressScanMode = 'phrase'
   let commentDepth = 0
   let previousWasEscape = false
@@ -286,6 +327,10 @@ function scanMailbox(token: string): MailboxScan {
   // Whether the current angle-addr opened a quoted local part, a comment or a
   // domain literal.
   let angleOpenedStructure = false
+  // The last character of the phrase that is not whitespace: a `[` right after
+  // an `@` opens a bare address's domain literal, whose `@` and `,` are text
+  // (`x@[me@gmail.com]` is one address, at that literal).
+  let lastPhraseCharacter: string | null = null
 
   for (let index = 0; index < token.length; index++) {
     const character = token.charAt(index)
@@ -300,7 +345,11 @@ function scanMailbox(token: string): MailboxScan {
           mode = 'comment'
           commentDepth = 1
           phrase.push(BLANK)
+        } else if (character === '[' && lastPhraseCharacter === '@') {
+          mode = 'phraseLiteral'
+          phrase.push(BLANK)
         } else {
+          if (!SWIFT_WHITESPACE_CHARACTER.test(character)) lastPhraseCharacter = character
           if (character === '<') {
             mode = 'angle'
             angleStart = index
@@ -391,6 +440,11 @@ function scanMailbox(token: string): MailboxScan {
         phrase.push(BLANK)
         if (character === ']' && !isEscaped) mode = 'angle'
         break
+      case 'phraseLiteral':
+        escapes = true
+        phrase.push(BLANK)
+        if (character === ']' && !isEscaped) mode = 'phrase'
+        break
     }
     previousWasEscape = escapes && character === '\\' && !isEscaped
   }
@@ -413,20 +467,62 @@ function scanMailbox(token: string): MailboxScan {
       phrase[position] = BLANK
   }
 
-  const bare = firstBareEmailMatch(phrase.join(''))
-  if (bare !== null) return { email: bare.email, angleStart: null }
+  const bare = bareAddress(phrase.join(''))
+  if (bare !== 'none') return bare
 
   // Step 3 reads inside an unclosed quote or comment only where nothing
   // outside them has an `@`: a real address the bare-address pattern does not
   // know (`x@attacker.xn--p1ai (<me@gmail.com>`) is still the mailbox's, and
   // reading past it took the quoted one.
-  if ((mode !== 'quote' && mode !== 'comment') || phrase.includes('@')) return 'none'
+  const hasAddressSign = phrase.includes('@')
+  if (!isOnlyMailbox || (mode !== 'quote' && mode !== 'comment') || hasAddressSign) {
+    return hasAddressSign ? 'unreadable' : 'none'
+  }
   let lastBracketed: MailboxAddressMatch | null = null
   for (const match of token.matchAll(new RegExp(BRACKETED_EMAIL_SOURCE, 'g'))) {
     const email = match[1]
     if (email !== undefined) lastBracketed = { email, angleStart: match.index }
   }
   return lastBracketed ?? 'none'
+}
+
+const BARE_EMAIL_GLOBAL_RE = new RegExp(BARE_EMAIL_RE.source, 'gi')
+const BARE_ADDRESS_ENDERS = new Set([',', ';', '>', ')', ']'])
+
+/**
+ * Step 2 of `scanMailbox` (port of EmailNormalizer.bareAddress): the bare
+ * address in `phrase`, where quoted strings, comments and literals are
+ * `BLANK`. A match that a `.` goes on from, past whitespace or a blank, on
+ * either side, is part of a longer address (RFC 5322's obsolete syntax lets
+ * CFWS sit between the dots of a local part or a domain), so the token is
+ * unreadable; a `.` that ends the text, or comes before `,`, `;`, `>`, `)` or
+ * `]`, ends a sentence and not a domain.
+ */
+function bareAddress(phrase: string): MailboxScan {
+  const isSpace = (character: string): boolean =>
+    character === BLANK || SWIFT_WHITESPACE_CHARACTER.test(character)
+  const found: string[] = []
+  for (const match of phrase.matchAll(BARE_EMAIL_GLOBAL_RE)) {
+    const email = match[1]
+    if (email === undefined) continue
+    const start = match.index + match[0].length - email.length
+    const end = start + email.length
+    let before = start
+    while (before > 0 && isSpace(phrase.charAt(before - 1))) before -= 1
+    if (before > 0 && phrase.charAt(before - 1) === '.') return 'unreadable'
+    let after = end
+    while (after < phrase.length && isSpace(phrase.charAt(after))) after += 1
+    if (after < phrase.length && phrase.charAt(after) === '.') {
+      let next = after + 1
+      while (next < phrase.length && isSpace(phrase.charAt(next))) next += 1
+      if (next < phrase.length && !BARE_ADDRESS_ENDERS.has(phrase.charAt(next))) return 'unreadable'
+    }
+    found.push(email)
+  }
+  const first = found[0]
+  if (first === undefined) return 'none'
+  if (new Set(found.map(normalizeEmail)).size > 1) return 'ambiguous'
+  return { email: first, angleStart: null }
 }
 
 /**
@@ -442,22 +538,26 @@ function scanMailbox(token: string): MailboxScan {
  * has an address for the scan to take; where the joined text still reads
  * another address than the token alone, the token alone is taken. A first
  * mailbox that is ambiguous is no address at all, never a reason to read the
- * next one. `parseEmailAddresses` reads each token alone, as the To and Cc
- * parser always has.
+ * next one; nor is one that is unreadable: the next one was read in place of
+ * a real address the scan could not (`"x"@attacker.example,
+ * (<me@gmail.com>`). `parseEmailAddresses` reads each token alone, as the To
+ * and Cc parser always has.
  */
 function firstMailbox(value: string): { token: string; match: MailboxAddressMatch } | null {
+  const ranges = addressTokenRanges(value)
+  const isOnlyMailbox = ranges.length === 1
   let nameStart: number | null = null
-  for (const [start, end] of addressTokenRanges(value)) {
+  for (const [start, end] of ranges) {
     const token = value.slice(start, end)
-    const scan = scanMailbox(token)
+    const scan = scanMailbox(token, isOnlyMailbox)
     if (scan === 'none') {
       nameStart ??= start
       continue
     }
-    if (scan === 'ambiguous') return null
+    if (scan === 'ambiguous' || scan === 'unreadable') return null
     if (nameStart !== null) {
       const mailbox = value.slice(nameStart, end)
-      const joined = scanMailbox(mailbox)
+      const joined = scanMailbox(mailbox, false)
       if (
         typeof joined !== 'string' &&
         normalizeEmail(joined.email) === normalizeEmail(scan.email)

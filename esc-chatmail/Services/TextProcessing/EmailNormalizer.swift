@@ -37,7 +37,7 @@ class EmailNormalizer {
     // Quoted local parts can contain brackets and escaped quotes. Consume
     // them as a unit, but never capture an unquoted nested '<' from a name.
     private static let bracketedEmailRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: #"<((?:"(?:[^"\\]|\\.)*"|[^<>"])+@[^<>]+)>"#)
+        try? NSRegularExpression(pattern: #"<((?:"(?:[^"\\]|\\[\s\S])*"|[^<>"])+@[^<>]+)>"#)
     }()
 
     private static let bareEmailRegex: NSRegularExpression? = {
@@ -77,8 +77,11 @@ class EmailNormalizer {
 
     /// The address of the one mailbox in `token` (a value
     /// `EmailAddressListParser.addressTokens` returned), or nil.
-    static func mailboxAddress(inToken token: String) -> MailboxAddressMatch? {
-        if case .address(let match) = scanMailbox(token) {
+    /// `isOnlyMailbox` says the token is its header's only one, which alone
+    /// lets step 3 of `scanMailbox` read inside a quote or comment that never
+    /// closes.
+    static func mailboxAddress(inToken token: String, isOnlyMailbox: Bool) -> MailboxAddressMatch? {
+        if case .address(let match) = scanMailbox(token, isOnlyMailbox: isOnlyMailbox) {
             return match
         }
         return nil
@@ -93,6 +96,12 @@ class EmailNormalizer {
         /// address in an angle-addr abandoned for a second `<`. Which one is
         /// the mailbox's is the sender's choice, so neither is taken.
         case ambiguous
+        /// An `@` outside quoted strings and comments and no address the scan
+        /// can read: an address in a form it does not know (a quoted local
+        /// part, a punycode TLD, a domain literal, an obsolete-syntax domain
+        /// that goes on past a comment or a space). It is still the mailbox's
+        /// address, so nothing else in the header may stand in for it.
+        case unreadable
     }
 
     /// Reads one token's mailbox, in this order:
@@ -104,10 +113,17 @@ class EmailNormalizer {
     ///    an `@`, the token is `.ambiguous`: taking the first or the last
     ///    lets the sender pick, by order, which one the app reads
     ///    (`<x@attacker.example> <me@gmail.com>` was the user's own mail);
-    /// 2. else the first bare address outside quoted strings, comments,
-    ///    angle-addr comments and domain literals;
-    /// 3. else, only where a quote or comment never closes and no `@` is
-    ///    outside quotes and comments, the last `<…@…>` anywhere. A token whose quotes and
+    /// 2. else the bare address outside quoted strings, comments, angle-addr
+    ///    comments and domain literals; `.ambiguous` where two different ones
+    ///    are written, and `.unreadable` where a `.` goes on from one of them
+    ///    past a space or a blanked comment (RFC 5322's obsolete syntax lets
+    ///    a domain or local part do that: `me@gmail.com.(x)attacker.example`
+    ///    is at gmail.com.attacker.example);
+    /// 3. else, only where the token is its header's only mailbox, a quote or
+    ///    comment never closes, and no `@` is outside quotes and comments,
+    ///    the last `<…@…>` anywhere. Its header's only mailbox: a token
+    ///    before it may be a real address the scan cannot read
+    ///    (`"x"@attacker.example, (<me@gmail.com>`). A token whose quotes and
     ///    comments all close and that has no address outside them has none
     ///    (`"<boss@corp.example>"`, `"John Doe <john@x.com>"`): read as an
     ///    address, a quoted one became a mailbox of its own ahead of the real
@@ -127,8 +143,8 @@ class EmailNormalizer {
     /// read as Unicode scalars, never `Character`s: a quote or an `@`
     /// followed by a combining mark is one `Character` that is neither, and
     /// the web app reads it as the scalar.
-    private static func scanMailbox(_ token: String) -> MailboxScan {
-        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral }
+    private static func scanMailbox(_ token: String, isOnlyMailbox: Bool) -> MailboxScan {
+        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral, phraseLiteral }
         var mode = Mode.phrase
         var commentDepth = 0
         var previousWasEscape = false
@@ -152,6 +168,10 @@ class EmailNormalizer {
         // Whether the current angle-addr opened a quoted local part, a
         // comment or a domain literal.
         var angleOpenedStructure = false
+        // The last scalar of the phrase that is not whitespace: a `[` right
+        // after an `@` opens a bare address's domain literal, whose `@` and
+        // `,` are text (`x@[me@gmail.com]` is one address, at that literal).
+        var lastPhraseScalar: Unicode.Scalar?
 
         let scalars = token.unicodeScalars
         var index = scalars.startIndex
@@ -168,7 +188,13 @@ class EmailNormalizer {
                     mode = .comment
                     commentDepth = 1
                     phrase.append(blank)
+                } else if scalar == "[" && lastPhraseScalar == "@" {
+                    mode = .phraseLiteral
+                    phrase.append(blank)
                 } else {
+                    if !CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                        lastPhraseScalar = scalar
+                    }
                     if scalar == "<" {
                         mode = .angle
                         angleStart = index
@@ -266,6 +292,12 @@ class EmailNormalizer {
                 if scalar == "]" && !isEscaped {
                     mode = .angle
                 }
+            case .phraseLiteral:
+                escapes = true
+                phrase.append(blank)
+                if scalar == "]" && !isEscaped {
+                    mode = .phrase
+                }
             }
             previousWasEscape = escapes && scalar == "\\" && !isEscaped
             index = scalars.index(after: index)
@@ -296,14 +328,24 @@ class EmailNormalizer {
                 phrase[position] = blank
             }
         }
-        if let bare = firstBareEmailMatch(in: String(String.UnicodeScalarView(phrase))) {
-            return .address(MailboxAddressMatch(email: bare.email, angleStart: nil))
+        switch bareAddress(inPhrase: String(String.UnicodeScalarView(phrase)), blank: blank) {
+        case .address(let email):
+            return .address(MailboxAddressMatch(email: email, angleStart: nil))
+        case .ambiguous:
+            return .ambiguous
+        case .unreadable:
+            return .unreadable
+        case .none:
+            break
         }
         // Step 3 reads inside an unclosed quote or comment only where nothing
         // outside them has an `@`: a real address the bare-address pattern
         // does not know (`x@attacker.xn--p1ai (<me@gmail.com>`) is still the
         // mailbox's, and reading past it took the quoted one.
-        guard mode == .quote || mode == .comment, !phrase.contains("@") else { return .none }
+        let hasAddressSign = phrase.contains("@")
+        guard isOnlyMailbox, mode == .quote || mode == .comment, !hasAddressSign else {
+            return hasAddressSign ? .unreadable : .none
+        }
         if let regex = bracketedEmailRegex,
            let match = regex.matches(in: token, range: NSRange(token.startIndex..., in: token)).last,
            let range = Range(match.range(at: 1), in: token),
@@ -311,6 +353,60 @@ class EmailNormalizer {
             return .address(MailboxAddressMatch(email: String(token.unicodeScalars[range]), angleStart: whole.lowerBound))
         }
         return .none
+    }
+
+    /// What step 2 of `scanMailbox` found in the blanked phrase.
+    private enum BareAddressScan {
+        case none
+        case address(String)
+        case ambiguous
+        case unreadable
+    }
+
+    /// Step 2 of `scanMailbox`: the bare address in `phrase`, where quoted
+    /// strings, comments and literals are `blank`. A match that a `.` goes on
+    /// from, past whitespace or a blank, on either side, is part of a longer
+    /// address (RFC 5322's obsolete syntax lets CFWS sit between the dots of
+    /// a local part or a domain), so the token is `.unreadable`; a `.` that
+    /// ends the text, or comes before `,`, `;`, `>`, `)` or `]`, ends a
+    /// sentence and not a domain.
+    private static func bareAddress(inPhrase phrase: String, blank: Unicode.Scalar) -> BareAddressScan {
+        guard let regex = bareEmailRegex else { return .none }
+        let scalars = phrase.unicodeScalars
+        func isSpace(_ scalar: Unicode.Scalar) -> Bool {
+            scalar == blank || CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
+        let enders: Set<Unicode.Scalar> = [",", ";", ">", ")", "]"]
+        var found: [String] = []
+        for match in regex.matches(in: phrase, range: NSRange(phrase.startIndex..., in: phrase)) {
+            guard let range = Range(match.range(at: 1), in: phrase) else { continue }
+            var before = range.lowerBound
+            while before > scalars.startIndex, isSpace(scalars[scalars.index(before: before)]) {
+                before = scalars.index(before: before)
+            }
+            if before > scalars.startIndex, scalars[scalars.index(before: before)] == "." {
+                return .unreadable
+            }
+            var after = range.upperBound
+            while after < scalars.endIndex, isSpace(scalars[after]) {
+                after = scalars.index(after: after)
+            }
+            if after < scalars.endIndex, scalars[after] == "." {
+                var next = scalars.index(after: after)
+                while next < scalars.endIndex, isSpace(scalars[next]) {
+                    next = scalars.index(after: next)
+                }
+                if next < scalars.endIndex, !enders.contains(scalars[next]) {
+                    return .unreadable
+                }
+            }
+            found.append(String(scalars[range]))
+        }
+        guard let first = found.first else { return .none }
+        if Set(found.map { normalize($0).unicodeScalars.map(\.value) }).count > 1 {
+            return .ambiguous
+        }
+        return .address(first)
     }
 
     /// The first mailbox of `string` that holds an address: the text from the
@@ -324,25 +420,30 @@ class EmailNormalizer {
     /// each starts in the phrase, where the comma left the scan, and none has
     /// an address for the scan to take; where the joined text still reads
     /// another address than the token alone, the token alone is taken. A
-    /// first mailbox that is `.ambiguous` is no address at all, never a reason
-    /// to read the next one. `EmailAddressListParser.mailboxes(from:)` reads
-    /// each token alone, as the To and Cc parser always has.
+    /// first mailbox that is `.ambiguous` or `.unreadable` is no address at
+    /// all, never a reason to read the next one: the next one was read in
+    /// place of a real address the scan could not
+    /// (`"x"@attacker.example, (<me@gmail.com>`).
+    /// `EmailAddressListParser.mailboxes(from:)` reads each token alone, as
+    /// the To and Cc parser always has.
     private static func firstMailbox(in string: String) -> (token: String, match: MailboxAddressMatch)? {
         let scalars = string.unicodeScalars
+        let ranges = EmailAddressListParser.addressTokenRanges(from: string)
+        let isOnlyMailbox = ranges.count == 1
         var nameStart: String.Index?
-        for range in EmailAddressListParser.addressTokenRanges(from: string) {
+        for range in ranges {
             let token = String(scalars[range])
-            switch scanMailbox(token) {
+            switch scanMailbox(token, isOnlyMailbox: isOnlyMailbox) {
             case .none:
                 if nameStart == nil {
                     nameStart = range.lowerBound
                 }
-            case .ambiguous:
+            case .ambiguous, .unreadable:
                 return nil
             case .address(let match):
                 if let nameStart {
                     let mailbox = String(scalars[nameStart..<range.upperBound])
-                    if case .address(let joined) = scanMailbox(mailbox),
+                    if case .address(let joined) = scanMailbox(mailbox, isOnlyMailbox: false),
                        normalize(joined.email) == normalize(match.email) {
                         return (mailbox, joined)
                     }
