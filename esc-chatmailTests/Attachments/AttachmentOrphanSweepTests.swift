@@ -107,6 +107,35 @@ final class AttachmentOrphanSweepTests: XCTestCase {
         )
     }
 
+    /// Revert-check: the `CoreDataStack.requireAttachedStore(in:)` call in
+    /// `AttachmentDownloader.performCleanupOrphanedFiles`. Without it the default
+    /// reference fetch on a coordinator with no store answers [] and both files go.
+    func testCleanupOrphanedFiles_noStoreAttached_defaultFetch_keepsAnOldLocalOriginal() async throws {
+        let original = try makeFile(
+            at: AttachmentPaths.originalPath(idOrUUID: "local_\(UUID().uuidString)", ext: "jpg"),
+            age: 2 * 24 * 60 * 60
+        )
+        let preview = try makeFile(
+            at: AttachmentPaths.previewPath(idOrUUID: "local_\(UUID().uuidString)"),
+            age: 2 * 24 * 60 * 60
+        )
+        let (container, _) = TestCoreDataStack.makeStorelessContainer()
+        // `persistentContainerForTesting` sets `isStoreLoaded` with no load: the flag is
+        // not what the sweep may trust.
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            coreDataStack: CoreDataStack(persistentContainerForTesting: container)
+        )
+
+        await downloader.cleanupOrphanedFiles()
+
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: original.path),
+            "With no store attached nothing proves a file is an orphan; this original cannot be downloaded again"
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preview.path))
+    }
+
     func testIsOldEnoughToSweep_missingFile_isKept() {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("missing-\(UUID().uuidString)")
