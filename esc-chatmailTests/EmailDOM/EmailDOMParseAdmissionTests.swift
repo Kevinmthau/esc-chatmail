@@ -466,7 +466,8 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// scan's count. Here SwiftSoup reads the head's `<noscript><script>` as
     /// text up to `</noscript>`, while the second scan takes the `script`
     /// for a script that runs to the end, and misses the divs.
-    /// Revert-check: "noscript" in `ScannedTagName.namesWithModeDependentRawText`.
+    /// Revert-check: the `noscript` rule that sets `readModeDependentTag` in
+    /// `TokenizingScanner.openElement`.
     func testEstimate_noscriptBody_keepsTheFirstScansCount() {
         let html = "<noscript><script></noscript>" + String(repeating: "<div>", count: 600)
         let actual = Self.swiftSoupDocumentDepth(html)
@@ -474,6 +475,28 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertLessThan(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), actual)
         XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), actual)
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+    }
+
+    /// Only a `select` or `frameset` the tokenizer reads, or a `noscript` in
+    /// the head, makes the first scan's count decide; a mention in a comment
+    /// or a `noscript` tracking pixel in the body does not, so a large
+    /// newsletter carrying one is still read precisely and admitted.
+    /// Revert-check: `TokenizingScanner.readModeDependentTag` (deciding on
+    /// any mention of the names refuses these).
+    func testEstimate_modeDependentNamesOutsideTheirModes_keepThePreciseBound() {
+        var rows = ""
+        for row in 0..<1_500 {
+            rows += "<tr><td><a href=\"https://example.com/\(row)\"><font face=Arial>row \(row)</font></a> <b>x</b></td></tr>"
+        }
+        let newsletter = "<html><head><title>News</title></head><body><table>" + rows + "</table>"
+        for html in [
+            newsletter + "<!-- <select> <noscript> --></body></html>",
+            newsletter + "<noscript><img src=\"https://t.example.com/p.gif\"></noscript></body></html>",
+            newsletter + "<input value=\"<frameset>\"></body></html>",
+        ] {
+            XCTAssertLessThan(EmailDOMParseAdmission.estimatedDepth(of: html), 30, String(html.suffix(80)))
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.suffix(80)))
+        }
     }
 
     /// Generated tag soup (seeded, so a failure reproduces): attribute values
@@ -493,7 +516,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 let html = generator.document(tokenCount: 40 + iteration % 260)
                 let tokenized = EmailDOMParseAdmission.tokenizedDepthEstimate(of: html)
                 let combined = EmailDOMParseAdmission.estimatedDepth(of: html)
-                // The second scan defers to the first for these (`namesWithModeDependentRawText`).
+                // The second scan may defer to the first for these (`readModeDependentTag`).
                 let lowercased = html.lowercased()
                 let selectOrFrameset = ["<select", "<frameset", "<noscript"].contains { lowercased.contains($0) }
 

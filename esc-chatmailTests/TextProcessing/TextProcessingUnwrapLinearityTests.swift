@@ -70,6 +70,25 @@ final class TextProcessingUnwrapLinearityTests: XCTestCase {
         }
     }
 
+    /// A run of blank lines before a long line asked its join question once
+    /// per blank line, each reading the long line: quadratic.
+    /// Revert-check: `blankRunJoins` in `unwrapEmailLineBreaks`.
+    func testUnwrap_blankLineRunBeforeALongLine_isUnchangedAndLinear() {
+        let small = "a" + String(repeating: "\n", count: 300) + String(repeating: "b", count: 300)
+        XCTAssertEqual(TextProcessing.unwrapEmailLineBreaks(from: small), LegacyUnwrap.unwrap(small))
+
+        let large = "a" + String(repeating: "\n", count: 100_000) + String(repeating: "b", count: 100_000)
+        let done = expectation(description: "unwrap")
+        let result = LockedUnwrap()
+        let thread = Thread {
+            result.value = TextProcessing.unwrapEmailLineBreaks(from: large)
+            done.fulfill()
+        }
+        thread.start()
+        wait(for: [done], timeout: 20)
+        XCTAssertEqual(result.value?.hasPrefix("a b"), true)
+    }
+
     /// A long run of joinable lines, the shape that was quadratic. Linear,
     /// 200 KB takes well under a second; quadratic, it took minutes. The
     /// comparison with the replaced function uses a smaller run so this
@@ -83,6 +102,11 @@ final class TextProcessingUnwrapLinearityTests: XCTestCase {
         XCTAssertFalse(unwrapped.contains("\n"))
         XCTAssertTrue(unwrapped.hasSuffix("file_5999.dat"))
     }
+}
+
+/// Written by one thread, read after `wait(for:)`.
+private final class LockedUnwrap: @unchecked Sendable {
+    var value: String?
 }
 
 private struct UnwrapCorpus: Decodable {

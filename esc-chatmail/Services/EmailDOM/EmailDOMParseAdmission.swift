@@ -73,8 +73,11 @@ import SwiftSoup
 ///   (`td` as three: `tbody`, `tr`, `td`).
 ///   SwiftSoup reads raw text after some tags in one insertion mode and
 ///   markup in another (`style` inside `select`, anything in a frameset, a
-///   `noscript` in the head or the body), so a body naming `select`,
-///   `frameset` or `noscript` keeps the first scan's count.
+///   `noscript` in the head), so once the second scan reads a `select` or
+///   `frameset` start tag, or a `noscript` one before the head has ended,
+///   the first scan's count decides. Up to that tag the second scan reads
+///   as SwiftSoup does, so a name inside a comment or an attribute, or a
+///   `noscript` in the body, changes nothing.
 /// `EmailDOMParseAdmissionTests` compares the bound with the depth SwiftSoup
 /// builds over generated tag soup; a SwiftSoup upgrade must pass it again.
 enum EmailDOMParseAdmission {
@@ -264,7 +267,7 @@ enum EmailDOMParseAdmission {
     ///   the scan charges, per formatting start tag, one comparison for each
     ///   formatting element it holds and the tag's length for each of the
     ///   same name. A body whose markup the second scan cannot follow
-    ///   (`namesWithModeDependentRawText`) is charged as if every earlier
+    ///   (`readModeDependentTag`) is charged as if every earlier
     ///   formatting tag were held, at the body's whole length.
     struct ParseCost: Equatable {
         let depth: Int
@@ -316,7 +319,7 @@ enum EmailDOMParseAdmission {
     }
 
     /// The second scan alone, without the first scan's shortcut or its
-    /// `select`, `frameset` and `noscript` rule. Exposed for the comparison
+    /// rule for mode-dependent tags. Exposed for the comparison
     /// tests; only `estimatedDepth(of:limit:)` may route a parse.
     static func tokenizedDepthEstimate(of html: String, isTableContextFragment: Bool = false) -> Int {
         let bytes = Array(html.utf8)
@@ -350,7 +353,7 @@ enum EmailDOMParseAdmission {
         let tokenizedDepth = scanner.run()
         let depth: Int
         let formattingCompareWork: Int
-        if count.namesTagWithModeDependentRawText {
+        if scanner.readModeDependentTag {
             depth = countedBound
             formattingCompareWork = Saturating.add(
                 Saturating.multiply(count.formattingTagCount, count.formattingTagCount * 16),
@@ -418,12 +421,21 @@ private enum ScannedTagName {
     /// Never pushed again once the document has them.
     static let documentNames: Set<[UInt8]> = Set(["html", "head", "body"].map { Array($0.utf8) })
 
-    /// Names after which SwiftSoup reads raw text in some insertion modes
-    /// and markup in others, which a scan of the bytes cannot tell apart:
+    /// Start tags after which SwiftSoup reads raw text in some insertion
+    /// modes and markup in others, which a scan of the bytes cannot follow:
     /// inside `select` it ignores `style` and `title`, in a frameset most
-    /// start tags, and a `noscript` is raw text in the head but markup in the
-    /// body (measured).
-    static let namesWithModeDependentRawText: Set<[UInt8]> = Set(["select", "frameset", "noscript"].map { Array($0.utf8) })
+    /// start tags. A `noscript` is one only in the head, where SwiftSoup
+    /// reads some of its content as text; in the body it is markup
+    /// (measured).
+    static let alwaysModeDependent: Set<[UInt8]> = Set(["select", "frameset"].map { Array($0.utf8) })
+    static let noscript = Array("noscript".utf8)
+
+    /// Start tags the head takes; any other one ends the head for good
+    /// (`<body>` included).
+    static let headStartTags: Set<[UInt8]> = Set([
+        "html", "head", "base", "basefont", "bgsound", "link", "meta", "title", "noscript", "noframes",
+        "style", "script", "template"
+    ].map { Array($0.utf8) })
 
     static let table = Array("table".utf8)
     static let td = Array("td".utf8)
@@ -651,7 +663,6 @@ private struct StartTagCount {
     private(set) var tagCount = 0
     /// Every `<` followed by a formatting element's name.
     private(set) var formattingTagCount = 0
-    private(set) var namesTagWithModeDependentRawText = false
 
     init(bytes: UnsafeBufferPointer<UInt8>) {
         let count = bytes.count
@@ -686,9 +697,6 @@ private struct StartTagCount {
             weight += ScannedTagName.weight(of: name)
             if ScannedTagName.formattingNames.contains(name) {
                 formattingTagCount += 1
-            }
-            if ScannedTagName.namesWithModeDependentRawText.contains(name) {
-                namesTagWithModeDependentRawText = true
             }
             index = nameStart
         }
@@ -737,6 +745,14 @@ private struct TokenizingScanner {
     private var formattingHeld = 0
     /// `EmailDOMParseAdmission.ParseCost.formattingCompareWork`.
     private(set) var formattingCompareWork = 0
+    /// Whether a start tag only the body takes has been read, so the tree
+    /// builder has left the head.
+    private var hasLeftHead = false
+    /// Whether a start tag after which SwiftSoup's reading depends on its
+    /// insertion mode has been read (`ScannedTagName.alwaysModeDependent`, or
+    /// a `noscript` in the head). Up to that tag this scan reads the bytes
+    /// as SwiftSoup does; after it, nothing it says can be trusted.
+    private(set) var readModeDependentTag = false
 
     private let isTableContextFragment: Bool
 
@@ -822,6 +838,12 @@ private struct TokenizingScanner {
     /// active formatting list. Void and document tags push nothing but may
     /// still close (`<hr>` may close a `p`).
     private mutating func openElement(named name: [UInt8], tagLength: Int, selfClosing: Bool) {
+        if ScannedTagName.alwaysModeDependent.contains(name) || (name == ScannedTagName.noscript && !hasLeftHead) {
+            readModeDependentTag = true
+        }
+        if !ScannedTagName.headStartTags.contains(name) {
+            hasLeftHead = true
+        }
         closeImpliedElements(before: name)
         if ScannedTagName.formattingNames.contains(name) {
             let sameName = formattingHeldByName[name, default: 0]

@@ -547,6 +547,12 @@ enum TextProcessing {
         // blank line of one run looks ahead to the same line, so the run is
         // walked once instead of once per blank line.
         var nextNonEmptyLookahead = -1
+        // Whether the paragraph joins across the blank lines before
+        // `nextNonEmptyLookahead`. Every blank line of a run asks the same
+        // question of the same paragraph and the same next line, so it is
+        // answered once: asked anew for each, a run of blank lines before a
+        // long line was quadratic.
+        var blankRunJoins: (lookahead: Int, joins: Bool)?
         var i = 0
 
         while i < lines.count {
@@ -570,7 +576,11 @@ enum TextProcessing {
                 let nextNonEmptyIndex = nextNonEmptyLookahead
 
                 // Check if we should join across the blank line(s)
-                if nextNonEmptyIndex < lines.count {
+                if let cached = blankRunJoins, cached.lookahead == nextNonEmptyIndex {
+                    if cached.joins {
+                        continue
+                    }
+                } else if nextNonEmptyIndex < lines.count {
                     let nextLine = trimmedLines[nextNonEmptyIndex]
                     let currentIsSignatureDelimiter = paragraph.isSignatureDelimiterLine
                     let nextIsSignatureDelimiter = isSignatureDelimiterLine(nextLine)
@@ -587,6 +597,7 @@ enum TextProcessing {
                         !currentIsSignatureDelimiter &&
                         !nextIsSignatureDelimiter {
                         // This is a soft wrap across blank lines - skip the blanks and continue joining
+                        blankRunJoins = (nextNonEmptyIndex, true)
                         continue
                     }
                 }
