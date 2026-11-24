@@ -20,28 +20,35 @@ import Foundation
 /// one-line rows of about 30 points in a tall chat column or an iPad, had
 /// on-screen rows taken out of the `ForEach` by the replace: scrolling down,
 /// every row more than `bufferSize` above the bottom edge, and scrolling up,
-/// every row more than `visibleItemCount + bufferSize` below the top edge
+/// every row `visibleItemCount + bufferSize` or more below the top edge
 /// (architecture review 2026-11, chat-transcript-ui#1). Near the tail that
 /// leaves a window shorter than the viewport, which then cannot scroll.
 ///
-/// So a request also keeps every row whose view is in the transcript's
-/// hierarchy (`VirtualScrollState.realizedRowIdentities`), and on a side where
-/// those reach past the position's rows, up to `bufferSize` rows beyond them:
-/// without that slack the window ended at the viewport's edge, where a row
-/// appearing there is within `preloadThreshold` of the window's end, and a
-/// reader who turned back had no row beyond the edge to appear and move the
-/// window (the iPhone keeps about 20 rows of it below the viewport while
-/// scrolling up). Everything a request keeps beyond the position's rows is a
-/// row the window already holds, so this adds no load, prepend or preload, and
-/// it does not change whether a window covers the position (`positionRows`):
-/// it changes only which rows a replace keeps. Where the realized rows lie
-/// within the position's rows a replace is exactly what it was: scrolling
-/// down, no more than `bufferSize` rows realized above the bottom edge, about
-/// ten on a phone. A phone that realizes more (short rows on a Pro Max, a
-/// small text size) widens as a tall viewport does, which has not been
-/// measured on a phone. What a wider replace costs is its rows: every replace
-/// re-fetches and re-maps all of them on the main actor, about 70 instead of
-/// 40 for a Mac viewport of 33 rows.
+/// So a request also keeps the rows whose views are in the transcript's
+/// hierarchy (`VirtualScrollState.realizedRowIdentities`) in an unbroken run
+/// on from the position's rows, and on a side where that run reaches past
+/// them, up to `bufferSize` rows beyond it: without that slack the window
+/// ended at the viewport's edge, where a row appearing there is within
+/// `preloadThreshold` of the window's end, and a reader who turned back had no
+/// row beyond the edge to appear and move the window (the iPhone keeps about
+/// 20 rows of it below the viewport while scrolling up). Only a run on from
+/// the position's rows: the rows on screen are one, while a realized row
+/// apart from it is a record the view has not cleared yet (an `onDisappear`
+/// still to come after a jump, or one never delivered), and keeping its row
+/// kept the window from sliding past it until the cap trimmed it.
+///
+/// Everything a request keeps beyond the position's rows is a row the window
+/// already holds, so this adds no load or prepend, and it does not change
+/// whether a window covers the position (`positionRows`): it changes only
+/// which rows a replace keeps. The preloads read only the position and the
+/// window's edges, which are at least as far from it as before. Where no
+/// realized row lies just past the position's rows a replace is exactly what
+/// it was: scrolling down, no more than `bufferSize` rows realized above the
+/// bottom edge, about ten on a phone. A phone that realizes more (short rows
+/// on a Pro Max, a small text size) widens as a tall viewport does, which has
+/// not been measured on a phone. What a wider replace costs is its rows: every
+/// replace re-fetches and re-maps all of them on the main actor, about 70
+/// instead of 40 for a Mac viewport of 33 rows.
 ///
 /// Not growth on every step: extending the window at each step grew it to the
 /// cap and front-trimmed rows far above the reader (iPhone simulator, 11 of 40
@@ -52,9 +59,10 @@ import Foundation
 /// and the window cap.
 enum VirtualScrollWindowPolicy {
     /// Absolute rows `startIndex..<endIndex`. Not a `Range`: a position past
-    /// the dataset's end (a count that shrank under it) gives an end below
-    /// the start, which `VirtualScrollState.loadWindow` refuses, and
-    /// constructing a `Range` from it would trap.
+    /// the dataset's end (a count that shrank under it) gives an end at or
+    /// below the start, which `VirtualScrollState.loadWindow` fails without
+    /// publishing, and constructing a `Range` from an end below the start
+    /// would trap.
     struct Rows: Equatable {
         let startIndex: Int
         let endIndex: Int
@@ -77,9 +85,10 @@ enum VirtualScrollWindowPolicy {
     }
 
     /// What a load for the reader's position asks for: `positionRows`,
-    /// widened to keep `realizedRows`, the absolute rows whose views are in
-    /// the hierarchy (`realizedRowSpan`), and on a side where those reach past
-    /// the position's rows, up to `bufferSize` rows beyond them. Only rows of
+    /// widened to keep the rows of `realizedRows` (absolute indices of the
+    /// rows whose views are in the hierarchy, `realizedRowIndices`) that run
+    /// on unbroken from it, and on a side where that run reaches past the
+    /// position's rows, up to `bufferSize` rows beyond it. Only rows of
     /// `windowRows`, the current window, are kept beyond the position's rows.
     /// A request past `maxWindowSize` drops the rows farthest from the
     /// position first, and never a row of `positionRows`, which the
@@ -88,7 +97,7 @@ enum VirtualScrollWindowPolicy {
         scrollPosition: Int,
         totalCount: Int,
         configuration: VirtualScrollConfiguration,
-        realizedRows: ClosedRange<Int>?,
+        realizedRows: Set<Int>,
         windowRows: Rows
     ) -> Rows {
         let position = positionRows(
@@ -96,25 +105,32 @@ enum VirtualScrollWindowPolicy {
             totalCount: totalCount,
             configuration: configuration
         )
-        // A position at or past the end asks for nothing a load accepts
-        // (an empty or inverted range); leave it for `loadWindow` to refuse,
-        // as before, rather than widen it into a load that succeeds.
-        guard let realizedRows, position.startIndex < position.endIndex else {
+        // A position at or past the end asks for nothing a load accepts (an
+        // empty or inverted range); leave it for `loadWindow` to fail, as
+        // before, rather than widen it into a load that succeeds.
+        guard !realizedRows.isEmpty, position.startIndex < position.endIndex else {
             return position
         }
         let heldStartIndex = max(0, windowRows.startIndex)
         let heldEndIndex = min(totalCount, windowRows.endIndex)
-        let firstRealizedIndex = max(realizedRows.lowerBound, heldStartIndex)
-        let lastRealizedIndex = min(realizedRows.upperBound, heldEndIndex - 1)
-        guard firstRealizedIndex <= lastRealizedIndex else { return position }
+
+        // The realized rows running on from the position's rows, each way.
+        var runStartIndex = position.startIndex
+        while runStartIndex - 1 >= heldStartIndex, realizedRows.contains(runStartIndex - 1) {
+            runStartIndex -= 1
+        }
+        var runEndIndex = position.endIndex
+        while runEndIndex < heldEndIndex, realizedRows.contains(runEndIndex) {
+            runEndIndex += 1
+        }
 
         var startIndex = position.startIndex
         var endIndex = position.endIndex
-        if firstRealizedIndex < startIndex {
-            startIndex = max(heldStartIndex, firstRealizedIndex - configuration.bufferSize)
+        if runStartIndex < startIndex {
+            startIndex = max(heldStartIndex, runStartIndex - configuration.bufferSize)
         }
-        if lastRealizedIndex >= endIndex {
-            endIndex = min(heldEndIndex, lastRealizedIndex + 1 + configuration.bufferSize)
+        if runEndIndex > endIndex {
+            endIndex = min(heldEndIndex, runEndIndex + configuration.bufferSize)
         }
 
         var overflow = (endIndex - startIndex) - configuration.maxWindowSize
@@ -134,32 +150,28 @@ enum VirtualScrollWindowPolicy {
         return Rows(startIndex: startIndex, endIndex: endIndex)
     }
 
-    /// The absolute span, first to last, of the published rows whose views
-    /// are in the hierarchy, each placed as the transcript places it: the
-    /// window's start plus the row's place in the published rows
+    /// The absolute indices of the published rows whose views are in the
+    /// hierarchy, each placed as the transcript places it: the window's start
+    /// plus the row's place in the published rows
     /// (`VirtualScrollState.absoluteIndex(forVisibleIndex:)`, which the row's
     /// `markIndexVisible` reports from). Only rows inside the window count.
-    /// Nil when no such row is realized.
     ///
     /// - Parameter publishedRowIdentities: the published rows' `ForEach`
     ///   identities in order (`ChatTranscriptIdentityPolicy.rows`), the
     ///   identities `realizedRowIdentities` is keyed by.
-    static func realizedRowSpan(
+    static func realizedRowIndices(
         realizedRowIdentities: Set<ChatMessageDisplayIdentity>,
         publishedRowIdentities: [ChatMessageDisplayIdentity],
         windowRows: Rows
-    ) -> ClosedRange<Int>? {
-        guard !realizedRowIdentities.isEmpty else { return nil }
-        var firstIndex: Int?
-        var lastIndex: Int?
+    ) -> Set<Int> {
+        guard !realizedRowIdentities.isEmpty else { return [] }
+        var indices = Set<Int>()
         for (rowIndex, rowIdentity) in publishedRowIdentities.enumerated()
         where realizedRowIdentities.contains(rowIdentity) {
             let absoluteIndex = windowRows.startIndex + rowIndex
             guard absoluteIndex < windowRows.endIndex else { break }
-            firstIndex = min(firstIndex ?? absoluteIndex, absoluteIndex)
-            lastIndex = max(lastIndex ?? absoluteIndex, absoluteIndex)
+            indices.insert(absoluteIndex)
         }
-        guard let firstIndex, let lastIndex else { return nil }
-        return firstIndex...lastIndex
+        return indices
     }
 }

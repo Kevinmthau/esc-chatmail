@@ -330,9 +330,9 @@ extension VirtualScrollState {
             startIndex: messageWindow?.startIndex ?? 0,
             endIndex: messageWindow?.endIndex ?? 0
         )
-        var realizedRows: ClosedRange<Int>?
+        var realizedRows = Set<Int>()
         if messageWindow != nil, !realizedRowIdentities.isEmpty {
-            realizedRows = VirtualScrollWindowPolicy.realizedRowSpan(
+            realizedRows = VirtualScrollWindowPolicy.realizedRowIndices(
                 realizedRowIdentities: realizedRowIdentities,
                 publishedRowIdentities: ChatTranscriptIdentityPolicy.rows(for: visibleMessages).map(\.id),
                 windowRows: windowRows

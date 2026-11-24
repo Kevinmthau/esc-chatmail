@@ -5026,6 +5026,57 @@ final class VirtualScrollStateTests: XCTestCase {
         )
     }
 
+    /// A row whose view left (`markRowUnrealized`, from its `onDisappear`) is
+    /// not kept: the record is the view's current placement, so the window
+    /// keeps sliding with the viewport instead of keeping every row scrolled
+    /// past.
+    ///
+    /// Revert-check: removing `realizedRowIdentities.remove` from
+    /// `VirtualScrollState.markRowUnrealized` publishes 10..<18 here.
+    func testMarkIndexVisible_rowsThatLeftTheViewport_areNotKept() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 10..<15, scrollPosition: 11)
+        defer { state.cleanup() }
+        let rows = ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages)
+        realizeEveryPublishedRow(of: state)
+        state.markRowUnrealized(rows[0].id)
+        state.markRowUnrealized(rows[1].id)
+
+        state.markIndexVisible(14)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex != 10 }
+
+        // Rows 12...14 are realized; row 11 is the slack above them.
+        XCTAssertEqual(state.visibleRangeStartIndex, 11)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[11..<18]).map(\.objectID)
+        )
+    }
+
+    /// A realized row apart from the rows on screen (an `onDisappear` still
+    /// to come after a jump, or one never delivered) is not kept, so one
+    /// stale record cannot hold the window back from sliding past it.
+    ///
+    /// Revert-check: widening `VirtualScrollWindowPolicy.requestedRows` to
+    /// the first and last realized rows instead of the run on from the
+    /// position's rows publishes 5..<18 here.
+    func testMarkIndexVisible_staleRealizedRowApartFromTheViewport_isNotKept() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 5..<16, scrollPosition: 11)
+        defer { state.cleanup() }
+        for row in ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages)
+        where row.index == 0 || (5...9).contains(row.index) {
+            state.markRowRealized(row.id)
+        }
+
+        state.markIndexVisible(14)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex != 5 }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 9)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[9..<18]).map(\.objectID)
+        )
+    }
+
     /// Scrolling up, the position is the top edge, and a viewport taller
     /// than the position's rows shows rows below them, which the replace
     /// dropped. They are kept, with a row of slack below them.

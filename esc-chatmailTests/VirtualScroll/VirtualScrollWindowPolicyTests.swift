@@ -2,8 +2,8 @@ import XCTest
 @testable import esc_chatmail
 
 /// The rows a scroll-driven window load asks for (`VirtualScrollWindowPolicy`):
-/// the position's rows, widened to keep every realized row and some slack
-/// beyond them, so a viewport taller than the position's rows keeps its
+/// the position's rows, widened to keep the realized rows running on from
+/// them and some slack beyond those, so a viewport taller than the position's rows keeps its
 /// on-screen rows through a sliding replace (architecture review 2026-11,
 /// chat-transcript-ui#1).
 final class VirtualScrollWindowPolicyTests: XCTestCase {
@@ -39,7 +39,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
         scrollPosition: Int,
         totalCount: Int = 200,
         configuration: VirtualScrollConfiguration? = nil,
-        realizedRows: ClosedRange<Int>?,
+        realizedRows: Set<Int>,
         window: VirtualScrollWindowPolicy.Rows
     ) -> VirtualScrollWindowPolicy.Rows {
         VirtualScrollWindowPolicy.requestedRows(
@@ -87,7 +87,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
 
     func testRequestedRows_withNothingRealized_isThePositionRows() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: nil, window: rows(0, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: [], window: rows(0, 30)),
             rows(13, 18)
         )
     }
@@ -97,11 +97,11 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     /// slack included.
     func testRequestedRows_realizedRowsInsideThePositionRows_isThePositionRows() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 13...14, window: rows(0, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(13...14), window: rows(0, 30)),
             rows(13, 18)
         )
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 13...17, window: rows(0, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(13...17), window: rows(0, 30)),
             rows(13, 18)
         )
     }
@@ -115,7 +115,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     /// drops on-screen rows 7..<13.
     func testRequestedRows_scrollingDownTallViewport_keepsTheRowsAboveThePosition() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 7...13, window: rows(0, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(7...13), window: rows(0, 30)),
             rows(6, 18)
         )
     }
@@ -125,7 +125,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     /// the slack below them.
     func testRequestedRows_scrollingUpTallViewport_keepsTheRowsBelowThePositionRows() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 10, realizedRows: 11...18, window: rows(5, 25)),
+            requestedRows(scrollPosition: 10, realizedRows: Set(11...18), window: rows(5, 25)),
             rows(9, 20)
         )
     }
@@ -138,12 +138,39 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     /// `VirtualScrollWindowPolicy.requestedRows` asks for 9..<19 and 7..<18.
     func testRequestedRows_tallViewport_keepsBufferRowsBeyondTheRealizedRows() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 10, realizedRows: 11...18, window: rows(0, 40)),
+            requestedRows(scrollPosition: 10, realizedRows: Set(11...18), window: rows(0, 40)),
             rows(9, 20)
         )
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 7...13, window: rows(0, 40)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(7...13), window: rows(0, 40)),
             rows(6, 18)
+        )
+    }
+
+    /// Only realized rows in an unbroken run on from the position's rows are
+    /// kept: the rows on screen are one, and a realized row apart from them is
+    /// a record the view has not cleared (an `onDisappear` still to come
+    /// after a jump, or one never delivered). Kept, its row held the window
+    /// back from sliding past it until the cap trimmed it.
+    ///
+    /// Revert-check: widening `VirtualScrollWindowPolicy.requestedRows` to
+    /// the first and last realized rows instead of the run asks for 1..<18
+    /// and 4..<18 here.
+    func testRequestedRows_keepsOnlyTheRealizedRunOnFromThePositionRows() {
+        // A stale row far above the run on screen.
+        XCTAssertEqual(
+            requestedRows(scrollPosition: 14, realizedRows: Set(8...13).union([2]), window: rows(0, 30)),
+            rows(7, 18)
+        )
+        // A row missing between them breaks the run.
+        XCTAssertEqual(
+            requestedRows(scrollPosition: 14, realizedRows: Set(5...10).union([12]), window: rows(0, 30)),
+            rows(11, 18)
+        )
+        // Realized rows not touching the position's rows widen nothing.
+        XCTAssertEqual(
+            requestedRows(scrollPosition: 14, realizedRows: Set(3...8), window: rows(0, 30)),
+            rows(13, 18)
         )
     }
 
@@ -153,27 +180,27 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     func testRequestedRows_keepsOnlyRowsTheWindowHolds() {
         // The slack stops at the window's edge.
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 7...13, window: rows(7, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(7...13), window: rows(7, 30)),
             rows(7, 18)
         )
         XCTAssertEqual(
-            requestedRows(scrollPosition: 10, realizedRows: 11...18, window: rows(5, 19)),
+            requestedRows(scrollPosition: 10, realizedRows: Set(11...18), window: rows(5, 19)),
             rows(9, 19)
         )
         // Realized rows reported outside the window are not asked for.
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 2...13, window: rows(8, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(2...13), window: rows(8, 30)),
             rows(8, 18)
         )
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, realizedRows: 2...5, window: rows(8, 30)),
+            requestedRows(scrollPosition: 14, realizedRows: Set(2...5), window: rows(8, 30)),
             rows(13, 18)
         )
     }
 
     func testRequestedRows_clipsToTheDataset() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 14, totalCount: 16, realizedRows: 10...20, window: rows(0, 30)),
+            requestedRows(scrollPosition: 14, totalCount: 16, realizedRows: Set(10...20), window: rows(0, 30)),
             rows(9, 16)
         )
     }
@@ -187,7 +214,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
     /// second case, a load that replaces the window.
     func testRequestedRows_positionPastTheEnd_isLeftForTheLoadToRefuse() {
         XCTAssertEqual(
-            requestedRows(scrollPosition: 30, totalCount: 20, realizedRows: 15...19, window: rows(10, 20)),
+            requestedRows(scrollPosition: 30, totalCount: 20, realizedRows: Set(15...19), window: rows(10, 20)),
             rows(29, 20)
         )
         // Exactly `bufferSize` past the end: the position's rows are empty.
@@ -201,7 +228,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
                     pageSize: 3,
                     preloadThreshold: 0
                 ),
-                realizedRows: 15...19,
+                realizedRows: Set(15...19),
                 window: rows(10, 35)
             ),
             rows(20, 20)
@@ -224,7 +251,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
             requestedRows(
                 scrollPosition: 50,
                 configuration: cappedConfiguration,
-                realizedRows: 30...70,
+                realizedRows: Set(30...70),
                 window: rows(0, 200)
             ),
             rows(45, 56)
@@ -234,7 +261,7 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
             requestedRows(
                 scrollPosition: 50,
                 configuration: cappedConfiguration,
-                realizedRows: 0...50,
+                realizedRows: Set(0...50),
                 window: rows(0, 200)
             ),
             rows(43, 54)
@@ -243,56 +270,58 @@ final class VirtualScrollWindowPolicyTests: XCTestCase {
             requestedRows(
                 scrollPosition: 50,
                 configuration: cappedConfiguration,
-                realizedRows: 50...120,
+                realizedRows: Set(50...120),
                 window: rows(0, 200)
             ),
             rows(49, 60)
         )
     }
 
-    // MARK: - realizedRowSpan
+    // MARK: - realizedRowIndices
 
-    func testRealizedRowSpan_placesRowsAtTheWindowStartPlusTheirPlace() {
+    func testRealizedRowIndices_placesRowsAtTheWindowStartPlusTheirPlace() {
         let published = (0..<8).map(identity)
         XCTAssertEqual(
-            VirtualScrollWindowPolicy.realizedRowSpan(
+            VirtualScrollWindowPolicy.realizedRowIndices(
                 realizedRowIdentities: [identity(2), identity(5), identity(3)],
                 publishedRowIdentities: published,
                 windowRows: rows(10, 18)
             ),
-            12...15
+            [12, 13, 15]
         )
     }
 
-    func testRealizedRowSpan_isNilWhenNoPublishedRowIsRealized() {
+    func testRealizedRowIndices_isEmptyWhenNoPublishedRowIsRealized() {
         let published = (0..<8).map(identity)
-        XCTAssertNil(
-            VirtualScrollWindowPolicy.realizedRowSpan(
+        XCTAssertEqual(
+            VirtualScrollWindowPolicy.realizedRowIndices(
                 realizedRowIdentities: [],
                 publishedRowIdentities: published,
                 windowRows: rows(10, 18)
-            )
+            ),
+            []
         )
-        XCTAssertNil(
-            VirtualScrollWindowPolicy.realizedRowSpan(
+        XCTAssertEqual(
+            VirtualScrollWindowPolicy.realizedRowIndices(
                 realizedRowIdentities: [identity(42)],
                 publishedRowIdentities: published,
                 windowRows: rows(10, 18)
-            )
+            ),
+            []
         )
     }
 
     /// Published rows past the window's end (rows the row cache could not
     /// line up with it) never ask a load for a row the window does not hold.
-    func testRealizedRowSpan_countsOnlyRowsInsideTheWindow() {
+    func testRealizedRowIndices_countsOnlyRowsInsideTheWindow() {
         let published = (0..<8).map(identity)
         XCTAssertEqual(
-            VirtualScrollWindowPolicy.realizedRowSpan(
+            VirtualScrollWindowPolicy.realizedRowIndices(
                 realizedRowIdentities: [identity(1), identity(6), identity(7)],
                 publishedRowIdentities: published,
                 windowRows: rows(10, 17)
             ),
-            11...16
+            [11, 16]
         )
     }
 }
