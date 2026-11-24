@@ -436,7 +436,10 @@ final class VirtualScrollState: ObservableObject {
               !isInitialAnchorHoldActive,
               abs(index - scrollPosition) > 2 else { return }
 
-        let requestedStartIndex = max(0, index - configuration.bufferSize)
+        // The rows the load below would ask for, from the same definition
+        // (`VirtualScrollWindowPolicy`): a replay whose rows start above the
+        // window would prepend.
+        let requestedStartIndex = requestedWindowRows(forPosition: index).startIndex
         if requestedStartIndex < window.startIndex && !isUserScrolling {
             deferredLeadingReplayIndex = index
             return

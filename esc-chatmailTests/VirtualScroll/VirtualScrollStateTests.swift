@@ -4979,6 +4979,95 @@ final class VirtualScrollStateTests: XCTestCase {
         )
     }
 
+    /// A viewport taller than the position's rows (the Mac's dense rows, an
+    /// iPad): scrolling down, the position is the bottom edge, and the
+    /// sliding replace kept only `bufferSize` rows above it, so rows still on
+    /// screen left the `ForEach` (architecture review 2026-11,
+    /// chat-transcript-ui#1). A replace keeps every realized row.
+    ///
+    /// Revert-check: returning `positionRows` from
+    /// `VirtualScrollWindowPolicy.requestedRows` (no realized span) publishes
+    /// 13..<18 here and drops realized rows 10..<13.
+    func testMarkIndexVisible_scrollingDownTallViewport_keepsRealizedRows() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 10..<15, scrollPosition: 11)
+        defer { state.cleanup() }
+        realizeEveryPublishedRow(of: state)
+
+        state.markIndexVisible(14)
+        await waitUntil { !state.isLoadingMore && state.visibleMessages.count == 8 }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 10)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[10..<18]).map(\.objectID)
+        )
+    }
+
+    /// The rows beyond the realized ones that the window already holds are
+    /// kept as slack, up to `bufferSize`: a window ending at the viewport's
+    /// edge left a reader turning back no row there to appear and move it.
+    ///
+    /// Revert-check: dropping `bufferSize` from the widened start in
+    /// `VirtualScrollWindowPolicy.requestedRows` publishes 10..<18 here.
+    func testMarkIndexVisible_scrollingDownTallViewport_keepsSlackAboveRealizedRows() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 5..<16, scrollPosition: 11)
+        defer { state.cleanup() }
+        for row in ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages) where (5...9).contains(row.index) {
+            state.markRowRealized(row.id)
+        }
+
+        state.markIndexVisible(14)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex != 5 }
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 9)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[9..<18]).map(\.objectID)
+        )
+    }
+
+    /// Scrolling up, the position is the top edge, and a viewport taller
+    /// than the position's rows shows rows below them, which the replace
+    /// dropped. They are kept, with a row of slack below them.
+    ///
+    /// Revert-check: returning `positionRows` from
+    /// `VirtualScrollWindowPolicy.requestedRows` publishes 9..<14 here and
+    /// drops realized rows 14..<18; dropping `bufferSize` from its widened
+    /// end publishes 9..<18.
+    func testMarkIndexVisible_scrollingUpTallViewport_keepsRealizedRows() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 10..<22, scrollPosition: 14)
+        defer { state.cleanup() }
+        for row in ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages) where row.index < 8 {
+            state.markRowRealized(row.id)
+        }
+
+        state.markIndexVisible(10)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 9 }
+
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[9..<19]).map(\.objectID)
+        )
+    }
+
+    /// An iPhone-height viewport: the realized rows lie inside the position's
+    /// own rows, and the replace is the sliding replace it always was.
+    func testMarkIndexVisible_realizedRowsInsidePositionRows_slidesWindowAsBefore() async throws {
+        let (state, messages) = try await makeTallViewportState(window: 10..<15, scrollPosition: 11)
+        defer { state.cleanup() }
+        for row in ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages) where row.index >= 3 {
+            state.markRowRealized(row.id)
+        }
+
+        state.markIndexVisible(14)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 13 }
+
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[13..<18]).map(\.objectID)
+        )
+    }
+
     /// At rest, every few rows of scroll reach the covered-window branch of
     /// `updateVisibleMessages` with rows equal to the published ones; an
     /// unconditional assignment republished them, the chat session forwarded
@@ -5433,6 +5522,50 @@ final class VirtualScrollStateTests: XCTestCase {
             .withDate(Date(timeIntervalSince1970: date))
             .inConversation(conversation)
             .build(in: viewContext)
+    }
+
+    /// A loaded state over 30 messages with `window` published and the reader
+    /// at `scrollPosition`, from a configuration whose position rows are 5
+    /// wide (3 from the position down, a buffer of 1 each side) and which
+    /// preloads nothing (threshold 0), so only `updateVisibleMessages` moves
+    /// the window. No row is realized yet.
+    private func makeTallViewportState(
+        window: Range<Int>,
+        scrollPosition: Int
+    ) async throws -> (VirtualScrollState, [Message]) {
+        let (conversation, messages) = try makeConversationWithMessages(count: 30)
+        let stack = self.stack!
+        let state = VirtualScrollState(
+            conversationId: conversation.id.uuidString,
+            configuration: VirtualScrollConfiguration(
+                visibleItemCount: 3,
+                bufferSize: 1,
+                pageSize: 3,
+                preloadThreshold: 0
+            ),
+            initialWindowPosition: .beginning,
+            viewContext: viewContext,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        await waitUntil { !state.isLoadingMore && state.initialLoadPhase == .loaded }
+
+        let loaded = await state.loadWindow(startIndex: window.lowerBound, endIndex: window.upperBound)
+        XCTAssertNotNil(loaded)
+        XCTAssertEqual(state.visibleRangeStartIndex, window.lowerBound)
+        XCTAssertEqual(
+            state.visibleMessages.map(\.objectID),
+            Array(messages[window]).map(\.objectID)
+        )
+        state.scrollPosition = scrollPosition
+        return (state, messages)
+    }
+
+    /// Every published row's view appears, as each row's `onAppear` reports
+    /// it (`ChatMessagesView`): a viewport tall enough to show the window.
+    private func realizeEveryPublishedRow(of state: VirtualScrollState) {
+        for row in ChatTranscriptIdentityPolicy.rows(for: state.visibleMessages) {
+            state.markRowRealized(row.id)
+        }
     }
 
     private func makeEndAnchoredState(conversation: Conversation) -> VirtualScrollState {

@@ -245,6 +245,14 @@ extension VirtualScrollState {
     /// Loads the window for `scrollPosition` if the current one does not
     /// cover it. Returns whether it started an extension load.
     ///
+    /// A load asks for `VirtualScrollWindowPolicy.requestedRows`: the
+    /// position's rows, every row whose view is in the hierarchy, and some
+    /// slack beyond those, so a viewport taller than the position's rows
+    /// keeps its on-screen rows through a replace. Whether a load is needed
+    /// at all is decided from the position's rows alone
+    /// (`VirtualScrollWindowPolicy.positionRows`), as it always was: the rows
+    /// kept beyond them are rows the window already holds.
+    ///
     /// - Parameter extendsWindowOnOverlap: extend the window to the union of
     ///   the requested range and the current one instead of replacing it.
     ///   Only the replay after a programmatic inset shift asks for this
@@ -256,10 +264,14 @@ extension VirtualScrollState {
     func updateVisibleMessages(extendsWindowOnOverlap: Bool = false) -> Bool {
         guard let window = messageWindow else { return false }
 
-        let startIndex = max(0, scrollPosition - configuration.bufferSize)
-        let endIndex = min(totalMessageCount, scrollPosition + configuration.visibleItemCount + configuration.bufferSize)
+        let positionRows = VirtualScrollWindowPolicy.positionRows(
+            scrollPosition: scrollPosition,
+            totalCount: totalMessageCount,
+            configuration: configuration
+        )
 
-        if window.contains(index: startIndex) && window.contains(index: endIndex - 1) {
+        if window.contains(index: positionRows.startIndex) &&
+            window.contains(index: positionRows.endIndex - 1) {
             // Current window already covers the requested range.
             // Keep rendering the whole window so the user can continue scrolling
             // through the buffered messages without the view pruning rows away.
@@ -276,6 +288,9 @@ extension VirtualScrollState {
             return false
         }
 
+        let requestedRows = requestedWindowRows(forPosition: scrollPosition)
+        let startIndex = requestedRows.startIndex
+        let endIndex = requestedRows.endIndex
         var loadStartIndex = startIndex
         var loadEndIndex = endIndex
         let extendsWindow = extendsWindowOnOverlap &&
@@ -305,6 +320,31 @@ extension VirtualScrollState {
             )
         }
         return extendsWindow
+    }
+
+    /// `VirtualScrollWindowPolicy.requestedRows` for a load at `position`,
+    /// over the rows of the current window whose views are in the hierarchy,
+    /// placed as the transcript's `ForEach` places them.
+    func requestedWindowRows(forPosition position: Int) -> VirtualScrollWindowPolicy.Rows {
+        let windowRows = VirtualScrollWindowPolicy.Rows(
+            startIndex: messageWindow?.startIndex ?? 0,
+            endIndex: messageWindow?.endIndex ?? 0
+        )
+        var realizedRows: ClosedRange<Int>?
+        if messageWindow != nil, !realizedRowIdentities.isEmpty {
+            realizedRows = VirtualScrollWindowPolicy.realizedRowSpan(
+                realizedRowIdentities: realizedRowIdentities,
+                publishedRowIdentities: ChatTranscriptIdentityPolicy.rows(for: visibleMessages).map(\.id),
+                windowRows: windowRows
+            )
+        }
+        return VirtualScrollWindowPolicy.requestedRows(
+            scrollPosition: position,
+            totalCount: totalMessageCount,
+            configuration: configuration,
+            realizedRows: realizedRows,
+            windowRows: windowRows
+        )
     }
 
     func loadWindow(
