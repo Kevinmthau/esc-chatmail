@@ -496,6 +496,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             guard !isInvalidated else { return }
+            guard !EmailWebViewLoadCoordination.isWebContentProcessTerminationError(error) else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -507,6 +508,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard !isInvalidated else { return }
+            guard !EmailWebViewLoadCoordination.isWebContentProcessTerminationError(error) else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -514,6 +516,46 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             }
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
             reloadAfterCurrentLoadIfNeeded(in: webView)
+        }
+
+        /// The web view's WebContent process died (jetsam while the app was suspended, or a page
+        /// that crashes WebKit), so the view shows nothing and the recorded signature no longer
+        /// describes anything on screen. Implementing this is also what stops WebKit's own reload:
+        /// with no handler, a process killed during a load was reloaded by WebKit from the network
+        /// at the load's base URL, the sender's `https://<From domain>/`, as an `.other` navigation
+        /// the policy allows (measured on the iOS 27.0 simulator, 2026-11-24).
+        ///
+        /// The reader puts its placeholder back, gives a pooled view back to the pool's records
+        /// (`discard`, so the pool never re-hosts or hands out a dead view), and reloads its own
+        /// content, never the base URL or anything else from the email, once for each content and
+        /// signature (`admitsReloadAfterWebContentTermination`). The content is the one it already
+        /// holds: nothing is read from disk, so no account generation is involved, and a reader an
+        /// account transition scrubbed is invalidated and does nothing here.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard !isInvalidated else { return }
+            Log.warning(
+                "Full reader WebContent process terminated messageId=\(Log.hashIdentifier(parent.message?.id))",
+                category: .ui
+            )
+            if let messageId = adoptedPrerenderedMessageId {
+                adoptedPrerenderedMessageId = nil
+                parent.webViewAdoptionProvider?.discard(messageId: messageId, webView: webView)
+            }
+            isLoading = false
+            shouldReloadAfterCurrentLoad = false
+            parent.onLoadFailed?()
+            guard coordination.admitsReloadAfterWebContentTermination(
+                content: parent.htmlContent,
+                reloadSignature: reloadSignature()
+            ) else {
+                // The same content took the process down again. Leave its signature recorded so
+                // `updateWebView` does not load it a third time; only the paint gate is reset, so
+                // a late confirmation of the dead document cannot remove the placeholder.
+                resetPaintConfirmationState()
+                return
+            }
+            resetLoadedSignatureAfterFailure()
+            loadContentIfReady(in: webView)
         }
 
         private func reloadAfterCurrentLoadIfNeeded(in webView: WKWebView) {

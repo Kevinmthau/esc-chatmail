@@ -108,6 +108,14 @@ enum FullInteractiveEmailWebView {
             return .cancel
         }
 
+        // Nothing in the app goes back or forward, and every document the reader shows is one the
+        // app loaded itself, so a back-forward navigation could only return to a page the app did
+        // not load. It is not what WebKit's own reload after a WebContent termination looked like
+        // (that arrived as .other at the base URL, and only the termination handlers stop it).
+        if navigationType == .backForward {
+            return .cancel
+        }
+
         // Allow the initial document load, resource loads, and reloads. This is critical for
         // loadHTMLString with an about:blank/base-URL baseURL, which arrives as .other.
         if navigationType == .other || navigationType == .reload {
@@ -594,6 +602,13 @@ protocol FullEmailWebViewAdopting: AnyObject {
 
     @discardableResult
     func checkin(messageId: String, webView: WKWebView) -> Bool
+
+    /// Forgets a checked-out web view whose WebContent process terminated, so the pool never
+    /// re-hosts it or hands it out as ready again. The reader is the view's navigation delegate
+    /// while it holds it, so the pool cannot hear of the termination itself. The entry is matched
+    /// by the view's identity and dropped with no teardown, because the reader still shows the view
+    /// and reloads its own content into it; the prepared payload is kept.
+    func discard(messageId: String, webView: WKWebView)
 }
 
 // MARK: - Live full-reader account boundary
@@ -983,6 +998,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         /// True while the instance is displayed in the reader. It stays tracked so checkin can find
         /// it, but warming and checkout skip it.
         var isCheckedOut = false
+        /// The view's WebContent process died, so it shows nothing. A terminated entry is never
+        /// ready again: a snapshot that completes after the death does not mark it finished, and
+        /// checkin drops it rather than re-hosting it.
+        var isTerminated = false
 
         init(
             key: FullEmailWebViewPreRenderKey,
@@ -1487,6 +1506,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
               entry.webView === webView else {
             return false
         }
+        guard !entry.isTerminated else {
+            // A dead view is never re-hosted. Returning false has the reader scrub it as a reader
+            // of its own (`scrubForAccountBoundary`), so it is dropped here with no teardown.
+            entries.removeValue(forKey: messageId)
+            return false
+        }
 
         entry.isCheckedOut = false
         entry.cidHandler.message = nil
@@ -1496,6 +1521,21 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         host.host(entry.webView, width: CGFloat(entry.key.widthBucket))
         applyEvictions(bookkeeping.touch(messageId))
         return entries[messageId] === entry
+    }
+
+    func discard(messageId: String, webView: WKWebView) {
+        guard let entry = entries[messageId], entry.webView === webView else {
+            return
+        }
+        entry.isTerminated = true
+        entry.didFinishInitialLoad = false
+        // The LRU slot stays: it is the prepared payload's too, which is kept.
+        entries.removeValue(forKey: messageId)
+        // Only a checked-out entry reaches here from the reader, and the reader keeps that view.
+        // One still hosted off screen is the pool's alone to release.
+        if !entry.isCheckedOut {
+            teardown(entry)
+        }
     }
 
     // MARK: Invalidation
@@ -1716,6 +1756,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         delegate.onFinish = { [weak self, weak entry] in
             self?.finalizeWarm(entry)
         }
+        delegate.onTerminate = { [weak self, weak entry] in
+            self?.handleWarmWebContentTermination(entry)
+        }
 
         host.host(webView, width: width)
         let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
@@ -1732,7 +1775,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// actually been rasterized, so adopting it into the on-screen reader composites an already-painted
     /// view with no first-paint flash. Snapshot errors are non-fatal — the content still loaded.
     private func finalizeWarm(_ entry: Entry?) {
-        guard let entry, !entry.didFinishInitialLoad else {
+        guard let entry, !entry.didFinishInitialLoad, !entry.isTerminated else {
             return
         }
 
@@ -1746,8 +1789,37 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         let configuration = WKSnapshotConfiguration()
         configuration.rect = bounds
         entry.webView.takeSnapshot(with: configuration) { [weak entry] _, _ in
-            entry?.didFinishInitialLoad = true
+            // A snapshot error is non-fatal for a live view, but one the process died under is not
+            // a paint: a terminated entry stays not ready.
+            guard let entry, !entry.isTerminated else { return }
+            entry.didFinishInitialLoad = true
         }
+    }
+
+    /// A pooled view's WebContent process died while the pool's own delegate held it (warming, or
+    /// warm and idle off screen). The entry is dropped so it is never handed out as ready, and so a
+    /// warm that never finished cannot block the next warm of that message, which keeps a same-key
+    /// entry. Nothing is warmed again here: a warm is new account work, made only by a caller that
+    /// captured the account generation (`warm`, `prepaintAfterExplicitOpen`), so the message is
+    /// warmed again when its row next asks. The prepared payload and its LRU slot are kept.
+    ///
+    /// A checked-out entry is the reader's, which is then the view's delegate and drops it through
+    /// `discard`; one marked here only because it was checked out at the time is dropped by
+    /// `checkin`.
+    private func handleWarmWebContentTermination(_ entry: Entry?) {
+        guard let entry else { return }
+        entry.isTerminated = true
+        entry.didFinishInitialLoad = false
+        let messageId = entry.key.messageId
+        Log.warning(
+            "Pooled full-email WebContent process terminated messageId=\(Log.hashIdentifier(messageId)) checkedOut=\(entry.isCheckedOut)",
+            category: .ui
+        )
+        guard entries[messageId] === entry, !entry.isCheckedOut else {
+            return
+        }
+        entries.removeValue(forKey: messageId)
+        teardown(entry)
     }
 
     private func applyEvictions(_ evicted: [String]) {
@@ -1915,9 +1987,18 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 @MainActor
 private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
     var onFinish: (() -> Void)?
+    var onTerminate: (() -> Void)?
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         onFinish?()
+    }
+
+    /// Implementing this is what keeps WebKit from reloading a dead view by itself, which for a
+    /// load still in progress fetched its base URL, the sender's site, from the network (measured
+    /// on the iOS 27.0 simulator; see `FullEmailReaderWebView.Coordinator`). The pool drops the
+    /// entry and reloads nothing.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        onTerminate?()
     }
 
     func webView(

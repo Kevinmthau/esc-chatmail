@@ -451,6 +451,150 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
     }
 
+    // MARK: WebContent process termination
+
+    // Revert-check: fails if `FullEmailReaderWebView.Coordinator.webViewWebContentProcessDidTerminate`
+    // stops calling `discard` (the pool would re-host the dead view at dismantle: `reclaim` would
+    // check it in), stops calling `onLoadFailed` (the placeholder stays gone over a blank view), or
+    // stops reloading (the reader stays blank, because `needsReload` compares only the recorded
+    // signature). Each was reverted on its own.
+    func testWebContentTermination_adoptedReader_discardsPooledViewRestoresPlaceholderAndReloadsOwnContent() {
+        let message = makeMessage(id: "terminated-adopted-reader", senderEmail: "news@sender.example")
+        let adopter = RecordingTerminationAdopter()
+        var loadFailedCount = 0
+        let html = "<html><body><p>Adopted</p></body></html>"
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(
+                message: message,
+                htmlContent: html,
+                webViewAdoptionProvider: adopter,
+                onLoadFailed: { loadFailedCount += 1 }
+            ),
+            paintConfirmer: DeferredPaintConfirmer()
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.adoptAlreadyLoadedContent(html, messageId: message.id)
+        XCTAssertFalse(coordinator.needsReload, "Precondition: the adopted content counts as loaded")
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+
+        XCTAssertEqual(adopter.discards.map(\.messageId), [message.id])
+        XCTAssertTrue(adopter.discards.first?.webView === webView)
+        XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
+        XCTAssertEqual(loadFailedCount, 1)
+        XCTAssertEqual(webView.loadedHTML, [html], "The reader reloads the content it holds")
+        XCTAssertEqual(
+            webView.loadedBaseURLs,
+            [FullInteractiveEmailWebView.baseURL(message: message, senderEmail: nil)]
+        )
+        XCTAssertTrue(webView.loadedRequests.isEmpty, "Nothing is loaded by URL, the base URL included")
+        XCTAssertFalse(coordinator.reclaimPrerenderedWebViewIfNeeded(webView))
+        XCTAssertTrue(adopter.checkins.isEmpty, "A dead view is never checked back in")
+    }
+
+    // Revert-check: fails if the reader's handler resets the signature on every termination (drop
+    // the `admitsReloadAfterWebContentTermination` guard): the second termination then reloads,
+    // and so does every `updateWebView` after it, which is a page that crashes WebKit reloading
+    // for as long as the reader is open.
+    func testWebContentTermination_secondOfSameContent_doesNotReloadAgain() {
+        var loadFailedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 }),
+            paintConfirmer: DeferredPaintConfirmer()
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webView(webView, didFinish: nil)
+        XCTAssertEqual(webView.loadedHTML.count, 1)
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        XCTAssertEqual(webView.loadedHTML.count, 2)
+        coordinator.webView(webView, didFinish: nil)
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(webView.loadedHTML.count, 2)
+        XCTAssertFalse(coordinator.needsReload)
+        XCTAssertEqual(loadFailedCount, 2, "Each termination still restores the placeholder")
+
+        coordinator.updateParent(makeReader(message: nil, htmlContent: "<p>Changed</p>"))
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(webView.loadedHTML.last, "<p>Changed</p>", "New content loads as before")
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        XCTAssertEqual(webView.loadedHTML.count, 4, "New content has a termination reload of its own")
+    }
+
+    // Revert-check: fails if the latched branch of the reader's termination handler stops calling
+    // `resetPaintConfirmationState`: the confirmation started for the dead document then completes
+    // and removes the placeholder over a blank view.
+    func testWebContentTermination_latched_pendingPaintConfirmationCannotRemovePlaceholder() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        var loadFinishedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFinished: { loadFinishedCount += 1 }),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.webView(webView, didFinish: nil)
+        XCTAssertEqual(paintConfirmer.confirmPaintCallCount, 1)
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        paintConfirmer.completeNext()
+
+        XCTAssertEqual(loadFinishedCount, 0)
+    }
+
+    // Revert-check: fails if `didFail` loses its `isWebContentProcessTerminationError` guard: the
+    // failure resets the signature that the termination's reload recorded, and the next update
+    // loads the same content again behind the latch's back.
+    func testWebContentTermination_failureReportedForTheDeadNavigation_doesNotRearmAReload() {
+        var loadFailedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 }),
+            paintConfirmer: DeferredPaintConfirmer()
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        XCTAssertEqual(webView.loadedHTML.count, 2)
+
+        coordinator.webView(webView, didFail: nil, withError: WKError(.webContentProcessTerminated))
+        coordinator.webView(
+            webView,
+            didFailProvisionalNavigation: nil,
+            withError: WKError(.webContentProcessTerminated)
+        )
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(webView.loadedHTML.count, 2)
+        XCTAssertFalse(coordinator.needsReload)
+        XCTAssertEqual(loadFailedCount, 1)
+    }
+
+    // HONEST SCOPE: pins the outcome, not one guard. Removing the handler's own `isInvalidated`
+    // guard does not fail this, because the scrub already replaced the parent with an empty reader
+    // and `loadContentIfReady` refuses an invalidated coordinator. A scrubbed reader must load
+    // nothing and call nothing back after a termination, whichever of them stops it.
+    func testWebContentTermination_afterAccountScrub_reloadsNothing() {
+        var loadFailedCount = 0
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 })
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.scrubForAccountBoundary(webView)
+        let loadsAfterScrub = webView.loadedHTML
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(webView.loadedHTML, loadsAfterScrub)
+        XCTAssertEqual(loadFailedCount, 0)
+    }
+
     // Revert-check: fails if `FullEmailReaderAccountBoundaryRegistry.register()`
     // loses its `acceptsAccountWork` admission guard — a reader whose makeUIView
     // runs during or after `clearForAccountTransition()` would keep old-account
@@ -628,6 +772,7 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         message: Message?,
         htmlContent: String? = nil,
         sourceSignature: String? = "sha256:source",
+        webViewAdoptionProvider: (any FullEmailWebViewAdopting)? = nil,
         onLoadFinished: (() -> Void)? = nil,
         onLoadFailed: (() -> Void)? = nil
     ) -> FullEmailReaderWebView {
@@ -635,6 +780,7 @@ final class FullEmailReaderWebViewTests: XCTestCase {
             htmlContent: htmlContent ?? defaultReaderHTML,
             sourceSignature: sourceSignature,
             message: message,
+            webViewAdoptionProvider: webViewAdoptionProvider,
             onLoadFinished: onLoadFinished,
             onLoadFailed: onLoadFailed
         )
@@ -679,10 +825,73 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         "<html><body><img src=\"cid:image001@example.com\"></body></html>"
     }
 
-    private func makeMessage(id: String) -> Message {
-        MessageBuilder()
-            .withId(id)
-            .build(in: coreDataStack.viewContext)
+    private func makeMessage(id: String, senderEmail: String? = nil) -> Message {
+        var builder = MessageBuilder().withId(id)
+        if let senderEmail {
+            builder = builder.withSender(email: senderEmail, name: "Sender")
+        }
+        return builder.build(in: coreDataStack.viewContext)
+    }
+}
+
+/// Records the reader's loads and supplies a window and a size, so `loadContentIfReady` is ready
+/// without layout callbacks. Nothing is really loaded.
+@MainActor
+private final class RecordingReaderWebView: WKWebView {
+    private let testWindow = UIWindow()
+    private(set) var loadedHTML: [String] = []
+    private(set) var loadedBaseURLs: [URL?] = []
+    private(set) var loadedRequests: [URLRequest] = []
+
+    override var window: UIWindow? { testWindow }
+
+    init() {
+        super.init(frame: CGRect(x: 0, y: 0, width: 390, height: 600), configuration: WKWebViewConfiguration())
+    }
+
+    required init?(coder: NSCoder) {
+        return nil
+    }
+
+    override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
+        loadedHTML.append(string)
+        loadedBaseURLs.append(baseURL)
+        return nil
+    }
+
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        loadedRequests.append(request)
+        return nil
+    }
+}
+
+@MainActor
+private final class RecordingTerminationAdopter: FullEmailWebViewAdopting {
+    struct Record {
+        let messageId: String
+        let webView: WKWebView
+    }
+
+    private(set) var discards: [Record] = []
+    private(set) var checkins: [Record] = []
+
+    func checkout(
+        messageId: String,
+        sourceSignature: String?,
+        wrappedHTML: String,
+        message: Message?,
+        width: CGFloat
+    ) -> FullEmailWebViewManager.Checkout? {
+        nil
+    }
+
+    func checkin(messageId: String, webView: WKWebView) -> Bool {
+        checkins.append(Record(messageId: messageId, webView: webView))
+        return true
+    }
+
+    func discard(messageId: String, webView: WKWebView) {
+        discards.append(Record(messageId: messageId, webView: webView))
     }
 }
 

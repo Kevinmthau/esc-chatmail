@@ -1,4 +1,5 @@
 import Foundation
+import WebKit
 
 /// Shared load-readiness / reload-signature core for the email WebView
 /// coordinators (`BaseEmailWebView.Coordinator` and
@@ -15,6 +16,9 @@ final class EmailWebViewLoadCoordination {
     private(set) var lastLoadedContent: String = ""
     private(set) var lastLoadedReloadSignature: String = ""
     private(set) var hasFinishedLoad = false
+    /// The content and signature last reloaded after the web view's WebContent process terminated.
+    /// See `admitsReloadAfterWebContentTermination`.
+    private var webContentTerminationReload: (content: String, reloadSignature: String)?
 
     /// Preview WebViews size themselves from the reported height, so
     /// readiness requires a measured height; the full reader does not.
@@ -101,6 +105,34 @@ final class EmailWebViewLoadCoordination {
         }
         resetLoadedSignatureAfterFailure()
         return true
+    }
+
+    /// Answers whether a WebContent process termination may reload this content: once for each
+    /// content and signature, then no more. The coordinators reload their own content when the
+    /// process dies, and `updateWebView` reloads whenever `needsReload` holds, so a page that
+    /// crashes WebKit every time it loads would reload for as long as the view is on screen. The
+    /// second termination of the same content is answered `false`, and the caller then leaves the
+    /// signature recorded, so nothing reloads it until the content or its signature changes.
+    func admitsReloadAfterWebContentTermination(content: String, reloadSignature: String) -> Bool {
+        if let webContentTerminationReload,
+           webContentTerminationReload.content == content,
+           webContentTerminationReload.reloadSignature == reloadSignature {
+            return false
+        }
+        webContentTerminationReload = (content, reloadSignature)
+        return true
+    }
+
+    /// A navigation that failed because its WebContent process died. The coordinators ignore it:
+    /// `webViewWebContentProcessDidTerminate` owns that recovery, and a failure handled as an
+    /// ordinary one would reset the signature behind the termination's reload, which is how the
+    /// once-only latch above would be undone into a reload loop. On the iOS 27.0 simulator no
+    /// failure arrived at all for a navigation the process took with it (2026-11-24, a SIGKILL of
+    /// the process mid-load); this is for a WebKit that reports one.
+    static func isWebContentProcessTerminationError(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        return nsError.domain == WKErrorDomain
+            && nsError.code == WKError.Code.webContentProcessTerminated.rawValue
     }
 
     static func isCancelledNavigationError(_ error: Error) -> Bool {
