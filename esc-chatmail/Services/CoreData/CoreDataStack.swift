@@ -29,11 +29,21 @@ final class CoreDataStack: @unchecked Sendable {
     /// depend on the host's free space. Read only by
     /// `resetStoreAfterLoadFailure()`.
     private let availableStorageBytes: @Sendable () -> Int64?
+    /// Each bundled model version's entity hashes
+    /// (`StoreModelCompatibility.bundledVersionHashes`), read only after a
+    /// migration-family load error.
+    private let bundledModelVersionHashes: @Sendable () -> [String: [String: Data]]?
+    /// Records, before a recovery reset removes the store, that it did
+    /// (`StoreRecoveryResetMarker`), so the restore that follows can tell the
+    /// store's own account's orphaned files from another account's.
+    private let markStoreRemovedByRecovery: @Sendable () -> Void
 
     init() {
         self.injectedContainerForTesting = nil
         self.injectedContainerNeedsLoading = false
         self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
+        self.bundledModelVersionHashes = { StoreModelCompatibility.bundledVersionHashes() }
+        self.markStoreRemovedByRecovery = { StoreRecoveryResetMarker.mark(in: .standard) }
     }
 
     /// Creates a stack backed by an existing, already-loaded container so that
@@ -46,6 +56,8 @@ final class CoreDataStack: @unchecked Sendable {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = false
         self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
+        self.bundledModelVersionHashes = { StoreModelCompatibility.bundledVersionHashes() }
+        self.markStoreRemovedByRecovery = {}
         self._isStoreLoaded = true
     }
 
@@ -55,11 +67,17 @@ final class CoreDataStack: @unchecked Sendable {
     /// load and recovery ladder against it.
     init(
         unloadedPersistentContainerForTesting container: NSPersistentContainer,
-        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() }
+        availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
+        bundledModelVersionHashes: @escaping @Sendable () -> [String: [String: Data]]? = {
+            StoreModelCompatibility.bundledVersionHashes()
+        },
+        markStoreRemovedByRecovery: @escaping @Sendable () -> Void = {}
     ) {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = true
         self.availableStorageBytes = availableStorageBytes
+        self.bundledModelVersionHashes = bundledModelVersionHashes
+        self.markStoreRemovedByRecovery = markStoreRemovedByRecovery
     }
 #endif
 
@@ -197,10 +215,10 @@ final class CoreDataStack: @unchecked Sendable {
     /// `TestCoreDataStack` reads its model from it, so with the default URL
     /// each Mac test run opened that mailbox with this checkout's model. A
     /// newer model would migrate it in place, and the installed app, unable
-    /// to open it afterwards, would delete it through its recovery ladder
-    /// (`CoreDataErrorClassifier` maps a version-hash mismatch to migration
-    /// recovery). An older model would fail to open it, and the host's own
-    /// ladder would delete it on the spot.
+    /// to open it afterwards, could not open the mailbox again until it was
+    /// updated (`PersistentStoreLoadError.storeFromNewerVersion`; before
+    /// 2026-11 its recovery ladder deleted it). An older model would fail to
+    /// open it in the same way.
     ///
     /// iOS keeps the default URL: a simulator's container holds nobody's mail.
     ///
@@ -275,8 +293,14 @@ final class CoreDataStack: @unchecked Sendable {
                 self?.retryLoadingStore(for: container)
             }
 
-        case .migrationRecovery:
-            attemptMigrationRecovery(for: container, originalError: error)
+        case .migrationFailed:
+            // Kept, foreground or background: never backed up and deleted
+            // here (`CoreDataErrorClassifier.RecoveryAction.migrationFailed`).
+            setStoreLoadError(StoreModelCompatibility.loadError(
+                forMigrationFailure: error,
+                storeAt: container.persistentStoreDescriptions.first?.url,
+                bundledVersionHashes: bundledModelVersionHashes()
+            ))
 
         case .storeReset:
             attemptStoreReset(for: container, originalError: error)
@@ -308,9 +332,9 @@ final class CoreDataStack: @unchecked Sendable {
         /// The store was backed up and removed. `retryLoadAfterFailure()`
         /// then loads an empty one.
         case removed
-        /// Nothing was touched: no `.unavailable` load failure is latched
-        /// with the store detached, or the volume is low on space or could
-        /// not be measured. The store opened, a timeout retry is pending, or
+        /// Nothing was touched: no resettable load failure (`.unavailable`
+        /// or `.migrationFailed`) is latched with the store detached, or the
+        /// volume is low on space or could not be measured. The store opened, a timeout retry is pending, or
         /// the disk is (or may be) full.
         case notResettable
         /// The backup could not be written or the store could not be
@@ -325,9 +349,11 @@ final class CoreDataStack: @unchecked Sendable {
     /// same backup-then-remove path as a corrupt store; the caller then calls
     /// `retryLoadAfterFailure()`.
     ///
-    /// Refuses unless an `.unavailable` failure is latched and no store is
-    /// attached, so it never deletes an open store or one a timeout retry is
-    /// about to load. Also refuses unless the volume measurably has
+    /// Refuses unless an `.unavailable` or `.migrationFailed` failure is
+    /// latched and no store is attached, so it never deletes an open store or
+    /// one a timeout retry is about to load. A store saved by a newer build
+    /// (`.storeFromNewerVersion`) is never reset: only a build that knows its
+    /// model can open it. Also refuses unless the volume measurably has
     /// `StoreVolumeFreeSpace.lowStorageThresholdBytes` free: a full disk
     /// usually latches `.unavailable` (SQLite reports CANTOPEN, not FULL), so
     /// the latched error alone cannot rule one out, and there freeing space
@@ -337,38 +363,41 @@ final class CoreDataStack: @unchecked Sendable {
     func resetStoreAfterLoadFailure() -> StoreResetOutcome {
         let container = persistentContainer
         guard let loadError = storeLoadError,
-              case PersistentStoreLoadError.unavailable = loadError,
+              Self.allowsResetAfterLoadFailure(loadError),
               container.persistentStoreCoordinator.persistentStores.isEmpty,
               let storeURL = container.persistentStoreDescriptions.first?.url,
               StoreVolumeFreeSpace.hasRoomForStoreReset(availableBytes: availableStorageBytes()) else {
             return .notResettable
         }
-        // Deliberate data loss, like migration recovery: the backup is the
-        // only copy of queued PendingAction and OutboundSendMutationRecord
-        // rows.
+        // Deliberate data loss: the backup is the only copy of queued
+        // PendingAction and OutboundSendMutationRecord rows.
         Log.error(
             "Resetting the store at the user's request; queued PendingAction/OutboundSendMutationRecord rows survive only in the backup",
             category: .coreData,
             error: loadError
         )
+        // Before the removal: a crash between the two leaves a marker for a
+        // store that is still there, which the restore treats as it treats
+        // any store with rows. The removal is by path (the file, its -wal and
+        // its -shm), so it also removes a store that never attached.
+        markStoreRemovedByRecovery()
         return recoveryHandler.prepareStoreReset(for: storeURL) ? .removed : .failed
+    }
+
+    /// The latched load errors the launch screen's Reset Mailbox may remove
+    /// the store for. Never `.insufficientStorage` (freeing space keeps the
+    /// data) or `.storeFromNewerVersion` (a newer build opens it).
+    static func allowsResetAfterLoadFailure(_ loadError: Error) -> Bool {
+        switch loadError {
+        case PersistentStoreLoadError.unavailable, PersistentStoreLoadError.migrationFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     private func retryLoadingStore(for container: NSPersistentContainer) {
         loadPersistentStores(for: container)
-    }
-
-    private func attemptMigrationRecovery(for container: NSPersistentContainer, originalError: NSError) {
-        guard let storeURL = container.persistentStoreDescriptions.first?.url else {
-            setStoreLoadError(PersistentStoreLoadError(classifying: originalError))
-            return
-        }
-
-        if recoveryHandler.prepareMigrationRecovery(for: storeURL) {
-            loadPersistentStores(for: container)
-        } else {
-            attemptStoreReset(for: container, originalError: originalError)
-        }
     }
 
     private func attemptStoreReset(for container: NSPersistentContainer, originalError: NSError) {
@@ -377,6 +406,7 @@ final class CoreDataStack: @unchecked Sendable {
             return
         }
 
+        markStoreRemovedByRecovery()
         if recoveryHandler.prepareStoreReset(for: storeURL) {
             loadPersistentStores(for: container)
         } else {

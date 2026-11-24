@@ -7,7 +7,7 @@ import CoreData
 /// `OutboundSendMutationRecord` rows and of the user's sent attachments, and
 /// forces a full re-sync. So `.storeReset` is an allow-list of errors that
 /// prove the file is not a usable database, and everything else keeps the
-/// store. It used to be the fallback for any error that was neither a timeout
+/// store, a migration that failed included (`.migrationFailed`). It used to be the fallback for any error that was neither a timeout
 /// nor a migration error, which deleted the store on a full disk, an I/O
 /// fault, or a launch before first unlock. A kept store that never opens is
 /// reset only by the user, from the launch screen's Reset Mailbox
@@ -25,7 +25,7 @@ enum CoreDataErrorClassifier {
         // NSPersistentStoreIncompatibleVersionHashError is deliberately NOT
         // here: a version-hash mismatch is deterministic — the store's model
         // hashes match no bundled model — so retrying can never succeed and
-        // only delayed the same migration-recovery outcome. It classifies as
+        // only delayed the same migration-failure outcome. It classifies as
         // a migration error below.
         let recoverableCodes = [
             NSPersistentStoreTimeoutError,
@@ -126,7 +126,7 @@ enum CoreDataErrorClassifier {
         } else if isStoreTemporarilyUnavailableError(error) {
             return .keepStore
         } else if isMigrationError(error) {
-            return .migrationRecovery
+            return .migrationFailed
         } else if isCorruptStoreError(error) {
             return .storeReset
         } else {
@@ -140,8 +140,16 @@ enum CoreDataErrorClassifier {
     enum RecoveryAction {
         /// Retry the operation after a delay
         case retry
-        /// Attempt migration recovery (backup + delete + reload)
-        case migrationRecovery
+        /// A migration-family error: the store could not be brought to this
+        /// build's model. The store is kept, never deleted automatically,
+        /// whether the launch is in the foreground or a background task's.
+        /// `CoreDataStack` reads the store's metadata to tell a store saved by
+        /// a newer build (`PersistentStoreLoadError.storeFromNewerVersion`,
+        /// which nothing resets) from a migration that failed on the user's
+        /// data (`.migrationFailed`, which the user may reset). This used to
+        /// back the store up and delete it on the first failure, and a
+        /// downgraded build lost the mailbox, its queued actions and drafts.
+        case migrationFailed
         /// Back up and delete the store. Only for a store proven corrupt.
         case storeReset
         /// Leave the store on disk and latch a load error the user can retry

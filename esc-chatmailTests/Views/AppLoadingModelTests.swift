@@ -16,6 +16,71 @@ final class AppLoadingModelTests: XCTestCase {
         )
     )
 
+    private let newerBuildFailure = CoreDataError.storeLoadFailed(
+        PersistentStoreLoadError.storeFromNewerVersion(
+            NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
+        )
+    )
+    private let failedMigration = CoreDataError.storeLoadFailed(
+        PersistentStoreLoadError.migrationFailed(
+            NSError(domain: NSCocoaErrorDomain, code: NSMigrationError)
+        )
+    )
+
+    /// Kevin, 2026-11-24: a store a newer MushMail saved is never offered a
+    /// reset, however often it fails: the foreground retry loop alone fails it
+    /// past the threshold in about 15 seconds.
+    ///
+    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering true
+    /// for `.storeFromNewerVersion` (it then counts toward the threshold), with
+    /// the `.storeFromNewerVersion` notice in `storeLoadFailureNotice` falling
+    /// through to the migration-failure case.
+    func testShowStoreLoadFailure_storeFromNewerVersion_neverOffersResetAndAsksToUpdate() {
+        let harness = Harness()
+
+        for _ in 0..<(threshold * 4) {
+            harness.model.showStoreLoadFailure(newerBuildFailure)
+            XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+        }
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Update MushMail")
+    }
+
+    /// A streak of a store that could not be opened, which a reset is offered
+    /// for, cannot carry over to a newer build's store: the newer-build failure
+    /// ends it, and the next failure of the first kind starts again from one.
+    ///
+    /// Revert-check: the `offersResetPastThreshold` guard in
+    /// `AppLoadingPolicy.resetEligibleFailureCount`.
+    func testShowStoreLoadFailure_newerBuildFailureMidStreak_endsStreak() {
+        let harness = Harness()
+        for _ in 0..<(threshold - 1) {
+            harness.model.showStoreLoadFailure(keptStoreFailure)
+        }
+
+        harness.model.showStoreLoadFailure(newerBuildFailure)
+        harness.model.showStoreLoadFailure(keptStoreFailure)
+
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+    }
+
+    /// Kevin, 2026-11-24: a migration that fails on the user's data is offered
+    /// the confirmed reset once retrying has not helped, and not before.
+    ///
+    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering
+    /// false for `.migrationFailed`.
+    func testShowStoreLoadFailure_failedMigration_offersResetAtThreshold() {
+        let harness = Harness()
+
+        for _ in 0..<(threshold - 1) {
+            harness.model.showStoreLoadFailure(failedMigration)
+        }
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+
+        harness.model.showStoreLoadFailure(failedMigration)
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
+    }
+
     /// Revert-check: making `AppLoadingModel.showStoreLoadFailure` pass a
     /// `previousCount` of 0 never reaches the threshold and fails this.
     func testShowStoreLoadFailure_repeatedKeptStoreFailures_offerResetAtThreshold() {

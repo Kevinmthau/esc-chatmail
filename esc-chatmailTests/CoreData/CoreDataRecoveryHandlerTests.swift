@@ -39,13 +39,13 @@ final class CoreDataRecoveryHandlerTests: XCTestCase {
         XCTAssertEqual(delay, 0.01, accuracy: 0.0001)
     }
 
-    func testHandleError_migrationError_returnsMigrationRecovery() {
+    func testHandleError_migrationError_returnsMigrationFailed() {
         let error = NSError(domain: NSCocoaErrorDomain, code: NSMigrationError)
 
         let result = sut.handleError(error, currentAttempts: 0)
 
-        guard case .migrationRecovery = result else {
-            return XCTFail("Expected .migrationRecovery, got \(result)")
+        guard case .migrationFailed = result else {
+            return XCTFail("Expected .migrationFailed, got \(result)")
         }
     }
 
@@ -77,23 +77,6 @@ final class CoreDataRecoveryHandlerTests: XCTestCase {
         guard case .keepStore = result else {
             return XCTFail("Expected .keepStore when attempts exhausted, got \(result)")
         }
-    }
-
-    // MARK: - prepareMigrationRecovery
-
-    func testPrepareMigrationRecovery_validStore_createsBackupAndRemovesStore() {
-        let succeeded = sut.prepareMigrationRecovery(for: storeURL)
-
-        XCTAssertTrue(succeeded)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: storeURL.path),
-                       "Store should be removed after migration recovery prep")
-        let backups = CoreDataBackupManager.listBackups(for: storeURL)
-        XCTAssertEqual(backups.count, 1, "Exactly one backup should have been created")
-    }
-
-    func testPrepareMigrationRecovery_missingStore_returnsFalse() {
-        let missing = tempDir.appendingPathComponent("missing.sqlite")
-        XCTAssertFalse(sut.prepareMigrationRecovery(for: missing))
     }
 
     // MARK: - prepareStoreReset
