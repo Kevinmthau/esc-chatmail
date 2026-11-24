@@ -157,8 +157,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// and `OutboundTaskRegistry.cancelAndAwaitAll` waits for it with the
     /// auth-transition gate held, as the next chat reply to the same
     /// conversation waits for its turn. It bounds one attempt, not the send:
-    /// the breaker is checked only before an attempt, so a 401 or 429 just
-    /// inside its 120 s can start a second attempt of up to 300 s (about
+    /// the breaker is checked only before an attempt, so a retry (a 401, a
+    /// 429 or a pre-transmission failure) just inside its 120 s can start a
+    /// second attempt of up to 300 s (about
     /// 420 s in all). Never raise it without weighing that.
     ///
     /// Every other setting (the request timeout, cache policy, and any
