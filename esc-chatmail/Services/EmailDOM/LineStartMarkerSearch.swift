@@ -14,7 +14,8 @@ import Foundation
 /// start, or at the run's first `\r` or `\n`. The regex then takes that first
 /// start, through the end of the marker's own match. Here each run's first
 /// start is tried once: the marker is matched where the run ends.
-/// `LineStartMarkerSearchTests` compares this with the regex.
+/// `HTMLMarkupScanTests.testLineStartMarkers_matchTheirRegexes` compares
+/// this with the regexes.
 struct LineStartMarkerSearch {
     /// Each marker's own regex, anchored where it is tried.
     private let markers: [NSRegularExpression]

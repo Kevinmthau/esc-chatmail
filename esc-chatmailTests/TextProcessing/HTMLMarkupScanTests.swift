@@ -120,6 +120,53 @@ final class HTMLMarkupScanTests: XCTestCase {
         }
     }
 
+    /// `HTMLMeaningfulContentChecker`'s three hidden-element regexes, which
+    /// `HiddenElementRule.meaningfulContentRules` replaced, in order.
+    private static let meaningfulContentHiddenRegexes: [NSRegularExpression] = [
+        "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*\\bhidden\\b[^>]*>[\\s\\S]*?</\\1>",
+        "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|opacity\\s*:\\s*0(?:\\.0+)?)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
+        "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*class\\s*=\\s*['\"][^'\"]*(?:\\bm-hide\\b|\\bpreheader\\b|\\bpreview-text\\b)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
+    ].compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
+
+    func testMeaningfulContentHiddenRules_matchTheirRegexes() throws {
+        let rules = HiddenElementRule.meaningfulContentRules
+        XCTAssertEqual(rules.count, 3)
+        XCTAssertEqual(Self.meaningfulContentHiddenRegexes.count, 3)
+        for (rule, regex) in zip(rules, Self.meaningfulContentHiddenRegexes) {
+            var generator = MarkupGenerator(seed: 0xC4EC)
+            for _ in 0..<25_000 {
+                let html = generator.next()
+                if html.unicodeScalars.contains(where: Self.fullyFoldedScalars.contains) { continue }
+                XCTAssertEqual(rule.removing(from: html), Self.replacing(regex, in: html, with: ""), "\(regex.pattern) \(html.debugDescription)")
+            }
+        }
+    }
+
+    /// SwiftSoup writes `<` and `>` in attribute values back out as they came,
+    /// so markup a sender hides in one attribute reaches the meaningful-content
+    /// check after every cleanup mode, and the rich-content pre-run's Apple
+    /// rich-link pass on every received message. At these sizes the regexes
+    /// and the `<div` search took 4 to 16 s (-O).
+    /// Revert-check: `HiddenElementRule.meaningfulContentRules` and the two
+    /// `HTMLBlockRule`s in `HTMLMeaningfulContentChecker.stripNonRenderableContent`,
+    /// and the kept hits in `RichContentClassifier.findMatchingClosingDiv`.
+    func testMarkupHiddenInAnAttribute_isReadOnce() {
+        let shapes = [
+            "<p title=\"" + String(repeating: "<!--", count: 20_000) + "\">Hello there</p>",
+            "<p title=\"" + String(repeating: "<head>", count: 20_000) + "\">Hello there</p>",
+            "<img title=\"" + String(repeating: "<a style='display:none'>", count: 10_000) + "\">Hello",
+            "<img title=\"" + String(repeating: "<a hidden>", count: 20_000) + "\">Hello",
+            "<img title=\"" + String(repeating: "<a class='preheader'>", count: 10_000) + "\">Hello",
+            "<div class=\"apple-rich-link\" title=\"" + String(repeating: "<div", count: 20_000) + "\">Hello there.</div>",
+        ]
+        for html in shapes {
+            let started = Date()
+            _ = HTMLMeaningfulContentChecker.hasMeaningfulContent(html)
+            _ = RichContentClassifier.hasGenuineRichContent(html)
+            XCTAssertLessThan(Date().timeIntervalSince(started), 5, String(html.prefix(40)))
+        }
+    }
+
     /// The one deliberate difference: a name meets its close tag ignoring
     /// ASCII case only, where the regex's backreference folded case fully.
     /// Revert-check: none; this pins the documented difference in
@@ -356,6 +403,7 @@ private struct MarkupGenerator {
         "<x", "<x>", "</x>", "<a1>", "</a1>", "<p>", "</p>", "<kbd>", "</\u{212A}bd>",
         "style", "style=", "style=\"", "style='", " style=\"display:none\"", " style='opacity:0'",
         "display:none", "display : none", "font-size:0", "mso-hide:all", "visibility:hidden", "max-height:0",
+        "opacity:0.00", " hidden", "hidden>", "Hidden", "class=", " class=\"preheader\"", " class='m-hide x'", "preview-text", "<a1 ",
         "On ", "on ", " wrote:", "On Jan 30, 2026 at 7:32 PM,", "Le ", " a écrit:", "Am ", " schrieb:",
         "-----Original Message-----", "-- Original Message --",
     ]

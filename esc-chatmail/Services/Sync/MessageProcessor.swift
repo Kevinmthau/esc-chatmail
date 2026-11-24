@@ -1020,8 +1020,8 @@ class MessageProcessor: @unchecked Sendable {
 
     // prepareHTMLForSnippet's three patterns: `<head\b[^>]*>[\s\S]*?</head>`
     // (.caseInsensitive), `<!--[\s\S]*?-->` (no options) and the hidden-element
-    // pattern (`HTMLMarkupScan.removingHiddenElements`, which documents it and
-    // its one difference), each removed with the result its regex gave but
+    // pattern (`HiddenElementRule.snippet`, which documents it and its one
+    // difference), each removed with the result its regex gave but
     // read once (`HTMLMarkupScan`): the regexes reread the rest of the text at
     // every start with nothing to close it.
     private static let snippetHeadElementRule = HTMLBlockRule(
