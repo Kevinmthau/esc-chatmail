@@ -446,14 +446,19 @@ enum EmailDOMParseAdmission {
                 Saturating.add(depth, TokenizingScanner.rebuildCost(attributeCount: attributes))
             )
             // Every node of the body in one block: each `<` gives an element
-            // at most the run of text before it and itself, and each pass of
-            // the adoption agency an adopter and a moved block, at most one
-            // pass for each formatting start tag. A block's children are
-            // moved together once, so this bounds the sum of the squares too.
+            // at most the run of text before it and itself, each pass of the
+            // adoption agency an adopter and a moved block, at most one pass
+            // for each formatting start tag, and foster parenting a rebuilt
+            // copy of each formatting element before it at each token. A
+            // block's children are moved together once, so this bounds the
+            // sum of the squares too.
             if count.mayRunAdoptionAgency {
                 let nodes = Saturating.add(
                     Saturating.add(Saturating.multiply(count.tokenCount, 2), 1),
-                    Saturating.multiply(count.formattingTagCount, 2)
+                    Saturating.add(
+                        Saturating.multiply(count.formattingTagCount, 2),
+                        Saturating.multiply(count.formattingTagsAcrossTokens, 2)
+                    )
                 )
                 childMoveWork = Saturating.multiply(nodes, nodes)
             } else {
@@ -518,9 +523,12 @@ private enum ScannedTagName {
 
     /// Elements SwiftSoup always inserts empty, never pushing them. Kept to
     /// the ones the tree builder's handlers insert empty themselves; any
-    /// other name is counted as an element that can hold children.
+    /// other name is counted as an element that can hold children. A
+    /// `command` is inserted empty in the body too (`InBodyStartToHead`,
+    /// then the head's `baseEtc`): held as open, its `</command>` dropped
+    /// the children counted on it.
     static let voidNames: Set<[UInt8]> = Set([
-        "area", "base", "basefont", "bgsound", "br", "col", "embed", "hr", "img", "input",
+        "area", "base", "basefont", "bgsound", "br", "col", "command", "embed", "hr", "img", "input",
         "keygen", "link", "meta", "param", "source", "track", "wbr"
     ].map { Array($0.utf8) })
 
@@ -590,6 +598,23 @@ private enum ScannedTagName {
     /// list back to them (a `</table>` over an `object`), which leaves their
     /// marker in the list: a cell closed later then clears only back to it.
     static let markersLeftInTheList = names(["applet", "marquee", "object", "template"])
+    /// Start tags SwiftSoup 2.13.5's body inserts without first rebuilding
+    /// the active formatting elements: `InBodyStartPClosers`, the headings,
+    /// `pre`, `listing`, `li`, `dd`, `dt`, `table` and `form`. Every other
+    /// start tag, and every run of text, may rebuild them.
+    static let insertsWithoutRebuilding = names([
+        "address", "article", "aside", "blockquote", "center", "details", "dir", "div", "dl", "fieldset",
+        "figcaption", "figure", "footer", "header", "hgroup", "menu", "nav", "ol", "p", "section", "summary",
+        "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "listing", "li", "dd", "dt", "table", "form"
+    ])
+
+    /// Where the adoption agency stops looking for a formatting element
+    /// held below: one of SwiftSoup 2.13.5's markers ends the active
+    /// formatting list's search (`getActiveFormattingElement`), and a
+    /// `table` the agency's scope (`TagSets.inScope`). Not HTML's: SwiftSoup
+    /// pushes no marker for a `template`, which is neither.
+    static let agencyMarkers = names(["td", "th", "caption", "applet", "marquee", "object"])
+    static let agencyBoundaries = agencyMarkers.union(names(["table"]))
     static let cells = names(["td", "th"])
 
     static let tableStructure = names([
@@ -615,9 +640,9 @@ private enum ScannedTagName {
 
     /// Start tags the body may drop or insert without leaving them open,
     /// which this scan otherwise holds as open: a `form` while SwiftSoup's
-    /// form pointer is set or in a table, a `frame`, and an `isindex`
-    /// (built from a form it closes).
-    static let mayNotStayOpen = names(["form", "frame", "isindex"])
+    /// form pointer is set or in a table, a `frame`, an `rp` or `rt` with
+    /// no `ruby` in scope (`InBodyStartRuby`), and an `isindex`.
+    static let mayNotStayOpen = names(["form", "frame", "isindex", "rp", "rt"])
 
     /// The elements SwiftSoup may close for the tag that closed one named
     /// `name`: the scan closes the innermost, and where that one may already
@@ -697,8 +722,17 @@ private enum ScannedTagName {
         if tableSections.contains(name) {
             return sectionEndTargets
         }
+        if name == table {
+            return tableEndTargets
+        }
         return [name]
     }
+
+    /// A `</table>` closes the cell, caption or column group it is read in
+    /// (`closeCell`, `processEndTag(caption)`), even with no `table` held, as
+    /// in a table part's fragment, where a `caption` closed this way took
+    /// an `object` held inside it with it.
+    private static let tableEndTargets = names(["table", "caption", "colgroup", "tbody", "thead", "tfoot", "tr", "td", "th"])
 
     /// How the tree builder may close held elements for a start tag:
     /// `targets` found looking down from the current node, a search that
@@ -773,13 +807,14 @@ private enum ScannedTagName {
 
     /// Start tags that close a `p` in button scope: SwiftSoup 2.13.5's
     /// `InBodyStartPClosers` plus the others whose handlers close one. Not
-    /// HTML's list: SwiftSoup inserts `dialog`, `main` and `xmp` as any
-    /// other element, and a `p` closed for one here stayed open there.
+    /// HTML's list: SwiftSoup inserts `dialog`, `main`, `xmp` and
+    /// `plaintext` as any other element, and a `p` closed for one here
+    /// stayed open there.
     static let closesParagraph: Set<[UInt8]> = Set([
         "address", "article", "aside", "blockquote", "center", "details", "dir", "div",
         "dl", "fieldset", "figcaption", "figure", "footer", "header", "hgroup", "menu",
         "nav", "ol", "p", "section", "summary", "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre",
-        "listing", "form", "li", "dd", "dt", "plaintext"
+        "listing", "form", "li", "dd", "dt"
     ].map { Array($0.utf8) })
 
     /// Raw text SwiftSoup's tree builder switches its tokenizer to after
@@ -1095,6 +1130,10 @@ private struct TokenizingScanner {
         /// active formatting list follows the marker's, and goes when the
         /// marker closes); otherwise -1.
         let clearedWithMarkerAt: Int
+        /// A formatting element the adoption agency has certainly taken out
+        /// of the active formatting list (`retireFromTheList`), though this
+        /// scan still holds it.
+        var retiredFromTheList = false
     }
 
     private struct Tag {
@@ -1215,6 +1254,33 @@ private struct TokenizingScanner {
     private var specialPositions: [Int] = []
     /// Where the markers held sit in `stack`, lowest first.
     private var markerPositions: [Int] = []
+    /// Where the `ScannedTagName.agencyBoundaries` held sit, lowest first.
+    private var agencyBoundaryPositions: [Int] = []
+    /// By formatting name, how many of the lowest held elements of that
+    /// name are retired from the active formatting list (`OpenElement
+    /// .retiredFromTheList`): a retired one is always below every one held
+    /// after it.
+    private var retiredByName: [[UInt8]: Int] = [:]
+    /// By formatting name, the `pushCount` when the first and the latest
+    /// element of it popped but kept in the active formatting list was
+    /// kept: a copy of one is rebuilt at or above the top of the stack of
+    /// that moment, never below it.
+    private var firstKeptAtByName: [[UInt8]: Int] = [:]
+    private var latestKeptAtByName: [[UInt8]: Int] = [:]
+    /// By formatting name, the `pushCount` at the first token after the
+    /// first keep that may rebuild formatting elements: before it no copy of
+    /// a kept one is on the builder's stack, and the agency finding a kept
+    /// one there only takes it out of the list, moving nothing.
+    private var firstPossibleCopyAtByName: [[UInt8]: Int] = [:]
+    /// Names kept since the last token that may rebuild.
+    private var keptAwaitingRebuild: Set<[UInt8]> = []
+    /// By formatting name, the kept ones the agency has certainly taken out
+    /// of the list (`consumeAKeptOne`).
+    private var keptConsumedByName: [[UInt8]: Int] = [:]
+    /// Over the formatting keys, the held elements of each, at most three
+    /// (Noah's ark): the most the tree builder can rebuild at one token,
+    /// whatever this scan knows about which are open.
+    private var rebuildableHeld = 0
     /// The `pushCount` after the latest push of a marker SwiftSoup may have
     /// left in its active formatting list: one of
     /// `ScannedTagName.markersLeftInTheList`, or any marker pushed before a
@@ -1260,7 +1326,8 @@ private struct TokenizingScanner {
             // The run of text before this markup is one node (the tokenizer
             // emits a run as one token, and the tree builder appends it).
             if readTextSinceMarkup {
-                countChildren(1, fosterable: readNonWhitespaceSinceMarkup)
+                noteTokenThatMayRebuild()
+                countChildren(1, fosterable: readNonWhitespaceSinceMarkup, rebuildsFormatting: true)
                 readTextSinceMarkup = false
                 readNonWhitespaceSinceMarkup = false
             }
@@ -1424,14 +1491,18 @@ private struct TokenizingScanner {
         // adoption agency for it (SwiftSoup 2.13.5 inserts a `<nobr>` as any
         // other element).
         if name == ScannedTagName.anchor {
-            chargeAdoptionAgency(for: name)
+            chargeAdoptionAgency(for: name, atStartTag: true)
         }
         closeImpliedElements(before: name)
+        if !ScannedTagName.insertsWithoutRebuilding.contains(name) {
+            noteTokenThatMayRebuild()
+        }
         // The element (or the empty one) goes to the current node once the
         // implied closes are done; in a table, all but a table part may be
         // foster parented (a `table` closes the one it is in, and goes
         // below it).
-        countChildren(1, fosterable: name == ScannedTagName.table || !ScannedTagName.tableStructure.contains(name))
+        let fosterable = name == ScannedTagName.table || !ScannedTagName.tableStructure.contains(name)
+        countChildren(1, fosterable: fosterable, rebuildsFormatting: fosterable)
         if ScannedTagName.formattingNames.contains(name) {
             let sameName = formattingHeldByName[name, default: 0]
             formattingCompareWork = Saturating.add(
@@ -1474,6 +1545,9 @@ private struct TokenizingScanner {
         if ScannedTagName.markers.contains(name) {
             markerPositions.append(stack.count - 1)
         }
+        if ScannedTagName.agencyBoundaries.contains(name) {
+            agencyBoundaryPositions.append(stack.count - 1)
+        }
         if ScannedTagName.markersLeftInTheList.contains(name) {
             latestMarkerPossiblyLeftInTheList = pushCount
         }
@@ -1504,15 +1578,27 @@ private struct TokenizingScanner {
     /// what the tree builder may have closed is marked.
     private mutating func closeElement(named name: [UInt8]) {
         if ScannedTagName.formattingNames.contains(name) {
-            chargeAdoptionAgency(for: name)
+            // An end tag the agency cannot act on is ignored by the builder
+            // (`anyOtherEndTag` stops at the boundary, which is special), so
+            // it closes nothing here either: marked as possibly closing
+            // everything above the `font` outside a table, a stray
+            // `</font>` in one cell left every later cell uncertain.
+            if agencyCannotReach(name) {
+                return
+            }
+            chargeAdoptionAgency(for: name, atStartTag: false)
         }
         if ScannedTagName.cells.contains(name), !isCertainlyInTableScope(name) {
             latestMarkerPossiblyLeftInTheList = pushCount
         }
         // `</p>` with no `p` in scope inserts one, `</br>` a `br`; no other
-        // end tag inserts anything.
+        // end tag inserts anything. SwiftSoup reads `</br>` as `<br>`, which
+        // rebuilds the formatting elements first.
+        if name == Self.br {
+            noteTokenThatMayRebuild()
+        }
         if name == ScannedTagName.p || name == Self.br {
-            countChildren(1)
+            countChildren(1, rebuildsFormatting: name == Self.br)
         }
         if stack.last?.name == name {
             if !isRobustlyOpen(at: stack.count - 1) {
@@ -1562,6 +1648,11 @@ private struct TokenizingScanner {
                     releaseFormatting(element)
                 } else {
                     keptWeight += element.weight
+                    if firstKeptAtByName[element.name] == nil {
+                        firstKeptAtByName[element.name] = pushCount
+                        keptAwaitingRebuild.insert(element.name)
+                    }
+                    latestKeptAtByName[element.name] = pushCount
                 }
             }
         }
@@ -1612,13 +1703,22 @@ private struct TokenizingScanner {
 
     /// `count` nodes the tree builder may append to its current node;
     /// `fosterable` where, in a table, it may append them below the table
-    /// instead.
-    private mutating func countChildren(_ count: Int, fosterable: Bool = true) {
+    /// instead. `rebuildsFormatting` for a token the body's rules handle
+    /// there, which first rebuilds the formatting elements off the stack:
+    /// while fostering, every rebuilt copy goes to the table's parent, side
+    /// by side (`insertNode`), not one inside the next, so that parent gains
+    /// one for each (`<i><div><p>`, ten `<b>`s, `</p><table>` and 4,000
+    /// `x<tr>` gave the `div` 40,000 children).
+    private mutating func countChildren(_ count: Int, fosterable: Bool = true, rebuildsFormatting: Bool = false) {
         guard let last = childPrefix.indices.last else { return }
-        childPrefix[last] = Saturating.add(childPrefix[last], count)
+        var count = count
         if fosterable, ScannedTagName.fosteringTableParts.contains(stack[last].name) {
+            if rebuildsFormatting {
+                count = Saturating.add(count, rebuildableHeld)
+            }
             fosterableCounts[last] = Saturating.add(fosterableCounts[last], count)
         }
+        childPrefix[last] = Saturating.add(childPrefix[last], count)
     }
 
     /// Before the innermost element is popped: what was counted on it goes
@@ -1634,6 +1734,12 @@ private struct TokenizingScanner {
         }
         if markerPositions.last == index {
             markerPositions.removeLast()
+        }
+        if agencyBoundaryPositions.last == index {
+            agencyBoundaryPositions.removeLast()
+        }
+        if stack[index].retiredFromTheList {
+            retiredByName[stack[index].name, default: 0] -= 1
         }
         guard let below = childPrefix.indices.last else { return }
         let passedOn: Int
@@ -1652,24 +1758,32 @@ private struct TokenizingScanner {
     /// formatting element `name` (`ParseCost.childMoveWork`).
     ///
     /// The agency finds the last `name` in the active formatting list and
-    /// takes the first special element above it as the furthest block, so
-    /// that is one held above the lowest `name` held, or anywhere where one
-    /// was closed but kept (and may be rebuilt anywhere). None is moved
-    /// where the innermost element is a `name` the builder certainly holds:
-    /// it, or a rebuilt one above it, is the one found, with nothing
-    /// special above. The agency runs once for each `name` in the list, at
-    /// most eight times, and each pass appends an adopter to its block and
-    /// a moved element to the block's common ancestor, which a later pass
-    /// may move again.
-    private mutating func chargeAdoptionAgency(for name: [UInt8]) {
-        let held = formattingHeldByName[name, default: 0]
-        guard held > 0 else { return }
+    /// takes the first special element above it as the furthest block. That
+    /// is a held one: above the lowest `name` held, or, for one popped but
+    /// kept in the list, above the copy the builder may rebuild of it, which
+    /// sits at or above the top of the stack of the moment it was kept.
+    /// None is moved where the innermost element is a `name` the builder
+    /// certainly holds (it, or a rebuilt one above it, is the one found,
+    /// with nothing special above), nor where every `name` lies below a
+    /// boundary the agency cannot see past (`agencyCannotReach`). The
+    /// agency runs once for each `name` in the list, at most eight times,
+    /// and each pass appends an adopter to its block and a moved element to
+    /// the block's common ancestor, which a later pass may move again.
+    private mutating func chargeAdoptionAgency(for name: [UInt8], atStartTag: Bool) {
+        let (live, kept) = listEntries(of: name)
+        let inTheList = live.count + kept
+        guard inTheList > 0 else { return }
         if stack.last?.name == name, isRobustlyOpen(at: stack.count - 1) {
             return
         }
-        let onStack = positionsByName[name] ?? []
-        let floor = held > onStack.count ? 0 : (onStack.first ?? 0)
-        let passes = min(Self.adoptionAgencyPasses, held)
+        if agencyCannotReach(name) {
+            return
+        }
+        var floor = live.first ?? stack.count
+        if kept > 0, let copyAt = firstPossibleCopyAtByName[name] {
+            floor = min(floor, firstPosition(pushedAfter: copyAt))
+        }
+        let passes = min(Self.adoptionAgencyPasses, inTheList)
         if let block = lowest(of: specialPositions, atOrAbove: floor), let top = childPrefix.last {
             // A later pass may move a block an earlier one appended to.
             let children = Saturating.add(
@@ -1682,6 +1796,117 @@ private struct TokenizingScanner {
             )
         }
         countChildren(Saturating.multiply(passes, 2))
+        if live.isEmpty {
+            consumeAKeptOne(name, atStartTag: atStartTag)
+        } else {
+            retireIfTheAgencyTakesIt(name, live: live, kept: kept)
+        }
+    }
+
+    /// The held elements of formatting name `name` still in the active
+    /// formatting list as far as this scan knows: those on the stack, lowest
+    /// first, and how many were kept after being popped.
+    private func listEntries(of name: [UInt8]) -> (live: ArraySlice<Int>, kept: Int) {
+        let retired = retiredByName[name, default: 0]
+        let onStack = positionsByName[name] ?? []
+        let live = onStack[min(retired, onStack.count)...]
+        let kept = formattingHeldByName[name, default: 0] - onStack.count - keptConsumedByName[name, default: 0]
+        return (live, max(0, kept))
+    }
+
+    /// A token after which the builder may have rebuilt formatting elements
+    /// (any run of text, and a start tag whose handler rebuilds).
+    private mutating func noteTokenThatMayRebuild() {
+        guard !keptAwaitingRebuild.isEmpty else { return }
+        for name in keptAwaitingRebuild where firstPossibleCopyAtByName[name] == nil {
+            firstPossibleCopyAtByName[name] = pushCount
+        }
+        keptAwaitingRebuild.removeAll()
+    }
+
+    /// With no `name` on the stack, the last `name` in the list is a kept
+    /// one or its copy, and the agency takes it out of the list: an `<a>`
+    /// start tag always (by the agency, or after it as the `a` it finds
+    /// still held), an end tag where no copy can be on the stack yet, since
+    /// the agency drops one it finds off the stack before looking at scope.
+    /// `<p><a href>link</p>` on every line kept an `a` a line and charged
+    /// each next `<a>` for the whole document.
+    private mutating func consumeAKeptOne(_ name: [UInt8], atStartTag: Bool) {
+        let (_, kept) = listEntries(of: name)
+        guard kept > 0, atStartTag || firstPossibleCopyAtByName[name] == nil else {
+            return
+        }
+        keptConsumedByName[name, default: 0] += 1
+        if kept == 1 {
+            firstKeptAtByName[name] = nil
+            latestKeptAtByName[name] = nil
+            firstPossibleCopyAtByName[name] = nil
+            keptAwaitingRebuild.remove(name)
+        }
+    }
+
+    /// Whether every `name` in the active formatting list lies below a
+    /// boundary the builder certainly holds, where the agency finds none
+    /// (a marker ends the list's search) or finds one out of scope (a
+    /// `table`), and moves nothing: a stray `</font>` in a cell of a table
+    /// inside `<font>`. A copy of a kept one rebuilt above a marker can be
+    /// found, unless it was kept before the marker was pushed (the rebuild
+    /// stops at the marker too); above a `table` it can, as foster parenting
+    /// rebuilds it there, and so can a copy of a held one the builder may
+    /// have closed.
+    private func agencyCannotReach(_ name: [UInt8]) -> Bool {
+        let (live, kept) = listEntries(of: name)
+        if live.isEmpty, kept == 0 {
+            return false
+        }
+        guard let boundary = agencyBoundaryPositions.last,
+              isRobustlyOpen(at: boundary),
+              (live.last ?? -1) < boundary else {
+            return false
+        }
+        if ScannedTagName.agencyMarkers.contains(stack[boundary].name) {
+            return kept == 0 || (latestKeptAtByName[name] ?? Int.max) < stack[boundary].pushedAt
+        }
+        return kept == 0 && live.count <= Self.robustCheckLimit && live.allSatisfy { isRobustlyOpen(at: $0) }
+    }
+
+    /// How many held elements `agencyCannotReach` checks one by one, so the
+    /// scan stays linear.
+    private static let robustCheckLimit = 4
+
+    /// Where the agency is certain to take the one `name` in the list out of
+    /// it (with no boundary held above it, it is found and in scope, and
+    /// every way through the agency removes it; an `<a>` start tag removes
+    /// it too when out of scope), and no marker that may have been left in
+    /// the list follows it, this scan stops counting it there, though
+    /// it still holds it: a stray `</b>` after `<b><div>…</b>`, or the
+    /// `<a>`s of every paragraph inside an `<a>` left open, then charges
+    /// nothing again.
+    private mutating func retireIfTheAgencyTakesIt(_ name: [UInt8], live: ArraySlice<Int>, kept: Int) {
+        // A marker left in the list after it would end the search first.
+        guard kept == 0, live.count == 1, let only = live.first,
+              (agencyBoundaryPositions.last ?? -1) < only,
+              latestMarkerPossiblyLeftInTheList < stack[only].pushedAt else {
+            return
+        }
+        stack[only].retiredFromTheList = true
+        retiredByName[name, default: 0] += 1
+    }
+
+    /// The lowest position in `stack` whose element was pushed after
+    /// `pushCount` was `time` (pushes are in stack order).
+    private func firstPosition(pushedAfter time: Int) -> Int {
+        var low = 0
+        var high = stack.count
+        while low < high {
+            let middle = (low + high) / 2
+            if stack[middle].pushedAt <= time {
+                low = middle + 1
+            } else {
+                high = middle
+            }
+        }
+        return low
     }
 
     /// SwiftSoup's adoption agency loop runs at most eight times.
@@ -1777,7 +2002,9 @@ private struct TokenizingScanner {
     /// Applies `change` to one key's counts and keeps the capped totals.
     private mutating func updateRebuildCandidates(key: Int, _ change: (inout TokenizingScanner) -> Void) {
         let before = min(heldByKey[key] - certainlyOpenByKey[key], Self.sameFormattingKept)
+        let heldBefore = min(heldByKey[key], Self.sameFormattingKept)
         change(&self)
+        rebuildableHeld += min(heldByKey[key], Self.sameFormattingKept) - heldBefore
         let after = min(heldByKey[key] - certainlyOpenByKey[key], Self.sameFormattingKept)
         rebuildCandidates += after - before
         rebuildCandidatesCost = Saturating.add(
