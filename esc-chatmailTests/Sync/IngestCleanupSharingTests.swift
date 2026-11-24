@@ -20,7 +20,10 @@ final class IngestCleanupSharingTests: XCTestCase {
             + corpus.rawSourceHTMLRecoveryCases.map(\.input)
             + corpus.cleanedSnippetCases.compactMap(\.html)
         XCTAssertGreaterThan(inputs.count, 100)
-        let paddings = [("\r\n", "\r\n"), ("\n\n  ", "\n \r\n\r\n"), ("\t ", ""), ("", "\n")]
+        let paddings = [
+            ("\r\n", "\r\n"), ("\n\n  ", "\n \r\n\r\n"), ("\t ", ""), ("", "\n"),
+            ("\u{A0}\u{2028}", "\u{85}\u{3000}\u{C}"),
+        ]
         for html in inputs {
             let trimmed = html.trimmingCharacters(in: .whitespacesAndNewlines)
             let expectedPreview = MessageProcessor.deriveHTMLChatPreview(from: trimmed)
@@ -43,6 +46,9 @@ final class IngestCleanupSharingTests: XCTestCase {
 
     /// Revert-check: the `richContentPrerun` assignment in
     /// `MessageProcessor.processGmailMessage` (the processor then returns none).
+    /// HONEST SCOPE: both inputs derive the same preview trimmed or not, so the
+    /// preview half pins nothing about which string ingest reads;
+    /// `testProcessGmailMessage_openElementToTheEnd_previewMatchesTheRepair` does.
     func testProcessGmailMessage_derivesPreviewAndPrerunFromTheStoredHTML() async throws {
         for html in [Self.richHTML, "<div>See you at noon.</div><div>Thanks,<br>Alex</div>"] {
             let message = Self.message(id: "shared", html: "\r\n\r\n  " + html + "\n \r\n")
@@ -56,6 +62,27 @@ final class IngestCleanupSharingTests: XCTestCase {
             ))
             XCTAssertEqual(processed.chatPreviewText, MessageProcessor.deriveHTMLChatPreview(from: stored))
         }
+    }
+
+    /// The one shape whose preview the untrimmed part derived differently:
+    /// trailing whitespace inside an element a bare address left open to the
+    /// end. Ingest now derives what `ChatPreviewRepair` derives from the
+    /// stored (trimmed) file.
+    /// Revert-check: `storedHTML` as the string `processGmailMessage` derives
+    /// its preview from (with `content.html`, the untrimmed part, the preview
+    /// keeps the line break).
+    func testProcessGmailMessage_openElementToTheEnd_previewMatchesTheRepair() async throws {
+        let part = "Please reply to Bob <bob@example.com> by Friday.\r\n"
+        let stored = part.trimmingCharacters(in: .whitespacesAndNewlines)
+        XCTAssertNotEqual(
+            MessageProcessor.deriveHTMLChatPreview(from: part),
+            MessageProcessor.deriveHTMLChatPreview(from: stored),
+            "Fixture: this shape must derive differently untrimmed"
+        )
+        let result = try await MessageProcessor().processGmailMessage(Self.message(id: "open", html: part), myAliases: [])
+        let processed = try XCTUnwrap(result)
+        XCTAssertEqual(processed.storedHTML, stored)
+        XCTAssertEqual(processed.chatPreviewText, MessageProcessor.deriveHTMLChatPreview(from: stored))
     }
 
     func testProcessGmailMessage_ownMessage_hasNoPrerun() async throws {

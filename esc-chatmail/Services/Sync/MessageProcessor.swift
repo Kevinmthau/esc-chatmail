@@ -115,9 +115,12 @@ class MessageProcessor: @unchecked Sendable {
         // rich-content pre-run (content-pipeline-cpu#2), which used to run the
         // cleanup chain again in `MessagePersister`. Derived from the trimmed
         // string the persister saves and `ChatPreviewRepair` re-derives from,
-        // never the untrimmed part: the two derive alike
-        // (`IngestCleanupSharingTests`), and the pre-run is reused only for
-        // the exact string it was computed on.
+        // never the untrimmed part, and the pre-run is reused only for the
+        // exact string it was computed on. The two derive alike for every
+        // golden-corpus input (`IngestCleanupSharingTests`); they differ only
+        // where trailing whitespace fell inside an element left open to the
+        // end (a plain-text part with a bare `<bob@example.com>`), and there
+        // ingest now gives the preview the repair already gave.
         try Task.checkCancellation()
         let classifiesRichContent = MessagePersister.richContentPrerunApplies(to: processedMessage)
         var storedHTMLDerivation: ChatBubbleTextProcessingResult?
