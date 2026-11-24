@@ -78,6 +78,10 @@ struct ChatPreviewRepair {
 
     let htmlContentHandler: HTMLContentHandler
     var pass: Pass = .receivedHTMLRederivation
+    /// The launch pass's poison-row guard. A quarantined row keeps its stored
+    /// preview and is passed like a row whose derivation changed nothing; nil
+    /// (tests, and any caller that is not a launch pass) derives every row.
+    var rowQuarantine: LaunchPassRowQuarantine?
 #if DEBUG
     /// Test seam: runs on the context's queue after each row a batch derives,
     /// so a test can land a cancellation between two rows of one batch.
@@ -406,7 +410,13 @@ struct ChatPreviewRepair {
     }
 
     private func applyDerivedPreview(to message: Message, recordingChangeIn batch: inout Batch) {
-        if let preview = derivedPreview(for: message),
+        if rowQuarantine?.isQuarantined(message.id) == true {
+            return
+        }
+        rowQuarantine?.beginRow(message.id)
+        let derived = derivedPreview(for: message)
+        rowQuarantine?.endRow()
+        if let preview = derived,
            !preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
            preview != message.chatPreviewText {
             message.chatPreviewText = preview

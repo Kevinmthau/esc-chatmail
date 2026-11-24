@@ -155,7 +155,7 @@ final class ConversationLaunchRepairCoordinator {
     /// One entry per persisted-preview pass, run in order under a single
     /// account-work request. Each pass owns its own completion flag and cursor.
     private struct ChatPreviewPass {
-        let repair: ChatPreviewRepair
+        var repair: ChatPreviewRepair
         let migrationKey: String
         let checkpointKey: String
     }
@@ -195,6 +195,17 @@ final class ConversationLaunchRepairCoordinator {
 #else
         return ChatPreviewRepair(htmlContentHandler: htmlContentHandler, pass: pass)
 #endif
+    }
+
+    /// The poison-row guard for a pass, built when the pass starts a run: that
+    /// is when a row an earlier launch died on is counted
+    /// (`LaunchPassRowQuarantine`). Its keys are its own, never one of
+    /// `chatPreviewRepairCheckpointKeys`, which conversation maintenance reads.
+    private func rowQuarantine(forPassKey passKey: String) -> LaunchPassRowQuarantine {
+        LaunchPassRowQuarantine.recoveringFromEarlierLaunches(
+            passKey: passKey,
+            store: storage.migrationFlags
+        )
     }
 
 #if DEBUG
@@ -258,6 +269,9 @@ final class ConversationLaunchRepairCoordinator {
         // current derivation they were ingested with, and then drops.
         // Account teardown therefore does not clear it.
         var retryCursor: ChatPreviewRepair.RetryCursor?
+        var guardedPass = pass
+        guardedPass.repair.rowQuarantine = rowQuarantine(forPassKey: pass.migrationKey)
+        let pass = guardedPass
         while !Task.isCancelled {
             // Never wait for sync while holding a lease: account teardown
             // waits for leases to drain before replacing the store.
@@ -461,7 +475,10 @@ final class ConversationLaunchRepairCoordinator {
     }
 
     private func runRichContentVerdictBackfill(request: AccountWorkRequest) async {
-        let backfill = RichContentVerdictBackfill(htmlContentHandler: htmlContentHandler)
+        let backfill = RichContentVerdictBackfill(
+            htmlContentHandler: htmlContentHandler,
+            rowQuarantine: rowQuarantine(forPassKey: Self.richContentVerdictBackfillMigrationKey)
+        )
         var cursor = storage.migrationFlags.string(forKey: Self.richContentVerdictBackfillCursorKey)
         while !Task.isCancelled {
             // Never wait for sync while holding a lease: account teardown
