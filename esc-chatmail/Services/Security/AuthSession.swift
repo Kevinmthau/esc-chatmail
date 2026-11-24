@@ -1985,9 +1985,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await clearParticipantCaches()
 
         // Through the seam, as every other path signs Google out: a test's stub
-        // must cover this too. Called directly, the SDK deleted the real "auth"
-        // keychain item, which in a Mac test host is the installed MushMail's
-        // Google session (architecture review 2026-11, account-boundary-auth#5).
+        // must cover this too. Called directly, the SDK would delete the real
+        // "auth" keychain item, which in a Mac test host is the installed
+        // MushMail's Google session (inferred from the shared keychain group, not
+        // measured; architecture review 2026-11, account-boundary-auth#5).
         signOutGoogleSession()
         currentUser = nil
         userEmail = nil
@@ -2054,9 +2055,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         await clearParticipantCaches()
 
         // Through the seam, as every other path signs Google out: a test's stub
-        // must cover this too. Called directly, the SDK deleted the real "auth"
-        // keychain item, which in a Mac test host is the installed MushMail's
-        // Google session (architecture review 2026-11, account-boundary-auth#5).
+        // must cover this too. Called directly, the SDK would delete the real
+        // "auth" keychain item, which in a Mac test host is the installed
+        // MushMail's Google session (inferred from the shared keychain group, not
+        // measured; architecture review 2026-11, account-boundary-auth#5).
         signOutGoogleSession()
         clearAuthState()
         clearAccountScopedSyncDefaults()

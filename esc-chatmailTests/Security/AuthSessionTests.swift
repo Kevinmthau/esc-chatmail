@@ -1454,9 +1454,9 @@ final class AuthSessionTests: XCTestCase {
 
     // The crash-resume pair signs Google out through the injected seam, in its place in
     // the teardown: after the drains, before the downloads close. It called the SDK
-    // singleton directly, which no stub covered, and in a Mac test host that deleted the
-    // installed MushMail's Google keychain item (architecture review 2026-11,
-    // account-boundary-auth#5).
+    // singleton directly, which no stub covered, and in a Mac test host that would delete
+    // the installed MushMail's Google keychain item (inferred, not measured; architecture
+    // review 2026-11, account-boundary-auth#5).
     // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` or
     // `resumeInterruptedCredentialCleanupIfNeeded()` goes back to
     // `GIDSignIn.sharedInstance.signOut()` in place of `signOutGoogleSession()`
@@ -1471,15 +1471,19 @@ final class AuthSessionTests: XCTestCase {
             let session = makeAuthSession(
                 keychainService: keychain,
                 signOutGoogleSession: { cleanup.record("google-sign-out") },
+                clearParticipantCaches: { cleanup.record("participants-closed") },
                 cleanupDownloads: { cleanup.record("downloads-closed") }
             )
 
             let outcome = await session.restorePreviousSignIn()
 
             XCTAssertEqual(outcome, .terminalNoSession, key.rawValue)
+            // The participant drain is the last one before the sign-out.
             XCTAssertEqual(
-                cleanup.events.filter { $0 == "google-sign-out" || $0 == "downloads-closed" }.prefix(2),
-                ["google-sign-out", "downloads-closed"],
+                cleanup.events
+                    .filter { ["participants-closed", "google-sign-out", "downloads-closed"].contains($0) }
+                    .prefix(3),
+                ["participants-closed", "google-sign-out", "downloads-closed"],
                 key.rawValue
             )
             XCTAssertEqual(cleanup.events.filter { $0 == "google-sign-out" }.count, 1, key.rawValue)
