@@ -21,9 +21,9 @@ struct HeldAccount: Equatable, Sendable {
         /// Google could not be reached: no network, a timeout, or Google's token
         /// endpoint failing or unavailable (`AuthSession.isConnectivityRestoreError`).
         case cannotConnect
-        /// The restore stopped for a reason of this device's: GoogleSignIn's keychain
-        /// item could not be read, a reopen step failed, or an error that is neither
-        /// a connection failure nor a revocation.
+        /// The restore stopped for a reason of this device's that a later attempt can
+        /// get past: GoogleSignIn's keychain item could not be read (with the app's
+        /// keychain naming an account), or a reopen step failed (`.transientFailure`).
         case couldNotRestore
     }
 

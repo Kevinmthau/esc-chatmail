@@ -71,6 +71,8 @@ final class LaunchRestoreRetryCoordinatorTests: XCTestCase {
         XCTAssertTrue(fixture.sleeper.requestedDelays.isEmpty)
     }
 
+    // HONEST SCOPE: both `attemptDidFinish` and `scheduleAutomaticRetryIfHeld` refuse
+    // without a held account, so this fails only if both checks are removed.
     func testAttemptThatEndsTheHold_schedulesNothingMore() async {
         let fixture = Fixture(pathSatisfied: true)
         fixture.restore.onRun = { fixture.isHeld.value = false }

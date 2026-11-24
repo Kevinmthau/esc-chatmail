@@ -22,6 +22,12 @@ import Foundation
 /// `AuthSession` treats as a failure that keeps the credentials and holds the account
 /// (`AuthSession.HeldAccount`).
 ///
+/// The bound is per request, not per restore: a restore usually makes one token request,
+/// but GoogleSignIn makes two when it already has a current user (a refresh, then on
+/// failure a restore from the keychain; `GIDSignIn.m` `restorePreviousSignIn`), so the
+/// gate is held for at most about a minute there. That is bounded, which is what the gate
+/// needs; the deadline of the restore as a whole is the sum.
+///
 /// The session is AppAuth's for every request it makes: the launch restore, the
 /// interactive sign-in's code exchange and `GIDGoogleUser.refreshTokensIfNeeded`. Each of
 /// them is one small POST, which `requestTimeout` and `resourceTimeout` leave ample room

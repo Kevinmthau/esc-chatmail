@@ -16,7 +16,7 @@ final class AuthSessionHeldAccountTests: XCTestCase {
     private let storedEmail = "stored@example.com"
 
     // Revert-check: fails if `concludeLaunchRestoreHold` stops holding the account, or if
-    // the restore callback's non-invalidating branch stops setting `heldFailure`.
+    // the restore callback's non-invalidating branch stops holding a connectivity error.
     func testRestore_offline_holdsAccountWithStoredEmailAndKeepsCredentials() async {
         let keychain = makeKeychain()
         let tokenManager = MockTokenManager()
@@ -56,19 +56,36 @@ final class AuthSessionHeldAccountTests: XCTestCase {
         XCTAssertEqual(session.heldAccount?.failure, .cannotConnect)
     }
 
-    func testRestore_errorThatIsNeitherConnectivityNorRevocation_holdsAsCouldNotRestore() async {
-        let keychainError = NSError(domain: kGIDSignInErrorDomain, code: -2)
-        let session = makeSession(restore: { completion in completion(nil, keychainError) })
+    /// An error asking again cannot mend (`invalid_client`, a bad ID token, a keychain
+    /// write) keeps the credentials, as before, but is neither held nor retried: the held
+    /// screen would promise a reconnect that never comes.
+    // Revert-check: fails if the restore callback holds every non-invalidating error
+    // instead of only `isConnectivityRestoreError` ones.
+    func testRestore_errorThatIsNeitherConnectivityNorRevocation_keepsCredentialsWithoutHolding() async {
+        for error in [
+            NSError(domain: kGIDSignInErrorDomain, code: -2),
+            NSError(domain: "org.openid.appauth.oauth_token", code: -9),
+            NSError(domain: "org.openid.appauth.general", code: -15)
+        ] {
+            let tokenManager = MockTokenManager()
+            let session = makeSession(
+                tokenManager: tokenManager,
+                restore: { completion in completion(nil, error) }
+            )
 
-        let outcome = await session.restorePreviousSignIn()
+            let outcome = await session.restorePreviousSignIn()
 
-        XCTAssertEqual(outcome, .retryableFailure)
-        XCTAssertEqual(session.heldAccount, HeldAccount(email: storedEmail, failure: .couldNotRestore))
+            XCTAssertEqual(outcome, .retryableFailure, "\(error)")
+            XCTAssertNil(session.heldAccount, "\(error)")
+            XCTAssertEqual(tokenManager.clearTokensCallCount, 0, "\(error)")
+        }
     }
 
     // Revert-check: fails if the `.indeterminate` branch of `restorePreviousSignIn` stops
-    // setting `heldFailure`: GoogleSignIn's item may be there, so it is not a sign-out.
-    func testRestore_unreadableGoogleSignInKeychain_holdsAsCouldNotRestore() async {
+    // setting `heldFailure` (GoogleSignIn's item may be there, so it is not a sign-out),
+    // or stops asking for a stored address first (a fresh install whose keychain query
+    // failed would be told its mail is on the device).
+    func testRestore_unreadableGoogleSignInKeychain_holdsOnlyAnAccountTheAppKeychainNames() async {
         let session = makeSession(
             hasPreviousGoogleSignIn: false,
             keychainPresence: .indeterminate,
@@ -79,6 +96,42 @@ final class AuthSessionHeldAccountTests: XCTestCase {
 
         XCTAssertEqual(outcome, .retryableFailure)
         XCTAssertEqual(session.heldAccount?.failure, .couldNotRestore)
+
+        let freshInstall = makeSession(
+            keychain: MockKeychainService(),
+            hasPreviousGoogleSignIn: false,
+            keychainPresence: .indeterminate,
+            restore: { _ in XCTFail("An unreadable SDK item is not restored") }
+        )
+
+        let freshInstallOutcome = await freshInstall.restorePreviousSignIn()
+        XCTAssertEqual(freshInstallOutcome, .retryableFailure)
+        XCTAssertNil(freshInstall.heldAccount)
+    }
+
+    // Revert-check: fails if a restore that cannot read the local-cleanup marker (the first
+    // keychain read, in `resumeInterruptedAccountRemovalIfNeeded`) drops the hold: every
+    // retry would then stop and the first-run sign-in screen show over intact credentials
+    // until the next launch.
+    // HONEST SCOPE: the same keep in the credential-cleanup and durable signed-out reads
+    // (`keepsExistingHold`, `keepingHoldIfUnreadable`) is never reached here: the mock's
+    // one-shot error is spent on the first read.
+    func testRetryAfterHold_unreadableMarker_keepsTheHold() async {
+        let keychain = makeKeychain()
+        let sdkRestores = HeldAccountTestBox(0)
+        let session = makeSession(keychain: keychain, restore: { completion in
+            sdkRestores.value += 1
+            completion(nil, URLError(.notConnectedToInternet))
+        })
+        _ = await session.restorePreviousSignIn()
+        XCTAssertNotNil(session.heldAccount)
+
+        keychain.errorToThrow = KeychainError.unhandledError(status: errSecInteractionNotAllowed)
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertEqual(sdkRestores.value, 1, "The marker read failed before the SDK restore")
+        XCTAssertEqual(session.heldAccount, HeldAccount(email: storedEmail, failure: .cannotConnect))
     }
 
     // invalid_grant on a retry signs out exactly as it does at launch, and ends the hold.
@@ -212,7 +265,7 @@ final class AuthSessionHeldAccountTests: XCTestCase {
             )
         ]
         for error in connectivity {
-            XCTAssertEqual(AuthSession.heldAccountFailure(for: error), .cannotConnect, "\(error)")
+            XCTAssertTrue(AuthSession.isConnectivityRestoreError(error), "\(error)")
             XCTAssertFalse(AuthSession.isCredentialInvalidatingRestoreError(error), "\(error)")
         }
 
@@ -223,7 +276,7 @@ final class AuthSessionHeldAccountTests: XCTestCase {
             NSError(domain: "AuthSessionHeldAccountTests", code: 1)
         ]
         for error in other {
-            XCTAssertEqual(AuthSession.heldAccountFailure(for: error), .couldNotRestore, "\(error)")
+            XCTAssertFalse(AuthSession.isConnectivityRestoreError(error), "\(error)")
         }
     }
 
