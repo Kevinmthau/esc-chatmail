@@ -81,6 +81,26 @@ final class AppLoadingModelTests: XCTestCase {
         XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
     }
 
+    /// The launch loop's timed retries do not reload a store whose migration
+    /// failed; the retry the user asks for, and the one after a reset, must.
+    ///
+    /// Revert-check: the `permitReloadAfterDeterministicFailure()` call in
+    /// `AppLoadingModel.retry`.
+    func testRetryAndReset_permitTheReloadOfAFailedMigration() {
+        let harness = Harness()
+        harness.model.showStoreLoadFailure(failedMigration)
+
+        harness.model.retry()
+        XCTAssertEqual(harness.reloadPermitCount, 1)
+
+        for _ in 0..<threshold {
+            harness.model.showStoreLoadFailure(failedMigration)
+        }
+        harness.model.resetMailbox()
+        XCTAssertEqual(harness.resetCallCount, 1)
+        XCTAssertEqual(harness.reloadPermitCount, 2, "The empty store must be loaded after the reset")
+    }
+
     /// Revert-check: making `AppLoadingModel.showStoreLoadFailure` pass a
     /// `previousCount` of 0 never reaches the threshold and fails this.
     func testShowStoreLoadFailure_repeatedKeptStoreFailures_offerResetAtThreshold() {
@@ -263,6 +283,7 @@ final class AppLoadingModelTests: XCTestCase {
         let retryRequests = RetryRequestCounter()
         var resetOutcome: CoreDataStack.StoreResetOutcome = .removed
         var resetCallCount = 0
+        var reloadPermitCount = 0
         var isProtectedDataAvailable = true
         var availableCapacityBytes: Int64? = 50 * 1024 * 1024 * 1024
         private(set) var model: AppLoadingModel!
@@ -275,6 +296,9 @@ final class AppLoadingModelTests: XCTestCase {
                 resetStore: { [unowned self] in
                     resetCallCount += 1
                     return resetOutcome
+                },
+                permitReloadAfterDeterministicFailure: { [unowned self] in
+                    reloadPermitCount += 1
                 },
                 availableCapacityBytes: { [unowned self] in availableCapacityBytes },
                 isProtectedDataAvailable: { [unowned self] in isProtectedDataAvailable }

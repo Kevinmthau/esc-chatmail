@@ -2,57 +2,74 @@ import XCTest
 import CoreData
 @testable import esc_chatmail
 
-/// `StoreModelCompatibility`: which bundled model version wrote a store, read from the
-/// compiled model's `VersionInfo.plist` without loading a second model.
+/// `StoreModelCompatibility`: a store is "a newer build's" only when it says so (the model
+/// ordinal stamped in its metadata is above this build's), never because its hashes match
+/// no bundled model.
 final class StoreModelCompatibilityTests: XCTestCase {
-    func testBundledVersionHashes_listEveryShippedVersionAndTheCurrentOne() throws {
-        let versions = try XCTUnwrap(StoreModelCompatibility.bundledVersionHashes())
-        let current = TestCoreDataStack.sharedModelVersionHashes
+    func testCurrentModelOrdinal_isReadFromTheCompiledModel() throws {
+        let ordinal = try XCTUnwrap(StoreModelCompatibility.currentModelOrdinal())
 
-        XCTAssertTrue(versions.keys.contains("ESCChatmail 5"))
-        XCTAssertTrue(
-            versions.values.contains(current),
-            "This build's own model must be among the versions it lists"
+        XCTAssertGreaterThanOrEqual(ordinal, 6, "ESCChatmail 6 shipped before this was written")
+    }
+
+    func testOrdinalOfModelVersionNamed_readsTheVersionNumber() {
+        XCTAssertEqual(StoreModelCompatibility.ordinal(ofModelVersionNamed: "ESCChatmail"), 1)
+        XCTAssertEqual(StoreModelCompatibility.ordinal(ofModelVersionNamed: "ESCChatmail 6"), 6)
+        XCTAssertEqual(StoreModelCompatibility.ordinal(ofModelVersionNamed: "ESCChatmail 12"), 12)
+        XCTAssertNil(StoreModelCompatibility.ordinal(ofModelVersionNamed: "ESCChatmail draft"))
+        XCTAssertNil(StoreModelCompatibility.ordinal(ofModelVersionNamed: "Other 3"))
+    }
+
+    func testVerdict_stampAboveThisBuild_isWrittenByNewerModel() {
+        let metadata: [String: Any] = [StoreModelCompatibility.modelOrdinalMetadataKey: 7]
+
+        XCTAssertEqual(
+            StoreModelCompatibility.verdict(forStoreMetadata: metadata, currentModelOrdinal: 6),
+            .writtenByNewerModel(storeOrdinal: 7)
         )
     }
 
-    func testVerdict_metadataOfTheCurrentModel_isABundledVersion() throws {
-        let metadata: [String: Any] = [NSStoreModelVersionHashesKey: TestCoreDataStack.sharedModelVersionHashes]
+    // Revert-check: the `storeOrdinal > currentModelOrdinal` condition of
+    // `StoreModelCompatibility.verdict(forStoreMetadata:currentModelOrdinal:)`. A store this
+    // build or an older one stamped, whose migration failed, would then never be resettable.
+    func testVerdict_stampAtOrBelowThisBuild_isNotNewer() {
+        for stamp in [1, 5, 6] {
+            let metadata: [String: Any] = [StoreModelCompatibility.modelOrdinalMetadataKey: stamp]
 
-        let verdict = StoreModelCompatibility.verdict(
-            forStoreMetadata: metadata,
-            bundledVersionHashes: StoreModelCompatibility.bundledVersionHashes()
-        )
-
-        guard case .bundledVersion = verdict else {
-            return XCTFail("Expected a bundled version, got \(verdict)")
+            XCTAssertEqual(
+                StoreModelCompatibility.verdict(forStoreMetadata: metadata, currentModelOrdinal: 6),
+                .notNewer,
+                "stamp \(stamp)"
+            )
         }
     }
 
-    func testVerdict_anEntityNoBundledVersionHas_isNoBundledVersion() {
-        var hashes = TestCoreDataStack.sharedModelVersionHashes
-        hashes["EntityFromANewerBuild"] = Data(repeating: 1, count: 32)
-
-        let verdict = StoreModelCompatibility.verdict(
-            forStoreMetadata: [NSStoreModelVersionHashesKey: hashes],
-            bundledVersionHashes: StoreModelCompatibility.bundledVersionHashes()
+    /// Every store written before the stamp existed has none, including one a build of the
+    /// first model wrote before that model was edited in place, whose hashes no bundled
+    /// version has. Read as "a newer build's", it could never be reset.
+    ///
+    /// Revert-check: the `let storeOrdinal = …` binding in the guard of
+    /// `StoreModelCompatibility.verdict(forStoreMetadata:currentModelOrdinal:)`, read as
+    /// "newer" when absent.
+    func testVerdict_noStampOrNoOrdinalOfOurOwn_isNotNewer() {
+        XCTAssertEqual(StoreModelCompatibility.verdict(forStoreMetadata: [:], currentModelOrdinal: 6), .notNewer)
+        XCTAssertEqual(
+            StoreModelCompatibility.verdict(
+                forStoreMetadata: [StoreModelCompatibility.modelOrdinalMetadataKey: 9],
+                currentModelOrdinal: nil
+            ),
+            .notNewer
         )
-
-        XCTAssertEqual(verdict, .noBundledVersion)
     }
 
-    // Revert-check: the `bundledVersionHashes` and store-hash guard of
-    // `StoreModelCompatibility.verdict(forStoreMetadata:…)`. Without it a read that failed
-    // compares as "matches nothing" and is taken for a newer build's store, which nothing
-    // ever lets the user reset.
-    func testVerdict_unreadableInputs_areUnreadableNeverANewerBuild() {
-        let current: [String: Any] = [NSStoreModelVersionHashesKey: TestCoreDataStack.sharedModelVersionHashes]
+    func testMetadataStamping_addsOrReplacesTheStampOnlyWhenItDiffers() {
+        let stamped = StoreModelCompatibility.metadataStamping(6, into: ["other": "kept"])
+        XCTAssertEqual((stamped?[StoreModelCompatibility.modelOrdinalMetadataKey] as? NSNumber)?.intValue, 6)
+        XCTAssertEqual(stamped?["other"] as? String, "kept")
 
-        XCTAssertEqual(StoreModelCompatibility.verdict(forStoreMetadata: current, bundledVersionHashes: nil), .unreadable)
-        XCTAssertEqual(
-            StoreModelCompatibility.verdict(forStoreMetadata: [:], bundledVersionHashes: StoreModelCompatibility.bundledVersionHashes()),
-            .unreadable
-        )
+        XCTAssertNil(StoreModelCompatibility.metadataStamping(6, into: [StoreModelCompatibility.modelOrdinalMetadataKey: 6]))
+        XCTAssertNil(StoreModelCompatibility.metadataStamping(nil, into: [:]))
+        XCTAssertNotNil(StoreModelCompatibility.metadataStamping(7, into: [StoreModelCompatibility.modelOrdinalMetadataKey: 6]))
     }
 
     func testLoadError_storeMetadataCannotBeRead_isUnavailable() throws {
@@ -67,7 +84,7 @@ final class StoreModelCompatibilityTests: XCTestCase {
         let loadError = StoreModelCompatibility.loadError(
             forMigrationFailure: failure,
             storeAt: notADatabase,
-            bundledVersionHashes: StoreModelCompatibility.bundledVersionHashes()
+            currentModelOrdinal: 6
         )
 
         guard case .unavailable = loadError else {

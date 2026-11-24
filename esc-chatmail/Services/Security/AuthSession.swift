@@ -109,24 +109,10 @@ struct LocalMailboxStoreInspection: Equatable, Sendable {
     /// no `Account` row and no other account-scoped row.
     let hasAccountScopedFiles: Bool
 
-    var hasAccountScopedMailboxData: Bool {
-        hasAccountScopedRows || hasAccountScopedFiles
-    }
-
     init(accountEmails: [String], hasAccountScopedRows: Bool, hasAccountScopedFiles: Bool) {
         self.accountEmails = accountEmails
         self.hasAccountScopedRows = hasAccountScopedRows
         self.hasAccountScopedFiles = hasAccountScopedFiles
-    }
-
-    /// Mailbox data of unknown kind is counted as rows, which no exception of
-    /// the isolation gate covers.
-    init(accountEmails: [String], hasAccountScopedMailboxData: Bool) {
-        self.init(
-            accountEmails: accountEmails,
-            hasAccountScopedRows: hasAccountScopedMailboxData,
-            hasAccountScopedFiles: false
-        )
     }
 }
 
@@ -1260,7 +1246,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     // again and the mailbox start does not move. Anything
                     // short of proof (no marker, an unreadable or different
                     // keychain account, any row) is the full cleanup.
-                    if isStoreRecoveryOfAccount(normalizedEmail) {
+                    let isRecoveryOfThisAccount: Bool
+                    do {
+                        isRecoveryOfThisAccount = try isStoreRecoveryOfAccount(normalizedEmail)
+                    } catch {
+                        // Not proof either way: the full cleanup would move the
+                        // start and remove the backup of what may be this account's
+                        // mailbox, so fail closed and let a later attempt decide.
+                        throw AuthError.localAccountIsolationFailed(error)
+                    }
+                    if isRecoveryOfThisAccount {
                         removesFilesLeftByStoreRecovery = true
                     } else {
                         resetRequired = true
@@ -1309,12 +1304,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// Whether the empty store beside stored files is this account's mailbox
     /// after a recovery reset: the marker is set, and the keychain, which
     /// still holds the previous session's account at this point (the new
-    /// session's is saved only after this gate), names `normalizedEmail`. An
-    /// unreadable keychain is not that proof.
-    private func isStoreRecoveryOfAccount(_ normalizedEmail: String) -> Bool {
-        guard StoreRecoveryResetMarker.isMarked(in: userDefaults),
-              let persisted = try? keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
-              let persistedEmail = Self.normalizedLoginHint(persisted) else {
+    /// session's is saved only after this gate), names `normalizedEmail`. No
+    /// account in the keychain is an answer (false); a keychain that cannot be
+    /// read is none, and throws.
+    private func isStoreRecoveryOfAccount(_ normalizedEmail: String) throws -> Bool {
+        guard StoreRecoveryResetMarker.isMarked(in: userDefaults) else {
+            return false
+        }
+        let persisted: String
+        do {
+            persisted = try keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue)
+        } catch KeychainError.itemNotFound {
+            return false
+        }
+        guard let persistedEmail = Self.normalizedLoginHint(persisted) else {
             return false
         }
         return persistedEmail.caseInsensitiveCompare(normalizedEmail) == .orderedSame

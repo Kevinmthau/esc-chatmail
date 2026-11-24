@@ -2259,6 +2259,31 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(fixture.storeReset.attemptCount, 1)
     }
 
+    // Revert-check: the do/catch around `isStoreRecoveryOfAccount` in
+    // `prepareLocalStoreForAuthenticatedAccount` (with `try?` in its place the read failure
+    // runs the full cleanup, which moves the start and removes the backup of what may be
+    // this account's mailbox).
+    func testAccountPreparation_recoveryMarkerButKeychainUnreadable_failsClosedAndKeepsEverything() async {
+        let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com")
+        let session = fixture.makeSession(
+            in: self,
+            keychainService: EmailReadFailingKeychain(wrapping: fixture.keychain)
+        )
+
+        do {
+            try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+            XCTFail("An unreadable keychain proves nothing either way")
+        } catch AuthError.localAccountIsolationFailed {
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(fixture.storeReset.attemptCount, 0)
+        XCTAssertEqual(fixture.htmlCleanup.attemptCount, 0)
+        XCTAssertEqual(fixture.defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), fixture.mailboxStart)
+        XCTAssertTrue(StoreRecoveryResetMarker.isMarked(in: fixture.defaults), "A later attempt decides")
+    }
+
     // Revert-check: the `StoreRecoveryResetMarker.clear` in the no-reset path of
     // `prepareLocalStoreForAuthenticatedAccount`. A marker left by a reset whose store then
     // refilled would otherwise wait for a later, unrelated empty store.
@@ -3886,13 +3911,13 @@ private final class RecoveryResetFixture {
         keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: keychainEmail])
     }
 
-    func makeSession(in tests: AuthSessionTests) -> AuthSession {
+    func makeSession(in tests: AuthSessionTests, keychainService: KeychainServiceProtocol? = nil) -> AuthSession {
         let storeReset = self.storeReset
         let fileCleanup = self.fileCleanup
         let htmlCleanup = self.htmlCleanup
         let hasRows = self.hasRows
         return tests.makeRecoveryResetSession(
-            keychainService: keychain,
+            keychainService: keychainService ?? keychain,
             userDefaults: defaults,
             resetCoreDataStore: { try storeReset.reset() },
             hasStoredAccountScopedMailboxData: { hasRows },
@@ -3900,5 +3925,57 @@ private final class RecoveryResetFixture {
             deleteAttachmentFiles: { try fileCleanup.deleteFiles() },
             cleanupHTMLContent: { try htmlCleanup.cleanup() }
         )
+    }
+}
+
+/// `MockKeychainService`, except that the account's email cannot be read.
+private final class EmailReadFailingKeychain: KeychainServiceProtocol {
+    private struct ReadFailure: Error {}
+    private let base: MockKeychainService
+
+    init(wrapping base: MockKeychainService) {
+        self.base = base
+    }
+
+    func save(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.save(data, for: key, withAccess: access)
+    }
+
+    func load(for key: String) throws -> Data {
+        if key == KeychainService.Key.googleUserEmail.rawValue { throw ReadFailure() }
+        return try base.load(for: key)
+    }
+
+    func delete(for key: String) throws {
+        try base.delete(for: key)
+    }
+
+    func exists(for key: String) -> Bool {
+        base.exists(for: key)
+    }
+
+    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws {
+        try base.update(data, for: key, withAccess: access)
+    }
+
+    func clearAll() throws {
+        try base.clearAll()
+    }
+
+    func saveString(_ string: String, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.saveString(string, for: key, withAccess: access)
+    }
+
+    func loadString(for key: String) throws -> String {
+        if key == KeychainService.Key.googleUserEmail.rawValue { throw ReadFailure() }
+        return try base.loadString(for: key)
+    }
+
+    func saveCodable<T: Codable>(_ object: T, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.saveCodable(object, for: key, withAccess: access)
+    }
+
+    func loadCodable<T: Codable>(_ type: T.Type, for key: String) throws -> T {
+        try base.loadCodable(type, for: key)
     }
 }

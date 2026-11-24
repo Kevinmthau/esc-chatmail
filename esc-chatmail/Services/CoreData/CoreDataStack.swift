@@ -15,6 +15,7 @@ final class CoreDataStack: @unchecked Sendable {
 
     private var _isStoreLoaded = false
     private var _storeLoadError: Error?
+    private var _deterministicReloadPermitted = false
 
     // Extracted services
     private let recoveryHandler = CoreDataRecoveryHandler()
@@ -29,10 +30,10 @@ final class CoreDataStack: @unchecked Sendable {
     /// depend on the host's free space. Read only by
     /// `resetStoreAfterLoadFailure()`.
     private let availableStorageBytes: @Sendable () -> Int64?
-    /// Each bundled model version's entity hashes
-    /// (`StoreModelCompatibility.bundledVersionHashes`), read only after a
-    /// migration-family load error.
-    private let bundledModelVersionHashes: @Sendable () -> [String: [String: Data]]?
+    /// This build's model ordinal (`StoreModelCompatibility.currentModelOrdinal`),
+    /// stamped into the store after a load and read after a migration-family
+    /// load error.
+    private let currentModelOrdinal: @Sendable () -> Int?
     /// Records, before a recovery reset removes the store, that it did
     /// (`StoreRecoveryResetMarker`), so the restore that follows can tell the
     /// store's own account's orphaned files from another account's.
@@ -42,7 +43,7 @@ final class CoreDataStack: @unchecked Sendable {
         self.injectedContainerForTesting = nil
         self.injectedContainerNeedsLoading = false
         self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
-        self.bundledModelVersionHashes = { StoreModelCompatibility.bundledVersionHashes() }
+        self.currentModelOrdinal = { StoreModelCompatibility.currentModelOrdinal() }
         self.markStoreRemovedByRecovery = { StoreRecoveryResetMarker.mark(in: .standard) }
     }
 
@@ -56,7 +57,7 @@ final class CoreDataStack: @unchecked Sendable {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = false
         self.availableStorageBytes = { StoreVolumeFreeSpace.availableBytes() }
-        self.bundledModelVersionHashes = { StoreModelCompatibility.bundledVersionHashes() }
+        self.currentModelOrdinal = { StoreModelCompatibility.currentModelOrdinal() }
         self.markStoreRemovedByRecovery = {}
         self._isStoreLoaded = true
     }
@@ -68,15 +69,13 @@ final class CoreDataStack: @unchecked Sendable {
     init(
         unloadedPersistentContainerForTesting container: NSPersistentContainer,
         availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
-        bundledModelVersionHashes: @escaping @Sendable () -> [String: [String: Data]]? = {
-            StoreModelCompatibility.bundledVersionHashes()
-        },
+        currentModelOrdinal: @escaping @Sendable () -> Int? = { StoreModelCompatibility.currentModelOrdinal() },
         markStoreRemovedByRecovery: @escaping @Sendable () -> Void = {}
     ) {
         self.injectedContainerForTesting = container
         self.injectedContainerNeedsLoading = true
         self.availableStorageBytes = availableStorageBytes
-        self.bundledModelVersionHashes = bundledModelVersionHashes
+        self.currentModelOrdinal = currentModelOrdinal
         self.markStoreRemovedByRecovery = markStoreRemovedByRecovery
     }
 #endif
@@ -271,6 +270,7 @@ final class CoreDataStack: @unchecked Sendable {
             if let error = error as NSError? {
                 self.handleStoreLoadError(error, for: container)
             } else {
+                self.stampCurrentModelOrdinal(on: container, storeURL: storeDescription.url)
                 self.setStoreLoaded(true)
                 self.loadAttempts = 0
                 Log.info("Core Data store loaded successfully: \(storeDescription)", category: .coreData)
@@ -279,6 +279,22 @@ final class CoreDataStack: @unchecked Sendable {
                 }
             }
         }
+    }
+
+    /// Records in the store's metadata that this build's model opened it
+    /// (`StoreModelCompatibility.modelOrdinalMetadataKey`), the evidence by
+    /// which an older build tells it was saved by a newer one. The coordinator
+    /// writes it with the next save.
+    private func stampCurrentModelOrdinal(on container: NSPersistentContainer, storeURL: URL?) {
+        let coordinator = container.persistentStoreCoordinator
+        guard let storeURL, let store = coordinator.persistentStore(for: storeURL),
+              let stamped = StoreModelCompatibility.metadataStamping(
+                  currentModelOrdinal(),
+                  into: coordinator.metadata(for: store)
+              ) else {
+            return
+        }
+        coordinator.setMetadata(stamped, for: store)
     }
 
     private func handleStoreLoadError(_ error: NSError, for container: NSPersistentContainer) {
@@ -299,7 +315,7 @@ final class CoreDataStack: @unchecked Sendable {
             setStoreLoadError(StoreModelCompatibility.loadError(
                 forMigrationFailure: error,
                 storeAt: container.persistentStoreDescriptions.first?.url,
-                bundledVersionHashes: bundledModelVersionHashes()
+                currentModelOrdinal: currentModelOrdinal()
             ))
 
         case .storeReset:
@@ -316,10 +332,20 @@ final class CoreDataStack: @unchecked Sendable {
     /// until the app was killed and launch spun forever. No-op unless a load
     /// error is latched and no store is attached; callers touch
     /// `persistentContainer` first, so this never doubles the initial load.
+    ///
+    /// A latch that reloading cannot change (`isDeterministicLoadFailure`: a
+    /// failed migration, a newer build's store) is reloaded only once the user
+    /// has asked (`permitReloadAfterDeterministicFailure()`), not by the launch
+    /// loop's timed retries or a background task: each reload runs the whole
+    /// migration again, on the main actor, before it fails the same way.
     func retryLoadAfterFailure() {
         let container = persistentContainer
-        guard storeLoadError != nil,
+        guard let loadError = storeLoadError,
               container.persistentStoreCoordinator.persistentStores.isEmpty else {
+            return
+        }
+        if Self.isDeterministicLoadFailure(loadError), !consumeDeterministicReloadPermit() {
+            Log.debug("Not reloading a store whose migration cannot succeed until the user asks", category: .coreData)
             return
         }
         Log.info("Retrying Core Data store load after a latched failure", category: .coreData)
@@ -381,7 +407,42 @@ final class CoreDataStack: @unchecked Sendable {
         // any store with rows. The removal is by path (the file, its -wal and
         // its -shm), so it also removes a store that never attached.
         markStoreRemovedByRecovery()
-        return recoveryHandler.prepareStoreReset(for: storeURL) ? .removed : .failed
+        guard recoveryHandler.prepareStoreReset(for: storeURL) else {
+            return .failed
+        }
+        // The latched error describes the store just removed, so the next
+        // retry must load the empty one, whoever asks for it.
+        permitReloadAfterDeterministicFailure()
+        return .removed
+    }
+
+    /// Lets the next `retryLoadAfterFailure()` reload a deterministic latch.
+    /// The launch screen's Try Again and Reset Mailbox call it.
+    func permitReloadAfterDeterministicFailure() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        isolationQueue.sync { _deterministicReloadPermitted = true }
+    }
+
+    private func consumeDeterministicReloadPermit() -> Bool {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync {
+            defer { _deterministicReloadPermitted = false }
+            return _deterministicReloadPermitted
+        }
+    }
+
+    /// Latched load errors that reloading the same store cannot change.
+    static func isDeterministicLoadFailure(_ loadError: Error) -> Bool {
+        switch loadError {
+        case PersistentStoreLoadError.migrationFailed, PersistentStoreLoadError.storeFromNewerVersion:
+            return true
+        default:
+            return false
+        }
     }
 
     /// The latched load errors the launch screen's Reset Mailbox may remove
