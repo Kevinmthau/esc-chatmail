@@ -111,10 +111,11 @@ describe('preparePersistPlan', () => {
     expect(plan.identity.participants).toEqual(['x@attacker.example'])
   })
 
-  // HONEST SCOPE: two rules each keep this from the user's address, so this
-  // fails only with both reverted: reading on after an unreadable token in
-  // `firstMailbox`, and step 3 of `scanMailbox` on a header of more than one
-  // token. Each alone is pinned in normalizeEmail.test.ts.
+  // Revert-check: letting step 3 of `scanMailbox` run on a header of more than
+  // one token gives the message a `from` row for the user's address (web reads
+  // From rows with `parseEmailAddresses`). Reading on after an unreadable
+  // token in `firstMailbox` is pinned in normalizeEmail.test.ts instead: this
+  // test cannot see it.
   it('reads no sender where an unreadable From address is followed by a commented one', async () => {
     const plan = (await preparePersistPlan(
       textMessage({ id: 'm1', from: `"x"@attacker.example, (<${ME}>`, to: [ME] }),

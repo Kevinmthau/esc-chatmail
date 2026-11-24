@@ -138,7 +138,9 @@ describe('extractEmail skips quoted names and comments', () => {
   // parseEmailAddresses case in mime/address.test.ts; dropping 'phraseLiteral' fails
   // `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress` fails the
   // obsolete-syntax rows; dropping its ambiguity fails `me@gmail.com
-  // x@attacker.example`. The NFD row pins parity with Swift.
+  // x@attacker.example`; blanking an angle-addr whose `@` the pattern cannot
+  // read without counting it fails the `<x@[…>…]>` rows. The NFD row pins
+  // parity with Swift.
   it.each([
     'Boss <boss@corp.example> <x@attacker.example>',
     '<x@attacker.example> <me@gmail.com>',
@@ -166,6 +168,9 @@ describe('extractEmail skips quoted names and comments', () => {
     'me@gmail.com\r\n .attacker.example',
     'x. me@gmail.com',
     'me@gmail.com x@attacker.example',
+    '<x@[1.2.3.4>]>, me@gmail.com',
+    '<x@[a>b]> me@gmail.com',
+    '<x@[a>b]> <me@gmail.com>',
   ])('reads no address from the ambiguous or literal %s', (value) => {
     expect(extractEmail(value)).toBeNull()
   })

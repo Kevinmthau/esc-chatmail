@@ -409,6 +409,10 @@ function scanMailbox(token: string, isOnlyMailbox: boolean): MailboxScan {
           if (content.includes('@') && ANGLE_ADDRESS_CONTENT_RE.test(content)) {
             completes.push({ email: content, angleStart })
           } else {
+            // An `@` the pattern cannot read (`<x@[a>b]>`, a domain literal
+            // holding `>`) is still an address, and the mailbox's: blanked as
+            // text, it let a later address stand in for it.
+            if (angleContent.includes('@')) abandonedAngleHeldAddress = true
             for (let position = angleSegmentStart; position < phrase.length; position++)
               phrase[position] = BLANK
           }

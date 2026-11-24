@@ -258,6 +258,13 @@ class EmailNormalizer {
                     if isAngleAddressContent(content) {
                         completes.append(MailboxAddressMatch(email: content, angleStart: angleStart))
                     } else {
+                        // An `@` the pattern cannot read (`<x@[a>b]>`, a
+                        // domain literal holding `>`) is still an address,
+                        // and the mailbox's: blanked as text, it let a later
+                        // address stand in for it.
+                        if angleContent.contains("@") {
+                            abandonedAngleHeldAddress = true
+                        }
                         for position in angleSegmentStart..<phrase.count {
                             phrase[position] = blank
                         }

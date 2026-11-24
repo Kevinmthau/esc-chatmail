@@ -983,7 +983,9 @@ final class EmailNormalizerTests: XCTestCase {
     /// assertion below; dropping `.phraseLiteral`
     /// fails `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress`
     /// fails the obsolete-syntax rows; dropping its ambiguity fails
-    /// `me@gmail.com x@attacker.example`.
+    /// `me@gmail.com x@attacker.example`; blanking an angle-addr whose `@`
+    /// the pattern cannot read without counting it fails the `<x@[…>…]>`
+    /// rows.
     func testExtractEmail_ambiguousOrLiteralAngleAddresses_readNoAddress() {
         let values = [
             "Boss <boss@corp.example> <x@attacker.example>",
@@ -1011,7 +1013,10 @@ final class EmailNormalizerTests: XCTestCase {
             "me@gmail.com. attacker.example",
             "me@gmail.com\r\n .attacker.example",
             "x. me@gmail.com",
-            "me@gmail.com x@attacker.example"
+            "me@gmail.com x@attacker.example",
+            "<x@[1.2.3.4>]>, me@gmail.com",
+            "<x@[a>b]> me@gmail.com",
+            "<x@[a>b]> <me@gmail.com>"
         ]
         for value in values {
             XCTAssertNil(EmailNormalizer.extractEmail(from: value), value)
