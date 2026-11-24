@@ -83,8 +83,8 @@ final class CoreDataErrorClassifierTests: XCTestCase {
 
     /// Deterministic migration failures used to reach a reset through the
     /// old `.storeReset` fallback. A code missing from `isMigrationError`
-    /// latches `.unavailable` instead of a migration failure, so a store from
-    /// a newer build would be offered a reset it must never get.
+    /// latches `.unavailable` instead of a migration failure, so the timed
+    /// retries would run its migration again and again on the main actor.
     ///
     /// Revert-check: removing any of these codes from
     /// `CoreDataErrorClassifier.isMigrationError` fails the matching case.

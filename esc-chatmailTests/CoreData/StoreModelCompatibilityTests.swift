@@ -31,7 +31,8 @@ final class StoreModelCompatibilityTests: XCTestCase {
 
     // Revert-check: the `storeOrdinal > currentModelOrdinal` condition of
     // `StoreModelCompatibility.verdict(forStoreMetadata:currentModelOrdinal:)`. A store this
-    // build or an older one stamped, whose migration failed, would then never be resettable.
+    // build or an older one stamped, whose migration failed, would then be told to update to
+    // a build that does not exist.
     func testVerdict_stampAtOrBelowThisBuild_isNotNewer() {
         for stamp in [1, 5, 6] {
             let metadata: [String: Any] = [StoreModelCompatibility.modelOrdinalMetadataKey: stamp]
@@ -46,7 +47,8 @@ final class StoreModelCompatibilityTests: XCTestCase {
 
     /// Every store written before the stamp existed has none, including one a build of the
     /// first model wrote before that model was edited in place, whose hashes no bundled
-    /// version has. Read as "a newer build's", it could never be reset.
+    /// version has. Read as "a newer build's", it would be told to install an update that
+    /// does not exist.
     ///
     /// Revert-check: the `let storeOrdinal = …` binding in the guard of
     /// `StoreModelCompatibility.verdict(forStoreMetadata:currentModelOrdinal:)`, read as

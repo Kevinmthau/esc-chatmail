@@ -95,8 +95,8 @@ final class CoreDataStackMigrationFailureTests: XCTestCase {
     /// A store whose hashes match no model this build bundles and that no build stamped:
     /// what a build of the first model wrote before that model was edited in place, or a
     /// development build's model that changed again before it shipped. Without the stamp
-    /// nothing proves a newer build wrote it, so it is a failed migration, which the user
-    /// can reset, not a newer build's store, which nobody can.
+    /// nothing proves a newer build wrote it, so it is a failed migration, not a newer
+    /// build's store, whose notice asks for an update that does not exist.
     ///
     /// Revert-check: deciding "newer" from the hashes again (a store matching no bundled
     /// version answered `.storeFromNewerVersion`).

@@ -12,15 +12,15 @@ enum PersistentStoreLoadError: LocalizedError {
     /// a reset whose backup could not be written, or a migration-family error
     /// whose store's metadata could not be read.
     case unavailable(Error)
-    /// A migration-family error on a store whose model is one this build
-    /// bundles: the migration to this build's model failed on the user's data.
-    /// Retrying may not help, so the user is offered Reset Mailbox once
-    /// retrying has not (`AppLoadingPolicy`); nothing deletes it otherwise.
+    /// A migration-family error on a store with no evidence that a newer build
+    /// saved it (`StoreModelCompatibility`): the migration to this build's
+    /// model failed. The user is offered Reset Mailbox once retrying has not
+    /// helped (`AppLoadingPolicy`); nothing deletes it otherwise.
     case migrationFailed(Error)
-    /// A migration-family error on a store whose model this build does not
-    /// bundle: a newer MushMail saved it (a downgrade, or a development build
-    /// sharing the Mac's container). Updating opens it as it is; the user may
-    /// also reset it, as for `.migrationFailed` (Kevin, 2026-11-24).
+    /// A migration-family error on a store whose stamped model ordinal is above
+    /// this build's: a newer MushMail saved it (a downgrade, or a development
+    /// build sharing the Mac's container). Updating opens it as it is; the user
+    /// may also reset it, as for `.migrationFailed` (Kevin, 2026-11-24).
     case storeFromNewerVersion(Error)
 
     init(classifying error: Error) {

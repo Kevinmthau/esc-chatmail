@@ -56,7 +56,8 @@ enum AppLoadingPolicy {
         let confirmButtonTitle: String
     }
 
-    /// Consecutive `.storeUnavailable` failures before the screen offers
+    /// Consecutive failures of a resettable kind (`offersResetPastThreshold`)
+    /// before the screen offers
     /// Reset Mailbox. The launch retry loop's backoff alone reaches five about
     /// 15 s after the first failure (waits of 1, 2, 4 and 8 s), so a transient
     /// fault has had several chances to clear first; each Try Again counts

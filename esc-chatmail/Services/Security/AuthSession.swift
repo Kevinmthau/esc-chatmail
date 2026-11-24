@@ -1323,7 +1323,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// branch again. A throw here fails the restore, whose catch clears the
     /// failed Google session and with it the keychain's account, so the next
     /// attempt runs the full cleanup: a failure costs what the full cleanup
-    /// always cost, never isolation.
+    /// always cost, never isolation. The account-scoped sync defaults are kept,
+    /// as a ladder reset with no files on disk always kept them, and the
+    /// initial sync that refills the store does not read the last-sync time.
     private func removeMailboxFilesLeftByStoreRecovery() async throws {
         Log.info("The store was reset by recovery for this account; removing its orphaned mailbox files only", category: .auth)
         try await cleanupHTMLContent()

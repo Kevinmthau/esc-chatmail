@@ -2,8 +2,8 @@ import Foundation
 
 /// Handles backup operations for Core Data stores.
 ///
-/// A backup is a whole copy of the mailbox, written before a reset or
-/// migration recovery removes the store, and nothing in the app reads it back.
+/// A backup is a whole copy of the mailbox, written before a reset removes the
+/// store, and nothing in the app reads it back.
 /// It is kept for a while as the last copy of queued PendingAction and
 /// OutboundSendMutationRecord rows, then pruned (`pruneBackups`), and removed
 /// with the mailbox at sign-out (`CoreDataStack.destroyAllData()`). Before
@@ -91,7 +91,7 @@ enum CoreDataBackupManager {
 
     /// Keeps only the newest backup, and drops that one too once it is older
     /// than `retentionInterval`. Runs whenever a store opens, which every
-    /// reset and migration recovery is followed by.
+    /// reset is followed by.
     static func pruneBackups(for storeURL: URL, now: Date = Date()) {
         // Here as well as where a backup is made: this runs at every launch, so a backup
         // made by a build from before the mark is left out from the next launch on.

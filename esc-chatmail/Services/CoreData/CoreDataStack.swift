@@ -361,8 +361,8 @@ final class CoreDataStack: @unchecked Sendable {
         /// The store was backed up and removed. `retryLoadAfterFailure()`
         /// then loads an empty one.
         case removed
-        /// Nothing was touched: no resettable load failure (`.unavailable`
-        /// or `.migrationFailed`) is latched with the store detached, or the
+        /// Nothing was touched: no resettable load failure
+        /// (`allowsResetAfterLoadFailure`) is latched with the store detached, or the
         /// volume is low on space or could not be measured. The store opened, a timeout retry is pending, or
         /// the disk is (or may be) full.
         case notResettable
@@ -570,7 +570,7 @@ final class CoreDataStack: @unchecked Sendable {
             }
         }
 
-        // Backups from a reset or migration recovery are copies of this
+        // Backups from a reset are copies of this
         // mailbox too, so they go with it (sign-out, disconnect, fresh
         // install). Read from the descriptions, not the attached stores: the
         // loop above has detached them all, and a store that never opened was
