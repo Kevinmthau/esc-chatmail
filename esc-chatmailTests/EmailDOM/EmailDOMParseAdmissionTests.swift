@@ -325,6 +325,17 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     ///   for a marker still open, and the `<a class=k>` charged nothing
     ///   (generated tag soup, which SwiftSoup has move 2 children twice).
     ///   Revert-check: `ScannedTagName.tableEndTargets`.
+    /// - The `<a>` inside the cell finds no `a` past the cell's marker and
+    ///   takes nothing out of the list, so the `a` kept at `</p>` is rebuilt
+    ///   above the `div` and found by `</a>`. Revert-check: the marker guard
+    ///   in `consumeAKeptOne`.
+    /// - An `rp` with a `ruby` in scope pops everything above the `ruby`,
+    ///   the `b` too, which text in the table then rebuilds. Revert-check:
+    ///   the `ruby` rule in `ScannedTagName.closingRules(forStartTag:)`.
+    /// - SwiftSoup closes a heading for a heading only if the current node
+    ///   was one before it closed the `p`, so the second `h1` nests in the
+    ///   first, which keeps its `<br>`s. Revert-check: `headingWasInnermost`
+    ///   in `closeImpliedElements`.
     func testChildMoveWork_childrenGivenToALowerElement_reachIt() {
         let children = 1_000
         let brs = String(repeating: "<br>", count: 1_000)
@@ -339,6 +350,9 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             ("<b><div><command>" + brs + "</command></b>", false),
             ("<b><div>" + brs + "<template></b>", false),
             ("<p><b>x</p></br><div>" + brs + "</b>", false),
+            ("<p><a>t</p><table><td><table></table><a></a></table>z<div>" + brs + "</a>", false),
+            ("<div><ruby><b><rp></rp><table>x<p>" + brs + "</b>", false),
+            ("<a><h1>" + brs + "<p><h1></a>", false),
         ]
         for shape in shapes {
             XCTAssertGreaterThanOrEqual(
@@ -364,11 +378,16 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// children (measured against SwiftSoup), at 400 rows 16 million in
     /// all, at 4,000 rows 24 s.
     /// Revert-check: `rebuildsFormatting` in `countChildren` (charged
-    /// 160,000).
+    /// 160,000). With a `<div/>` after the `<table>` the scan's innermost
+    /// element is one the builder closed at once, while its current node is
+    /// still the table (16,024,009 measured). Revert-check: the
+    /// `fosteringPartsHeld` term in `countChildren`.
     func testChildMoveWork_formattingRebuiltWhileFostering_countsEachCopy() {
         let formatting = (0..<10).map { "<b class=c\($0)>" }.joined()
         let html = "<i><div><p>" + formatting + "</p><table>" + String(repeating: "x<tr>", count: 400) + "</table></i>"
         XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedCost(of: html).childMoveWork, 16_016_004)
+        let underAClosedDiv = "<i><div><p>" + formatting + "</p><table><div/>" + String(repeating: "x<col>", count: 400) + "</table></i>"
+        XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedCost(of: underAClosedDiv).childMoveWork, 16_024_009)
     }
 
     /// Stray and misnested formatting end tags are everywhere in old mail,
@@ -382,7 +401,11 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// `closeElement` (the cell shapes), `retireIfTheAgencyTakesIt` (the `<a>`
     /// left open over paragraphs), `consumeAKeptOne` (the links on every
     /// line), `firstPossibleCopyAtByName` (the list after a kept `b`, which
-    /// no token rebuilds before its `</b>`).
+    /// no token rebuilds before its `</b>`), `opensTheOnlyTable` in
+    /// `lowestTargetOfStartTag` (a stray `</font>` between rows), the
+    /// effective kept count in `markPossiblyClosed(by:)` (`</strong>` after
+    /// `</p>` on every line), the copy branch of `consumeAKeptOne` (`</b>`
+    /// after text rebuilt it).
     func testChildMoveWork_strayFormattingEndTags_chargeNothing() {
         func lines(_ count: Int, _ line: String) -> String { String(repeating: line, count: count) }
         let mailingTemplate = "<font face=Arial><center>"
@@ -397,6 +420,9 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             "<a href=x><div>" + lines(600, "<p><a href=y>l</a></p>"),
             lines(300, "<p><a href=x>link</p>"),
             "<div><p><b>x</p><ul>" + lines(1_000, "<li>") + "</b>",
+            "<font face=Arial><table width=600>" + lines(200, "<tr><td><font size=2>Row text</td></tr></font>\n") + "</table></font>",
+            "<div><font face=Verdana><center>" + lines(1_000, "<p><strong>text<br></p></strong>\n") + "</center></font></div>",
+            "<div><font face=Verdana><center>" + lines(1_000, "<p><b>x</p> tail</b>\n") + "</center></font></div>",
         ]
         for html in shapes {
             XCTAssertLessThan(EmailDOMParseAdmission.estimatedCost(of: html).childMoveWork, 100_000, String(html.prefix(40)))

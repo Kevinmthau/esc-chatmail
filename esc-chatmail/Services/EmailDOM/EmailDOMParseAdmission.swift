@@ -791,6 +791,11 @@ private enum ScannedTagName {
         if impliedEndTagStarts.contains(name) {
             rules.append(ClosingRule(targets: impliedEndTagNames, stopsAt: []))
         }
+        // With a `ruby` in scope SwiftSoup pops everything above it
+        // (`popStackToBefore(ruby)`), a `b` held there included.
+        if name == rp || name == rt {
+            rules.append(ClosingRule(targets: [], stopsAt: [ruby], clearsAboveStop: true))
+        }
         if name == template {
             rules.append(ClosingRule(targets: [], stopsAt: [], clearsAboveStop: true))
         }
@@ -798,6 +803,9 @@ private enum ScannedTagName {
     }
 
     private static let template = Array("template".utf8)
+    private static let rp = Array("rp".utf8)
+    private static let rt = Array("rt".utf8)
+    private static let ruby = Array("ruby".utf8)
     /// Start tags that close a `p` in some modes or builds (`table` not in
     /// quirks mode): never popped for, but a `p` held may be closed.
     private static let mayCloseParagraph = names(["table", "hr", "isindex", "image", "input", "keygen"])
@@ -1281,6 +1289,8 @@ private struct TokenizingScanner {
     /// (Noah's ark): the most the tree builder can rebuild at one token,
     /// whatever this scan knows about which are open.
     private var rebuildableHeld = 0
+    /// How many `ScannedTagName.fosteringTableParts` are held.
+    private var fosteringPartsHeld = 0
     /// The `pushCount` after the latest push of a marker SwiftSoup may have
     /// left in its active formatting list: one of
     /// `ScannedTagName.markersLeftInTheList`, or any marker pushed before a
@@ -1548,6 +1558,9 @@ private struct TokenizingScanner {
         if ScannedTagName.agencyBoundaries.contains(name) {
             agencyBoundaryPositions.append(stack.count - 1)
         }
+        if ScannedTagName.fosteringTableParts.contains(name) {
+            fosteringPartsHeld += 1
+        }
         if ScannedTagName.markersLeftInTheList.contains(name) {
             latestMarkerPossiblyLeftInTheList = pushCount
         }
@@ -1712,10 +1725,15 @@ private struct TokenizingScanner {
     private mutating func countChildren(_ count: Int, fosterable: Bool = true, rebuildsFormatting: Bool = false) {
         guard let last = childPrefix.indices.last else { return }
         var count = count
-        if fosterable, ScannedTagName.fosteringTableParts.contains(stack[last].name) {
-            if rebuildsFormatting {
-                count = Saturating.add(count, rebuildableHeld)
-            }
+        let innermostFosters = ScannedTagName.fosteringTableParts.contains(stack[last].name)
+        // The builder's current node may be a table part below an innermost
+        // element it dropped or closed at once (`<div/>`, `<frame>`), where
+        // what this element is passed down when popped must hold the copies.
+        if fosterable, rebuildsFormatting,
+           innermostFosters || (fosteringPartsHeld > 0 && !isRobustlyOpen(at: last)) {
+            count = Saturating.add(count, rebuildableHeld)
+        }
+        if fosterable, innermostFosters {
             fosterableCounts[last] = Saturating.add(fosterableCounts[last], count)
         }
         childPrefix[last] = Saturating.add(childPrefix[last], count)
@@ -1740,6 +1758,9 @@ private struct TokenizingScanner {
         }
         if stack[index].retiredFromTheList {
             retiredByName[stack[index].name, default: 0] -= 1
+        }
+        if ScannedTagName.fosteringTableParts.contains(stack[index].name) {
+            fosteringPartsHeld -= 1
         }
         guard let below = childPrefix.indices.last else { return }
         let passedOn: Int
@@ -1825,16 +1846,34 @@ private struct TokenizingScanner {
     }
 
     /// With no `name` on the stack, the last `name` in the list is a kept
-    /// one or its copy, and the agency takes it out of the list: an `<a>`
-    /// start tag always (by the agency, or after it as the `a` it finds
-    /// still held), an end tag where no copy can be on the stack yet, since
-    /// the agency drops one it finds off the stack before looking at scope.
-    /// `<p><a href>link</p>` on every line kept an `a` a line and charged
-    /// each next `<a>` for the whole document.
+    /// one or its copy, and the agency takes it out of the list, unless a
+    /// marker after it ends the search first (a cell's, though the scan
+    /// may not hold that cell as certainly open, or one left in the list).
+    /// Found off the stack it is only dropped: no copy will ever add the
+    /// level `crossingClose` kept for it. A copy is taken where it is found
+    /// in scope (an `<a>` start tag takes it anyway), and the builder may
+    /// close it with everything above it. `<p><a href>link</p>` on every
+    /// line kept an `a` a line and charged each next `<a>` for the whole
+    /// document, and `<p><strong>…</p></strong>` marked the whole stack at
+    /// every line.
     private mutating func consumeAKeptOne(_ name: [UInt8], atStartTag: Bool) {
         let (_, kept) = listEntries(of: name)
-        guard kept > 0, atStartTag || firstPossibleCopyAtByName[name] == nil else {
+        guard kept > 0, let keptAt = firstKeptAtByName[name], latestMarkerPossiblyLeftInTheList < keptAt else {
             return
+        }
+        if let marker = markerPositions.last, stack[marker].pushedAt > keptAt {
+            return
+        }
+        if let copyAt = firstPossibleCopyAtByName[name] {
+            if !atStartTag, let boundary = agencyBoundaryPositions.last, stack[boundary].pushedAt > copyAt {
+                return
+            }
+            let copiedFrom = firstPosition(pushedAfter: copyAt)
+            if copiedFrom < stack.count {
+                markPossiblyClosed(from: copiedFrom)
+            }
+        } else {
+            openWeight -= ScannedTagName.weight(of: name)
         }
         keptConsumedByName[name, default: 0] += 1
         if kept == 1 {
@@ -1932,8 +1971,7 @@ private struct TokenizingScanner {
     /// everything above it, instead (a formatting element kept after an end
     /// tag crossed it may be rebuilt anywhere).
     private mutating func doubtClosing(of name: [UInt8]) {
-        let keptOfName = formattingHeldByName[name, default: 0] - (positionsByName[name]?.count ?? 0)
-        if ScannedTagName.formattingNames.contains(name), keptOfName > 0 {
+        if ScannedTagName.formattingNames.contains(name), listEntries(of: name).kept > 0 {
             markDoubtful(from: 0)
             return
         }
@@ -2079,11 +2117,10 @@ private struct TokenizingScanner {
     /// rebuilt anywhere since, so a tag that can close one of its name
     /// marks the whole stack.
     private mutating func markPossiblyClosed(by name: [UInt8], lowestTarget: Int?) {
-        let keptOfName = formattingHeldByName[name, default: 0] - (positionsByName[name]?.count ?? 0)
         // Inside a `template` the builder's modes are its own; anything it
         // holds may be closed.
         let template = positionsByName[Self.template]?.first
-        if ScannedTagName.formattingNames.contains(name), keptOfName > 0 {
+        if ScannedTagName.formattingNames.contains(name), listEntries(of: name).kept > 0 {
             markPossiblyClosed(from: 0)
         } else if let lowest = [lowestTarget, template].compactMap({ $0 }).min() {
             markPossiblyClosed(from: lowest)
@@ -2127,13 +2164,17 @@ private struct TokenizingScanner {
     /// the builder may close beyond that is marked.
     private mutating func closeImpliedElements(before name: [UInt8]) {
         typealias N = ScannedTagName
+        // SwiftSoup reads the current node before closing a `p`, and closes
+        // a heading only if that was one: `<h1><p><h1>` nests the second
+        // heading in the first.
+        let headingWasInnermost = innermostIs(in: N.headings)
         // In a table's modes SwiftSoup inserts a `form` without closing a
         // `p` (a table part's fragment holds one open over it), so a `form`
         // only marks the `p` as possibly closed.
         if N.closesParagraph.contains(name), name != N.form, innermostIs(N.p) {
             popInnermostForStartTag()
         }
-        if N.headings.contains(name), innermostIs(in: N.headings) {
+        if N.headings.contains(name), headingWasInnermost, innermostIs(in: N.headings) {
             popInnermostForStartTag()
         }
         if name == N.li, innermostIs(N.li) {
@@ -2174,7 +2215,13 @@ private struct TokenizingScanner {
     /// above that stop.
     private func lowestTargetOfStartTag(_ name: [UInt8]) -> Int? {
         var lowest = ScannedTagName.closingRules(forStartTag: name).compactMap(lowestTarget(of:)).min()
-        if ScannedTagName.tableStructure.contains(name), !stack.isEmpty {
+        // With no `table` held the builder is in no table's modes (outside a
+        // table part's fragment), and a `<table>` closes only a `p`: marking
+        // all held there left a `font` around the table uncertain, and a
+        // stray `</font>` between its rows charged for the whole table.
+        let opensTheOnlyTable = name == ScannedTagName.table && !isTableContextFragment
+            && (positionsByName[ScannedTagName.table]?.isEmpty ?? true)
+        if ScannedTagName.tableStructure.contains(name), !stack.isEmpty, !opensTheOnlyTable {
             // In the table modes a table part's start tag closes the cell,
             // the row or the section it is in, or clears everything above
             // the table, fostered elements too; in a table part's fragment
