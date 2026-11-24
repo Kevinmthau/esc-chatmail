@@ -89,8 +89,12 @@ describe('extractEmail', () => {
 })
 
 // Port of EmailNormalizerTests' quoted-name cases (architecture review
-// gap-mime-decoding-i18n#2). Revert-check: taking the first `<…@…>` anywhere
-// again in `extractEmail` (`firstAddressAnywhere`) fails every forged case.
+// gap-mime-decoding-i18n#2). Revert-check: reading the first `<…@…>` anywhere
+// again in `extractEmail` (`firstAddressAnywhere`) fails the rows whose forged
+// address comes first; turning off the scanner's quote, comment,
+// angle-comment or escape rules in `scanMailbox` fails the rows that need
+// each; reading step 2 from the unblanked token fails `(boss@corp.example)
+// x@attacker.example`.
 describe('extractEmail skips quoted names and comments', () => {
   it.each([
     ['quoted name holding another address', '"Boss <boss@corp.example>" <x@attacker.example>'],
@@ -111,11 +115,32 @@ describe('extractEmail skips quoted names and comments', () => {
     ['address before a quote that never closes', '<x@attacker.example> "Boss <boss@corp.example>'],
     ['bare address after a quoted address', '"Boss boss@corp.example" x@attacker.example'],
     ['a quote followed by a combining mark', '"́Boss <boss@corp.example>" <x@attacker.example>'],
-    ['two angle-addrs in the phrase', 'Boss <boss@corp.example> <x@attacker.example>'],
     ['comment after the angle-addr', '"Boss" <x@attacker.example> (<boss@corp.example>)'],
     ['quoted string after the angle-addr', '<x@attacker.example> "<boss@corp.example>"'],
+    ['comment inside the angle-addr', '<x@attacker.example (><me@gmail.com>)>'],
+    ['comment opening the angle-addr', '<(><me@gmail.com>)x@attacker.example>'],
+    ['backslash outside quotes', String.raw`x\"<me@gmail.com>" <x@attacker.example>`],
+    ['bare address in a comment', '(boss@corp.example) x@attacker.example'],
   ])('reads the mailbox address past a %s', (_name, value) => {
     expect(extractEmail(value)).toBe('x@attacker.example')
+  })
+
+  // Revert-check: returning the first or the last complete angle-addr in
+  // `scanMailbox` in place of 'ambiguous' fails one of the two orders;
+  // dropping the 'domainLiteral' mode reads me@gmail.com.
+  it.each([
+    'Boss <boss@corp.example> <x@attacker.example>',
+    '<x@attacker.example> <me@gmail.com>',
+    '<x@attacker.example <me@gmail.com>>',
+    '<x@[><me@gmail.com>]>',
+  ])('reads no address from the ambiguous or literal %s', (value) => {
+    expect(extractEmail(value)).toBeNull()
+  })
+
+  it('reads one address written twice, and a domain literal', () => {
+    expect(extractEmail('Ann <a@x.com> <A@x.com>')).toBe('a@x.com')
+    expect(extractEmail('<ops@[192.168.0.1]>')).toBe('ops@[192.168.0.1]')
+    expect(extractEmail('<ops@[(]>')).toBe('ops@[(]')
   })
 
   it('keeps the embedded address in the display name, where it is hidden', () => {

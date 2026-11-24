@@ -178,16 +178,18 @@ struct EmailAddressListParser {
     /// Splits an address header into one token per mailbox, at every comma
     /// outside a quoted string, a comment and an angle-addr.
     ///
-    /// Comments are skipped as RFC 5322 has them, nested and with backslash
-    /// escapes: a comma inside one does not end the mailbox. Splitting there
-    /// made the text before it a mailbox of its own, so
+    /// Comments are skipped as RFC 5322 has them, nested, in the phrase and
+    /// inside the angle-addr: a comma inside one does not end the mailbox.
+    /// Splitting there made the text before it a mailbox of its own, so
     /// `(<boss@corp.example>, x) <x@attacker.example>` (one mailbox, whose
-    /// address is x@attacker.example) read as boss@corp.example first. A
-    /// comment that never closes runs to the end, as a quote that never
-    /// closes always has. Read as Unicode scalars, for the reason
-    /// `EmailNormalizer.mailboxAddress(inToken:)` gives; that scanner reads
-    /// quotes, comments and escapes by the same rules, and so does the web
-    /// app's port (`web/src/identity/normalizeEmail.ts`).
+    /// address is x@attacker.example) read as boss@corp.example first. Inside
+    /// the angle-addr a domain literal (`[…]`) and a quoted local part are
+    /// text too. A backslash escapes only inside a quoted string, a comment or
+    /// a domain literal. A comment that never closes runs to the end, as a
+    /// quote that never closes always has. Read as Unicode scalars, for the
+    /// reason `EmailNormalizer.mailboxAddress(inToken:)` gives; its scanner
+    /// reads quotes, comments, literals and escapes by these same rules, and
+    /// so does the web app's port (`web/src/identity/normalizeEmail.ts`).
     static func addressTokens(from headerValue: String) -> [String] {
         addressTokenRanges(from: headerValue).map { String(headerValue.unicodeScalars[$0]) }
     }
@@ -195,7 +197,7 @@ struct EmailAddressListParser {
     /// Where each of `addressTokens(from:)`'s tokens sits in `headerValue`,
     /// trimmed of whitespace, empty tokens left out.
     static func addressTokenRanges(from headerValue: String) -> [Range<String.Index>] {
-        enum Mode { case phrase, quote, comment, angle, angleQuote }
+        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral }
         let scalars = headerValue.unicodeScalars
         var ranges: [Range<String.Index>] = []
         var tokenStart = scalars.startIndex
@@ -207,12 +209,13 @@ struct EmailAddressListParser {
         while index < scalars.endIndex {
             let scalar = scalars[index]
             let isEscaped = previousWasEscape
+            var escapes = false
             var splitsHere = false
             switch mode {
             case .phrase:
-                if scalar == "\"" && !isEscaped {
+                if scalar == "\"" {
                     mode = .quote
-                } else if scalar == "(" && !isEscaped {
+                } else if scalar == "(" {
                     mode = .comment
                     commentDepth = 1
                 } else if scalar == "<" {
@@ -221,29 +224,42 @@ struct EmailAddressListParser {
                     splitsHere = true
                 }
             case .quote:
+                escapes = true
                 if scalar == "\"" && !isEscaped {
                     mode = .phrase
                 }
-            case .comment:
+            case .comment, .angleComment:
+                escapes = true
                 if scalar == "(" && !isEscaped {
                     commentDepth += 1
                 } else if scalar == ")" && !isEscaped {
                     commentDepth -= 1
                     if commentDepth == 0 {
-                        mode = .phrase
+                        mode = mode == .comment ? .phrase : .angle
                     }
                 }
             case .angle:
                 // Mailbox delimiters cannot nest: a nested '<' restarts the
                 // angle-addr, so an unmatched display-name bracket cannot
                 // swallow later recipients.
-                if scalar == "\"" && !isEscaped {
+                if scalar == "\"" {
                     mode = .angleQuote
+                } else if scalar == "(" {
+                    mode = .angleComment
+                    commentDepth = 1
+                } else if scalar == "[" {
+                    mode = .domainLiteral
                 } else if scalar == ">" {
                     mode = .phrase
                 }
             case .angleQuote:
+                escapes = true
                 if scalar == "\"" && !isEscaped {
+                    mode = .angle
+                }
+            case .domainLiteral:
+                escapes = true
+                if scalar == "]" && !isEscaped {
                     mode = .angle
                 }
             }
@@ -253,7 +269,7 @@ struct EmailAddressListParser {
                 appendTrimmedRange(tokenStart..<index, of: scalars, to: &ranges)
                 tokenStart = next
             }
-            previousWasEscape = scalar == "\\" && !isEscaped
+            previousWasEscape = escapes && scalar == "\\" && !isEscaped
             index = next
         }
 

@@ -28,12 +28,14 @@ describe('addressTokens', () => {
     ])
   })
 
-  // Revert-check: dropping the 'comment' mode from `addressTokens` splits each
-  // of these at the comma inside the comment.
+  // Revert-check: dropping the 'comment' (or, for the angle-addr row, the
+  // 'angleComment') mode from `addressTokens` splits each of these at the
+  // comma inside the comment.
   it.each([
     ['a comma inside a comment', '(<boss@corp.example>, x) <x@attacker.example>'],
     ['a nested comment', '(a (b, c) d) <x@attacker.example>'],
     ['an escaped paren inside a comment', String.raw`(a \), b) <x@attacker.example>`],
+    ['a comma inside an angle-addr comment', '<me@gmail.com (>, <boss@corp.example>)>'],
   ])('keeps %s inside its mailbox', (_name, first) => {
     expect(addressTokens(`${first}, bob@example.com`)).toEqual([first, 'bob@example.com'])
   })

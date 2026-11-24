@@ -2072,6 +2072,56 @@
         "listId": null
       },
       "notes": "A quoted string after the angle-addr is text, though its address is the last one written. Revert-check: the quote mode of EmailNormalizer.mailboxAddress / web mailboxAddress."
+    },
+    {
+      "id": "comment_inside_angle_addr_holding_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "<x@attacker.example (><me@gmail.com>)>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "RFC 5322 allows a comment inside the angle-addr, and its < and > are text; the address is x@attacker.example. Read as structure, the comment's address was the last complete angle-addr and made the message the user's own. Revert-check: the angleComment mode of EmailNormalizer.scanMailbox / web scanMailbox."
+    },
+    {
+      "id": "backslash_outside_quotes_escapes_nothing",
+      "headers": [
+        {
+          "name": "From",
+          "value": "x\\\"<me@gmail.com>\" <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A backslash escapes only inside a quoted string, a comment or a domain literal; here the quote after it opens the name. Revert-check: honoring the backslash in the phrase in EmailNormalizer.scanMailbox / web scanMailbox."
     }
   ],
   "cleanedSnippetCases": [
