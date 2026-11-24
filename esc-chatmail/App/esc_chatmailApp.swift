@@ -271,6 +271,10 @@ struct esc_chatmailApp: App {
 
         // 4. Ready to show main UI
         isInitialized = true
+        // A held account (the restore above could not reach Google) is retried
+        // from here on: on Try Again, on the path's return, on foregrounding.
+        // Only now, so no retry can run ahead of the launch's own restore.
+        dependencies.launchRestoreRetryCoordinator.start(isInBackground: isApplicationInBackground)
         await dependencies.telemetryClient.record(
             TelemetryEvent(
                 name: .appLaunch,
@@ -291,6 +295,9 @@ struct esc_chatmailApp: App {
         GIDSignIn.sharedInstance.configuration = GIDConfiguration(
             clientID: GoogleConfig.clientId
         )
+        // The launch restore's deadline: AppAuth's token requests time out
+        // instead of holding the auth-transition gate on a stalled link.
+        GoogleAuthTransport.install()
     }
     
     private func configureBackgroundTasks() {
@@ -347,6 +354,10 @@ struct esc_chatmailApp: App {
             ),
             reason: reason
         )
+        // Ignored until `initializeApp()` has started the coordinator.
+        dependencies.launchRestoreRetryCoordinator.handle(
+            LaunchRestoreRetryPolicy.response(toScenePhase: newPhase, platform: .current)
+        )
     }
 
     /// Mac only: activation, system sleep and wake
@@ -368,6 +379,9 @@ struct esc_chatmailApp: App {
                 canAccessMailbox: dependencies.authSession.canAccessMailbox
             ),
             reason: reason
+        )
+        dependencies.launchRestoreRetryCoordinator.handle(
+            LaunchRestoreRetryPolicy.response(toSystemEvent: event)
         )
     }
 
@@ -416,6 +430,16 @@ struct esc_chatmailApp: App {
                 triggerImmediateSync: true,
                 processPendingActionsIfStarted: true
             )
+        } else if isAuthenticated,
+                  dependencies.authSession.canAccessMailbox,
+                  AppLifecyclePolicy.armsBackgroundTasksOnAuthChange(
+                      platform: .current,
+                      isApplicationInBackground: isApplicationInBackground
+                  ) {
+            // A held account's restore that finished after the app went to the
+            // background: the scene's background arm ran while nobody was signed
+            // in and armed nothing, so nothing else would before the next launch.
+            armBackgroundTasksForSceneBackground()
         } else if !isAuthenticated {
             dependencies.foregroundSyncCoordinator.stop(reason: "authBecameUnauthenticated")
         }

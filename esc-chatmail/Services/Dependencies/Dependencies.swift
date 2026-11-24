@@ -82,6 +82,8 @@ final class Dependencies: ObservableObject {
 
     let syncEngine: SyncEngine
     let foregroundSyncCoordinator: ForegroundSyncCoordinator
+    /// Runs a held account's launch restore again (`HeldAccount`).
+    let launchRestoreRetryCoordinator: LaunchRestoreRetryCoordinator
     let attachmentDownloader: AttachmentDownloader
     #if os(iOS)
     /// iOS only, like the rest of the BGTask layer it fronts.
@@ -374,6 +376,7 @@ final class Dependencies: ObservableObject {
         htmlContentRecoveryService: HTMLContentRecoveryService = .shared,
         syncEngine: SyncEngine? = nil,
         foregroundSyncCoordinator: ForegroundSyncCoordinator? = nil,
+        launchRestoreRetryCoordinator: LaunchRestoreRetryCoordinator? = nil,
         attachmentDownloader: AttachmentDownloader? = nil,
         participantLoader: ParticipantLoader? = nil,
         conversationManager: ConversationManager? = nil,
@@ -404,6 +407,7 @@ final class Dependencies: ObservableObject {
         self._htmlContentRecoveryService = htmlContentRecoveryService
         self.syncEngine = resolvedSyncEngine
         self.foregroundSyncCoordinator = resolvedForegroundSyncCoordinator
+        self.launchRestoreRetryCoordinator = launchRestoreRetryCoordinator ?? .shared
         self.attachmentDownloader = resolvedAttachmentDownloader
         #if os(iOS)
         self.backgroundSyncManager = BackgroundSyncManager.shared

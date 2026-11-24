@@ -46,11 +46,16 @@ private final class AuthenticatedGoogleUserBox {
     var restoreOutcome: AuthRestoreOutcome = .retryableFailure
     var didReplaceGoogleSession = false
     var didClearGoogleSession = false
+    /// Set where a restore ends retryably with this account's credentials kept.
+    var heldFailure: HeldAccount.Failure?
 }
 
 private struct InterruptedCleanupResumeResult {
     let outcome: AuthRestoreOutcome
     let shouldSweepBackgroundTasksOnTransitionEnd: Bool
+    /// The marker could not be read, so nothing was decided: an account a launch
+    /// restore held stays held (`AuthSession.heldAccount`), and its retries go on.
+    var keepsExistingHold = false
 }
 
 enum AuthRestoreOutcome: Equatable, Sendable {
@@ -283,6 +288,15 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     @Published var userName: String?
     @Published var accessToken: String?
     @Published private(set) var requiresReauthentication = false
+    /// The account a launch restore kept without publishing a session (`HeldAccount`).
+    ///
+    /// Set only by `restorePreviousSignIn()`, as it ends, for a failure that kept the
+    /// credentials; that same point clears it for any other outcome. A published session
+    /// (`publishAuthenticatedSession`), every clearing of the session (`clearAuthState`)
+    /// and a sign-out's registration (`registerAccountRemovalRequest`) clear it too. It
+    /// never stands beside `isAuthenticated`, and it is not a session: everything gated on
+    /// `canAccessMailbox` stays off while an account is held.
+    @Published private(set) var heldAccount: HeldAccount?
 
     var canAccessMailbox: Bool {
         isAuthenticated && !requiresReauthentication
@@ -500,7 +514,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     func restorePreviousSignIn() async -> AuthRestoreOutcome {
         await beginAuthenticationTransition()
         var shouldSweepBackgroundTasksOnTransitionEnd = false
+        // Whether this restore ends holding the account. Decided as the transition
+        // ends, so every return below either holds the account or lets it go, and
+        // a retry that is running keeps the hold on screen until it has an answer.
+        var heldFailure: HeldAccount.Failure?
         defer {
+            concludeLaunchRestoreHold(heldFailure)
             endAuthenticationTransition(
                 sweepIfDurablySignedOut: shouldSweepBackgroundTasksOnTransitionEnd
             )
@@ -514,17 +533,26 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // account drains and store/file cleanup. The durable marker wins over
         // SDK restore state and is resumed before any account can be published
         // or background-readable credentials remain available.
+        // A marker that cannot be read decides nothing. A held account stays held
+        // through it: ending the hold there stopped every retry and put the first-run
+        // sign-in screen over intact credentials until the next launch.
         if let result = await resumeInterruptedAccountRemovalIfNeeded() {
             shouldSweepBackgroundTasksOnTransitionEnd =
                 result.shouldSweepBackgroundTasksOnTransitionEnd
+            if result.keepsExistingHold {
+                heldFailure = heldAccount?.failure
+            }
             return result.outcome
         }
         if let result = await resumeInterruptedCredentialCleanupIfNeeded() {
             shouldSweepBackgroundTasksOnTransitionEnd =
                 result.shouldSweepBackgroundTasksOnTransitionEnd
+            if result.keepsExistingHold {
+                heldFailure = heldAccount?.failure
+            }
             return result.outcome
         }
-        if let outcome = resumeDurableSignedOutStateIfNeeded() {
+        if let outcome = resumeDurableSignedOutStateIfNeeded(keepingHoldIfUnreadable: &heldFailure) {
             return outcome
         }
 
@@ -560,6 +588,20 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                     return .retryableFailure
                 }
             case .indeterminate:
+                // GoogleSignIn's own item may well be there; a later restore can
+                // read it, so an account the app's keychain names is held rather
+                // than shown as signed out. With no stored address there is no
+                // evidence of an account (a fresh install whose keychain query
+                // failed), and the sign-in screen shows as before.
+                // An address that cannot be read either decides nothing: an account
+                // already held stays held, as through an unreadable marker.
+                // HONEST SCOPE: that fallback has no test; the mock keychain's error
+                // is one-shot and is spent on the first marker read.
+                if currentOrPersistedUserEmail() != nil {
+                    heldFailure = .couldNotRestore
+                } else {
+                    heldFailure = heldAccount?.failure
+                }
                 return .retryableFailure
             case .present:
                 break
@@ -596,6 +638,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                                     : .retryableFailure
                             } else {
                                 restoredUser.restoreOutcome = .retryableFailure
+                                // Offline, a timeout (`GoogleAuthTransport`'s deadline)
+                                // or Google failing: the credentials stay, and so does the
+                                // account, held until a restore can reach Google. Any other
+                                // error that keeps the credentials (`invalid_client`, a bad
+                                // ID token, a keychain write) cannot be mended by asking
+                                // again, so it is not held or retried: the sign-in screen
+                                // shows, as it did before holding existed.
+                                if let error, Self.isConnectivityRestoreError(error) {
+                                    restoredUser.heldFailure = .cannotConnect
+                                }
                             }
                             return
                         }
@@ -658,6 +710,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                 didReopenAccountWork = true
             case .retryKeepingCredentials:
                 restoredUser.restoreOutcome = .retryableFailure
+                // A reopen step that failed (`.transientFailure`) can succeed
+                // with the same credentials; a superseding sign-out ends the hold
+                // in `concludeLaunchRestoreHold`.
+                restoredUser.heldFailure = .couldNotRestore
             case .discardCredentials:
                 // Runs before endQuiescence(), matching signIn's catch order:
                 // the clear mutates account-scoped defaults and published state.
@@ -666,6 +722,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         }
         await syncRunCoordinator.endQuiescence()
+        heldFailure = restoredUser.didClearGoogleSession ? nil : restoredUser.heldFailure
 
         guard let user = restoredUser.user, didReopenAccountWork else {
             if restoredUser.didClearGoogleSession {
@@ -1503,6 +1560,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             userDefaults.set(true, forKey: "hasCompletedSignIn")
         }
         requiresReauthentication = false
+        heldAccount = nil
         isAuthenticated = true
     }
 
@@ -1515,6 +1573,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         currentUser = nil
         userEmail = nil
         userName = nil
+        heldAccount = nil
         requiresReauthentication = false
         isAuthenticated = false
         accessToken = nil
@@ -1592,6 +1651,59 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // already-completed deletes on the next launch.
             Log.error("Failed to clear rejected-session cleanup prerequisite", category: .auth, error: error)
             return false
+        }
+    }
+
+    /// Ends a launch restore's hold, or holds the account, as the restore ends.
+    ///
+    /// A failure that kept the credentials holds the account unless a session is
+    /// published (an interactive sign-in got there first) or a sign-out has been asked
+    /// for, which owns the account from then on. Every other ending lets it go.
+    private func concludeLaunchRestoreHold(_ failure: HeldAccount.Failure?) {
+        guard let failure, !isAuthenticated, !isAccountRemovalRequested else {
+            heldAccount = nil
+            return
+        }
+        // A hold kept through an unreadable marker is rebuilt right after a keychain
+        // read failed; the address it already had stays when this read fails too.
+        heldAccount = HeldAccount(
+            email: currentOrPersistedUserEmail() ?? heldAccount?.email,
+            failure: failure
+        )
+        Log.info(
+            "Launch restore held the account (\(failure == .cannotConnect ? "cannot connect" : "could not restore"))",
+            category: .auth
+        )
+    }
+
+    /// Whether a restore error means Google could not be reached, which is what holds the
+    /// account and retries the restore. Every other error that is not a revocation keeps
+    /// the credentials too, but is neither held nor retried.
+    ///
+    /// - Any `NSURLErrorDomain` error (offline, a timeout, DNS, TLS, a dropped link).
+    /// - AppAuth's network error (`OIDErrorCodeNetworkError` -5), which wraps the
+    ///   transport's error, and its server error (`OIDErrorCodeServerError` -6), which
+    ///   wraps an HTTP error the endpoint answered without OAuth JSON (a 5xx page, a
+    ///   proxy's or captive portal's answer; a 4xx of that kind is counted too).
+    /// - Google's token endpoint answering `server_error` (-7) or
+    ///   `temporarily_unavailable` (-8).
+    /// - Otherwise the error's underlying error, if any, is asked the same, which is
+    ///   how a userinfo fetch's transport error (GTMSessionFetcher passes those through)
+    ///   is recognized.
+    nonisolated static func isConnectivityRestoreError(_ error: Error) -> Bool {
+        let error = error as NSError
+        switch error.domain {
+        case NSURLErrorDomain:
+            return true
+        case "org.openid.appauth.general" where error.code == -5 || error.code == -6:
+            return true
+        case "org.openid.appauth.oauth_token" where error.code == -7 || error.code == -8:
+            return true
+        default:
+            guard let underlying = error.userInfo[NSUnderlyingErrorKey] as? Error else {
+                return false
+            }
+            return isConnectivityRestoreError(underlying)
         }
     }
 
@@ -1801,12 +1913,15 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// Rejects an SDK session that survived a previously completed sign-out.
     /// GoogleSignIn's `signOut()` ignores keychain deletion errors, so the
     /// app-owned verdict must win before automatic SDK restore is attempted.
-    private func resumeDurableSignedOutStateIfNeeded() -> AuthRestoreOutcome? {
+    private func resumeDurableSignedOutStateIfNeeded(
+        keepingHoldIfUnreadable heldFailure: inout HeldAccount.Failure?
+    ) -> AuthRestoreOutcome? {
         let isDurablySignedOut: Bool
         do {
             isDurablySignedOut = try hasPersistedDurableSignedOutState()
         } catch {
             Log.warning("Could not read durable signed-out state; deferring restore", category: .auth)
+            heldFailure = heldAccount?.failure
             return .retryableFailure
         }
         guard isDurablySignedOut else { return nil }
@@ -1837,7 +1952,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             Log.warning("Could not determine whether account cleanup is pending; deferring restore", category: .auth)
             return InterruptedCleanupResumeResult(
                 outcome: .retryableFailure,
-                shouldSweepBackgroundTasksOnTransitionEnd: false
+                shouldSweepBackgroundTasksOnTransitionEnd: false,
+                keepsExistingHold: true
             )
         }
         guard cleanupRequired else { return nil }
@@ -1905,7 +2021,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             Log.warning("Could not determine whether credential cleanup is pending; deferring restore", category: .auth)
             return InterruptedCleanupResumeResult(
                 outcome: .retryableFailure,
-                shouldSweepBackgroundTasksOnTransitionEnd: false
+                shouldSweepBackgroundTasksOnTransitionEnd: false,
+                keepsExistingHold: true
             )
         }
         guard cleanupRequired else { return nil }
@@ -2133,6 +2250,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     }
 
     private func registerAccountRemovalRequest() -> AccountRemovalRequest {
+        // A sign-out owns the account from here: the held screen gives way to the
+        // signed-out one at once, and nothing retries the restore behind it.
+        heldAccount = nil
         nextAccountRemovalEpoch &+= 1
         let request = AccountRemovalRequest(epoch: nextAccountRemovalEpoch)
         pendingAccountRemovalRequests.insert(request)
