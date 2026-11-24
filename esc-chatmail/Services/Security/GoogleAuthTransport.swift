@@ -20,7 +20,7 @@ import Foundation
 /// sign-in's wait, which nothing can cancel, never ended. Bounded at the transport, the
 /// SDK itself reports a network error (`OIDErrorCodeNetworkError`) inside the gate, which
 /// `AuthSession` treats as a failure that keeps the credentials and holds the account
-/// (`AuthSession.HeldAccount`).
+/// (`AuthSession.heldAccount`, `HeldAccount`).
 ///
 /// The bound is per request, not per restore: a restore usually makes one token request,
 /// but GoogleSignIn makes two when it already has a current user (a refresh, then on

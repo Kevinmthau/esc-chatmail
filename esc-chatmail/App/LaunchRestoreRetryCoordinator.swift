@@ -136,8 +136,9 @@ final class LaunchRestoreRetryCoordinator: ObservableObject {
         scheduleAutomaticRetryIfHeld()
     }
 
-    /// Waits for the path if it is known to be down, else for the backoff (and then for
-    /// the path, if it went down meanwhile), and then tries.
+    /// Waits for the path if it is known to be down (and then `pathReturnSettleDelay`),
+    /// else for the backoff (and then for the path, if it went down meanwhile), and then
+    /// tries.
     private func scheduleAutomaticRetryIfHeld() {
         guard isStarted, !isPaused, attemptTask == nil, scheduledRetry == nil, hasHeldAccount() else {
             return
@@ -154,7 +155,10 @@ final class LaunchRestoreRetryCoordinator: ObservableObject {
         scheduledRetryID = id
         scheduledRetry = Task { [weak self] in
             do {
-                if !waitsForPathOnly {
+                if waitsForPathOnly {
+                    try await pathMonitor.waitUntilPathSatisfied()
+                    guard await sleep(LaunchRestoreRetryPolicy.pathReturnSettleDelay) else { return }
+                } else {
                     guard await sleep(delay) else { return }
                 }
                 try await pathMonitor.waitUntilPathSatisfied()

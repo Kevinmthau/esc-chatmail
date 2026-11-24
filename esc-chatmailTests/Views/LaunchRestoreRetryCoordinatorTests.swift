@@ -21,6 +21,12 @@ final class LaunchRestoreRetryCoordinatorTests: XCTestCase {
         XCTAssertTrue(fixture.sleeper.requestedDelays.isEmpty, "A path known to be down waits for the path, not a timer")
 
         fixture.pathMonitor.pathDidChange(isSatisfied: true)
+        // Revert-check: fails if the settle wait after the path's return is removed
+        // (the attempt would start at once, with no sleep asked for).
+        await waitUntil { fixture.sleeper.pendingCount == 1 }
+        XCTAssertEqual(fixture.sleeper.requestedDelays, [LaunchRestoreRetryPolicy.pathReturnSettleDelay])
+        XCTAssertEqual(fixture.restore.calls, 0)
+        fixture.sleeper.fireAll()
 
         await waitUntil { fixture.restore.calls == 1 }
         await waitUntil { !fixture.coordinator.isRestoring }

@@ -20,7 +20,7 @@ enum HeldAccountViewPolicy {
         let mail = heldAccount.email.map { "Your mail for \($0)" } ?? "Your mail"
         switch heldAccount.failure {
         case .cannotConnect:
-            return "\(mail) is still on this device. MushMail will reconnect when you’re back online."
+            return "\(mail) is still on this device. MushMail will reconnect as soon as it can reach Google."
         case .couldNotRestore:
             return "\(mail) is still on this device. MushMail will try again shortly."
         }

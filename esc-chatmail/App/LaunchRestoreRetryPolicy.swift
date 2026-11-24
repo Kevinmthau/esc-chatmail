@@ -46,6 +46,11 @@ enum LaunchRestoreRetryPolicy {
     /// but reaches nothing (a captive portal, a link that stalls), where no path change
     /// will come.
     static let initialAutomaticRetryDelay: TimeInterval = 15
+    /// The wait after a path that was down comes back, before the attempt. A path that
+    /// keeps dropping and returning would otherwise start a restore, with its
+    /// quiescence, at every return; and a path that has just come back often cannot
+    /// resolve a name yet.
+    static let pathReturnSettleDelay: TimeInterval = 2
     static let maximumAutomaticRetryDelay: TimeInterval = 300
 
     static func shouldAttempt(

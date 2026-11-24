@@ -1658,7 +1658,12 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             heldAccount = nil
             return
         }
-        heldAccount = HeldAccount(email: currentOrPersistedUserEmail(), failure: failure)
+        // A hold kept through an unreadable marker is rebuilt right after a keychain
+        // read failed; the address it already had stays when this read fails too.
+        heldAccount = HeldAccount(
+            email: currentOrPersistedUserEmail() ?? heldAccount?.email,
+            failure: failure
+        )
         Log.info(
             "Launch restore held the account (\(failure == .cannotConnect ? "cannot connect" : "could not restore"))",
             category: .auth

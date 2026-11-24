@@ -128,6 +128,7 @@ final class LaunchRestoreRetryPolicyTests: XCTestCase {
         )
         XCTAssertTrue(message.contains("person@example.com"))
         XCTAssertTrue(message.contains("still on this device"))
+        XCTAssertFalse(message.contains("back online"), "Held while online too: Google failing, a timeout")
         XCTAssertTrue(
             HeldAccountViewPolicy.message(for: HeldAccount(email: nil, failure: .couldNotRestore))
                 .hasPrefix("Your mail is still on this device")
