@@ -8,6 +8,11 @@ enum CoreDataError: LocalizedError {
     case persistentFailure(Error)
     case stackDestroyed
     case entityCreationFailed(String)
+    /// The context's coordinator has no store attached: the load failed and
+    /// was kept, a timeout retry is pending, or a reset is between removing
+    /// the store and loading the next one. A fetch there answers `[]` without
+    /// an error, which is not "no rows" (`CoreDataStack.requireAttachedStore(in:)`).
+    case storeNotAttached
 
     var errorDescription: String? {
         switch self {
@@ -25,6 +30,8 @@ enum CoreDataError: LocalizedError {
             return "Data stack has been destroyed"
         case .entityCreationFailed(let entityName):
             return "Failed to create entity: \(entityName)"
+        case .storeNotAttached:
+            return "The data store is not open"
         }
     }
 
@@ -36,14 +43,14 @@ enum CoreDataError: LocalizedError {
         case .storeLoadFailed(let error), .migrationFailed(let error), .saveFailed(let error),
              .transientFailure(let error), .persistentFailure(let error):
             return error
-        case .stackDestroyed, .entityCreationFailed:
+        case .stackDestroyed, .entityCreationFailed, .storeNotAttached:
             return nil
         }
     }
 
     var recoverySuggestion: String? {
         switch self {
-        case .storeLoadFailed, .migrationFailed, .persistentFailure, .stackDestroyed, .entityCreationFailed:
+        case .storeLoadFailed, .migrationFailed, .persistentFailure, .stackDestroyed, .entityCreationFailed, .storeNotAttached:
             return "Please restart the app. If the problem persists, you may need to reinstall."
         case .saveFailed, .transientFailure:
             return "Please try again. Your data is safe."

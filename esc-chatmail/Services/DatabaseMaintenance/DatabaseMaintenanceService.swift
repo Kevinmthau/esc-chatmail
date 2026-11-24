@@ -28,8 +28,19 @@ final class DatabaseMaintenanceService: ObservableObject {
     @Published var lastMaintenanceDate: Date?
 
     // Internal for extension access
-    let coreDataStack = CoreDataStack.shared
+    let coreDataStack: CoreDataStack
     let taskRegistry: any BackgroundTaskRegistering
+    /// Awaited first by both maintenance handlers, before the maintenance run
+    /// is asked for and before anything touches the store. A cold background
+    /// launch reaches these handlers without `initializeApp`, so without it
+    /// the handler made the store's first load itself (migration and recovery
+    /// ladder included) ahead of the fresh-install cleanup, and went on
+    /// against a coordinator with no store when that load was kept as failed.
+    /// The default is the single-attempt `preparePersistenceIfNeeded()`, as
+    /// background sync's: never the foreground's retry loop, which does not
+    /// end in a background task, and never the auth restore, which takes the
+    /// account boundary that the maintenance run waits on.
+    let persistenceReadiness: @Sendable () async -> Bool
 
     /// Internal (not private) only so tests can inject a seamed registry.
     /// Never construct a second instance against the default `.shared`
@@ -41,8 +52,20 @@ final class DatabaseMaintenanceService: ObservableObject {
     /// the Mac. It is resolved here rather than in the parameter list because
     /// the Mac registry's `shared` is main-actor isolated, and a default
     /// argument is evaluated outside this initializer's isolation.
-    init(taskRegistry: (any BackgroundTaskRegistering)? = nil) {
+    ///
+    /// `coreDataStack` and `persistenceReadiness` are for tests too. A test
+    /// injects both, because the default readiness runs the real
+    /// `FreshInstallHandler` on the host's defaults.
+    init(
+        taskRegistry: (any BackgroundTaskRegistering)? = nil,
+        coreDataStack: CoreDataStack = .shared,
+        persistenceReadiness: @escaping @Sendable () async -> Bool = {
+            await AppStartupBootstrap.shared.preparePersistenceIfNeeded()
+        }
+    ) {
         self.taskRegistry = taskRegistry ?? PlatformBackgroundTaskRegistry.shared
+        self.coreDataStack = coreDataStack
+        self.persistenceReadiness = persistenceReadiness
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }
@@ -61,7 +84,8 @@ final class DatabaseMaintenanceService: ObservableObject {
                 requiresPower: false
             ),
             handler: { [weak self] in
-                await self?.performAnalyze() ?? false
+                guard let self, await self.persistenceReadiness() else { return false }
+                return await self.performAnalyze()
             }
         )
 
@@ -73,7 +97,8 @@ final class DatabaseMaintenanceService: ObservableObject {
                 requiresPower: false
             ),
             handler: { [weak self] in
-                await self?.performCleanup() ?? false
+                guard let self, await self.persistenceReadiness() else { return false }
+                return await self.performCleanup()
             }
         )
     }

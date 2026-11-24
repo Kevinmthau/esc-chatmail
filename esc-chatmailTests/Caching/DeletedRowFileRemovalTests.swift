@@ -356,6 +356,34 @@ final class DeletedRowFileRemovalTests: XCTestCase {
         XCTAssertEqual(referenced, ["Attachments/kept.jpg", "Previews/kept.jpg"])
     }
 
+    // Revert-check: the `CoreDataStack.requireAttachedStore(in:)` call in
+    // `DeletedRowFileReclamation.liveMessageIDs`. Without it the read answers that no
+    // message is stored, and every deleted row's body file is removed.
+    func testLiveMessageIDs_noStoreAttached_throwsAndNamesNoIDAbsent() {
+        let (container, _) = TestCoreDataStack.makeStorelessContainer()
+
+        XCTAssertThrowsError(
+            try DeletedRowFileReclamation.liveMessageIDs(
+                among: ["stored-but-unreadable"],
+                in: container.newBackgroundContext()
+            )
+        )
+    }
+
+    // Revert-check: the `CoreDataStack.requireAttachedStore(in:)` call in
+    // `DeletedRowFileReclamation.referencedAttachmentPaths`. Without it the read answers
+    // that no row names the file, and a sibling message's attachment is removed.
+    func testReferencedAttachmentPaths_noStoreAttached_throws() {
+        let (container, _) = TestCoreDataStack.makeStorelessContainer()
+
+        XCTAssertThrowsError(
+            try DeletedRowFileReclamation.referencedAttachmentPaths(
+                among: ["Attachments/shared-by-a-sibling.jpg"],
+                in: container.newBackgroundContext()
+            )
+        )
+    }
+
     // MARK: - Helpers
 
     private func makeAttachmentFile(named name: String) throws -> String {

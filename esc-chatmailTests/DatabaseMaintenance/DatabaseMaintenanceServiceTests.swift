@@ -91,6 +91,27 @@ final class DatabaseMaintenanceServiceTests: XCTestCase {
         XCTAssertFalse(handler.htmlFileExists(for: "orphan"))
     }
 
+    // Revert-check: the `CoreDataStack.requireAttachedStore(in:)` call in
+    // `DatabaseMaintenanceService.cleanupOrphanedHTMLFiles`. Without it the default ID
+    // fetch on a coordinator with no store answers [] and the stored body is removed.
+    func testOrphanedHTMLCleanup_noStoreAttached_defaultFetch_preservesStoredBody() async throws {
+        let (container, _) = TestCoreDataStack.makeStorelessContainer()
+        let directory = makeMessagesDirectory()
+        let handler = HTMLContentHandler(messagesDirectory: directory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let generation = try XCTUnwrap(handler.captureAccountGeneration())
+        let bodyURL = try XCTUnwrap(handler.saveHTML("<p>keep</p>", for: "message"))
+
+        await DatabaseMaintenanceService.cleanupOrphanedHTMLFiles(
+            in: container.newBackgroundContext(),
+            htmlContentHandler: handler,
+            expectedGeneration: generation
+        )
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: bodyURL.path))
+        XCTAssertEqual(handler.loadHTML(for: "message"), "<p>keep</p>")
+    }
+
     private func makeMessagesDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("DatabaseMaintenanceServiceTests-\(UUID().uuidString)", isDirectory: true)

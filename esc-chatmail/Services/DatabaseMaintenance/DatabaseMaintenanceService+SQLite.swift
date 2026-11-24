@@ -5,6 +5,12 @@ import Foundation
 extension DatabaseMaintenanceService {
 
     func performAnalyze() async -> Bool {
+        // Read before `persistentContainer`, whose first touch would start
+        // the store load here, inside no bootstrap.
+        guard coreDataStack.isStoreLoaded else {
+            Log.info("Database analyze skipped: the store is not loaded", category: .coreData)
+            return false
+        }
         guard let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
             return false
         }

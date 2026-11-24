@@ -12,12 +12,30 @@ extension DatabaseMaintenanceService {
     }
 
     private func performCleanupWhileStoreIsIdle() async -> Bool {
+        // Read before `newBackgroundContext()`, whose first touch of the lazy
+        // container would start the store load here, inside the maintenance
+        // run and outside the bootstrap's fresh-install-then-load order. The
+        // handler asked for readiness first; a reset whose reload failed since
+        // then leaves the bootstrap ready and this flag false.
+        guard coreDataStack.isStoreLoaded else {
+            Log.info("Database cleanup skipped: the store is not loaded", category: .coreData)
+            return false
+        }
         let htmlContentHandler = HTMLContentHandler.shared
         let htmlAccountGeneration = htmlContentHandler.captureAccountGeneration()
         let context = coreDataStack.newBackgroundContext()
         let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
 
         guard !Task.isCancelled else { return false }
+
+        // The flag is not a witness (`CoreDataStack.requireAttachedStore(in:)`).
+        // Nothing below runs against a coordinator with no store: what the
+        // history purge and the batch delete do there is not known, and the
+        // sweeps would read every file as an orphan.
+        guard await context.perform({ CoreDataStack.hasAttachedStore(context) }) else {
+            Log.error("Database cleanup skipped: no store is attached", category: .coreData)
+            return false
+        }
 
         // Best-effort, isolated from the rest of cleanup: a purge failure must
         // not abort attachment cleanup below (which bails on the first false).
@@ -95,7 +113,10 @@ extension DatabaseMaintenanceService {
         in context: NSManagedObjectContext,
         leases: ComposeAttachmentLeaseRegistry = .shared
     ) throws -> [NSManagedObjectID] {
-        try leases.withProtectedResources { resources in
+        // What a batch delete does on a coordinator with no store is not
+        // known; it is never asked.
+        try CoreDataStack.requireAttachedStore(in: context)
+        return try leases.withProtectedResources { resources in
             let request = NSFetchRequest<NSFetchRequestResult>(entityName: "Attachment")
             request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
                 AttachmentPredicates.orphaned,
@@ -126,6 +147,9 @@ extension DatabaseMaintenanceService {
 
         let validMessageIds: Set<String>? = await context.perform {
             do {
+                // Outside the injectable fetch: with no store attached the
+                // fetch answers [] and every body would be an orphan.
+                try CoreDataStack.requireAttachedStore(in: context)
                 let results = try fetchMessageIDs(context)
                 return Set(results.compactMap { $0["id"] as? String })
             } catch {
