@@ -476,21 +476,20 @@ private enum ScannedTagName {
     /// in scope, the names that end the scope: crossing one, the tree
     /// builder would ignore the end tag. Nil for any other end tag.
     static func scopeBoundaries(crossedByEndTagOf name: [UInt8]) -> Set<[UInt8]>? {
-        if name == td || name == th || tableSections.contains(name) || name == tr
-            || name == Array("caption".utf8) {
-            return names(["table", "template", "html", "select"])
+        if name == td || name == th || tableSections.contains(name) || name == tr || name == caption {
+            return tableScopeBoundaries
         }
-        if name == Array("table".utf8) {
-            return names(["template", "html", "select"])
+        if name == table {
+            return tableEndScopeBoundaries
         }
         if name == p {
-            return defaultScopeBoundaries.union(names(["button"]))
+            return buttonScopeBoundaries
         }
         if name == li {
-            return defaultScopeBoundaries.union(names(["ol", "ul"]))
+            return listItemScopeBoundaries
         }
         if headings.contains(name) {
-            return defaultScopeBoundaries.union(headings)
+            return headingScopeBoundaries
         }
         if blockClosers.contains(name) {
             return defaultScopeBoundaries
@@ -507,10 +506,10 @@ private enum ScannedTagName {
             return headings
         }
         if name == tr {
-            return names(["tr", "td", "th"])
+            return rowEndTargets
         }
         if tableSections.contains(name) {
-            return names(["tbody", "thead", "tfoot", "tr", "td", "th"])
+            return sectionEndTargets
         }
         return [name]
     }
@@ -530,6 +529,18 @@ private enum ScannedTagName {
 
     private static let listItemStops = names(["ul", "ol", "dl", "table", "td", "th", "caption", "button"])
     private static let buttonScopeBoundaries = defaultScopeBoundaries.union(names(["button"]))
+    private static let listItemScopeBoundaries = defaultScopeBoundaries.union(names(["ol", "ul"]))
+    private static let headingScopeBoundaries = defaultScopeBoundaries.union(headings)
+    private static let tableScopeBoundaries = names(["table", "template", "html", "select"])
+    private static let tableEndScopeBoundaries = names(["template", "html", "select"])
+    private static let rowEndTargets = names(["tr", "td", "th"])
+    private static let sectionEndTargets = names(["tbody", "thead", "tfoot", "tr", "td", "th"])
+    private static let definitionTargets = names(["dd", "dt"])
+    private static let caption = Array("caption".utf8)
+    private static let menuitem = Array("menuitem".utf8)
+    private static let button = Array("button".utf8)
+    private static let anchor = Array("a".utf8)
+    private static let nobr = Array("nobr".utf8)
 
     static func closingRules(forStartTag name: [UInt8]) -> [ClosingRule] {
         var rules: [ClosingRule] = []
@@ -540,7 +551,7 @@ private enum ScannedTagName {
             rules.append(ClosingRule(targets: [li], stopsAt: listItemStops))
         }
         if name == dd || name == dt {
-            rules.append(ClosingRule(targets: names(["dd", "dt"]), stopsAt: listItemStops))
+            rules.append(ClosingRule(targets: definitionTargets, stopsAt: listItemStops))
         }
         if headings.contains(name) {
             rules.append(ClosingRule(targets: headings, stopsAt: [], currentNodeOnly: true))
@@ -548,13 +559,13 @@ private enum ScannedTagName {
         if name == option || name == optgroup {
             rules.append(ClosingRule(targets: [option], stopsAt: [], currentNodeOnly: true))
         }
-        if name == Array("menuitem".utf8) {
+        if name == menuitem {
             rules.append(ClosingRule(targets: [name], stopsAt: [], currentNodeOnly: true))
         }
-        if name == Array("button".utf8) {
+        if name == button {
             rules.append(ClosingRule(targets: [name], stopsAt: defaultScopeBoundaries))
         }
-        if name == Array("a".utf8) || name == Array("nobr".utf8) {
+        if name == anchor || name == nobr {
             rules.append(ClosingRule(targets: [name], stopsAt: markers))
         }
         if impliedEndTagStarts.contains(name) {

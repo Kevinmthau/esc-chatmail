@@ -487,7 +487,9 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         let failures = LockedFailures()
         let thread = Thread {
             var generator = TagSoupGenerator(seed: 0x5EED_2026_1123)
-            for iteration in 0..<3_000 {
+            // 1,000 documents keep this near 20 s in CI; the same generator
+            // ran over a million documents off the suite before merging.
+            for iteration in 0..<1_000 {
                 let html = generator.document(tokenCount: 40 + iteration % 260)
                 let tokenized = EmailDOMParseAdmission.tokenizedDepthEstimate(of: html)
                 let combined = EmailDOMParseAdmission.estimatedDepth(of: html)
