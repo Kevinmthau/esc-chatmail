@@ -6,7 +6,14 @@
 import type { CalendarEventData } from '../db/types'
 import { GmailApiError, isAccountScopedSyncAbort } from '../gmail/errors'
 import type { GmailHeader, GmailMessage, GmailPart } from '../gmail/types'
-import { addressTokens, extractDisplayName, extractEmail, normalizeEmail } from './address'
+import {
+  addressTokens,
+  displayNameInToken,
+  extractDisplayName,
+  extractEmail,
+  mailboxAddress,
+  normalizeEmail,
+} from './address'
 import { extractAttachments, isAttachmentPart, type ParsedAttachment } from './attachments'
 import { analyzeCalendarInvite } from './calendarInvite'
 import { base64UrlDecodeToString, decodeTransferEncoding } from './decode'
@@ -74,12 +81,13 @@ export interface ParseGmailMessageOptions {
  */
 export function parseEmailAddresses(headerValue: string): ParsedAddress[] {
   const result: ParsedAddress[] = []
-  for (const token of addressTokens(headerValue)) {
-    const email = extractEmail(token)
-    if (email === null) continue
+  const tokens = addressTokens(headerValue)
+  for (const token of tokens) {
+    const match = mailboxAddress(token, tokens.length === 1)
+    if (match === null) continue
     result.push({
-      email: normalizeEmail(email),
-      name: extractDisplayName(token),
+      email: normalizeEmail(match.email),
+      name: displayNameInToken(token, match),
     })
   }
   return result

@@ -46,13 +46,23 @@ final class LogRedactionTests: XCTestCase {
         XCTAssertEqual(Log.redact(address: "jane@example.com"), "j***@example.com")
     }
 
-    func testRedactAddress_malformedAngleBracketHeader_isFullyMasked() {
-        let redacted = Log.redact(address: "Jane <jane@example.com (Jane Doe)>")
+    /// RFC 5322 allows a comment inside the angle-addr, and the address
+    /// parser leaves it out of the address (`EmailNormalizer.scanMailbox`),
+    /// so this is redacted as the address alone. An angle-addr whose comment
+    /// never closes has no address, and is masked whole. Either way no part
+    /// of the name is logged.
+    func testRedactAddress_commentInsideAngleAddr_logsNoPartOfTheName() {
+        let cases = [
+            ("Jane <jane@example.com (Jane Doe)>", "j***@example.com"),
+            ("Jane <jane@example.com (Jane Doe>", "<redacted>")
+        ]
+        for (header, expected) in cases {
+            let redacted = Log.redact(address: header)
 
-        XCTAssertEqual(redacted, "<redacted>")
-        XCTAssertFalse(redacted.contains("Jane"))
-        XCTAssertFalse(redacted.contains("Doe"))
-        XCTAssertFalse(redacted.contains("example.com"))
+            XCTAssertEqual(redacted, expected, header)
+            XCTAssertFalse(redacted.contains("Jane"), header)
+            XCTAssertFalse(redacted.contains("Doe"), header)
+        }
     }
 
     func testRedactAddress_noParseableEmail_isFullyMasked() {
