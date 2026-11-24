@@ -9,7 +9,9 @@ import Foundation
 /// point or die with it, like every other write of the run. Found messages are
 /// returned for the run to persist through `MessagePersister.saveMessages`,
 /// whose echo matching consumes the record; a record Gmail has no copy of is
-/// staged as "Not sent". An API failure is no verdict. Cancellation and
+/// staged as "Not sent". An API failure is no verdict. Every lookup that got
+/// an answer or an ordinary failure stamps `deliveryProbedAt`, which spaces
+/// the next one by `DeliveryUnknownProbePolicy.reprobeInterval`. Cancellation and
 /// account-scoped failures (`APIError.isAccountScopedSyncAbort`) abort the
 /// run, as they do for every request of it.
 struct DeliveryUnknownProbe {
@@ -59,7 +61,7 @@ struct DeliveryUnknownProbe {
             try Task.checkCancellation()
             let answer: DeliveryUnknownProbePolicy.Answer
             do {
-                let (messageIDs, nextPageToken) = try await messageFetcher.listMessages(
+                let (messageIDs, nextPageToken) = try await messageFetcher.searchAllMessages(
                     query: DeliveryUnknownProbePolicy.query(
                         forOptimisticMessageID: candidate.optimisticMessageID
                     ),
@@ -87,7 +89,7 @@ struct DeliveryUnknownProbe {
             switch DeliveryUnknownProbePolicy.verdict(for: answer) {
             case .found(let messageIDs):
                 try await context.perform {
-                    try DeliveryUnknownResolution.stageFound(
+                    try DeliveryUnknownResolution.stageLookedUp(
                         optimisticMessageID: candidate.optimisticMessageID,
                         probedAt: runStartedAt,
                         in: context
@@ -107,6 +109,16 @@ struct DeliveryUnknownProbe {
                     outcome.unresolved.append(candidate.optimisticMessageID)
                 }
             case .none:
+                // Not a verdict, only a record that it was asked: the next
+                // lookup waits `reprobeInterval`, so a record whose lookup
+                // keeps failing cannot hold the run's few lookups for good.
+                try await context.perform {
+                    try DeliveryUnknownResolution.stageLookedUp(
+                        optimisticMessageID: candidate.optimisticMessageID,
+                        probedAt: runStartedAt,
+                        in: context
+                    )
+                }
                 outcome.unresolved.append(candidate.optimisticMessageID)
             }
         }

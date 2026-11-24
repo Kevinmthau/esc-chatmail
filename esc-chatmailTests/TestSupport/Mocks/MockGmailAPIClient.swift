@@ -121,6 +121,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Every listMessages() query in call order (a run can list more than
     /// once, e.g. history recovery and then reconciliation).
     var listMessagesQueries: [String?] = []
+    /// Every searchAllMessages() query (Spam and Trash included), in call order.
+    private(set) var searchAllMessagesQueries: [String] = []
     private(set) var listMessagesLastMaxResults: Int?
     private(set) var listMessagesLastPageToken: String?
 
@@ -227,6 +229,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listMessagesCallCount = 0
             listMessagesLastQuery = nil
             listMessagesQueries = []
+            searchAllMessagesQueries = []
             listMessagesLastMaxResults = nil
             listMessagesLastPageToken = nil
             getMessageCallCount = 0
@@ -292,6 +295,14 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             }
             return listMessagesResponse
         }
+    }
+
+    /// Served by `listMessages(pageToken:maxResults:query:)`'s responses and
+    /// errors, and recorded in `searchAllMessagesQueries` as well as in the
+    /// list calls, so a test can tell the Spam-and-Trash search apart.
+    func searchAllMessages(query: String, maxResults: Int) async throws -> MessagesListResponse {
+        withStateLock { searchAllMessagesQueries.append(query) }
+        return try await listMessages(pageToken: nil, maxResults: maxResults, query: query)
     }
 
     func getMessage(id: String, format: String) async throws -> GmailMessage {

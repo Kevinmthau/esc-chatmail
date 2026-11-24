@@ -16,6 +16,16 @@ extension GmailAPIClient {
         return try await performGET(endpoint: APIEndpoints.messages(), queryItems: queryItems)
     }
 
+    /// One page of a search over every label, Spam and Trash included.
+    nonisolated func searchAllMessages(query: String, maxResults: Int) async throws -> MessagesListResponse {
+        let queryItems = [
+            URLQueryItem(name: "maxResults", value: String(maxResults)),
+            URLQueryItem(name: "q", value: query),
+            URLQueryItem(name: "includeSpamTrash", value: "true")
+        ]
+        return try await performGET(endpoint: APIEndpoints.messages(), queryItems: queryItems)
+    }
+
     /// Fetches a single message by ID.
     nonisolated func getMessage(id: String, format: String = "full") async throws -> GmailMessage {
         try await getMessage(id: id, format: format, maxRetries: nil)

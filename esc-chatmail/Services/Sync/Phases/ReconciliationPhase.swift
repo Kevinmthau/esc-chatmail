@@ -111,7 +111,8 @@ struct ReconciliationPhase: SyncPhase {
                 }
                 if foundOutcome.hasBlockingFailures {
                     // No verdict was written for them: the record stays
-                    // "Delivery unknown" and is looked up again later.
+                    // "Delivery unknown" and is looked up again once
+                    // `DeliveryUnknownProbePolicy.reprobeInterval` has passed.
                     log.warning("Failed to persist \(foundOutcome.blockingFailureIds.count) message(s) a delivery-unknown lookup found")
                 }
             }

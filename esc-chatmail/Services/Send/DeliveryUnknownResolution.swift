@@ -16,8 +16,8 @@ enum DeliveryUnknownResolution {
 
     /// Stages the change on the record with this optimistic ID, compare-and-set
     /// from "Delivery unknown" only: a record in any other state (consumed by
-    /// an echo, already Not sent, a committed send) is left alone and `false`
-    /// is returned. Call inside the context's `perform`. Nothing is saved.
+    /// an echo, already Not sent, a committed send), or one whose message row
+    /// is gone, is left alone and `false` is returned. Call inside the context's `perform`. Nothing is saved.
     static func stageNotSent(
         optimisticMessageID: String,
         in context: NSManagedObjectContext
@@ -33,6 +33,15 @@ enum DeliveryUnknownResolution {
               record.remoteCommittedThreadId == nil else {
             return false
         }
+        let messageRequest = Message.fetchRequest()
+        messageRequest.predicate = MessagePredicates.id(optimisticMessageID)
+        messageRequest.includesPendingChanges = true
+        let messages = try context.fetch(messageRequest).filter { !$0.isDeleted }
+        // `retainDefinitelyUnsentOptimisticMessage` never marks a record whose
+        // message row is gone: it restores the conversation and drops the
+        // record instead, which needs the view context. Leave such a record
+        // as it is rather than write a marker that path never writes.
+        guard !messages.isEmpty else { return false }
 
         record.remoteCommittedMessageId = OutboundSendRemoteState.notSentMessageID
         record.failureReason = notSentReason
@@ -41,10 +50,7 @@ enum DeliveryUnknownResolution {
             record.replyEnvelopeData = try envelope.withoutRecoverySource().encoded()
         }
 
-        let messageRequest = Message.fetchRequest()
-        messageRequest.predicate = MessagePredicates.id(optimisticMessageID)
-        messageRequest.includesPendingChanges = true
-        for message in try context.fetch(messageRequest) where !message.isDeleted {
+        for message in messages {
             for attachment in message.attachmentsArray where attachment.isLocalAttachment {
                 attachment.state = .failed
             }
@@ -52,10 +58,11 @@ enum DeliveryUnknownResolution {
         return true
     }
 
-    /// Records that the probe found this send in Gmail, so it is not asked
-    /// about again for `DeliveryUnknownProbePolicy.reprobeInterval` if its
-    /// echo does not consume the record. Still "Delivery unknown" only.
-    static func stageFound(
+    /// Records that the probe asked about this send without resolving it here
+    /// (found, whose echo may not consume it, or no verdict), so it is not
+    /// asked again for `DeliveryUnknownProbePolicy.reprobeInterval`. Still
+    /// "Delivery unknown" only.
+    static func stageLookedUp(
         optimisticMessageID: String,
         probedAt: Date,
         in context: NSManagedObjectContext

@@ -36,7 +36,11 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
 
         XCTAssertEqual(outcome.resolvedAsNotSent, ["lost-send"])
-        XCTAssertEqual(api.listMessagesQueries, [DeliveryUnknownProbePolicy.query(forOptimisticMessageID: "lost-send")])
+        XCTAssertEqual(
+            api.searchAllMessagesQueries,
+            [DeliveryUnknownProbePolicy.query(forOptimisticMessageID: "lost-send")],
+            "Asked through the search that includes Spam and Trash"
+        )
         XCTAssertEqual(api.sendMessageCallCount, 0, "Resolving a send never sends it")
         let staged = try state(of: "lost-send", in: context)
         XCTAssertEqual(staged.marker, OutboundSendRemoteState.notSentMessageID)
@@ -71,7 +75,9 @@ final class DeliveryUnknownProbeTests: XCTestCase {
     // MARK: - No verdict
 
     // Revert-check: fails if `DeliveryUnknownProbePolicy.isEligible` stops
-    // requiring `admittedAt`, the quiet period or the ambiguous marker.
+    // requiring `admittedAt` or the quiet period. (The in-flight and Not-sent
+    // seeds never reach it: the probe's fetch asks for the ambiguous marker.
+    // `DeliveryUnknownProbePolicyTests` pins the marker rule.)
     func testRun_legacyRecentInFlightAndNotSentRecords_areNeverLookedUp() async throws {
         try seedSend(id: "legacy", admittedAgo: nil)
         try seedSend(id: "recent", admittedAgo: 10 * 60)
@@ -87,7 +93,10 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         XCTAssertEqual(try state(of: "in-flight", in: context).marker, OutboundSendRemoteState.inFlightMessageID)
     }
 
-    func testRun_listFailure_isNoVerdictAndStagesNothing() async throws {
+    // Revert-check: fails if `DeliveryUnknownProbe.run` stops stamping
+    // `deliveryProbedAt` for a no-verdict lookup: three records whose lookup
+    // keeps failing would take every run's lookups and starve the rest.
+    func testRun_listFailure_isNoVerdictButSpacesTheNextLookup() async throws {
         try seedSend(id: "unknown", admittedAgo: 2 * 60 * 60)
         api.listMessagesError = APIError.serverError(503)
 
@@ -96,9 +105,63 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         XCTAssertEqual(outcome.unresolved, ["unknown"])
         let staged = try state(of: "unknown", in: context)
         XCTAssertEqual(staged.marker, OutboundSendRemoteState.ambiguousMessageID)
-        XCTAssertNil(staged.probedAt)
+        XCTAssertEqual(staged.attachmentStates, [.uploaded])
+        XCTAssertEqual(staged.probedAt, runStart)
+    }
+
+    // Revert-check: fails if `DeliveryUnknownResolution.stageNotSent` drops its
+    // missing-message guard: it would write a Not-sent marker that
+    // `retainDefinitelyUnsentOptimisticMessage` never writes for a record
+    // without its message, and cold recovery would then restore the
+    // conversation's pre-send rollup days later.
+    func testRun_recordWhoseMessageIsGone_isLeftDeliveryUnknown() async throws {
+        try seedSend(id: "orphan", admittedAgo: 2 * 60 * 60)
+        let deleteContext = stack.newBackgroundContext()
+        try deleteContext.performAndWait {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id("orphan")
+            for message in try deleteContext.fetch(request) { deleteContext.delete(message) }
+            try deleteContext.save()
+        }
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.unresolved, ["orphan"])
         let probeContext: NSManagedObjectContext = context
-        XCTAssertFalse(probeContext.performAndWait { probeContext.hasChanges })
+        let marker = try await probeContext.perform {
+            try Self.record(id: "orphan", in: probeContext)?.remoteCommittedMessageId
+        }
+        XCTAssertEqual(marker, OutboundSendRemoteState.ambiguousMessageID)
+    }
+
+    // The production client puts Spam and Trash in the search: a sent copy the
+    // user trashed must still count as found.
+    // Revert-check: fails if `GmailAPIClient.searchAllMessages` stops sending
+    // `includeSpamTrash=true`, or `DeliveryUnknownProbe.run` goes back to
+    // `listMessages`, which leaves Spam and Trash out.
+    func testRun_productionClient_searchesWithSpamAndTrashIncluded() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.data(200, Data(#"{"resultSizeEstimate":0}"#.utf8))]
+        try seedSend(id: "lost-send", admittedAgo: 2 * 60 * 60)
+        let client = GmailAPIClient(
+            tokenManager: MockTokenManager(),
+            session: StubURLProtocol.makeSession(),
+            retryClock: FakeSyncClock()
+        )
+
+        let outcome = try await DeliveryUnknownProbe(messageFetcher: MessageFetcher(apiClient: client, clock: FakeSyncClock()))
+            .run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.resolvedAsNotSent, ["lost-send"])
+        let url = try XCTUnwrap(StubURLProtocol.requestURLs.first)
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertTrue(items.contains(URLQueryItem(name: "includeSpamTrash", value: "true")))
+        XCTAssertTrue(items.contains(URLQueryItem(
+            name: "q",
+            value: DeliveryUnknownProbePolicy.query(forOptimisticMessageID: "lost-send")
+        )))
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
     }
 
     func testRun_emptyPageWithANextPageToken_isNoVerdict() async throws {

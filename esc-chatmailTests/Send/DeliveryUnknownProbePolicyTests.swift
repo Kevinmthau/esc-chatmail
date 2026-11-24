@@ -57,6 +57,20 @@ final class DeliveryUnknownProbePolicyTests: XCTestCase {
         XCTAssertTrue(Policy.isEligible(candidate(probedAgo: Policy.reprobeInterval), runStartedAt: runStart))
     }
 
+    // Revert-check: fails if `DeliveryUnknownProbePolicy.candidatesToProbe`
+    // stops putting never-asked records ahead of ones asked before.
+    func testCandidatesToProbe_neverAskedFirstThenLeastRecentlyAsked() {
+        let candidates = [
+            candidate(id: "asked-long-ago", admittedAgo: 90 * 60 * 60, probedAgo: 30 * 60 * 60),
+            candidate(id: "asked-recently", admittedAgo: 99 * 60 * 60, probedAgo: 7 * 60 * 60),
+            candidate(id: "never-asked", admittedAgo: 2 * 60 * 60)
+        ]
+
+        let probed = Policy.candidatesToProbe(candidates, runStartedAt: runStart).map(\.optimisticMessageID)
+
+        XCTAssertEqual(probed, ["never-asked", "asked-long-ago", "asked-recently"])
+    }
+
     func testCandidatesToProbe_oldestAdmissionFirstAndCapped() {
         let candidates = [
             candidate(id: "c", admittedAgo: 3 * 60 * 60),

@@ -25,17 +25,28 @@ import Foundation
 /// (`NetworkConfig.sendResourceTimeout`), so that Gmail has finished with any
 /// request it was still processing when the app gave up on it, and its search
 /// has indexed the result.
+///
+/// What neither witness can see: a sent copy the user deleted forever (not
+/// to Trash) before the app synced it. History then answers 404 for it, which
+/// is "gone", not a failure, and the search finds nothing, so the send reads
+/// as "Not sent" though the recipient has it. Nor does the history witness
+/// cover a run after a history recovery, whose listing leaves Trash out
+/// (`SyncTimeCalculator`); the search, which includes Trash, still does. The
+/// quiet period is measured on the wall clock (`admittedAt` and the run's
+/// start are both `Date()`), so a clock moved forward shortens it.
 enum DeliveryUnknownProbePolicy {
     /// How long after admission a send is first looked up. Far past the send's
     /// 300 s whole-request cap: the request is over on the device by then, and
     /// what remains is Gmail committing a body it had whole and indexing it.
     static let quietPeriod: TimeInterval = 60 * 60
 
-    /// How long a send that was found, but whose echo did not consume its
-    /// record, waits before it is looked up again.
-    static let reprobeInterval: TimeInterval = 24 * 60 * 60
+    /// How long a send that was looked up without being resolved (found, but
+    /// its echo did not consume the record, or no verdict) waits before it is
+    /// looked up again.
+    static let reprobeInterval: TimeInterval = 6 * 60 * 60
 
-    /// Lookups per run, one list request each. Oldest admission first.
+    /// Lookups per run, one list request each: never asked first, then
+    /// least recently asked, then oldest admission.
     static let maximumProbesPerRun = 3
 
     /// What the policy reads off an `OutboundSendMutationRecord`.
@@ -78,22 +89,25 @@ enum DeliveryUnknownProbePolicy {
         return true
     }
 
-    /// The eligible candidates this run looks up, oldest admission first.
+    /// The eligible candidates this run looks up: never asked first, then
+    /// least recently asked, then oldest admission.
     static func candidatesToProbe(
         _ candidates: [Candidate],
         runStartedAt: Date
     ) -> [Candidate] {
         let eligible = candidates.filter { isEligible($0, runStartedAt: runStartedAt) }
         let ordered = eligible.sorted {
-            ($0.admittedAt ?? .distantPast, $0.optimisticMessageID)
-                < ($1.admittedAt ?? .distantPast, $1.optimisticMessageID)
+            ($0.deliveryProbedAt ?? .distantPast, $0.admittedAt ?? .distantPast, $0.optimisticMessageID)
+                < ($1.deliveryProbedAt ?? .distantPast, $1.admittedAt ?? .distantPast, $1.optimisticMessageID)
         }
         return Array(ordered.prefix(maximumProbesPerRun))
     }
 
     /// The Gmail search for the send's own Message-ID, the one its MIME
     /// carried (`MimeBuilder.messageId(forOptimisticMessageID:)`), in every
-    /// label including Spam and Trash.
+    /// label. Sent with `includeSpamTrash=true`
+    /// (`GmailAPIClientProtocol.searchAllMessages`), which is what puts Spam
+    /// and Trash in it; `in:anywhere` says the same and is not relied on.
     static func query(forOptimisticMessageID optimisticMessageID: String) -> String {
         let messageID = MimeBuilder.messageId(forOptimisticMessageID: optimisticMessageID)
         let bare = messageID.trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
