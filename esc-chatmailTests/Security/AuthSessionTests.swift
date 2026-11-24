@@ -1452,6 +1452,56 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // The crash-resume pair signs Google out through the injected seam, in its place in
+    // the teardown: after the drains, before the downloads close. It called the SDK
+    // singleton directly, which no stub covered, and in a Mac test host that deleted the
+    // installed MushMail's Google keychain item (architecture review 2026-11,
+    // account-boundary-auth#5).
+    // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` or
+    // `resumeInterruptedCredentialCleanupIfNeeded()` goes back to
+    // `GIDSignIn.sharedInstance.signOut()` in place of `signOutGoogleSession()`
+    // (no "google-sign-out" is recorded for that marker).
+    func testRestoreResumedCleanup_signsGoogleOutThroughTheSeamBeforeDownloadsClose() async throws {
+        for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
+            let keychain = MockKeychainService()
+            try keychain.save(Data([1]), for: key.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                keychainService: keychain,
+                signOutGoogleSession: { cleanup.record("google-sign-out") },
+                cleanupDownloads: { cleanup.record("downloads-closed") }
+            )
+
+            let outcome = await session.restorePreviousSignIn()
+
+            XCTAssertEqual(outcome, .terminalNoSession, key.rawValue)
+            XCTAssertEqual(
+                cleanup.events.filter { $0 == "google-sign-out" || $0 == "downloads-closed" }.prefix(2),
+                ["google-sign-out", "downloads-closed"],
+                key.rawValue
+            )
+            XCTAssertEqual(cleanup.events.filter { $0 == "google-sign-out" }.count, 1, key.rawValue)
+        }
+    }
+
+    // The only call of the SDK's sign-out is the seam's production default, so no path of
+    // AuthSession can reach the real Google session past a test's stub.
+    // Revert-check: fails if any `GIDSignIn.sharedInstance.signOut()` is added back to
+    // AuthSession.swift outside the `signOutGoogleSession` default.
+    func testGoogleSDKSignOut_isCalledOnlyFromTheSeamDefault() throws {
+        let source = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+        let call = "GIDSignIn.sharedInstance.signOut()"
+        XCTAssertEqual(source.components(separatedBy: call).count - 1, 1)
+        let seamDefault = try XCTUnwrap(source.range(of: "signOutGoogleSession: @escaping @MainActor @Sendable () -> Void = {"))
+        let callSite = try XCTUnwrap(source.range(of: call))
+        XCTAssertLessThan(seamDefault.lowerBound, callSite.lowerBound)
+        XCTAssertLessThan(
+            source.distance(from: seamDefault.upperBound, to: callSite.lowerBound),
+            40,
+            "The one SDK sign-out is the body of the seam's default closure"
+        )
+    }
+
     // Revert-check: fails if `clearFailedGoogleSession()` drops its
     // `cancelBackgroundTaskRequests()` step. A restore rejected with an
     // invalidated credential concludes signed out with tokens cleared, so every

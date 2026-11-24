@@ -1984,7 +1984,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         resetSyncStorageState()
         await clearParticipantCaches()
 
-        GIDSignIn.sharedInstance.signOut()
+        // Through the seam, as every other path signs Google out: a test's stub
+        // must cover this too. Called directly, the SDK deleted the real "auth"
+        // keychain item, which in a Mac test host is the installed MushMail's
+        // Google session (architecture review 2026-11, account-boundary-auth#5).
+        signOutGoogleSession()
         currentUser = nil
         userEmail = nil
         userName = nil
@@ -2049,7 +2053,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         resetSyncStorageState()
         await clearParticipantCaches()
 
-        GIDSignIn.sharedInstance.signOut()
+        // Through the seam, as every other path signs Google out: a test's stub
+        // must cover this too. Called directly, the SDK deleted the real "auth"
+        // keychain item, which in a Mac test host is the installed MushMail's
+        // Google session (architecture review 2026-11, account-boundary-auth#5).
+        signOutGoogleSession()
         clearAuthState()
         clearAccountScopedSyncDefaults()
         userDefaults.removeObject(forKey: "hasCompletedSignIn")
