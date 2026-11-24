@@ -395,7 +395,14 @@ final class IncrementalSyncOrchestrator {
             )
             let reconciliationTimer = timing.start("reconciliation")
             let reconciliationResult = try await reconciliationPhase.execute(
-                input: ReconciliationInput(skipLabelReconciliation: shouldSkipReconciliation),
+                input: ReconciliationInput(
+                    skipLabelReconciliation: shouldSkipReconciliation,
+                    probesDeliveryUnknownSends: DeliveryUnknownProbePolicy.allowsProbing(
+                        allowsExpensiveWork: allowsExpensiveRecovery,
+                        historySliceIsTerminal: historyResult.nextPageToken == nil,
+                        hadFetchFailures: fetchResult.hasFailures
+                    )
+                ),
                 context: phaseContext
             )
             timing.finish(

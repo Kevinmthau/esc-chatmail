@@ -72,6 +72,11 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     // MARK: - Error Simulation
 
+    /// listMessages() responses keyed by the exact query, checked before
+    /// `listMessagesResponse`, for a run that lists with more than one query.
+    var listMessagesResponsesByQuery: [String: MessagesListResponse] = [:]
+    /// listMessages() errors keyed by the exact query (reset after throwing).
+    var listMessagesErrorsByQuery: [String: Error] = [:]
     /// Error to throw on listMessages() (resets after throwing)
     var listMessagesError: Error?
     /// Optional page-token keyed listMessages() errors (reset after throwing).
@@ -204,6 +209,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             // Errors
             listMessagesError = nil
             listMessagesErrorsByPageToken = [:]
+            listMessagesResponsesByQuery = [:]
+            listMessagesErrorsByQuery = [:]
             getMessageError = nil
             getMessageErrors = [:]
             modifyMessageError = nil
@@ -269,6 +276,12 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         return try withStateLock {
             if let error = listMessagesErrorsByPageToken.removeValue(forKey: pageTokenKey(pageToken)) {
                 throw error
+            }
+            if let query, let error = listMessagesErrorsByQuery.removeValue(forKey: query) {
+                throw error
+            }
+            if let query, let response = listMessagesResponsesByQuery[query] {
+                return response
             }
             if let error = listMessagesError {
                 listMessagesError = nil

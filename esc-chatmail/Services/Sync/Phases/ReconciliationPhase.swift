@@ -5,6 +5,11 @@ import CoreData
 struct ReconciliationInput {
     /// Skip label reconciliation when history reported no changes
     let skipLabelReconciliation: Bool
+    /// Look up "Delivery unknown" sends in Gmail by Message-ID
+    /// (`DeliveryUnknownProbe`). The orchestrator sets it only from
+    /// `DeliveryUnknownProbePolicy.allowsProbing`: a run that may do expensive
+    /// work and whose history slice was terminal and clean.
+    var probesDeliveryUnknownSends = false
 }
 
 struct ReconciliationPhaseResult: Sendable, Equatable {
@@ -82,6 +87,33 @@ struct ReconciliationPhase: SyncPhase {
                 // Missed-message recovery is a safety net outside history
                 // semantics; failures here are logged, not cursor-gating.
                 log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
+            }
+        }
+
+        if input.probesDeliveryUnknownSends {
+            let probeOutcome = try await DeliveryUnknownProbe(messageFetcher: messageFetcher)
+                .run(runStartedAt: context.syncStartTime, in: context.coreDataContext)
+            if !probeOutcome.foundMessageIDs.isEmpty {
+                // Persisted as any synced echo is: the persister's Message-ID
+                // match consumes the record in this run's context.
+                let foundOutcome = try await BatchProcessor.retryFailedMessages(
+                    failedIds: probeOutcome.foundMessageIDs,
+                    messageFetcher: messageFetcher
+                ) { [messagePersister] messages in
+                    try await messagePersister.saveMessages(
+                        messages,
+                        labelIds: context.labelIds,
+                        myAliases: context.myAliases,
+                        sendAsAliases: context.sendAsAliases,
+                        modificationTransaction: context.modificationTransaction,
+                        in: context.coreDataContext
+                    )
+                }
+                if foundOutcome.hasBlockingFailures {
+                    // No verdict was written for them: the record stays
+                    // "Delivery unknown" and is looked up again later.
+                    log.warning("Failed to persist \(foundOutcome.blockingFailureIds.count) message(s) a delivery-unknown lookup found")
+                }
             }
         }
 
