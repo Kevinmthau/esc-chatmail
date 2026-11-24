@@ -239,42 +239,47 @@ export function formatSignOffLineBreaks(text: string): string {
 
 // MARK: - Quote extraction (PlainTextQuoteRemover)
 
+// Each pattern with `.+` starts at a line start, and one with two or three
+// of them bounds each, as in iOS's PlainTextQuoteRemover: unanchored, nested
+// `.+` made a crafted long line quadratic or cubic. Apple's quoted
+// "> On …, at …" stays unanchored (unwrapping can join it to the line above)
+// and is only bounded. Keep the two in step.
 const QUOTE_INDICATOR_PATTERNS: RegExp[] = [
   // Time-based quotes - English
   /(?:^|\n)On .+ wrote:/i,
-  /(?:^|\n)On .+, .+ wrote:/i,
-  /> On .+, at .+, .+ wrote:/i,
+  /(?:^|\n)On .{1,200}, .{1,200} wrote:/i,
+  /> On .{1,100}, at [^,\n]{1,40}, .{1,200} wrote:/i,
   // iOS/Apple Mail format
   /On [A-Z][a-z]+ \d{1,2}, \d{4} at \d{1,2}:\d{2}\s*[AP]M,/i,
 
   // International quote patterns
-  /Am .+ schrieb .+:/i,
-  /Le .+ a écrit\s*:/i,
-  /El .+ escribió:/i,
-  /Il .+ ha scritto:/i,
-  /Em .+ escreveu:/i,
-  /Op .+ schreef .+:/i,
+  /(?:^|\n)[ \t]*Am .{1,200} schrieb .{1,200}:/i,
+  /(?:^|\n)[ \t]*Le .+ a écrit\s*:/i,
+  /(?:^|\n)[ \t]*El .+ escribió:/i,
+  /(?:^|\n)[ \t]*Il .+ ha scritto:/i,
+  /(?:^|\n)[ \t]*Em .+ escreveu:/i,
+  /(?:^|\n)[ \t]*Op .{1,200} schreef .{1,200}:/i,
 
   // Header-based quotes
-  /From: .+\nSent: .+\nTo: .+\nSubject: .+/i,
-  /From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+/i,
-  /From: .+\nDate: .+\nTo: .+\nSubject: .+/i,
-  /From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+/i,
+  /(?:^|\n)[ \t]*From: .+\nSent: .+\nTo: .+\nSubject: .+/i,
+  /(?:^|\n)[ \t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+/i,
+  /(?:^|\n)[ \t]*From: .+\nDate: .+\nTo: .+\nSubject: .+/i,
+  /(?:^|\n)[ \t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+/i,
   /-----Original Message-----/i,
   /________________________________/i,
 
   // International header patterns
-  /Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+/i,
-  /De\s*: .+\nEnvoyé\s*: .+\nÀ\s*: .+\nObjet\s*: .+/i,
-  /De: .+\nEnviado: .+\nPara: .+\nAsunto: .+/i,
+  /(?:^|\n)[ \t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+/i,
+  /(?:^|\n)[ \t]*De\s*: .+\nEnvoyé\s*: .+\nÀ\s*: .+\nObjet\s*: .+/i,
+  /(?:^|\n)[ \t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+/i,
 
   // Forward indicators - English
   /Begin forwarded message:/i,
-  /(?:^|\n)\s*-{2,}\s*Forwarded message\b.*/i,
+  /(?:^|\n)[ \t]*-{2,}\s*Forwarded message\b.*/i,
   /\s-{2,}\s*Forwarded message\b.*/i,
   /---------- Forwarded message ---------/i,
   /------ Original Message ------/i,
-  /(?:^|\n)\s*-{2,}\s*Original Message\b.*/i,
+  /(?:^|\n)[ \t]*-{2,}\s*Original Message\b.*/i,
 
   // Forward indicators - International
   /Weitergeleitete Nachricht/i,

@@ -8,46 +8,61 @@ enum PlainTextQuoteRemover {
     // MARK: - Quote Indicator Patterns
 
     /// Regex patterns that indicate quoted content (string form for reference)
+    ///
+    /// Each pattern with `.+` starts at a line start (`(?:^|\n)`, with the
+    /// line's leading spaces), and a pattern with two or three of them bounds
+    /// each one. Unanchored, a pattern was tried at every occurrence of its
+    /// first word ("le ", "am ", "from: "…) with `.+` running to the end of
+    /// the line, and nested `.+` made each try quadratic or cubic in the line:
+    /// one crafted 30,000-character line held a sync for 43 s. Anchored and
+    /// bounded, a line costs at most the product of its bounds
+    /// (`PlainTextQuoteRemoverPatternCostTests`). An attribution in the middle
+    /// of a line, or longer than the bounds, is no longer recognized here;
+    /// `web/src/mime/text.ts` keeps the same patterns. The one exception is
+    /// Apple's quoted "> On …, at …, … wrote:", which stays unanchored and is
+    /// only bounded: the line unwrapping ahead of this pass joins it to the
+    /// sign-off above it ("Jordan > On Feb 15, …"), and it starts at the
+    /// literal "> On ", so each try is bounded and the cost stays linear.
     private static let quoteIndicatorPatternStrings = [
         // Time-based quotes - English
         // Require "On" at start of string or after newline to avoid mid-sentence matches
         // (e.g., "I need to reload on the Chablis" should not match)
         "(?:^|\\n)On .+ wrote:",
-        "(?:^|\\n)On .+, .+ wrote:",
-        "> On .+, at .+, .+ wrote:",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:",
         // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
         "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
 
         // International quote patterns
         // German: "Am [date] schrieb [name]:"
-        "Am .+ schrieb .+:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:",
         // French: "Le [date] [name] a écrit :" or "Le [date], [name] a écrit :"
-        "Le .+ a écrit\\s*:",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:",
         // Spanish: "El [date] [name] escribió:"
-        "El .+ escribió:",
+        "(?:^|\\n)[ \\t]*El .+ escribió:",
         // Italian: "Il [date] [name] ha scritto:"
-        "Il .+ ha scritto:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:",
         // Portuguese: "Em [date] [name] escreveu:"
-        "Em .+ escreveu:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:",
         // Dutch: "Op [date] schreef [name]:"
-        "Op .+ schreef .+:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:",
 
         // Header-based quotes - Outlook style (uses "Sent:")
-        "From: .+\nSent: .+\nTo: .+\nSubject: .+",
-        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
         // Header-based quotes - Apple Mail style (uses "Date:")
-        "From: .+\nDate: .+\nTo: .+\nSubject: .+",
-        "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
         "-----Original Message-----",
         "________________________________",
 
         // International header patterns
         // German
-        "Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
         // French
-        "De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
+        "(?:^|\\n)[ \\t]*De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
         // Spanish
-        "De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
 
         // Forward indicators - English
         "Begin forwarded message:",
@@ -55,12 +70,14 @@ enum PlainTextQuoteRemover {
         // "---------- Forwarded message ---------"
         // "---------- Forwarded message"
         // "----- Forwarded message -----"
-        "(?:^|\\n)\\s*-{2,}\\s*Forwarded message\\b.*",
+        // Leading spaces only: a `\s*` here crossed newlines, and a run of
+        // blank lines before the marker cost the run's length at each of them.
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Forwarded message\\b.*",
         // Handles soft-wrapped variants where the marker appears inline after intro text.
         "\\s-{2,}\\s*Forwarded message\\b.*",
         "---------- Forwarded message ---------",
         "------ Original Message ------",
-        "(?:^|\\n)\\s*-{2,}\\s*Original Message\\b.*",
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Original Message\\b.*",
 
         // Forward indicators - International
         "Weitergeleitete Nachricht",   // German
@@ -82,20 +99,20 @@ enum PlainTextQuoteRemover {
     /// between two non-literal atoms, so case folding treats it alike in both.
     private static let requiredLiteralByPattern: [String: String] = [
         "(?:^|\\n)On .+ wrote:": " wrote:",
-        "(?:^|\\n)On .+, .+ wrote:": " wrote:",
-        "> On .+, at .+, .+ wrote:": " wrote:",
-        "Am .+ schrieb .+:": " schrieb ",
-        "Le .+ a écrit\\s*:": " a écrit",
-        "El .+ escribió:": " escribió:",
-        "Il .+ ha scritto:": " ha scritto:",
-        "Em .+ escreveu:": " escreveu:",
-        "Op .+ schreef .+:": " schreef ",
-        "From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
-        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
-        "From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",
-        "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+": "\nDate: ",
-        "Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+": "\nGesendet: ",
-        "De: .+\nEnviado: .+\nPara: .+\nAsunto: .+": "\nEnviado: ",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:": " wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:": " wrote:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:": " a écrit",
+        "(?:^|\\n)[ \\t]*El .+ escribió:": " escribió:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:": " ha scritto:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:": " escreveu:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:": " schreef ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+": "\nGesendet: ",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+": "\nEnviado: ",
     ]
 
     private struct QuotePattern {
