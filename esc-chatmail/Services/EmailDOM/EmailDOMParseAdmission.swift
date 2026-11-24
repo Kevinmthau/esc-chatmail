@@ -551,10 +551,14 @@ private enum ScannedTagName {
     static let headNoscriptElements: Set<[UInt8]> = Set(["style", "noframes"].map { Array($0.utf8) })
 
     /// Start tags the head takes; any other one ends the head for good
-    /// (`<body>` included).
+    /// (`<body>` included). `command` is one of them (SwiftSoup's
+    /// `baseEtc`): without it a `<command>` was taken to end the head, and
+    /// the head's `noscript` after it, whose tags SwiftSoup reads as text,
+    /// was read as markup, so a `<plaintext>` there stopped the scan before
+    /// a thousand divs.
     static let headStartTags: Set<[UInt8]> = Set([
-        "html", "head", "base", "basefont", "bgsound", "link", "meta", "title", "noscript", "noframes",
-        "style", "script", "template"
+        "html", "head", "base", "basefont", "bgsound", "command", "link", "meta", "title", "noscript",
+        "noframes", "style", "script", "template"
     ].map { Array($0.utf8) })
 
     static let table = Array("table".utf8)

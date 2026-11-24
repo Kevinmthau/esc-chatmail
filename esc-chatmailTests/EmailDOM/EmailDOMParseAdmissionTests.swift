@@ -618,6 +618,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             String(repeating: "<tr><span><span><span></tr>", count: 300),
             String(repeating: "<div><table/><span><span></table>", count: 300),
             String(repeating: "<caption><b><b></caption>", count: 300),
+            // SwiftSoup's head takes a `command`, so the `noscript` after it
+            // is the head's, its `<plaintext>` text, and the divs markup.
+            // Revert-check: `command` in `ScannedTagName.headStartTags`.
+            "<command><noscript><plaintext></noscript>" + String(repeating: "<div>", count: 600),
             // SwiftSoup's double escape matches `script` in lowercase only.
             String(repeating: "<div><script><!--<SCRIPT></script>", count: 300),
             String(repeating: "<div><script><!--<script></SCRIPT></script></div>--></script>", count: 300),
