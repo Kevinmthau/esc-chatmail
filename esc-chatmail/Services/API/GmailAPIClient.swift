@@ -152,17 +152,21 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// caught by the 30 s request timeout, which is an idle timer: measured on
     /// macOS 27.2 against a throttled loopback server, an upload that kept
     /// writing ran 40 s under a 15 s request timeout, and timed out only once
-    /// nothing more could be written for 15 s. The cap is also how long a
-    /// sign-out can wait: an admitted send is drain-only, and
-    /// `OutboundTaskRegistry.cancelAndAwaitAll` waits for it with the
+    /// nothing more could be written for 15 s (not measured on iOS). The cap
+    /// also sets how long a sign-out can wait: an admitted send is drain-only,
+    /// and `OutboundTaskRegistry.cancelAndAwaitAll` waits for it with the
     /// auth-transition gate held, as the next chat reply to the same
-    /// conversation waits for its turn. Never raise it without weighing that.
+    /// conversation waits for its turn. It bounds one attempt, not the send:
+    /// the breaker is checked only before an attempt, so a 401 or 429 just
+    /// inside its 120 s can start a second attempt of up to 300 s (about
+    /// 420 s in all). Never raise it without weighing that.
     ///
     /// Every other setting (the request timeout, cache policy, and any
     /// injected protocol classes) is copied from `session`;
     /// `URLSession.configuration` already returns a copy, so the read session
-    /// is untouched. The delegate is not copied (see `init`). The trade-off is a separate connection pool, so
-    /// the first send after launch, or after the pool has gone idle, may pay
+    /// is untouched. The delegate is not copied (see `init`). The trade-off
+    /// is a separate connection pool, so the first send after launch, or
+    /// after the pool has gone idle, may pay
     /// its own TCP+TLS handshake instead of reusing the sync session's warm
     /// connection; the optimistic bubble hides it, but it adds to the time
     /// until the bubble reads Delivered.
@@ -487,10 +491,15 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             // breaker's 120 s by itself (`sendResourceTimeout`),
                             // and `sendMessage` classifies a timeout as
                             // ambiguous, so a send Gmail refused ended as
-                            // "Delivery unknown" instead of "Not sent". Kept
-                            // behind an earlier failure, which a read
-                            // reported here before and still does.
-                            lastError = lastError ?? APIError.authenticationError
+                            // "Delivery unknown" instead of "Not sent". Only
+                            // for a request that may not be retransmitted: a
+                            // read whose refresh succeeded keeps reporting what
+                            // it reported before, because `authenticationError`
+                            // aborts a sync run and parks the pending-action
+                            // queue as if the credentials had failed.
+                            if !behavior.allowsRetransmission {
+                                lastError = lastError ?? APIError.authenticationError
+                            }
                             continue
                         } catch TokenManagerError.invalidCredentials {
                             Log.error("Refresh token revoked, user must re-authenticate", category: .api)

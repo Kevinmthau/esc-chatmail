@@ -520,7 +520,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             NetworkConfig.sendResourceTimeout,
             300,
-            "The cap bounds a sign-out's drain of an admitted send; raising it is a decision, not a tweak"
+            "The cap sets how long a sign-out's drain of an admitted send can take; raising it is a decision, not a tweak"
         )
     }
 
@@ -559,6 +559,34 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "The breaker tripped before the refreshed request")
         XCTAssertEqual(tokenManager.refreshTokenCallCount, 1)
+    }
+
+    // Revert-check: fails if the 401 path's `lastError` assignment in
+    // `GmailAPIClient.performRetryingRequest` loses its
+    // `!behavior.allowsRetransmission` guard — a read whose token refresh
+    // succeeded would report `authenticationError`, which aborts a sync run as
+    // an account-scoped failure.
+    func testGetMessage_unauthorizedThenBreakerTrips_keepsReportingATimeoutNotAnAuthFailure() async {
+        let breakerClock = ScriptedNowClock(offsets: [0, 0, 150])
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 0.01, maxDelay: 0.02),
+            session: StubURLProtocol.makeSession(),
+            circuitBreakerClock: breakerClock
+        )
+        StubURLProtocol.script = [.status(401), .data(200, Self.messageResponseBody)]
+
+        do {
+            _ = try await client.getMessage(id: "m1")
+            XCTFail("Expected the breaker to stop the refreshed attempt")
+        } catch let error as APIError {
+            guard case .timeout = error else {
+                return XCTFail("A read keeps its old breaker error, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
     }
 
     // Revert-check: fails if the 429 path of `GmailAPIClient.performRetryingRequest`
