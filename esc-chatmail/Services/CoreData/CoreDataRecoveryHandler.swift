@@ -29,9 +29,9 @@ final class CoreDataRecoveryHandler {
             Log.warning("Core Data load attempt \(currentAttempts) failed with recoverable error: \(error)", category: .coreData)
             return .retry(delay: retryDelay)
 
-        case .migrationRecovery:
-            Log.error("Core Data migration failed", category: .coreData, error: error)
-            return .migrationRecovery
+        case .migrationFailed:
+            Log.error("Core Data migration failed; keeping the store on disk", category: .coreData, error: error)
+            return .migrationFailed
 
         case .storeReset:
             Log.error("Core Data store is corrupt", category: .coreData, error: error)
@@ -40,32 +40,6 @@ final class CoreDataRecoveryHandler {
         case .keepStore:
             Log.error("Core Data store could not be opened; keeping it on disk", category: .coreData, error: error)
             return .keepStore
-        }
-    }
-
-    /// Attempts migration recovery by backing up and removing the problematic store.
-    /// - Parameter storeURL: The URL of the store to recover
-    /// - Returns: true if recovery preparation succeeded
-    func prepareMigrationRecovery(for storeURL: URL) -> Bool {
-        do {
-            // Create timestamped backup before attempting recovery
-            let backupURL = try CoreDataBackupManager.createTimestampedBackup(at: storeURL)
-            Log.info("Created backup before migration recovery: \(backupURL.path)", category: .coreData)
-            // Deliberate data loss, worth shouting about: deleting the store
-            // destroys PendingAction and OutboundSendMutationRecord rows — the
-            // only non-re-syncable user data — and forces a full re-bootstrap.
-            // The backup above is the sole copy of those rows.
-            Log.error(
-                "Migration recovery is DELETING the store; queued PendingAction/OutboundSendMutationRecord rows are lost except in the backup at \(backupURL.lastPathComponent)",
-                category: .coreData
-            )
-
-            // Remove problematic store
-            try CoreDataBackupManager.removeStore(at: storeURL)
-            return true
-        } catch {
-            Log.error("Migration recovery preparation failed", category: .coreData, error: error)
-            return false
         }
     }
 
@@ -91,7 +65,7 @@ final class CoreDataRecoveryHandler {
 
     enum RecoveryResult {
         case retry(delay: TimeInterval)
-        case migrationRecovery
+        case migrationFailed
         case storeReset
         case keepStore
     }

@@ -10,12 +10,21 @@ import Foundation
 /// permanent one (a store type mismatch, an I/O or can't-open error that
 /// never clears) would otherwise leave the user on this screen for good,
 /// with deleting the app, which loses the same data, as the only way out.
+///
+/// A migration-family load error keeps the store too, and is offered the reset
+/// in the same way as any other (Kevin, 2026-11-24): never deleted
+/// automatically, and offered behind the confirmation once retrying has not
+/// helped. A store a newer MushMail saved differs in its words alone: the
+/// notice asks the user to update, and the confirmation says that updating
+/// keeps the mailbox and the reset removes it.
 enum AppLoadingPolicy {
     struct StoreLoadFailureNotice: Equatable {
         let title: String
         let message: String
         /// Shows Reset Mailbox beside Try Again.
         let offersMailboxReset: Bool
+        /// What the confirmation behind Reset Mailbox says.
+        var resetConfirmation: MailboxResetConfirmation = AppLoadingPolicy.mailboxResetConfirmation
     }
 
     /// What a load failure says about the way out of it.
@@ -27,6 +36,15 @@ enum AppLoadingPolicy {
         /// (`PersistentStoreLoadError.unavailable`). Retrying may fix it; if
         /// it never does, only a reset can.
         case storeUnavailable
+        /// The migration to this build's model failed on the user's data
+        /// (`PersistentStoreLoadError.migrationFailed`). The store is kept;
+        /// once retrying has not helped, the user may reset it.
+        case migrationFailed
+        /// A newer MushMail saved the store
+        /// (`PersistentStoreLoadError.storeFromNewerVersion`). Updating is the
+        /// fix that keeps the mailbox; the reset is offered as for any other
+        /// failure, in words that say so (Kevin, 2026-11-24).
+        case storeFromNewerVersion
         /// Any other error. `CoreDataStack.resetStoreAfterLoadFailure()`
         /// refuses to reset these, so the screen does not offer it.
         case other
@@ -38,7 +56,8 @@ enum AppLoadingPolicy {
         let confirmButtonTitle: String
     }
 
-    /// Consecutive `.storeUnavailable` failures before the screen offers
+    /// Consecutive failures of a resettable kind (`offersResetPastThreshold`)
+    /// before the screen offers
     /// Reset Mailbox. The launch retry loop's backoff alone reaches five about
     /// 15 s after the first failure (waits of 1, 2, 4 and 8 s), so a transient
     /// fault has had several chances to clear first; each Try Again counts
@@ -48,6 +67,14 @@ enum AppLoadingPolicy {
     static let mailboxResetConfirmation = MailboxResetConfirmation(
         title: "Reset Mailbox?",
         message: "MushMail will delete its copy of your mailbox on this device and download your mail again from Gmail. Changes that haven't synced yet, drafts, and messages that haven't finished sending will be lost.",
+        confirmButtonTitle: "Reset Mailbox"
+    )
+
+    /// The confirmation for a mailbox a newer MushMail saved: updating opens
+    /// it as it is, and the reset deletes it.
+    static let newerVersionMailboxResetConfirmation = MailboxResetConfirmation(
+        title: "Reset Mailbox?",
+        message: "Updating MushMail keeps your mailbox on this device as it is. Resetting deletes it and downloads your mail again from Gmail; changes that haven't synced yet, drafts, and messages that haven't finished sending will be lost.",
         confirmButtonTitle: "Reset Mailbox"
     )
 
@@ -75,14 +102,21 @@ enum AppLoadingPolicy {
         if isInsufficientStorage(loadError) || isLowOnStorage {
             return .insufficientStorage
         }
-        if case PersistentStoreLoadError.unavailable = loadError {
+        switch loadError {
+        case PersistentStoreLoadError.unavailable:
             return .storeUnavailable
+        case PersistentStoreLoadError.migrationFailed:
+            return .migrationFailed
+        case PersistentStoreLoadError.storeFromNewerVersion:
+            return .storeFromNewerVersion
+        default:
+            return .other
         }
-        return .other
     }
 
     /// The count of consecutive failures toward `mailboxResetFailureThreshold`
-    /// after one more failure of `kind`. A storage or unrecognized failure
+    /// after one more failure of `kind`. Only the kinds a reset is offered for
+    /// count (`offersResetPastThreshold`); a storage or unrecognized failure
     /// ends the streak. A failure while protected data is unavailable (a cold
     /// background launch before first unlock, or a locked device) neither
     /// counts nor ends it: data protection alone explains it, so it says
@@ -97,7 +131,7 @@ enum AppLoadingPolicy {
         isProtectedDataAvailable: Bool,
         isFreeSpaceKnown: Bool
     ) -> Int {
-        guard kind == .storeUnavailable else {
+        guard offersResetPastThreshold(kind) else {
             return 0
         }
         return isProtectedDataAvailable && isFreeSpaceKnown ? previousCount + 1 : previousCount
@@ -122,6 +156,32 @@ enum AppLoadingPolicy {
                 message: "MushMail needs more free space to open your mail. Free up storage in Settings, then try again.",
                 offersMailboxReset: false
             )
+        case .storeFromNewerVersion where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
+            return StoreLoadFailureNotice(
+                title: "Update MushMail",
+                message: "Your mailbox on this device was saved by a newer version of MushMail. Update MushMail to open it, or reset the mailbox and download your mail again from Gmail.",
+                offersMailboxReset: true,
+                resetConfirmation: newerVersionMailboxResetConfirmation
+            )
+        case .storeFromNewerVersion:
+            return StoreLoadFailureNotice(
+                title: "Update MushMail",
+                message: "Your mailbox on this device was saved by a newer version of MushMail. Update MushMail to open it.",
+                offersMailboxReset: false,
+                resetConfirmation: newerVersionMailboxResetConfirmation
+            )
+        case .migrationFailed where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
+            return StoreLoadFailureNotice(
+                title: "Can't Open Your Mail",
+                message: "MushMail still can't update its mailbox for this version. If trying again doesn't help, you can reset it and download your mail again from Gmail.",
+                offersMailboxReset: true
+            )
+        case .migrationFailed:
+            return StoreLoadFailureNotice(
+                title: "Can't Open Your Mail",
+                message: "MushMail couldn't update its mailbox for this version. Tap Try Again to try once more.",
+                offersMailboxReset: false
+            )
         case .storeUnavailable where isFreeSpaceKnown && resetEligibleFailureCount >= mailboxResetFailureThreshold:
             return StoreLoadFailureNotice(
                 title: "Can't Open Your Mail",
@@ -134,6 +194,18 @@ enum AppLoadingPolicy {
                 message: "MushMail couldn't open its mailbox. Try again in a moment.",
                 offersMailboxReset: false
             )
+        }
+    }
+
+    /// The kinds Reset Mailbox is offered for once
+    /// `mailboxResetFailureThreshold` failures have counted. The same set
+    /// `CoreDataStack.allowsResetAfterLoadFailure` accepts.
+    static func offersResetPastThreshold(_ kind: StoreLoadFailureKind) -> Bool {
+        switch kind {
+        case .storeUnavailable, .migrationFailed, .storeFromNewerVersion:
+            return true
+        case .insufficientStorage, .other:
+            return false
         }
     }
 

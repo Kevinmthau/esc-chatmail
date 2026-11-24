@@ -102,7 +102,18 @@ enum AuthenticatedAccountEntry: Equatable, Sendable {
 
 struct LocalMailboxStoreInspection: Equatable, Sendable {
     let accountEmails: [String]
-    let hasAccountScopedMailboxData: Bool
+    /// A row of an account-scoped entity other than `Account`. Looked for only
+    /// when the store has no `Account` row.
+    let hasAccountScopedRows: Bool
+    /// A body or attachment file on disk. Looked for only when the store has
+    /// no `Account` row and no other account-scoped row.
+    let hasAccountScopedFiles: Bool
+
+    init(accountEmails: [String], hasAccountScopedRows: Bool, hasAccountScopedFiles: Bool) {
+        self.accountEmails = accountEmails
+        self.hasAccountScopedRows = hasAccountScopedRows
+        self.hasAccountScopedFiles = hasAccountScopedFiles
+    }
 }
 
 /// Whether another account's files are in the directories a mailbox keeps outside its store.
@@ -192,7 +203,8 @@ private enum ProductionLocalMailboxStoreInspector {
             // attached outside `destroyAllData`, so nothing pins this line.
             try CoreDataStack.requireAttachedStore(in: context)
             let accountEmails = try context.fetch(Account.fetchRequest()).map(\.email)
-            var hasAccountScopedMailboxData = false
+            var hasAccountScopedRows = false
+            var hasAccountScopedFiles = false
 
             // Normal established stores have an Account row, so avoid issuing
             // the additional existence queries on the common launch path.
@@ -201,23 +213,24 @@ private enum ProductionLocalMailboxStoreInspector {
                     let request = NSFetchRequest<NSFetchRequestResult>(entityName: entityName)
                     request.fetchLimit = 1
                     if try context.count(for: request) > 0 {
-                        hasAccountScopedMailboxData = true
+                        hasAccountScopedRows = true
                         break
                     }
                 }
-                if !hasAccountScopedMailboxData {
-                    hasAccountScopedMailboxData = try HTMLContentHandler.shared
+                if !hasAccountScopedRows {
+                    hasAccountScopedFiles = try HTMLContentHandler.shared
                         .hasStoredHTMLFiles()
                 }
-                if !hasAccountScopedMailboxData {
-                    hasAccountScopedMailboxData = AccountScopedMailboxFileInspector
+                if !hasAccountScopedRows, !hasAccountScopedFiles {
+                    hasAccountScopedFiles = AccountScopedMailboxFileInspector
                         .hasStoredFiles()
                 }
             }
 
             return LocalMailboxStoreInspection(
                 accountEmails: accountEmails,
-                hasAccountScopedMailboxData: hasAccountScopedMailboxData
+                hasAccountScopedRows: hasAccountScopedRows,
+                hasAccountScopedFiles: hasAccountScopedFiles
             )
         }
     }
@@ -1206,6 +1219,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
         var resetRequired = hasCleanupRequirement
         var foundEmptyStore = false
+        var removesFilesLeftByStoreRecovery = false
         if !resetRequired {
             let storeInspection: LocalMailboxStoreInspection
             do {
@@ -1222,8 +1236,24 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // orphaned rows/files have no account predicate and would otherwise
             // publish under the new login.
             if storeInspection.accountEmails.isEmpty {
-                resetRequired = storeInspection.hasAccountScopedMailboxData
-                foundEmptyStore = !resetRequired
+                if storeInspection.hasAccountScopedRows {
+                    resetRequired = true
+                } else if storeInspection.hasAccountScopedFiles {
+                    // The one exception: the store this account's mailbox was
+                    // in was removed by a recovery reset, not a sign-out
+                    // (`StoreRecoveryResetMarker`). The files are this
+                    // account's and are removed, but the store is not reset
+                    // again and the mailbox start does not move. Anything
+                    // short of proof (no marker, an unreadable or different
+                    // keychain account, any row) is the full cleanup.
+                    if isStoreRecoveryOfAccount(normalizedEmail) {
+                        removesFilesLeftByStoreRecovery = true
+                    } else {
+                        resetRequired = true
+                    }
+                } else {
+                    foundEmptyStore = true
+                }
             } else {
                 resetRequired = storeInspection.accountEmails.contains {
                     $0.caseInsensitiveCompare(normalizedEmail) != .orderedSame
@@ -1231,10 +1261,22 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             }
         }
 
+        if removesFilesLeftByStoreRecovery {
+            do {
+                try await removeMailboxFilesLeftByStoreRecovery()
+            } catch {
+                throw AuthError.localAccountIsolationFailed(error)
+            }
+            return
+        }
+
         guard resetRequired else {
             if foundEmptyStore, entry == .interactiveSignIn {
                 restartMailboxStartTime()
             }
+            // The gate has decided this store: a marker left by a recovery
+            // reset says nothing about any later one.
+            StoreRecoveryResetMarker.clear(in: userDefaults)
             return
         }
 
@@ -1248,6 +1290,52 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             throw AuthError.localAccountIsolationFailed(error)
         }
 
+    }
+
+    /// Whether the empty store beside stored files is this account's mailbox
+    /// after a recovery reset: the marker is set, and the keychain, which
+    /// still holds the previous session's account at this point (the new
+    /// session's is saved only after this gate), names `normalizedEmail`. A
+    /// keychain that cannot be read is not that proof, and gets the full
+    /// cleanup, as before this exception existed. Throwing instead would not
+    /// leave the question to a later attempt: a restore that fails here clears
+    /// the failed Google session (`clearFailedGoogleSession`), which deletes
+    /// the keychain's account, so the next attempt would run the full cleanup
+    /// anyway, with the user signed out as well.
+    private func isStoreRecoveryOfAccount(_ normalizedEmail: String) -> Bool {
+        guard StoreRecoveryResetMarker.isMarked(in: userDefaults),
+              let persisted = try? keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+              let persistedEmail = Self.normalizedLoginHint(persisted) else {
+            return false
+        }
+        return persistedEmail.caseInsensitiveCompare(normalizedEmail) == .orderedSame
+    }
+
+    /// The account cleanup reduced to its files, for the store a recovery
+    /// reset removed (`isStoreRecoveryOfAccount`). The bodies and attachments
+    /// name rows that no longer exist and are removed before anything is
+    /// published, as the full cleanup removes them. Not done: the credential
+    /// cleanup, the second store reset (which would remove every backup,
+    /// the reset's own included) and the move of the mailbox start, so the
+    /// next initial sync lists up to `SyncConfig.initialSyncMaxWindow` from
+    /// the start the mailbox already had. No durable marker is written: a
+    /// crash here leaves the recovery marker, and the next launch takes this
+    /// branch again. A throw here fails the restore, whose catch clears the
+    /// failed Google session and with it the keychain's account, so the next
+    /// attempt runs the full cleanup: a failure costs what the full cleanup
+    /// always cost, never isolation. The account-scoped sync defaults are kept,
+    /// as a ladder reset with no files on disk always kept them, and the
+    /// initial sync that refills the store does not read the last-sync time.
+    private func removeMailboxFilesLeftByStoreRecovery() async throws {
+        Log.info("The store was reset by recovery for this account; removing its orphaned mailbox files only", category: .auth)
+        try await cleanupHTMLContent()
+        try await deleteAttachmentFiles()
+        await clearAttachmentCache()
+        // A sign-out that arrived while this was suspended owns the teardown.
+        guard pendingAccountRemovalRequests.isEmpty else {
+            throw CancellationError()
+        }
+        StoreRecoveryResetMarker.clear(in: userDefaults)
     }
 
     func currentOrPersistedUserEmail() -> String? {
@@ -1688,6 +1776,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             key: .localStoreResetRequired,
             defaultsKey: Self.localStoreResetRequiredKey
         )
+        // The store was reset again, and every backup with it.
+        StoreRecoveryResetMarker.clear(in: userDefaults)
     }
 
     private func performDurableCredentialCleanup() throws {

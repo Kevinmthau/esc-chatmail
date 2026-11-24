@@ -320,7 +320,6 @@ final class LogRedactionTests: XCTestCase {
         "esc-chatmail/Services/Conversation/ConversationCreationSerializer.swift|Log.error(\"Failed to save new conversation: \\(error)\", category: .coreData)",
         "esc-chatmail/Services/Conversation/ConversationRollupUpdater.swift|Log.diagnostic(.conversationRollups, \"Excluding self: \\(email)\", category: .conversation)",
         "esc-chatmail/Services/CoreData/CoreDataBackupManager.swift|Log.warning(\"Failed to remove old backup: \\(error.localizedDescription)\", category: .coreData)",
-        "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.info(\"Created backup before migration recovery: \\(backupURL.path)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.info(\"Created backup before store reset: \\(backupURL.path)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.warning(\"Core Data load attempt \\(currentAttempts) failed with recoverable error: \\(error)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataSaveOperations.swift|Log.debug(\"  - Detail: \\(detailedError.localizedDescription)\", category: .coreData)",

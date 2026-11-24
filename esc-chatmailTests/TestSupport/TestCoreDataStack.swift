@@ -23,7 +23,7 @@ final class TestCoreDataStack: @unchecked Sendable {
     /// - With even two stable model instances alive, `+[NSManagedObject
     ///   entity]` cannot disambiguate ("Failed to find a unique match"), which
     ///   breaks product code using `Entity(context:)` initializers.
-    private static let sharedModel: NSManagedObjectModel =
+    static let sharedModel: NSManagedObjectModel =
         CoreDataStack.shared.persistentContainer.managedObjectModel
 
     /// Serializes container creation. Coordinator↔model association is not

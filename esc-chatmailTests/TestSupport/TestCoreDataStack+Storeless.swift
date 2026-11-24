@@ -42,3 +42,11 @@ extension TestCoreDataStack {
         return storeURL
     }
 }
+
+extension TestCoreDataStack {
+    /// The entity hashes of the process-wide model, as a store it writes records them in its
+    /// metadata (`NSStoreModelVersionHashesKey`).
+    static var sharedModelVersionHashes: [String: Data] {
+        sharedModel.entityVersionHashesByName
+    }
+}
