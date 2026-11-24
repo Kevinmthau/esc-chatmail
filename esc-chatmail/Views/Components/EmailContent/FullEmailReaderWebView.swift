@@ -357,6 +357,10 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func completeAdoptionCallbacksIfActive() {
             guard !isInvalidated else { return }
+            // A WebContent termination in the turn before this one has given the view back
+            // (clearing the marker) and is reloading it: the adopted paint is gone, so the
+            // placeholder stays until the reload's own paint confirmation removes it.
+            guard adoptedPrerenderedMessageId != nil else { return }
             parent.onAdoptedPrerendered?()
             parent.onLoadFinished?()
         }
@@ -527,10 +531,13 @@ struct FullEmailReaderWebView: WebViewRepresentable {
         ///
         /// The reader puts its placeholder back, gives a pooled view back to the pool's records
         /// (`discard`, so the pool never re-hosts or hands out a dead view), and reloads its own
-        /// content, never the base URL or anything else from the email, once for each content and
-        /// signature (`admitsReloadAfterWebContentTermination`). The content is the one it already
-        /// holds: nothing is read from disk, so no account generation is involved, and a reader an
-        /// account transition scrubbed is invalidated and does nothing here.
+        /// content, never the base URL or anything else from the email, as often as
+        /// `admitsReloadAfterWebContentTermination` allows: again only after the last reload's
+        /// paint was confirmed, and at most three times for one content and signature. The reload
+        /// is the HTML the reader already holds, so no body is read again; its `cid:` images are
+        /// asked of `CIDSchemeHandler` again, as at the first load and at an attachment's arrival,
+        /// and an attachment that must be downloaded goes through `AttachmentDownloader`'s account boundary. A
+        /// reader an account transition scrubbed is invalidated and does nothing here.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             guard !isInvalidated else { return }
             Log.warning(
@@ -548,9 +555,10 @@ struct FullEmailReaderWebView: WebViewRepresentable {
                 content: parent.htmlContent,
                 reloadSignature: reloadSignature()
             ) else {
-                // The same content took the process down again. Leave its signature recorded so
-                // `updateWebView` does not load it a third time; only the paint gate is reset, so
-                // a late confirmation of the dead document cannot remove the placeholder.
+                // The same content took the process down before its reload painted, or has used
+                // its reloads. Leave its signature recorded so `updateWebView` does not load it
+                // again; only the paint gate is reset, so a late confirmation of the dead document
+                // cannot remove the placeholder.
                 resetPaintConfirmationState()
                 return
             }
@@ -617,6 +625,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             }
 
             hasConfirmedPaintForCurrentLoad = true
+            coordination.recordDisplayedAfterWebContentTermination()
             parent.onLoadFinished?()
             reloadAfterCurrentLoadIfNeeded(in: webView)
         }

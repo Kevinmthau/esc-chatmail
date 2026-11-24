@@ -493,10 +493,11 @@ final class FullEmailReaderWebViewTests: XCTestCase {
     }
 
     // Revert-check: fails if the reader's handler resets the signature on every termination (drop
-    // the `admitsReloadAfterWebContentTermination` guard): the second termination then reloads,
-    // and so does every `updateWebView` after it, which is a page that crashes WebKit reloading
-    // for as long as the reader is open.
-    func testWebContentTermination_secondOfSameContent_doesNotReloadAgain() {
+    // the `admitsReloadAfterWebContentTermination` guard, or its `wasDisplayed` condition): the
+    // second termination of a reload that never painted then reloads, and so does every
+    // `updateWebView` after it, which is a page that crashes WebKit reloading for as long as the
+    // reader is open.
+    func testWebContentTermination_beforeTheReloadPainted_doesNotReloadAgain() {
         var loadFailedCount = 0
         let coordinator = FullEmailReaderWebView.Coordinator(
             makeReader(message: nil, onLoadFailed: { loadFailedCount += 1 }),
@@ -523,6 +524,70 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         XCTAssertEqual(webView.loadedHTML.last, "<p>Changed</p>", "New content loads as before")
         coordinator.webViewWebContentProcessDidTerminate(webView)
         XCTAssertEqual(webView.loadedHTML.count, 4, "New content has a termination reload of its own")
+    }
+
+    // Revert-check: fails if `completePaintGate` stops calling
+    // `recordDisplayedAfterWebContentTermination` (a second jetsam of a reader that recovered and
+    // painted is not reloaded, and the reader stays dead until it is reopened), or if
+    // `admitsReloadAfterWebContentTermination` loses its `maximumWebContentTerminationReloads`
+    // bound (a page that paints and then crashes reloads without end).
+    func testWebContentTermination_afterEachReloadPainted_reloadsAgainUpToTheCap() {
+        let paintConfirmer = DeferredPaintConfirmer()
+        let coordinator = FullEmailReaderWebView.Coordinator(
+            makeReader(message: nil),
+            paintConfirmer: paintConfirmer
+        )
+        let webView = RecordingReaderWebView()
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webView(webView, didFinish: nil)
+        paintConfirmer.completeNext()
+
+        for _ in 0..<EmailWebViewLoadCoordination.maximumWebContentTerminationReloads {
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+            coordinator.webView(webView, didFinish: nil)
+            paintConfirmer.completeNext()
+        }
+        XCTAssertEqual(
+            webView.loadedHTML.count,
+            1 + EmailWebViewLoadCoordination.maximumWebContentTerminationReloads,
+            "Each termination after a painted reload reloads"
+        )
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(webView.loadedHTML.count, 1 + EmailWebViewLoadCoordination.maximumWebContentTerminationReloads)
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    // Revert-check: fails if `completeAdoptionCallbacksIfActive` loses its
+    // `adoptedPrerenderedMessageId` guard: a termination in the turn between adoption and its
+    // deferred callbacks restores the placeholder, and the callbacks then remove it again over the
+    // blank view while the reload has not painted.
+    func testWebContentTermination_beforeDeferredAdoptionCallbacks_keepsThePlaceholder() {
+        var loadFinishedCount = 0
+        var adoptedCount = 0
+        var loadFailedCount = 0
+        let html = "<html><body><p>Adopted</p></body></html>"
+        let reader = FullEmailReaderWebView(
+            htmlContent: html,
+            sourceSignature: "sha256:source",
+            message: nil,
+            webViewAdoptionProvider: RecordingTerminationAdopter(),
+            onLoadFinished: { loadFinishedCount += 1 },
+            onLoadFailed: { loadFailedCount += 1 },
+            onAdoptedPrerendered: { adoptedCount += 1 }
+        )
+        let coordinator = FullEmailReaderWebView.Coordinator(reader, paintConfirmer: DeferredPaintConfirmer())
+        let webView = RecordingReaderWebView()
+        coordinator.adoptAlreadyLoadedContent(html, messageId: "adopted-then-terminated")
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.completeAdoptionCallbacksIfActive()
+
+        XCTAssertEqual(loadFailedCount, 1)
+        XCTAssertEqual(loadFinishedCount, 0)
+        XCTAssertEqual(adoptedCount, 0)
     }
 
     // Revert-check: fails if the latched branch of the reader's termination handler stops calling
