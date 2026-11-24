@@ -246,6 +246,13 @@ struct NetworkConfig {
     /// Resource timeout interval (in seconds)
     static let resourceTimeout: TimeInterval = 60.0
 
+    /// Whole-request cap for messages.send only (`GmailAPIClient.createSendSession`).
+    /// A send is one request carrying every attachment (about 1.83 times
+    /// their bytes): 300 s covers the 25 MB budget above about 1.3 Mbit/s
+    /// of uplink and three or four photos above about 0.5 Mbit/s. It also
+    /// bounds how long a sign-out waits for an admitted send to drain.
+    static let sendResourceTimeout: TimeInterval = 300.0
+
     /// Maximum retry attempts for API requests
     static let maxRetries = 3
 

@@ -42,6 +42,31 @@ private final class ReadSessionProbeURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+/// A `SyncClock` whose `now()` returns a scripted sequence of offsets from a
+/// fixed start, repeating the last one: lets a test place the circuit
+/// breaker's reads without sleeping. `sleep` is never expected.
+private final class ScriptedNowClock: SyncClock, @unchecked Sendable {
+    /// Guards `offsets`; `now()` is called from the retry engine's task.
+    private let lock = NSLock()
+    private var offsets: [TimeInterval]
+    private let start = Date(timeIntervalSince1970: 1_700_000_000)
+
+    init(offsets: [TimeInterval]) {
+        self.offsets = offsets
+    }
+
+    func now() -> Date {
+        lock.withLock {
+            let offset = offsets.count > 1 ? offsets.removeFirst() : (offsets.first ?? 0)
+            return start.addingTimeInterval(offset)
+        }
+    }
+
+    func sleep(nanoseconds: UInt64) async throws {
+        try Task.checkCancellation()
+    }
+}
+
 private final class ProbedNetworkRetryStrategy: RetryStrategy, @unchecked Sendable {
     let maxRetries: Int
     let initialDelay: TimeInterval
@@ -451,7 +476,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
     // Revert-check: fails if `GmailAPIClient.createSendSession(basedOn:)` stops
     // turning `waitsForConnectivity` off — an offline send would again wait out
-    // the 60 s resource timeout and end as an ambiguous `NSURLErrorTimedOut`.
+    // the resource timeout and end as an ambiguous `NSURLErrorTimedOut`.
     func testSendSession_productionClient_doesNotWaitForConnectivityButKeepsReadSettings() {
         let productionClient = GmailAPIClient(tokenManager: MockTokenManager())
         let readConfiguration = productionClient.session.configuration
@@ -464,8 +489,108 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             "Reads and sync keep riding out short connectivity gaps"
         )
         XCTAssertEqual(sendConfiguration.timeoutIntervalForRequest, readConfiguration.timeoutIntervalForRequest)
-        XCTAssertEqual(sendConfiguration.timeoutIntervalForResource, readConfiguration.timeoutIntervalForResource)
         XCTAssertEqual(sendConfiguration.requestCachePolicy, readConfiguration.requestCachePolicy)
+    }
+
+    // Revert-check: fails if `GmailAPIClient.createSendSession(basedOn:)` stops
+    // setting `timeoutIntervalForResource` from `NetworkConfig.sendResourceTimeout`
+    // — the send would again inherit the read session's 60 s whole-request cap,
+    // and a few photos on a slow uplink would time out after the barrier into a
+    // permanent "Delivery unknown".
+    func testSendSession_productionClient_hasItsOwnLongerResourceTimeoutAndTheReadIdleTimeout() {
+        let productionClient = GmailAPIClient(tokenManager: MockTokenManager())
+        let readConfiguration = productionClient.session.configuration
+        let sendConfiguration = productionClient.sendSession.configuration
+
+        XCTAssertEqual(sendConfiguration.timeoutIntervalForResource, NetworkConfig.sendResourceTimeout)
+        XCTAssertEqual(
+            readConfiguration.timeoutIntervalForResource,
+            NetworkConfig.resourceTimeout,
+            "Reads keep their 60 s cap"
+        )
+        XCTAssertGreaterThan(
+            sendConfiguration.timeoutIntervalForResource,
+            readConfiguration.timeoutIntervalForResource
+        )
+        XCTAssertEqual(
+            sendConfiguration.timeoutIntervalForRequest,
+            readConfiguration.timeoutIntervalForRequest,
+            "The idle timeout stays the stall detector"
+        )
+        XCTAssertLessThanOrEqual(
+            NetworkConfig.sendResourceTimeout,
+            300,
+            "The cap bounds a sign-out's drain of an admitted send; raising it is a decision, not a tweak"
+        )
+    }
+
+    // MARK: - The circuit breaker never turns a definite rejection into a timeout
+
+    // Revert-check: fails if the 401 path of `GmailAPIClient.performRetryingRequest`
+    // stops recording `lastError` before its `continue` — the breaker would throw
+    // `APIError.timeout`, which `sendMessage` classifies as ambiguous, so a send
+    // Gmail refused would end as "Delivery unknown" instead of "Not sent".
+    func testSendMessage_unauthorizedAfterAnUploadPastTheBreakerWindow_failsDefinitelyWithoutResending() async {
+        // now() is read at the start, at the top of attempt 1, then at the top
+        // of attempt 2: the first upload is taken to have lasted 150 s, past
+        // `NetworkConfig.maxTotalRetryTime`, which the send's own resource
+        // timeout now allows.
+        let breakerClock = ScriptedNowClock(offsets: [0, 0, 150])
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 0.01, maxDelay: 0.02),
+            session: StubURLProtocol.makeSession(),
+            circuitBreakerClock: breakerClock
+        )
+        StubURLProtocol.script = [.status(401), .data(200, Self.sendResponseBody)]
+
+        do {
+            _ = try await client.sendMessage(rawMessage: "raw")
+            XCTFail("Expected the breaker to stop the refreshed attempt")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("A 401 proves Gmail refused the send; it must not be ambiguous: \(underlying)")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected the 401's own error, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1, "The breaker tripped before the refreshed request")
+        XCTAssertEqual(tokenManager.refreshTokenCallCount, 1)
+    }
+
+    // Revert-check: fails if the 429 path of `GmailAPIClient.performRetryingRequest`
+    // stops recording `lastError` before it sleeps — a breaker trip at the top of
+    // the next attempt would throw `APIError.timeout`, an ambiguous send outcome
+    // for a request Gmail refused.
+    func testSendMessage_rateLimitedThenBreakerTrips_failsDefinitelyWithoutResending() async {
+        // Start, top of attempt 1, the 429 path's budget check, top of attempt 2.
+        let breakerClock = ScriptedNowClock(offsets: [0, 0, 0, 150])
+        client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 0.01, maxDelay: 0.02),
+            session: StubURLProtocol.makeSession(),
+            retryClock: FakeSyncClock(),
+            circuitBreakerClock: breakerClock
+        )
+        StubURLProtocol.script = [.status(429), .data(200, Self.sendResponseBody)]
+
+        do {
+            _ = try await client.sendMessage(rawMessage: "raw")
+            XCTFail("Expected the breaker to stop the second attempt")
+        } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
+            XCTFail("A 429 proves Gmail refused the send; it must not be ambiguous: \(underlying)")
+        } catch let error as APIError {
+            guard case .rateLimited = error else {
+                return XCTFail("Expected the 429's own error, got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
     }
 
     // Revert-check: fails if `GmailAPIClient.sendMessage` stops passing

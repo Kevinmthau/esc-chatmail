@@ -75,9 +75,14 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     let tokenManager: TokenManagerProtocol
     let retryStrategy: RetryStrategy
     /// Sleep source for the retry engine's backoff waits only. The circuit
-    /// breaker and time-budget checks still read wall-clock `Date()`, so a
-    /// `FakeSyncClock` makes backoff instant without tripping them.
+    /// breaker and time-budget checks read `circuitBreakerClock` instead, so a
+    /// `FakeSyncClock` here makes backoff instant without tripping them.
     let retryClock: any SyncClock
+    /// Time source for the retry engine's circuit breaker and time-budget
+    /// checks (`NetworkConfig.maxTotalRetryTime`). Separate from `retryClock`
+    /// so that a test can advance the breaker's time without the backoff
+    /// sleeps advancing it too, and the reverse.
+    let circuitBreakerClock: any SyncClock
 
     /// Tracks cumulative rate limit backoff time to prevent API exhaustion
     let rateLimitTracker = RateLimitTracker()
@@ -101,11 +106,13 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         retryStrategy: RetryStrategy = NetworkRetryStrategy(),
         session: URLSession? = nil,
         sendSession: URLSession? = nil,
-        retryClock: any SyncClock = SystemSyncClock()
+        retryClock: any SyncClock = SystemSyncClock(),
+        circuitBreakerClock: any SyncClock = SystemSyncClock()
     ) {
         self.tokenManager = tokenManager
         self.retryStrategy = retryStrategy
         self.retryClock = retryClock
+        self.circuitBreakerClock = circuitBreakerClock
         let resolvedSession = session ?? Self.createSession()
         self.session = resolvedSession
         self.sendSession = sendSession ?? Self.createSendSession(basedOn: resolvedSession)
@@ -137,10 +144,24 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// worker's bounded `OutboundConnectivityGate` wait, where waiting is
     /// duplicate-safe.
     ///
-    /// Every other setting (timeouts, cache policy, and any injected protocol
-    /// classes) is copied from `session`; `URLSession.configuration` already
-    /// returns a copy, so the read session is untouched. The delegate is not
-    /// copied (see `init`). The trade-off is a separate connection pool, so
+    /// The whole-request cap is the send's own, `NetworkConfig.sendResourceTimeout`
+    /// (300 s), not the read session's 60 s: a send is one request carrying
+    /// every attachment, and a few photos on a slow uplink took longer than
+    /// 60 s, timed out after the barrier and ended as a permanent "Delivery
+    /// unknown" for a message Gmail never received. A stalled upload is still
+    /// caught by the 30 s request timeout, which is an idle timer: measured on
+    /// macOS 27.2 against a throttled loopback server, an upload that kept
+    /// writing ran 40 s under a 15 s request timeout, and timed out only once
+    /// nothing more could be written for 15 s. The cap is also how long a
+    /// sign-out can wait: an admitted send is drain-only, and
+    /// `OutboundTaskRegistry.cancelAndAwaitAll` waits for it with the
+    /// auth-transition gate held, as the next chat reply to the same
+    /// conversation waits for its turn. Never raise it without weighing that.
+    ///
+    /// Every other setting (the request timeout, cache policy, and any
+    /// injected protocol classes) is copied from `session`;
+    /// `URLSession.configuration` already returns a copy, so the read session
+    /// is untouched. The delegate is not copied (see `init`). The trade-off is a separate connection pool, so
     /// the first send after launch, or after the pool has gone idle, may pay
     /// its own TCP+TLS handshake instead of reusing the sync session's warm
     /// connection; the optimistic bubble hides it, but it adds to the time
@@ -148,6 +169,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     private static func createSendSession(basedOn session: URLSession) -> URLSession {
         let configuration = session.configuration
         configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForResource = NetworkConfig.sendResourceTimeout
         return URLSession(configuration: configuration)
     }
 
@@ -338,7 +360,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     ) async throws -> T {
         let transport = requestSession ?? session
         let retries = maxRetries ?? retryStrategy.maxRetries
-        let startTime = Date()
+        let startTime = circuitBreakerClock.now()
         var lastError: Error?
         var retryDelay = retryStrategy.initialDelay
         var currentRequest = request
@@ -357,7 +379,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             attempt += 1
 
             // Circuit breaker: check if we've exceeded max total retry time
-            let elapsedTime = Date().timeIntervalSince(startTime)
+            let elapsedTime = circuitBreakerClock.now().timeIntervalSince(startTime)
             if elapsedTime >= NetworkConfig.maxTotalRetryTime {
                 Log.warning("Circuit breaker triggered: exceeded max total retry time (\(NetworkConfig.maxTotalRetryTime)s)", category: .api)
                 throw lastError ?? APIError.timeout
@@ -398,7 +420,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     }
 
                     // Check if delay would exceed remaining time budget
-                    let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                    let remainingTime = NetworkConfig.maxTotalRetryTime - circuitBreakerClock.now().timeIntervalSince(startTime)
                     if delay > remainingTime {
                         Log.warning("Circuit breaker: delay (\(delay)s) exceeds remaining time budget (\(remainingTime)s)", category: .api)
                         throw APIError.rateLimited(retryAfter: headerRetryAfter)
@@ -408,6 +430,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                         throw APIError.rateLimited(retryAfter: headerRetryAfter)
                     }
 
+                    // Recorded so that a breaker trip at the top of the
+                    // loop reports the rejection, not `APIError.timeout`
+                    // (see the 401 path).
+                    lastError = lastError ?? APIError.rateLimited(retryAfter: headerRetryAfter)
                     await rateLimitTracker.recordBackoff(delay)
                     try await sleepBeforeRetry(
                         delay: delay,
@@ -423,7 +449,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     // have processed the request before failing. Never resend.
                     if behavior.allowsRetransmission, attempt < allowedAttempts {
                         // Check time budget before sleeping
-                        let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                        let remainingTime = NetworkConfig.maxTotalRetryTime - circuitBreakerClock.now().timeIntervalSince(startTime)
                         if retryDelay > remainingTime {
                             Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
                             throw APIError.serverError(httpResponse.statusCode)
@@ -453,6 +479,18 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             // the refreshed token always gets its request (bounded:
                             // hasAttemptedTokenRefresh makes this once-only).
                             allowedAttempts += 1
+                            // A 401 proves the server rejected this attempt.
+                            // Recorded so that, if the breaker trips before
+                            // the refreshed request goes out, it throws that
+                            // definite rejection and not `APIError.timeout`:
+                            // a send's first attempt can now outlast the
+                            // breaker's 120 s by itself (`sendResourceTimeout`),
+                            // and `sendMessage` classifies a timeout as
+                            // ambiguous, so a send Gmail refused ended as
+                            // "Delivery unknown" instead of "Not sent". Kept
+                            // behind an earlier failure, which a read
+                            // reported here before and still does.
+                            lastError = lastError ?? APIError.authenticationError
                             continue
                         } catch TokenManagerError.invalidCredentials {
                             Log.error("Refresh token revoked, user must re-authenticate", category: .api)
@@ -493,7 +531,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
                 if attempt < allowedAttempts {
                     // Check time budget before sleeping
-                    let remainingTime = NetworkConfig.maxTotalRetryTime - Date().timeIntervalSince(startTime)
+                    let remainingTime = NetworkConfig.maxTotalRetryTime - circuitBreakerClock.now().timeIntervalSince(startTime)
                     if retryDelay > remainingTime {
                         Log.warning("Circuit breaker: retry delay exceeds remaining time budget", category: .api)
                         throw lastError ?? URLError(.timedOut)
