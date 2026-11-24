@@ -24,7 +24,7 @@ extension DatabaseMaintenanceService {
         let htmlContentHandler = self.htmlContentHandler()
         let htmlAccountGeneration = htmlContentHandler.captureAccountGeneration()
         let context = coreDataStack.newBackgroundContext()
-        let cleanupService = DataCleanupService(coreDataStack: coreDataStack)
+        let cleanupService = makeDataCleanupService(coreDataStack)
 
         guard !Task.isCancelled else { return false }
 

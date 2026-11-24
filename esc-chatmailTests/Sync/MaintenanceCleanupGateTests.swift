@@ -474,8 +474,6 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         )
     }
 
-    /// A service whose runs announce through `announceCleanupFinished`
-    /// and nowhere else, with everything else as `makeService` has it.
     private func makeExclusiveRunner() -> StoreMaintenanceCoordinator {
         StoreMaintenanceCoordinator(
             syncRunCoordinator: SyncRunCoordinator(),
@@ -500,6 +498,8 @@ final class MaintenanceCleanupGateTests: XCTestCase {
         )
     }
 
+    /// A service whose runs announce through `announceCleanupFinished`
+    /// and nowhere else, with everything else as `makeService` has it.
     private func makeService(
         announceCleanupFinished: @escaping @Sendable () -> Void
     ) -> DataCleanupService {

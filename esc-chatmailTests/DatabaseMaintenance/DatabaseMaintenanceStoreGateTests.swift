@@ -8,11 +8,12 @@ import XCTest
 /// load (and any migration or recovery-ladder step) ahead of the fresh-install cleanup,
 /// and carried on against a coordinator with no store when that load was kept as failed.
 ///
-/// Every test injects everything `DatabaseMaintenanceService` reaches (`makeService`): the
-/// stack, the readiness, a run coordinator of its own, an HTML boundary over a temporary
-/// directory and a recording attachment sweep. The defaults are the host's shared run
-/// boundary and its real `Messages`, `Attachments` and `Previews`. Keep this suite out of
-/// `Mac.xctestplan` all the same.
+/// Every test injects what `DatabaseMaintenanceService` reaches (`makeService`): the stack,
+/// the readiness, a run coordinator of its own, an HTML boundary over a temporary directory,
+/// a recording attachment sweep, and store-wide passes with their own aliases, flags,
+/// serializer and announcement. The defaults are the host's shared run boundary, its real
+/// `Messages`, `Attachments` and `Previews`, and the shared `AliasManager`. What is still
+/// shared is the compose lease registry. Keep this suite out of `Mac.xctestplan`.
 @MainActor
 final class DatabaseMaintenanceStoreGateTests: XCTestCase {
     private var directoriesToRemove: [URL] = []
@@ -153,7 +154,20 @@ final class DatabaseMaintenanceStoreGateTests: XCTestCase {
                 remoteConfig: StaticRemoteConfigProvider(flags: [.databaseMaintenanceEnabled: true])
             ),
             htmlContentHandler: { htmlContentHandler },
-            sweepOrphanedAttachmentFiles: { sweep.record() }
+            sweepOrphanedAttachmentFiles: { sweep.record() },
+            makeDataCleanupService: { coreDataStack in
+                let flags = InMemoryMigrationFlagStore()
+                flags.set(true, forKey: DataCleanupService.participantSetSplitMigrationKey)
+                flags.set(true, forKey: DataCleanupService.rfc2047HeaderTextRepairKey)
+                return DataCleanupService(
+                    coreDataStack: coreDataStack,
+                    conversationManager: ConversationManager(currentUserEmail: { "me@example.com" }),
+                    conversationMutationSerializer: ConversationRollupMutationSerializer(),
+                    migrationFlags: flags,
+                    identityAliasProvider: { _ in ["me@example.com"] },
+                    announceCleanupFinished: {}
+                )
+            }
         )
     }
 

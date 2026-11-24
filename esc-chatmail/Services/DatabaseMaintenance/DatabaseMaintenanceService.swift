@@ -50,6 +50,8 @@ final class DatabaseMaintenanceService: ObservableObject {
     let htmlContentHandler: @Sendable () -> HTMLContentHandler
     /// The cleanup's last step, the sweep of `Attachments` and `Previews`.
     let sweepOrphanedAttachmentFiles: @Sendable () async -> Void
+    /// Builds the cleanup's store-wide passes over this service's stack.
+    let makeDataCleanupService: @Sendable (CoreDataStack) -> DataCleanupService
 
     /// Internal (not private) only so tests can inject a seamed registry.
     /// Never construct a second instance against the default `.shared`
@@ -81,6 +83,9 @@ final class DatabaseMaintenanceService: ObservableObject {
         htmlContentHandler: @escaping @Sendable () -> HTMLContentHandler = { .shared },
         sweepOrphanedAttachmentFiles: @escaping @Sendable () async -> Void = {
             await AttachmentDownloader.shared.cleanupOrphanedFiles()
+        },
+        makeDataCleanupService: @escaping @Sendable (CoreDataStack) -> DataCleanupService = { coreDataStack in
+            DataCleanupService(coreDataStack: coreDataStack)
         }
     ) {
         self.taskRegistry = taskRegistry ?? PlatformBackgroundTaskRegistry.shared
@@ -89,6 +94,7 @@ final class DatabaseMaintenanceService: ObservableObject {
         self.storeMaintenanceCoordinator = storeMaintenanceCoordinator
         self.htmlContentHandler = htmlContentHandler
         self.sweepOrphanedAttachmentFiles = sweepOrphanedAttachmentFiles
+        self.makeDataCleanupService = makeDataCleanupService
         registerBackgroundTasks()
         loadLastMaintenanceDate()
     }

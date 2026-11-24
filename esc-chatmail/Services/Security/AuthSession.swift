@@ -186,6 +186,10 @@ private enum ProductionLocalMailboxStoreInspector {
         try await CoreDataStack.shared.performBackgroundTask { context in
             // An empty answer here, beside stored files, resets the store and
             // removes the files: it must come from a store that is attached.
+            // HONEST SCOPE: no test reaches this inspector (every AuthSession
+            // test injects `inspectLocalMailboxStore`), and the flag that
+            // `performBackgroundTask` waits for is set only with a store
+            // attached outside `destroyAllData`, so nothing pins this line.
             try CoreDataStack.requireAttachedStore(in: context)
             let accountEmails = try context.fetch(Account.fetchRequest()).map(\.email)
             var hasAccountScopedMailboxData = false
