@@ -63,6 +63,10 @@ struct ReconciliationPhase: SyncPhase {
         )
         let missedIds = missedResult.missingIds
         diagnostics.merge(missedResult.diagnostics)
+        // A message the run knows is missing and could not fetch may be a
+        // "Delivery unknown" send's echo, which neither history nor the
+        // store then shows: no "Not sent" verdict in such a run.
+        var missedRecoveryFailed = false
 
         if !missedIds.isEmpty {
             log.info("Reconciliation found \(missedIds.count) missed messages")
@@ -87,12 +91,17 @@ struct ReconciliationPhase: SyncPhase {
                 // Missed-message recovery is a safety net outside history
                 // semantics; failures here are logged, not cursor-gating.
                 log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
+                missedRecoveryFailed = true
             }
         }
 
         if input.probesDeliveryUnknownSends {
             let probeOutcome = try await DeliveryUnknownProbe(messageFetcher: messageFetcher)
-                .run(runStartedAt: context.syncStartTime, in: context.coreDataContext)
+                .run(
+                    runStartedAt: context.syncStartTime,
+                    allowsNotSentVerdict: !missedRecoveryFailed,
+                    in: context.coreDataContext
+                )
             if !probeOutcome.foundMessageIDs.isEmpty {
                 // Persisted as any synced echo is: the persister's Message-ID
                 // match consumes the record in this run's context.

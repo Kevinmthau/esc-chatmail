@@ -354,6 +354,32 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         XCTAssertEqual(api.sendMessageCallCount, 0)
     }
 
+    // Revert-check: fails if `ReconciliationPhase.execute` stops passing a
+    // failed missed-message recovery to the probe as `allowsNotSentVerdict:
+    // false`: the message it knows is missing may be the send's echo.
+    func testReconciliationPhase_failedMissedMessageRecovery_refusesNotSent() async throws {
+        try seedSend(id: "maybe-missed-echo", admittedAgo: 2 * 60 * 60)
+        api.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "gmail-missed", threadId: "thread")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        api.listMessagesResponsesByQuery[DeliveryUnknownProbePolicy.query(forOptimisticMessageID: "maybe-missed-echo")] =
+            MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        api.getMessageErrors["gmail-missed"] = APIError.serverError(503)
+
+        _ = try await makePhase().execute(
+            input: ReconciliationInput(skipLabelReconciliation: true, probesDeliveryUnknownSends: true),
+            context: makePhaseContext()
+        )
+
+        XCTAssertTrue(api.getMessageCalledIds.contains("gmail-missed"), "The missed message was listed and failed")
+        XCTAssertTrue(api.searchAllMessagesQueries.contains(DeliveryUnknownProbePolicy.query(forOptimisticMessageID: "maybe-missed-echo")))
+        let staged = try state(of: "maybe-missed-echo", in: context)
+        XCTAssertEqual(staged.marker, OutboundSendRemoteState.ambiguousMessageID)
+        XCTAssertEqual(staged.probedAt, runStart)
+    }
+
     // Revert-check: fails if `ReconciliationPhase.execute` stops handing the
     // probe's found IDs to the persister's fetch.
     func testReconciliationPhase_foundMessage_isFetchedForPersistence() async throws {

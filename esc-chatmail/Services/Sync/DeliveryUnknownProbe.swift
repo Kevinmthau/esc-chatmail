@@ -31,8 +31,12 @@ struct DeliveryUnknownProbe {
         self.messageFetcher = messageFetcher
     }
 
+    /// `allowsNotSentVerdict` is false when the run has evidence the store is
+    /// missing a message it could not fetch (`ReconciliationPhase`'s
+    /// missed-message recovery failed): an empty search then gives no verdict.
     func run(
         runStartedAt: Date,
+        allowsNotSentVerdict: Bool = true,
         in context: NSManagedObjectContext
     ) async throws -> Outcome {
         let candidates = try await context.perform {
@@ -98,7 +102,8 @@ struct DeliveryUnknownProbe {
                 outcome.foundMessageIDs.append(contentsOf: messageIDs)
             case .notFound:
                 let staged = try await context.perform {
-                    if let admittedAt = candidate.admittedAt,
+                    if allowsNotSentVerdict,
+                       let admittedAt = candidate.admittedAt,
                        try DeliveryUnknownResolution.storeAgreesItWasNotSent(
                            optimisticMessageID: candidate.optimisticMessageID,
                            admittedAt: admittedAt,
