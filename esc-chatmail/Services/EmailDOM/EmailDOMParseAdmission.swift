@@ -132,11 +132,6 @@ enum EmailDOMParseAdmission {
         }
     }
 
-    /// Whether `html` would be admitted, without keeping the tree.
-    static func admit(_ html: String) throws {
-        _ = try parseDocument(html)
-    }
-
     private static func admittedParse<Parsed>(
         _ html: String,
         isTableContextFragment: Bool = false,
