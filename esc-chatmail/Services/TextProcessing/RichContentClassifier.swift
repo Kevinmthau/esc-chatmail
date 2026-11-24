@@ -367,13 +367,23 @@ enum RichContentClassifier {
         try? NSRegularExpression(pattern: "</?(?:div|span|br|p|a|b|i|strong|em|font|blockquote)[^>]*>")
     }()
 
+    /// Both tag regexes end every match at a `>`, so they run up to the text's
+    /// last `>` (`HTMLMarkupScan.replacingTagsEndingAtTagEnd`), with the same
+    /// result: over the whole text they read to its end from every `<` after
+    /// that `>`, and 30,000 unclosed `<div style="a` held a received
+    /// message's verdict for 87 s.
     private static func approximateTextContent(from html: String) -> String {
         RegexSanitizer.replace(
-            in: RegexSanitizer.replace(in: html, regex: htmlTagRegex, with: " "),
+            in: replacingTags(in: html, regex: htmlTagRegex, with: " "),
             regex: RegexSanitizer.whitespaceRunRegex,
             with: " "
         )
         .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replacingTags(in html: String, regex: NSRegularExpression?, with template: String) -> String {
+        guard let regex else { return html }
+        return HTMLMarkupScan.replacingTagsEndingAtTagEnd(in: html, regex: regex, with: template)
     }
 
     /// Counts HTML elements using efficient substring search
@@ -428,7 +438,7 @@ enum RichContentClassifier {
 
         // Check if content is predominantly simple div/span wrappers
         // Strip simple formatting tags and count what HTML tags remain
-        let afterSimpleStrip = RegexSanitizer.replace(in: html, regex: simpleFormattingTagRegex, with: "")
+        let afterSimpleStrip = replacingTags(in: html, regex: simpleFormattingTagRegex, with: "")
 
         // Count remaining HTML tags (complex tags that weren't stripped)
         let remainingTagCount = afterSimpleStrip.components(separatedBy: "<").count - 1
