@@ -74,11 +74,26 @@ final class HTMLMarkupScanTests: XCTestCase {
         }
     }
 
+    /// The regex `HTMLMarkupScan.removingHiddenElements` replaced.
+    private static let hiddenElementRegex = try? NSRegularExpression(
+        pattern: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
+        options: [.caseInsensitive]
+    )
+
+    /// Characters whose full case folding the regex's backreference equated
+    /// with ASCII letters, where the scan matches names ignoring ASCII case
+    /// only (`testHiddenElements_fullCaseFoldedNames_areLeftInPlace`).
+    private static let fullyFoldedScalars: Set<Unicode.Scalar> = [
+        "\u{212A}", "\u{017F}", "\u{00DF}", "\u{1E9E}",
+        "\u{FB00}", "\u{FB01}", "\u{FB02}", "\u{FB03}", "\u{FB04}", "\u{FB05}", "\u{FB06}",
+    ]
+
     func testHiddenElements_matchTheRegex() throws {
-        let regex = try XCTUnwrap(HTMLMarkupScan.hiddenElementRegex)
+        let regex = try XCTUnwrap(Self.hiddenElementRegex)
         var generator = MarkupGenerator(seed: 0x41DE)
         for _ in 0..<40_000 {
             let html = generator.next()
+            if html.unicodeScalars.contains(where: Self.fullyFoldedScalars.contains) { continue }
             XCTAssertEqual(
                 HTMLMarkupScan.removingHiddenElements(from: html),
                 Self.replacing(regex, in: html, with: ""),
@@ -90,7 +105,7 @@ final class HTMLMarkupScanTests: XCTestCase {
     /// The hidden-element regex picks the last hiding `style` whose end has a
     /// close tag after it; ends that cross a `>` in a value decide which.
     func testHiddenElements_crossingValues_matchTheRegex() throws {
-        let regex = try XCTUnwrap(HTMLMarkupScan.hiddenElementRegex)
+        let regex = try XCTUnwrap(Self.hiddenElementRegex)
         let shapes = [
             "<div style=\"display:none\" x style='opacity:0 > </div> '>a</div>b</div>",
             "<div style='display:none'>a</DIV><div style=\"font-size:0\">b</div>c",
@@ -98,12 +113,70 @@ final class HTMLMarkupScanTests: XCTestCase {
             "<span style = \"mso-hide:all\">x</Span><span>y</span>",
             "<td style=\"max-height:0\" style=\"display:none\">x</td>",
             "<div style=\"display:none\">x",
-            "<div\u{212A} style=\"display:none\">x</div\u{212A}>",
-            "<kbd style=\"display:none\">x</\u{212A}BD>",
+            "<kbd style=\"display:none\">x</KBD>",
         ]
         for html in shapes {
             XCTAssertEqual(HTMLMarkupScan.removingHiddenElements(from: html), Self.replacing(regex, in: html, with: ""), html)
         }
+    }
+
+    /// The one deliberate difference: a name meets its close tag ignoring
+    /// ASCII case only, where the regex's backreference folded case fully.
+    /// Revert-check: none; this pins the documented difference in
+    /// `HTMLMarkupScan.removingHiddenElements`, which a return to the regex for
+    /// such names would undo (and make quadratic again).
+    func testHiddenElements_fullCaseFoldedNames_areLeftInPlace() throws {
+        let regex = try XCTUnwrap(Self.hiddenElementRegex)
+        for html in [
+            "<ss style=\"display:none\">hidden</ß>visible",
+            "<st style=\"display:none\">hidden</\u{FB06}>visible",
+            "<kbd style=\"display:none\">hidden</\u{212A}BD>visible",
+            "<div\u{212A} style=\"display:none\">hidden</div\u{212A}>visible",
+        ] {
+            XCTAssertEqual(Self.replacing(regex, in: html, with: ""), "visible", html)
+            XCTAssertEqual(HTMLMarkupScan.removingHiddenElements(from: html), html, html)
+        }
+    }
+
+    // MARK: - Linear where the first scans were not (review round 1)
+
+    /// Thousands of close tags before one `>`: the walk jumps past it once.
+    /// Revert-check: the binary search for the next close tag in
+    /// `HTMLMarkupScan.CloseTagIndex.answers` (a walk over the tags before the
+    /// `>` took 42 s at this size in Debug).
+    func testCloseTagsSharingOneTagEnd_areReadOnce() {
+        let small = "<x>" + String(repeating: "</x a", count: 2_000) + ">"
+        XCTAssertEqual(
+            HTMLMarkupScan.containsLikelyHTMLMarkup(small),
+            LegacyMarkupWalk.containsLikelyHTMLMarkup(small)
+        )
+        let html = "<x>" + String(repeating: "</x a", count: 100_000) + ">"
+        let started = Date()
+        _ = HTMLMarkupScan.containsLikelyHTMLMarkup(html)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    /// Thousands of spellings of one folded name (`s` and `ſ`) share answers.
+    /// Revert-check: the folded-key cache in `HTMLMarkupScan.CloseTagIndex`
+    /// (answers kept by name refilter the key's close tags for each spelling).
+    func testNamesThatFoldAlike_shareTheirAnswers() {
+        var html = String(repeating: "</sssssssssssss>", count: 20_000)
+        for bits in 0..<8_192 {
+            html += "<" + String((0..<13).map { bits >> $0 & 1 == 0 ? "s" : "\u{017F}" }) + ">"
+        }
+        let started = Date()
+        XCTAssertFalse(HTMLMarkupScan.containsLikelyHTMLMarkup(html))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+    }
+
+    /// One close tag with a name outside ASCII must not slow every element.
+    /// Revert-check: handing such names to the regex in
+    /// `HTMLMarkupScan.removingHiddenElements` (24.7 s at this size, -O).
+    func testHiddenElements_aNameOutsideASCII_keepsTheScanLinear() {
+        let html = "</\u{212A}>" + String(repeating: "<div style=\"display:none\">x", count: 8_000)
+        let started = Date()
+        _ = HTMLMarkupScan.removingHiddenElements(from: html)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5)
     }
 
     func testLineStartMarkers_matchTheirRegexes() throws {

@@ -152,7 +152,16 @@ enum HTMLMarkupScan {
         /// ignoring case to another folds to the same key, and each candidate
         /// is compared exactly before it counts.
         private let byFoldedName: [String: [Int]]
-        private var answersByName: [String: (openings: [String.Index], found: [Bool])] = [:]
+        /// A name's close tags and the walk's answer at each.
+        private struct Answers {
+            let openings: [String.Index]
+            let found: [Bool]
+        }
+
+        /// Answers by folded key, one entry for each class of names in it that
+        /// compare equal ignoring case (one class, for names that fold alike),
+        /// with that class's first name to compare a query with.
+        private var answersByKey: [String: [(name: String, answers: Answers)]] = [:]
 
         init(html: String, scan: OpeningScan) {
             var closeTags: [CloseTag] = []
@@ -190,26 +199,38 @@ enum HTMLMarkupScan {
         func hasExplicitCloseTag(named tagName: String, after startIndex: String.Index) -> Bool {
             let answers = answers(for: tagName)
             // The first of this name's close tags at or after `startIndex`.
+            let first = Self.firstIndex(in: answers.openings) { $0 >= startIndex }
+            return first < answers.found.count && answers.found[first]
+        }
+
+        /// The first index whose element satisfies `predicate`, which holds for
+        /// a suffix of `elements`.
+        private static func firstIndex<Element>(in elements: [Element], where predicate: (Element) -> Bool) -> Int {
             var low = 0
-            var high = answers.openings.count
+            var high = elements.count
             while low < high {
                 let middle = (low + high) / 2
-                if answers.openings[middle] < startIndex {
-                    low = middle + 1
-                } else {
+                if predicate(elements[middle]) {
                     high = middle
+                } else {
+                    low = middle + 1
                 }
             }
-            return low < answers.found.count && answers.found[low]
+            return low
         }
 
         /// For each close tag named `tagName`, whether the walk that reaches it
-        /// finds a bare one: there, or where the walk goes on from it.
-        private func answers(for tagName: String) -> (openings: [String.Index], found: [Bool]) {
-            if let known = answersByName[tagName] {
-                return known
+        /// finds a bare one: there, or where the walk goes on from it. Kept by
+        /// folded key, not by name: names that fold alike but are spelled
+        /// differently (`s` and `ſ`) share one set of answers, so a sender's
+        /// thousands of spellings cost one pass over the key's close tags.
+        private func answers(for tagName: String) -> Answers {
+            let key = Self.key(tagName)
+            var classes = answersByKey[key] ?? []
+            if let known = classes.first(where: { $0.name.caseInsensitiveCompare(tagName) == .orderedSame }) {
+                return known.answers
             }
-            let tags = (byFoldedName[Self.key(tagName)] ?? [])
+            let tags = (byFoldedName[key] ?? [])
                 .map { closeTags[$0] }
                 .filter { $0.name.caseInsensitiveCompare(tagName) == .orderedSame }
             let openings = tags.map(\.opening)
@@ -225,15 +246,15 @@ enum HTMLMarkupScan {
                     found[position] = true
                     continue
                 }
-                // The walk goes on past the tag's `>`.
-                var next = position + 1
-                while next < tags.count, tags[next].opening <= tagEnd {
-                    next += 1
-                }
+                // The walk goes on past the tag's `>`: a search, never a walk
+                // over the close tags in between, which thousands of `</x a`
+                // ahead of one `>` made quadratic.
+                let next = Self.firstIndex(in: openings) { $0 > tagEnd }
                 found[position] = next < tags.count && found[next]
             }
-            let answers = (openings: openings, found: found)
-            answersByName[tagName] = answers
+            let answers = Answers(openings: openings, found: found)
+            classes.append((name: tagName, answers: answers))
+            answersByKey[key] = classes
             return answers
         }
     }
@@ -404,13 +425,6 @@ enum HTMLMarkupScan {
 
     // MARK: - Hidden elements
 
-    /// `MessageProcessor.prepareHTMLForSnippet`'s hidden-element pattern: an
-    /// element whose `style` hides it, through its close tag (`</\1>`).
-    static let hiddenElementRegex = try? NSRegularExpression(
-        pattern: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:\(hidingDeclarationPattern))[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
-        options: [.caseInsensitive]
-    )
-
     private static let hidingDeclarationPattern =
         "display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0"
     private static let elementStartRegex = try? NSRegularExpression(pattern: "<([a-zA-Z0-9]+)\\b", options: [.caseInsensitive])
@@ -419,28 +433,35 @@ enum HTMLMarkupScan {
     private static let hidingDeclarationRegex = try? NSRegularExpression(pattern: hidingDeclarationPattern, options: [.caseInsensitive])
     private static let closeTagRegex = try? NSRegularExpression(pattern: "</([a-zA-Z0-9]+)>", options: [.caseInsensitive])
 
-    /// Every match of `hiddenElementRegex` removed, with the regex's own result
-    /// and without its rereading. The regex tried every `<name` and, at each,
-    /// read to the tag's `>` and through every `style` before it, and from
-    /// each such tag end to the end of the text for a close tag: a sender's
-    /// `<div style="a` repeated 8,000 times (101 KB) held a message's snippet
-    /// for 35 s.
+    /// `MessageProcessor.prepareHTMLForSnippet`'s hidden elements removed: an
+    /// element whose `style` hides it, through its close tag. This replaced
+    /// the regex
+    /// `<([a-zA-Z0-9]+)\b[^>]*style\s*=\s*['"][^'"]*(?:display\s*:\s*none|…)[^'"]*['"][^>]*>[\s\S]*?</\1>`
+    /// (case-insensitive), which tried every `<name` and, at each, read to the
+    /// tag's `>` and through every `style` before it, and from each such tag
+    /// end to the end of the text for a close tag: a sender's `<div style="a`
+    /// repeated 8,000 times (101 KB) held a message's snippet for 35 s.
     ///
-    /// Here each `<name`'s match is worked out from two indexes built once.
-    /// The regex's tag can end at more than one `>`: a `style` whose value
-    /// hides the element ends the tag at the first `>` after the value's
-    /// closing quote. The regex tries the last such `style` before the tag's
-    /// first `>` first, then each earlier one, and takes the first whose end
-    /// has a close tag of the name after it, through the first such close
-    /// tag. Those ends never decrease from one `style` to the next (a value
-    /// holds no quote, so a later `style`'s value starts at or after an
-    /// earlier one's closing quote), so the `style`s with a close tag after
-    /// their end come first, and the regex takes the last of them. A name with
-    /// a character outside ASCII, which the regex's case folding could equate
-    /// with another, is left to the regex, as is every name in a text with
-    /// such a close tag.
+    /// Here each `<name`'s match is worked out from two indexes built once,
+    /// with the regex's result. The regex's tag can end at more than one `>`:
+    /// a `style` whose value hides the element ends the tag at the first `>`
+    /// after the value's closing quote. The regex tries the last such `style`
+    /// before the tag's first `>` first, then each earlier one, and takes the
+    /// first whose end has a close tag of the name after it, through the first
+    /// such close tag. Those ends never decrease from one `style` to the next
+    /// (a value holds no quote, so a later `style`'s value starts at or after
+    /// an earlier one's closing quote), so the `style`s with a close tag after
+    /// their end come first, and the regex takes the last of them.
+    ///
+    /// One difference, deliberate: a name is matched to its close tag ignoring
+    /// ASCII case only. The regex's backreference folded case fully, so `<ss`
+    /// closed at `</ß>`, `<st` at `</ﬆ>`, and a name spelled with `ſ` or the
+    /// Kelvin sign at its ASCII spelling. Such an element is left in the
+    /// snippet here. Handing those names back to the regex kept it quadratic
+    /// for a whole message whenever one such character appeared
+    /// (`HTMLMarkupScanTests` pins the difference).
     static func removingHiddenElements(from text: String) -> String {
-        guard let hiddenElementRegex, let elementStartRegex else { return text }
+        guard let elementStartRegex else { return text }
         let nsText = text as NSString
         let length = nsText.length
         let styles = HidingStyles(text)
@@ -477,21 +498,11 @@ enum HTMLMarkupScan {
             var matchEnd: Int?
             if !candidates.isEmpty {
                 let name = nsText.substring(with: start.range(at: 1))
-                switch closeTags.closes(forName: name) {
-                case .indexed(let closes):
-                    if let lastClose = closes.last?.location {
-                        let lastWithClose = styles.lastIndex(in: candidates) { $0.elementEnd < lastClose }
-                        if let lastWithClose {
-                            let elementEnd = styles[lastWithClose].elementEnd
-                            matchEnd = closes.first { $0.location > elementEnd }.map(NSMaxRange)
-                        }
-                    }
-                case .leftToTheRegex:
-                    matchEnd = hiddenElementRegex.firstMatch(
-                        in: text,
-                        options: .anchored,
-                        range: NSRange(location: start.range.location, length: length - start.range.location)
-                    ).map { NSMaxRange($0.range) }
+                if let closes = closeTags.closes(forName: name),
+                   let lastClose = closes.last?.location,
+                   let lastWithClose = styles.lastIndex(in: candidates, where: { $0.elementEnd < lastClose }) {
+                    let elementEnd = styles[lastWithClose].elementEnd
+                    matchEnd = closes.first { $0.location > elementEnd }.map(NSMaxRange)
                 }
             }
             guard let matchEnd else {
@@ -619,15 +630,8 @@ enum HTMLMarkupScan {
         }
     }
 
-    /// Every `</name>`, by name.
+    /// Every `</name>` whose name is ASCII, by name ignoring ASCII case.
     private struct CloseTagPositions {
-        enum Closes {
-            /// The name's close tags, in order.
-            case indexed(SortedCloses)
-            /// A name, or a text, the regex's case folding has to judge.
-            case leftToTheRegex
-        }
-
         /// Close tags in order, with a binary search for the first after a
         /// location.
         struct SortedCloses {
@@ -651,20 +655,13 @@ enum HTMLMarkupScan {
         }
 
         private var rangesByName: [String: [NSRange]] = [:]
-        /// Whether some close tag's name holds a character outside ASCII.
-        private var hasUnfoldedName = false
 
         init(_ text: String) {
-            guard let closeTagRegex = HTMLMarkupScan.closeTagRegex else {
-                hasUnfoldedName = true
-                return
-            }
+            guard let closeTagRegex = HTMLMarkupScan.closeTagRegex else { return }
             let nsText = text as NSString
             for match in closeTagRegex.matches(in: text, range: NSRange(location: 0, length: nsText.length)) {
                 if let key = Self.key(nsText.substring(with: match.range(at: 1))) {
                     rangesByName[key, default: []].append(match.range)
-                } else {
-                    hasUnfoldedName = true
                 }
             }
         }
@@ -674,9 +671,9 @@ enum HTMLMarkupScan {
             name.utf16.allSatisfy { $0 < 0x80 } ? name.lowercased() : nil
         }
 
-        func closes(forName name: String) -> Closes {
-            guard !hasUnfoldedName, let key = Self.key(name) else { return .leftToTheRegex }
-            return .indexed(SortedCloses(ranges: rangesByName[key] ?? []))
+        /// Nil for a name outside ASCII, which closes nothing.
+        func closes(forName name: String) -> SortedCloses? {
+            Self.key(name).map { SortedCloses(ranges: rangesByName[$0] ?? []) }
         }
     }
 }

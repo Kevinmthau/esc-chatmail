@@ -154,7 +154,8 @@ enum PlainTextQuoteRemover {
 
     /// UTF-16 units searched past the last tried start: more than the longest
     /// match of a quoted pattern's bounds (two of 200 characters, each up to
-    /// two units), with room for the `\s*` before "a écrit"'s colon.
+    /// two units), with room for about 3,000 units of the unbounded `\s*`
+    /// before "a écrit"'s colon. A longer run there is not found past the limit.
     static let quotedAttributionSearchTail = 4_096
 
     /// Pre-compiled regex patterns for performance (compiled once at class load)
@@ -393,12 +394,12 @@ enum PlainTextQuoteRemover {
         return (earliestIndex, attribution)
     }
 
-    /// Pre-compiled regex for collapsing excessive newlines (performance optimization)
     /// The whole text, unless its start literal occurs more than
     /// `quotedAttributionStartLimit` times: then up to the last occurrence tried
     /// plus `quotedAttributionSearchTail`. A match found in the shorter range is
     /// a match in the text (the quoted patterns read nothing past their end),
-    /// and every match that starts at a tried occurrence fits in it.
+    /// and a match that starts at a tried occurrence fits in it unless the
+    /// `\s*` before "a écrit"'s colon, which is unbounded, runs past the tail.
     static func quotedAttributionSearchRange(
         in text: String,
         fullRange: NSRange,
@@ -429,6 +430,7 @@ enum PlainTextQuoteRemover {
         return fullRange
     }
 
+    /// Pre-compiled regex for collapsing excessive newlines (performance optimization)
     private static let excessiveNewlinesPattern: NSRegularExpression? = {
         try? NSRegularExpression(pattern: "\n{3,}", options: [])
     }()
