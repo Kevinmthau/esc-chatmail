@@ -5,6 +5,11 @@ import CoreData
 struct ReconciliationInput {
     /// Skip label reconciliation when history reported no changes
     let skipLabelReconciliation: Bool
+    /// Look up "Delivery unknown" sends in Gmail by Message-ID
+    /// (`DeliveryUnknownProbe`). The orchestrator sets it only from
+    /// `DeliveryUnknownProbePolicy.allowsProbing`: a run that may do expensive
+    /// work and whose history slice was terminal and clean.
+    var probesDeliveryUnknownSends = false
 }
 
 struct ReconciliationPhaseResult: Sendable, Equatable {
@@ -58,6 +63,10 @@ struct ReconciliationPhase: SyncPhase {
         )
         let missedIds = missedResult.missingIds
         diagnostics.merge(missedResult.diagnostics)
+        // A message the run knows is missing and could not fetch may be a
+        // "Delivery unknown" send's echo, which neither history nor the
+        // store then shows: no "Not sent" verdict in such a run.
+        var missedRecoveryFailed = false
 
         if !missedIds.isEmpty {
             log.info("Reconciliation found \(missedIds.count) missed messages")
@@ -82,6 +91,39 @@ struct ReconciliationPhase: SyncPhase {
                 // Missed-message recovery is a safety net outside history
                 // semantics; failures here are logged, not cursor-gating.
                 log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
+                missedRecoveryFailed = true
+            }
+        }
+
+        if input.probesDeliveryUnknownSends {
+            let probeOutcome = try await DeliveryUnknownProbe(messageFetcher: messageFetcher)
+                .run(
+                    runStartedAt: context.syncStartTime,
+                    allowsNotSentVerdict: !missedRecoveryFailed,
+                    in: context.coreDataContext
+                )
+            if !probeOutcome.foundMessageIDs.isEmpty {
+                // Persisted as any synced echo is: the persister's Message-ID
+                // match consumes the record in this run's context.
+                let foundOutcome = try await BatchProcessor.retryFailedMessages(
+                    failedIds: probeOutcome.foundMessageIDs,
+                    messageFetcher: messageFetcher
+                ) { [messagePersister] messages in
+                    try await messagePersister.saveMessages(
+                        messages,
+                        labelIds: context.labelIds,
+                        myAliases: context.myAliases,
+                        sendAsAliases: context.sendAsAliases,
+                        modificationTransaction: context.modificationTransaction,
+                        in: context.coreDataContext
+                    )
+                }
+                if foundOutcome.hasBlockingFailures {
+                    // No verdict was written for them: the record stays
+                    // "Delivery unknown" and is looked up again once
+                    // `DeliveryUnknownProbePolicy.reprobeInterval` has passed.
+                    log.warning("Failed to persist \(foundOutcome.blockingFailureIds.count) message(s) a delivery-unknown lookup found")
+                }
             }
         }
 
