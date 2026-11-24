@@ -11,6 +11,8 @@ final class IngestCleanupSharingTests: XCTestCase {
     /// MIME parts arrive with line breaks and spaces around the HTML; the
     /// stored string is trimmed. Every golden-corpus HTML input must derive
     /// the same preview, exactly, and the same verdict either way.
+    /// HONEST SCOPE: the verdict half guards nothing this change touched;
+    /// ingest classified the trimmed string before and after it.
     func testGoldenCorpusHTML_derivesTheSamePaddedAndTrimmed() throws {
         let bundle = Bundle(for: type(of: self))
         let url = try XCTUnwrap(bundle.url(forResource: "golden_message_corpus", withExtension: "json"))
@@ -64,9 +66,9 @@ final class IngestCleanupSharingTests: XCTestCase {
         }
     }
 
-    /// The one shape whose preview the untrimmed part derived differently:
-    /// trailing whitespace inside an element a bare address left open to the
-    /// end. Ingest now derives what `ChatPreviewRepair` derives from the
+    /// The shape whose preview the untrimmed part derived differently:
+    /// trailing whitespace inside an element left open to the end (here by a
+    /// bare address; `<plaintext>` does the same). Ingest now derives what `ChatPreviewRepair` derives from the
     /// stored (trimmed) file.
     /// Revert-check: `storedHTML` as the string `processGmailMessage` derives
     /// its preview from (with `content.html`, the untrimmed part, the preview
@@ -144,6 +146,7 @@ final class IngestCleanupSharingTests: XCTestCase {
 }
 
 /// Returns its message, whatever it is given.
+/// `@unchecked Sendable`: its only state is an immutable `let` of a Sendable value.
 private final class FixedMessageProcessor: MessageProcessor, @unchecked Sendable {
     private let processedMessage: ProcessedMessage
 

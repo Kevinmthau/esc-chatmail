@@ -54,6 +54,7 @@ final class MessageDerivationCancellationTests: XCTestCase {
 
 /// Cancels the task it runs in, as an expiring background task does, and
 /// returns its message.
+/// `@unchecked Sendable`: its only state is an immutable `let` of a Sendable value.
 private final class CancellingMessageProcessor: MessageProcessor, @unchecked Sendable {
     private let processedMessage: ProcessedMessage
 
