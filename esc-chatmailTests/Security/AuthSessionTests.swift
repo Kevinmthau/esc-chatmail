@@ -1460,7 +1460,9 @@ final class AuthSessionTests: XCTestCase {
     // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` or
     // `resumeInterruptedCredentialCleanupIfNeeded()` goes back to
     // `GIDSignIn.sharedInstance.signOut()` in place of `signOutGoogleSession()`
-    // (no "google-sign-out" is recorded for that marker).
+    // (no "google-sign-out" is recorded for that marker). Run that revert-check on the iOS
+    // simulator only: reverted, a Mac test host would delete the installed app's Google
+    // session, which is the damage this test exists to prevent.
     func testRestoreResumedCleanup_signsGoogleOutThroughTheSeamBeforeDownloadsClose() async throws {
         for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
             let keychain = MockKeychainService()
@@ -1484,14 +1486,21 @@ final class AuthSessionTests: XCTestCase {
         }
     }
 
-    // The only call of the SDK's sign-out is the seam's production default, so no path of
-    // AuthSession can reach the real Google session past a test's stub.
-    // Revert-check: fails if any `GIDSignIn.sharedInstance.signOut()` is added back to
-    // AuthSession.swift outside the `signOutGoogleSession` default.
+    // In AuthSession.swift the SDK's sign-out is called only as the seam's production
+    // default, and its disconnect not at all, so neither reaches the real Google session
+    // past a test's stub. Comment lines are skipped, so a note may quote the call.
+    // HONEST SCOPE: this reads one spelling; an alias of the singleton would slip past.
+    // Revert-check: fails if a `GIDSignIn.sharedInstance.signOut()` or `.disconnect` is
+    // added to AuthSession.swift outside the `signOutGoogleSession` default.
     func testGoogleSDKSignOut_isCalledOnlyFromTheSeamDefault() throws {
-        let source = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+        let fullSource = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+        let source = fullSource
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
         let call = "GIDSignIn.sharedInstance.signOut()"
         XCTAssertEqual(source.components(separatedBy: call).count - 1, 1)
+        XCTAssertFalse(source.contains("GIDSignIn.sharedInstance.disconnect"))
         let seamDefault = try XCTUnwrap(source.range(of: "signOutGoogleSession: @escaping @MainActor @Sendable () -> Void = {"))
         let callSite = try XCTUnwrap(source.range(of: call))
         XCTAssertLessThan(seamDefault.lowerBound, callSite.lowerBound)
