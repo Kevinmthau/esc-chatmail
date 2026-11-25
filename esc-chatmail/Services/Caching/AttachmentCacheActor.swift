@@ -365,6 +365,14 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, imageSourceOptions) else {
             return nil
         }
+        // The original is the sender's, and the bubble reads it in place of a flattened preview
+        // (`thumbnailFlattensTransparency`), so the same budget as the preview's holds here: an
+        // image past it is refused before any of it is decoded, and the loader falls back to the
+        // preview, which such an image does not have.
+        guard let sourcePixelSize = ImageProcessor.sourcePixelSize(of: imageSource),
+              ImageProcessor.isWithinDecodeBudget(sourcePixelSize) else {
+            return nil
+        }
 
         let maxDimensionInPixels = max(targetSize.width, targetSize.height) * scale
         guard maxDimensionInPixels > 0, maxDimensionInPixels.isFinite else {

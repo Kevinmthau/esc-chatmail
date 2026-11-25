@@ -101,6 +101,85 @@ final class ComposeSendOrchestratorTests: XCTestCase {
         XCTAssertEqual(backgroundTasks.endedIdentifiers.count, 1)
     }
 
+    // A post-barrier timeout through the production client and send service
+    // stays "Delivery unknown" with its admission time, and the Message-ID
+    // lookup that resolves it later sends nothing: the only request Gmail ever
+    // saw is the first one.
+    // Revert-check: fails if `GmailSendService.recordRemoteSendState` stops
+    // stamping `admittedAt` (the probe would find nothing eligible), or if
+    // `ConnectionErrorDetector` starts treating a timeout as pre-transmission
+    // (the send would be retried and end "Not sent" at once).
+    func testExecuteInBackground_postBarrierTimeout_isDeliveryUnknownUntilTheProbeResolvesItWithoutResending() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.error(URLError(.timedOut))]
+        let stack = TestCoreDataStack()
+        let viewContext = stack.makeMainQueueViewContext()
+        let authSession = AuthSession()
+        authSession.userEmail = "sender@example.com"
+        let sendService = GmailSendService(
+            viewContext: viewContext,
+            apiClient: GmailAPIClient(
+                tokenManager: MockTokenManager(),
+                retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 0.01, maxDelay: 0.02),
+                session: StubURLProtocol.makeSession()
+            ),
+            authSession: authSession
+        )
+        let recipient = "slow-upload@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Three photos on a slow uplink",
+            optimisticConversation: .participantHash(calculateParticipantHash(from: [normalizedEmail(recipient)]))
+        )
+        try viewContext.save()
+
+        let operation = ComposeSendOrchestrator(
+            sendService: sendService,
+            syncPerformer: MockIncrementalSyncPerformer()
+        ).executeInBackground(
+            input: makeInput(body: "Three photos on a slow uplink"),
+            attachmentReferences: [],
+            optimisticMessageID: handle.optimisticMessageID
+        )
+        await operation.task.value
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+        let probeContext = stack.newBackgroundContext()
+        let id = handle.optimisticMessageID
+        let (marker, admittedAt) = try await probeContext.perform {
+            try Self.markerAndAdmission(id: id, in: probeContext)
+        }
+        XCTAssertEqual(marker, OutboundSendRemoteState.ambiguousMessageID)
+        XCTAssertNotNil(admittedAt)
+
+        let api = MockGmailAPIClient()
+        let outcome = try await DeliveryUnknownProbe(messageFetcher: MessageFetcher(apiClient: api, clock: FakeSyncClock()))
+            .run(
+                runStartedAt: try XCTUnwrap(admittedAt).addingTimeInterval(DeliveryUnknownProbePolicy.quietPeriod),
+                in: probeContext
+            )
+        try await probeContext.perform { try probeContext.save() }
+
+        XCTAssertEqual(outcome.resolvedAsNotSent, [id])
+        let (resolvedMarker, _) = try await probeContext.perform {
+            try Self.markerAndAdmission(id: id, in: probeContext)
+        }
+        XCTAssertEqual(resolvedMarker, OutboundSendRemoteState.notSentMessageID)
+        XCTAssertEqual(StubURLProtocol.requestCount, 1, "Resolving the send sent nothing")
+        XCTAssertEqual(api.sendMessageCallCount, 0)
+    }
+
+    private nonisolated static func markerAndAdmission(
+        id: String,
+        in context: NSManagedObjectContext
+    ) throws -> (String?, Date?) {
+        let request = OutboundSendMutationRecord.fetchRequest()
+        request.predicate = NSPredicate(format: "id == %@", id)
+        guard let record = try context.fetch(request).first else { return (nil, nil) }
+        return (record.remoteCommittedMessageId, record.admittedAt)
+    }
+
     func testDeniedBackgroundTimeStillAllowsForegroundSend() async {
         let sendService = MockComposeSendService()
         let backgroundTasks = MockOutboundBackgroundTaskManager()

@@ -16,7 +16,9 @@ import Foundation
 ///   its batch, so for that long the store has no row for a file that is the new one.
 ///
 /// A read that fails is not an answer of "no row": the caller removes nothing, and the
-/// daily orphan sweeps take the files later.
+/// daily orphan sweeps take the files later. Nor is a read on a coordinator with no store
+/// attached, which answers `[]` without an error: both reads throw there
+/// (`CoreDataStack.requireAttachedStore(in:)`).
 ///
 /// And an attachment file stored under an ID the app made is not removed with its row at
 /// all (`isRemovedWithItsRow`); the orphan sweep takes it once no row names it.
@@ -44,6 +46,7 @@ enum DeletedRowFileReclamation {
     ) throws -> Set<String> {
         guard !ids.isEmpty else { return [] }
         return try context.performAndWait {
+            try CoreDataStack.requireAttachedStore(in: context)
             let request = NSFetchRequest<NSDictionary>(entityName: "Message")
             request.predicate = NSPredicate(format: "id IN %@", ids)
             request.resultType = .dictionaryResultType
@@ -61,6 +64,7 @@ enum DeletedRowFileReclamation {
     ) throws -> Set<String> {
         guard !relativePaths.isEmpty else { return [] }
         return try context.performAndWait {
+            try CoreDataStack.requireAttachedStore(in: context)
             let request = NSFetchRequest<NSDictionary>(entityName: "Attachment")
             request.predicate = NSPredicate(
                 format: "localURL IN %@ OR previewURL IN %@",

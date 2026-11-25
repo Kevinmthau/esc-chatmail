@@ -91,6 +91,40 @@ final class ChatPreviewRepairTests: XCTestCase {
         }
     }
 
+    /// A row an earlier launch died deriving three times is passed over: it keeps
+    /// its stored preview, the rows around it are derived, and the pass completes.
+    /// Revert-check: the `rowQuarantine?.isQuarantined` guard in
+    /// `ChatPreviewRepair.applyDerivedPreview` (the row is then derived), and
+    /// `beginRow`/`endRow` around the derivation (no mark is written).
+    func testCoordinatorRepair_rowAnEarlierLaunchDiedOnThreeTimes_keepsItsPreviewAndThePassCompletes() async throws {
+        let before = try message("001")
+        let poisoned = try message("002")
+        let after = try message("003")
+        try viewContext.save()
+        let passKey = ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey
+        flags.setString("002\n002", forKey: LaunchPassRowQuarantine.deathsKey(forPassKey: passKey))
+        flags.setString("an-earlier-launch|002", forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: passKey))
+        // The second pass has nothing to do here.
+        flags.set(true, forKey: ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey)
+
+        let repair = coordinator()
+        repair.repairPersistedChatPreviews()
+        await repair.waitForChatPreviewRepairCompletion()
+
+        XCTAssertTrue(flags.bool(forKey: passKey))
+        viewContext.refreshAllObjects()
+        XCTAssertEqual(poisoned.chatPreviewText, "Old preview")
+        XCTAssertEqual(before.chatPreviewText, "Keep this reply.\n\nBest,\n\nAlex")
+        XCTAssertEqual(after.chatPreviewText, before.chatPreviewText)
+        XCTAssertEqual(flags.string(forKey: LaunchPassRowQuarantine.quarantineKey(forPassKey: passKey)), "002")
+        XCTAssertNil(flags.string(forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: passKey)))
+        XCTAssertGreaterThanOrEqual(
+            flags.stringWriteCount(forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: passKey)), 6,
+            "This test's own mark, its clearing, then each derived row marked and cleared"
+        )
+        withExtendedLifetime(repair) {}
+    }
+
     // Revert-check: CacheVersioning.chatPreviewDerivationVersion schedules F12
     // through the existing coordinator after the prior repair completed;
     // EmailDOMQuoteRemover's link evidence changes only the saved preview.

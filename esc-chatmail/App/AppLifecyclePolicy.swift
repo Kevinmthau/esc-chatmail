@@ -122,6 +122,19 @@ enum AppLifecyclePolicy {
         }
     }
 
+    /// Whether a session published while the iOS app is in the background arms the
+    /// BGTask requests. The scene's own arm (`.stopForegroundSyncAndArmBackgroundTasks`)
+    /// ran when the app went to the background, and arms nothing without a session, so a
+    /// restore that lands after it (a held account's retry, or a background task's
+    /// restore) left the device with none for the rest of that background stay. The Mac
+    /// has no BGTasks.
+    static func armsBackgroundTasksOnAuthChange(
+        platform: AppPlatform,
+        isApplicationInBackground: Bool
+    ) -> Bool {
+        platform == .iOS && isApplicationInBackground
+    }
+
     static func terminationDecision(hasOutstandingSends: Bool) -> TerminationDecision {
         hasOutstandingSends
             ? .terminateAfterOutstandingSends(timeout: outstandingSendTerminationTimeout)

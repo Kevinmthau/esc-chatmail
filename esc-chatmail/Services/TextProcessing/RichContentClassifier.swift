@@ -297,13 +297,30 @@ enum RichContentClassifier {
 
     /// Finds the end index (exclusive) of the closing `</div>` that matches the opening `<div` at `start`.
     /// Uses a lightweight depth counter so nested `<div>` elements inside the block are handled correctly.
+    ///
+    /// Each search's hit is kept while it is still ahead of the walk: the
+    /// close tag found from the first `<div` is the one found from every `<div`
+    /// before it, and searching for it again from each (thousands of `<div`
+    /// in one attribute value ahead of one `</div`) was quadratic, 16 s at
+    /// 40 KB on every received message's pre-run.
     private static func findMatchingClosingDiv(in html: String, from start: String.Index) -> String.Index? {
         var depth = 0
         var searchIndex = start
+        var knownOpen: Range<String.Index>??
+        var knownClose: Range<String.Index>??
+
+        func next(_ needle: String, known: inout Range<String.Index>??) -> Range<String.Index>? {
+            if let found = known, found.map({ $0.lowerBound >= searchIndex }) ?? true {
+                return found
+            }
+            let found = html.range(of: needle, options: .caseInsensitive, range: searchIndex..<html.endIndex)
+            known = .some(found)
+            return found
+        }
 
         while searchIndex < html.endIndex {
-            let nextOpen = html.range(of: "<div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
-            let nextClose = html.range(of: "</div", options: .caseInsensitive, range: searchIndex..<html.endIndex)
+            let nextOpen = next("<div", known: &knownOpen)
+            let nextClose = next("</div", known: &knownClose)
 
             switch (nextOpen, nextClose) {
             case let (open?, close?):
@@ -350,13 +367,23 @@ enum RichContentClassifier {
         try? NSRegularExpression(pattern: "</?(?:div|span|br|p|a|b|i|strong|em|font|blockquote)[^>]*>")
     }()
 
+    /// Both tag regexes end every match at a `>`, so they run up to the text's
+    /// last `>` (`HTMLMarkupScan.replacingTagsEndingAtTagEnd`), with the same
+    /// result: over the whole text they read to its end from every `<` after
+    /// that `>`, and 30,000 unclosed `<div style="a` held a received
+    /// message's verdict for 87 s.
     private static func approximateTextContent(from html: String) -> String {
         RegexSanitizer.replace(
-            in: RegexSanitizer.replace(in: html, regex: htmlTagRegex, with: " "),
+            in: replacingTags(in: html, regex: htmlTagRegex, with: " "),
             regex: RegexSanitizer.whitespaceRunRegex,
             with: " "
         )
         .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func replacingTags(in html: String, regex: NSRegularExpression?, with template: String) -> String {
+        guard let regex else { return html }
+        return HTMLMarkupScan.replacingTagsEndingAtTagEnd(in: html, regex: regex, with: template)
     }
 
     /// Counts HTML elements using efficient substring search
@@ -411,7 +438,7 @@ enum RichContentClassifier {
 
         // Check if content is predominantly simple div/span wrappers
         // Strip simple formatting tags and count what HTML tags remain
-        let afterSimpleStrip = RegexSanitizer.replace(in: html, regex: simpleFormattingTagRegex, with: "")
+        let afterSimpleStrip = replacingTags(in: html, regex: simpleFormattingTagRegex, with: "")
 
         // Count remaining HTML tags (complex tags that weren't stripped)
         let remainingTagCount = afterSimpleStrip.components(separatedBy: "<").count - 1

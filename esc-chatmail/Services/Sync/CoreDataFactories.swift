@@ -270,8 +270,29 @@ struct MessageParticipantFactory {
     ) throws -> MessageParticipant? {
         guard let email = EmailNormalizer.extractEmail(from: headerValue) else { return nil }
 
+        return try create(
+            email: email,
+            displayName: EmailNormalizer.extractDisplayName(from: headerValue),
+            kind: kind,
+            for: message,
+            in: context
+        )
+    }
+
+    /// Creates a message participant from an address and a name already
+    /// parsed apart (`EmailAddressListParser.mailboxes(from:)`). A parsed name
+    /// is decoded and unquoted, so it must never be joined back to its address
+    /// and parsed again: a name that decoded to `<boss@corp.example>` then
+    /// replaced the recipient's address in the row.
+    static func create(
+        email: String,
+        displayName: String?,
+        kind: ParticipantKind,
+        for message: Message,
+        in context: NSManagedObjectContext
+    ) throws -> MessageParticipant? {
         let normalizedEmail = EmailNormalizer.normalize(email)
-        let displayName = EmailNormalizer.extractDisplayName(from: headerValue)
+        guard !normalizedEmail.isEmpty else { return nil }
 
         let person = try PersonFactory.findOrCreate(
             email: normalizedEmail,

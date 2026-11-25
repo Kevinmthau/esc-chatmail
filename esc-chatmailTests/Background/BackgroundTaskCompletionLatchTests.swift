@@ -89,6 +89,29 @@ final class BackgroundTaskCompletionLatchTests: XCTestCase {
         XCTAssertEqual(submissions.value, 0)
     }
 
+    // Revert-check: fails if `complete(success:beforeReporting:)` calls the hook after
+    // `onComplete`, more than once, or with an expiry that disagrees with the result.
+    func testBeforeReporting_runsOnceBeforeCompletion_withTheExpiry() {
+        let lifecycleState = BackgroundTaskLifecycleState()
+        var events: [String] = []
+        let latch = BackgroundTaskCompletionLatch(lifecycleState: lifecycleState) { events.append("complete \($0)") }
+
+        latch.expire()
+        latch.complete(success: true) { reported, didExpire in events.append("before \(reported) \(didExpire)") }
+        latch.complete(success: true) { _, _ in events.append("again") }
+
+        XCTAssertEqual(events, ["before false true", "complete false"])
+    }
+
+    func testBeforeReporting_unexpiredRun_reportsItsOwnResult() {
+        var events: [String] = []
+        let latch = BackgroundTaskCompletionLatch { events.append("complete \($0)") }
+
+        latch.complete(success: true) { reported, didExpire in events.append("before \(reported) \(didExpire)") }
+
+        XCTAssertEqual(events, ["before true false", "complete true"])
+    }
+
     func testSharedLifecycleExpirationRejectsSchedulingAndForcesFailure() {
         let lifecycleState = BackgroundTaskLifecycleState()
         let submissions = NSLockedCounter()

@@ -332,4 +332,96 @@ final class SyncTimeCalculatorTests: XCTestCase {
         XCTAssertEqual(config.maxWindow, SyncConfig.maxReconciliationWindow)
         XCTAssertTrue(config.useLastSyncAsPrimary)
     }
+
+    // MARK: - Stored times read as no later than now
+
+    /// A last-sync time and a mailbox start written while the device clock was ahead are
+    /// read as no later than `now` (the earlier of the device's time and Gmail's), so a
+    /// floor drawn from them cannot start past mail Gmail already had. Only ever earlier.
+    ///
+    /// Revert-check: either `clampedToNow` call in `SyncTimeCalculator.calculateStartTime`.
+    func testStoredTimesAheadOfNow_areReadAsNow() throws {
+        let suiteName = "SyncTimeCalculatorTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now: TimeInterval = 1_800_000_000
+        defaults.set(now + 7200, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+
+        let recovery = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, now: now, defaults: defaults)
+        XCTAssertEqual(recovery, now - SyncConfig.recoveryBufferSeconds)
+
+        let reconciliation = SyncTimeCalculator.calculateStartTime(config: .reconciliation, now: now, defaults: defaults)
+        XCTAssertEqual(reconciliation, now - SyncConfig.timestampBufferSeconds)
+
+        defaults.set(now + 3600, forKey: SyncConfig.mailboxStartTimestampKey)
+        let recoveryWithStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, now: now, defaults: defaults)
+        XCTAssertEqual(recoveryWithStart, now - SyncConfig.timestampBufferSeconds, "The start's floor is read from now, too")
+
+        defaults.removeObject(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        let initial = SyncTimeCalculator.calculateStartTime(config: .initialSync, now: now, defaults: defaults)
+        XCTAssertEqual(initial, now - SyncConfig.timestampBufferSeconds)
+        let installBranch = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
+            newestReceivedInternalDate: nil,
+            now: now,
+            defaults: defaults
+        )
+        XCTAssertEqual(installBranch, now - SyncConfig.timestampBufferSeconds)
+    }
+
+    /// The clamp only lowers: stored times behind `now` are read as they are, and recovery
+    /// stays uncapped.
+    func testStoredTimesBehindNow_areReadUnchanged() throws {
+        let suiteName = "SyncTimeCalculatorTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now: TimeInterval = 1_800_000_000
+        let lastSync = now - 30 * 86_400
+        defaults.set(lastSync, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+
+        let recovery = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, now: now, defaults: defaults)
+
+        XCTAssertEqual(recovery, lastSync - SyncConfig.recoveryBufferSeconds)
+    }
+
+    /// A mailbox start written while the device clock was ahead, with a correct last-sync
+    /// time after it in Gmail's time: the start must not raise recovery's floor past the
+    /// last sync, or the mail between is skipped (round-1 review of PR 469).
+    ///
+    /// Revert-check: `min(install, lastSuccessfulSync)` in the last-sync branch of
+    /// `SyncTimeCalculator.calculateStartTime`.
+    func testMailboxStartAfterTheLastSync_isReadAsTheLastSync() throws {
+        let suiteName = "SyncTimeCalculatorTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now: TimeInterval = 1_800_000_000
+        let lastSync = now - 10 * 86_400
+        defaults.set(lastSync, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        defaults.set(lastSync + 23 * 3600, forKey: SyncConfig.mailboxStartTimestampKey)
+
+        let recovery = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, now: now, defaults: defaults)
+
+        XCTAssertEqual(recovery, lastSync - SyncConfig.timestampBufferSeconds)
+    }
+
+    /// A last-sync time an earlier build stamped with a device clock that is still ahead
+    /// is read that much earlier: a clamp to now does not reach it once now has passed it.
+    ///
+    /// Revert-check: the `deviceClockLead` term in `SyncTimeCalculator.calculateStartTime`.
+    func testDeviceClockLead_movesTheLastSyncEarlier() throws {
+        let suiteName = "SyncTimeCalculatorTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let now: TimeInterval = 1_800_000_000
+        let lastSync = now - 10 * 86_400
+        defaults.set(lastSync, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+
+        let recovery = SyncTimeCalculator.calculateStartTime(
+            config: .historyRecovery,
+            now: now,
+            deviceClockLead: 7200,
+            defaults: defaults
+        )
+
+        XCTAssertEqual(recovery, lastSync - 7200 - SyncConfig.recoveryBufferSeconds)
+    }
 }

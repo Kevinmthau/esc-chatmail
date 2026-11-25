@@ -155,11 +155,12 @@ struct DocumentAttachmentImporter {
                     mimeType = prepared.mimeType
                     ext = prepared.fileExtension
                     finalizedFilename = prepared.filename(replacingExtensionOf: filename)
-                    width = Int16(clamping: Int(prepared.size.width.rounded()))
-                    height = Int16(clamping: Int(prepared.size.height.rounded()))
+                    let persistedSize = AttachmentMetadataBounds.persistedImageDimensions(prepared.size)
+                    width = persistedSize.width
+                    height = persistedSize.height
                 } else if mimeType == "application/pdf",
                           let count = ImageProcessor.getPDFPageCount(from: data) {
-                    pageCount = Int16(clamping: count)
+                    pageCount = AttachmentMetadataBounds.persistedPDFPageCount(count)
                 }
             } catch {
                 failures.append("\(filename): \(error.localizedDescription)")

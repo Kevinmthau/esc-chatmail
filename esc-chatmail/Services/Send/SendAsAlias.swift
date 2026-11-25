@@ -175,37 +175,137 @@ actor SendAsAliasManager {
 }
 
 struct EmailAddressListParser {
+    /// Splits an address header into one token per mailbox, at every comma
+    /// outside a quoted string, a comment and an angle-addr.
+    ///
+    /// Comments are skipped as RFC 5322 has them, nested, in the phrase and
+    /// inside the angle-addr: a comma inside one does not end the mailbox.
+    /// Splitting there made the text before it a mailbox of its own, so
+    /// `(<boss@corp.example>, x) <x@attacker.example>` (one mailbox, whose
+    /// address is x@attacker.example) read as boss@corp.example first. Inside
+    /// the angle-addr a domain literal (`[…]`) and a quoted local part are
+    /// text too. A backslash escapes only inside a quoted string, a comment or
+    /// a domain literal. A comment that never closes runs to the end, as a
+    /// quote that never closes always has. Read as Unicode scalars, for the
+    /// reason `EmailNormalizer.mailboxAddress(inToken:)` gives; its scanner
+    /// reads quotes, comments, literals and escapes by these same rules, and
+    /// so does the web app's port (`web/src/identity/normalizeEmail.ts`).
     static func addressTokens(from headerValue: String) -> [String] {
-        var tokens: [String] = []
-        var current = ""
-        var isInQuotes = false
-        var angleDepth = 0
-        var previousWasEscape = false
+        addressTokenRanges(from: headerValue).map { String(headerValue.unicodeScalars[$0]) }
+    }
 
-        for character in headerValue {
-            if character == "\"" && !previousWasEscape {
-                isInQuotes.toggle()
-                current.append(character)
-            } else if character == "<" && !isInQuotes {
-                // Mailbox delimiters cannot nest. Restart at the newest '<'
-                // so an unmatched display-name bracket cannot swallow later recipients.
-                angleDepth = 1
-                current.append(character)
-            } else if character == ">" && !isInQuotes {
-                angleDepth = max(0, angleDepth - 1)
-                current.append(character)
-            } else if character == "," && !isInQuotes && angleDepth == 0 {
-                appendToken(current, to: &tokens)
-                current.removeAll(keepingCapacity: true)
-            } else {
-                current.append(character)
+    /// Where each of `addressTokens(from:)`'s tokens sits in `headerValue`,
+    /// trimmed of whitespace, empty tokens left out.
+    static func addressTokenRanges(from headerValue: String) -> [Range<String.Index>] {
+        enum Mode { case phrase, quote, comment, angle, angleQuote, angleComment, domainLiteral, phraseLiteral }
+        let scalars = headerValue.unicodeScalars
+        var ranges: [Range<String.Index>] = []
+        var tokenStart = scalars.startIndex
+        var mode = Mode.phrase
+        var commentDepth = 0
+        var previousWasEscape = false
+        // As in `EmailNormalizer.scanMailbox`: a `[` right after an `@` in
+        // the phrase opens a bare address's domain literal.
+        var lastPhraseScalar: Unicode.Scalar?
+
+        var index = scalars.startIndex
+        while index < scalars.endIndex {
+            let scalar = scalars[index]
+            let isEscaped = previousWasEscape
+            var escapes = false
+            var splitsHere = false
+            switch mode {
+            case .phrase:
+                if scalar == "\"" {
+                    mode = .quote
+                } else if scalar == "(" {
+                    mode = .comment
+                    commentDepth = 1
+                } else if scalar == "[" && lastPhraseScalar == "@" {
+                    mode = .phraseLiteral
+                } else if scalar == "<" {
+                    mode = .angle
+                } else if scalar == "," {
+                    splitsHere = true
+                    lastPhraseScalar = nil
+                }
+                if !splitsHere && (mode == .phrase || mode == .angle)
+                    && !CharacterSet.whitespacesAndNewlines.contains(scalar) {
+                    lastPhraseScalar = scalar
+                }
+            case .quote:
+                escapes = true
+                if scalar == "\"" && !isEscaped {
+                    mode = .phrase
+                }
+            case .comment, .angleComment:
+                escapes = true
+                if scalar == "(" && !isEscaped {
+                    commentDepth += 1
+                } else if scalar == ")" && !isEscaped {
+                    commentDepth -= 1
+                    if commentDepth == 0 {
+                        mode = mode == .comment ? .phrase : .angle
+                    }
+                }
+            case .angle:
+                // Mailbox delimiters cannot nest: a nested '<' restarts the
+                // angle-addr, so an unmatched display-name bracket cannot
+                // swallow later recipients.
+                if scalar == "\"" {
+                    mode = .angleQuote
+                } else if scalar == "(" {
+                    mode = .angleComment
+                    commentDepth = 1
+                } else if scalar == "[" {
+                    mode = .domainLiteral
+                } else if scalar == ">" {
+                    mode = .phrase
+                }
+            case .angleQuote:
+                escapes = true
+                if scalar == "\"" && !isEscaped {
+                    mode = .angle
+                }
+            case .domainLiteral:
+                escapes = true
+                if scalar == "]" && !isEscaped {
+                    mode = .angle
+                }
+            case .phraseLiteral:
+                escapes = true
+                if scalar == "]" && !isEscaped {
+                    mode = .phrase
+                }
             }
 
-            previousWasEscape = character == "\\" && !previousWasEscape
+            let next = scalars.index(after: index)
+            if splitsHere {
+                appendTrimmedRange(tokenStart..<index, of: scalars, to: &ranges)
+                tokenStart = next
+            }
+            previousWasEscape = escapes && scalar == "\\" && !isEscaped
+            index = next
         }
 
-        appendToken(current, to: &tokens)
-        return tokens
+        appendTrimmedRange(tokenStart..<scalars.endIndex, of: scalars, to: &ranges)
+        return ranges
+    }
+
+    /// Every mailbox in an address header value, with its normalized address
+    /// and its display name: how a message's From, To, Cc and Bcc are read
+    /// for its rows and for its conversation's participant hash.
+    static func mailboxes(from headerValue: String) -> [EmailAddress] {
+        let tokens = addressTokens(from: headerValue)
+        return tokens.compactMap { token in
+            guard let match = EmailNormalizer.mailboxAddress(inToken: token, isOnlyMailbox: tokens.count == 1) else {
+                return nil
+            }
+            return EmailAddress(
+                email: EmailNormalizer.normalize(match.email),
+                displayName: EmailNormalizer.displayName(inToken: token, match: match)
+            )
+        }
     }
 
     static func emailAddresses(from headerValue: String) -> [String] {
@@ -216,10 +316,21 @@ struct EmailAddressListParser {
         }
     }
 
-    private static func appendToken(_ token: String, to tokens: inout [String]) {
-        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-            tokens.append(trimmed)
+    private static func appendTrimmedRange(
+        _ range: Range<String.Index>,
+        of scalars: String.UnicodeScalarView,
+        to ranges: inout [Range<String.Index>]
+    ) {
+        var lower = range.lowerBound
+        var upper = range.upperBound
+        while lower < upper, CharacterSet.whitespacesAndNewlines.contains(scalars[lower]) {
+            lower = scalars.index(after: lower)
+        }
+        while lower < upper, CharacterSet.whitespacesAndNewlines.contains(scalars[scalars.index(before: upper)]) {
+            upper = scalars.index(before: upper)
+        }
+        if lower < upper {
+            ranges.append(lower..<upper)
         }
     }
 }

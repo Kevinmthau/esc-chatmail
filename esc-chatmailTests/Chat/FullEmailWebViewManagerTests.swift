@@ -852,6 +852,193 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         XCTAssertTrue(oldDOMWasScrubbed)
     }
 
+    // MARK: WebContent process termination
+
+    // Revert-check: fails if `WarmNavigationDelegate.webViewWebContentProcessDidTerminate` is
+    // removed (the entry stays, still marked finished, and checkout hands the dead view out as
+    // ready), or `handleWarmWebContentTermination` stops removing the entry (it stays tracked,
+    // unready, and keeps every later warm of the same key from replacing it).
+    func testWebContentTermination_ofWarmIdleEntry_dropsEntryKeepsPayloadAndNeverChecksOut() throws {
+        let fixture = makePrepaintedFixture(id: "terminated-idle")
+        let manager = fixture.manager
+        defer { manager.clear() }
+        manager.markInitialLoadFinishedForTesting(messageId: fixture.messageId)
+        let webView = try XCTUnwrap(manager.webViewForTesting(messageId: fixture.messageId))
+        let delegate = try XCTUnwrap(webView.navigationDelegate, "Precondition: the pool's delegate")
+
+        delegate.webViewWebContentProcessDidTerminate?(webView)
+
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: fixture.messageId))
+        XCTAssertNil(fixture.checkout())
+    }
+
+    // Revert-check: fails if `handleWarmWebContentTermination` is removed: a warm that never
+    // finished keeps its same-key entry, so the next prepaint keeps the dead view and the message
+    // is never warmed again until the pool forgets it.
+    func testWebContentTermination_whileStillWarming_letsTheNextPrepaintStartAFreshView() throws {
+        let fixture = makePrepaintedFixture(id: "terminated-warming")
+        let manager = fixture.manager
+        defer { manager.clear() }
+        let deadWebView = try XCTUnwrap(manager.webViewForTesting(messageId: fixture.messageId))
+        XCTAssertFalse(manager.isWarmedForTesting(messageId: fixture.messageId))
+
+        deadWebView.navigationDelegate?.webViewWebContentProcessDidTerminate?(deadWebView)
+        fixture.prepaint()
+
+        let freshWebView = try XCTUnwrap(manager.webViewForTesting(messageId: fixture.messageId))
+        XCTAssertFalse(freshWebView === deadWebView)
+        XCTAssertTrue(freshWebView.navigationDelegate != nil)
+    }
+
+    // Revert-check: fails if `discard` tears the checked-out entry down (`teardown` of a
+    // checked-out entry is the fail-closed scrub, which takes the CID association from the view
+    // the reader still shows), if it matches the entry by message ID alone instead of the view's
+    // identity, or if it stops removing the entry (the reader's dismantle would check the dead
+    // view back in).
+    func testDiscard_checkedOutView_dropsTheEntryByIdentityOnlyAndKeepsTheReadersView() throws {
+        let fixture = makePrepaintedFixture(id: "discard-checked-out")
+        let manager = fixture.manager
+        defer { manager.clear() }
+        manager.markInitialLoadFinishedForTesting(messageId: fixture.messageId)
+        let checkout = try XCTUnwrap(fixture.checkout())
+
+        manager.discard(messageId: fixture.messageId, webView: WKWebView(frame: .zero))
+        XCTAssertTrue(
+            manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId),
+            "Another view of the same message is not this entry"
+        )
+
+        manager.discard(messageId: fixture.messageId, webView: checkout.webView)
+
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: fixture.messageId))
+        XCTAssertTrue(checkout.cidHandler.message === fixture.message, "The reader's view is not torn down")
+        XCTAssertFalse(manager.checkin(messageId: fixture.messageId, webView: checkout.webView))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+    }
+
+    // Revert-check: fails if `checkin` loses its `isTerminated` guard: the dead view is re-hosted
+    // as the message's entry, never ready again and keeping every later warm of the same key.
+    // HONEST SCOPE: in the app the reader is a checked-out view's delegate, so the pool's delegate
+    // cannot hear of its termination; the test leaves the pool's delegate on the view to make that
+    // state, which is the guard's only way in.
+    func testCheckin_ofAViewTerminatedWhileCheckedOut_dropsItInsteadOfRehosting() throws {
+        let fixture = makePrepaintedFixture(id: "terminated-checked-out")
+        let manager = fixture.manager
+        defer { manager.clear() }
+        manager.markInitialLoadFinishedForTesting(messageId: fixture.messageId)
+        let checkout = try XCTUnwrap(fixture.checkout())
+
+        checkout.webView.navigationDelegate?.webViewWebContentProcessDidTerminate?(checkout.webView)
+        XCTAssertTrue(
+            manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId),
+            "A checked-out entry is the reader's until it comes back"
+        )
+        XCTAssertFalse(manager.isWarmedForTesting(messageId: fixture.messageId))
+
+        XCTAssertFalse(manager.checkin(messageId: fixture.messageId, webView: checkout.webView))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+    }
+
+    #if os(iOS)
+    // Revert-check: fails if both of `finalizeWarm`'s `isTerminated` checks are removed (the early
+    // guard and the snapshot completion's; either one alone holds): a load that finishes after the
+    // death starts a snapshot whose completion marks the dead entry ready, so checkout would hand
+    // it out. HONEST SCOPE: the same manufactured state as the checkin test above, the only one in
+    // which a terminated entry outlives its removal. iOS only because the view is put in a window,
+    // as the reader would: WebKit left the snapshot of a view in no window pending (iOS 27.0).
+    func testFinishAfterTermination_neverMarksTheEntryReady() async throws {
+        let fixture = makePrepaintedFixture(id: "finish-after-termination")
+        let manager = fixture.manager
+        defer { manager.clear() }
+        manager.markInitialLoadFinishedForTesting(messageId: fixture.messageId)
+        let checkout = try XCTUnwrap(fixture.checkout())
+        let scene = try XCTUnwrap(
+            UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        )
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 600)
+        window.isHidden = false
+        defer { window.isHidden = true }
+        window.addSubview(checkout.webView)
+        let delegate = try XCTUnwrap(checkout.webView.navigationDelegate)
+        delegate.webViewWebContentProcessDidTerminate?(checkout.webView)
+
+        delegate.webView?(checkout.webView, didFinish: nil)
+        // Snapshots of a view complete in order, so this one returns after any `finalizeWarm` began.
+        // Bounded, so a WebKit that leaves it pending fails the test rather than hanging the run.
+        let snapshotReturned = expectation(description: "The later snapshot returned")
+        checkout.webView.takeSnapshot(with: nil) { _, _ in
+            snapshotReturned.fulfill()
+        }
+        await fulfillment(of: [snapshotReturned], timeout: 10)
+
+        XCTAssertFalse(manager.isWarmedForTesting(messageId: fixture.messageId))
+        checkout.webView.removeFromSuperview()
+    }
+    #endif
+
+    private struct PrepaintedFixture {
+        let manager: FullEmailWebViewManager
+        let messageId: String
+        let message: Message
+        let request: OriginalEmailWarmRequest
+        let artifact: EmailReaderArtifact
+        let html: String
+        let stack: TestCoreDataStack
+
+        @MainActor
+        func prepaint() {
+            manager.prepaintAfterExplicitOpen(
+                request: request,
+                message: message,
+                artifact: artifact,
+                width: 390
+            )
+        }
+
+        @MainActor
+        func checkout() -> FullEmailWebViewManager.Checkout? {
+            manager.checkout(
+                messageId: messageId,
+                sourceSignature: artifact.sourceSignature,
+                wrappedHTML: html,
+                message: message,
+                width: 390
+            )
+        }
+    }
+
+    /// A manager with an explicit-open prepaint of one message, which makes its off-screen web
+    /// view with the pool's own navigation delegate.
+    private func makePrepaintedFixture(id: String) -> PrepaintedFixture {
+        let testStack = TestCoreDataStack()
+        let messageId = "\(id)-\(UUID().uuidString)"
+        let message = MessageBuilder()
+            .withId(messageId)
+            .withSubject("Subject")
+            .withSender(email: "sender@example.com", name: "Sender")
+            .withBody("Body \(messageId)")
+            .build(in: testStack.viewContext)
+        let html = simpleHTML(title: "Termination \(id)")
+        let fixture = PrepaintedFixture(
+            manager: FullEmailWebViewManager(),
+            messageId: messageId,
+            message: message,
+            request: makeRequest(messageId: messageId),
+            artifact: makeArtifact(message: message, html: html),
+            html: html,
+            stack: testStack
+        )
+        fixture.prepaint()
+        XCTAssertTrue(
+            fixture.manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId),
+            "Precondition: the prepaint made an off-screen web view"
+        )
+        return fixture
+    }
+
     private func makeLoader(contentHandler: HTMLContentHandler) -> OriginalEmailSourceLoader {
         let recoveryService = NoopHTMLContentRecoveryService()
         return OriginalEmailSourceLoader(
@@ -1397,6 +1584,13 @@ final class FullInteractiveEmailWebViewNavigationDecisionTests: XCTestCase {
             navigationType: type,
             url: urlString.flatMap(URL.init(string:))
         )
+    }
+
+    // Revert-check: fails if `navigationDecision` loses its `.backForward` branch, which lets a
+    // back-forward navigation to an https page through as `.allow`.
+    func testBackForwardNavigationIsCancelled() {
+        XCTAssertEqual(decide(.backForward, "https://example.com/"), .cancel)
+        XCTAssertEqual(decide(.backForward, "about:blank"), .cancel)
     }
 
     func testInitialAndReloadNavigationsAreAllowed() {

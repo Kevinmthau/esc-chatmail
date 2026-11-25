@@ -24,28 +24,51 @@ extension MessagePersister {
             if EmailNormalizer.isHideMyEmailDisplayName(recipient.displayName) {
                 continue
             }
-            let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            saveParticipant(from: headerValue, kind: .to, for: message, in: context)
+            saveParticipant(recipient, kind: .to, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
         for recipient in processedMessage.headers.cc {
             if EmailNormalizer.isHideMyEmailDisplayName(recipient.displayName) {
                 continue
             }
-            let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            saveParticipant(from: headerValue, kind: .cc, for: message, in: context)
+            saveParticipant(recipient, kind: .cc, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
         for recipient in processedMessage.headers.bcc {
             if EmailNormalizer.isHideMyEmailDisplayName(recipient.displayName) {
                 continue
             }
-            let headerValue = "\(recipient.displayName ?? "") <\(recipient.email)>"
-            saveParticipant(from: headerValue, kind: .bcc, for: message, in: context)
+            saveParticipant(recipient, kind: .bcc, for: message, in: context)
             participantEmails.append(EmailNormalizer.normalize(recipient.email))
         }
 
         return participantEmails
+    }
+
+    /// Saves a parsed To, Cc or Bcc recipient, its address and name passed
+    /// as they were parsed and never joined into a header again
+    /// (`MessageParticipantFactory.create(email:displayName:…)` says why).
+    nonisolated func saveParticipant(
+        _ recipient: EmailAddress,
+        kind: ParticipantKind,
+        for message: Message,
+        in context: NSManagedObjectContext
+    ) {
+        do {
+            _ = try MessageParticipantFactory.create(
+                email: recipient.email,
+                displayName: recipient.displayName,
+                kind: kind,
+                for: message,
+                in: context
+            )
+        } catch {
+            Log.error(
+                "Failed to create participant for message \(Log.hashIdentifier(message.id))",
+                category: .coreData,
+                error: error
+            )
+        }
     }
 
     /// Saves a single participant using MessageParticipantFactory.

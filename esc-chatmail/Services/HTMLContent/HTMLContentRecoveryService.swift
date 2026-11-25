@@ -343,24 +343,57 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                 return .failed
             }
 
-            let htmlMimeCandidates = await collectHTMLCandidates(
+            // The body sync stores comes first (`MIMEBodyExtractor`, the walk
+            // sync reads it with), so a recovered body is the stored one and
+            // a body split around an inline photo comes back whole. Only when
+            // that body shows nothing does the scoring below pick among every
+            // HTML part. Fetch failures leave a part out here, as everywhere
+            // in recovery, which is best effort. So recovery no longer trades
+            // a stored body that shows something for a richer HTML part
+            // beside it (two text/html parts side by side in a
+            // multipart/mixed): the next refetch would have stored the first
+            // one again.
+            let bodyFetches = RecoveryBodyFetches()
+            let syncedHTML = (try? await MIMEBodyExtractor.extract(
                 from: payload,
-                messageId: messageId,
-                apiClient: apiClient,
-                includeHTMLMimeParts: true,
-                includeEmbeddedRawSource: false
-            )
+                kinds: [.html]
+            ) { part in
+                await self.decodedTextualBody(
+                    from: part,
+                    messageId: messageId,
+                    apiClient: apiClient,
+                    fetches: bodyFetches
+                )
+            })?.html?.trimmingCharacters(in: .whitespacesAndNewlines)
             guard isCurrent(key, htmlGeneration: htmlGeneration) else {
                 return .failed
             }
 
+            var resolvedHTML: String?
+            if let syncedHTML, HTMLMeaningfulContentChecker.hasMeaningfulContent(syncedHTML) {
+                resolvedHTML = syncedHTML
+            } else {
+                let htmlMimeCandidates = await collectHTMLCandidates(
+                    from: payload,
+                    messageId: messageId,
+                    apiClient: apiClient,
+                    fetches: bodyFetches,
+                    includeHTMLMimeParts: true,
+                    includeEmbeddedRawSource: false
+                )
+                guard isCurrent(key, htmlGeneration: htmlGeneration) else {
+                    return .failed
+                }
+                resolvedHTML = bestMeaningfulHTMLCandidate(from: htmlMimeCandidates)
+            }
+
             let embeddedRawSourceCandidates: [HTMLRecoveryCandidate]
-            let resolvedHTML = bestMeaningfulHTMLCandidate(from: htmlMimeCandidates)
             if resolvedHTML == nil {
                 embeddedRawSourceCandidates = await collectHTMLCandidates(
                     from: payload,
                     messageId: messageId,
                     apiClient: apiClient,
+                    fetches: bodyFetches,
                     includeHTMLMimeParts: false,
                     includeEmbeddedRawSource: true
                 )
@@ -538,21 +571,27 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         from part: MessagePart,
         messageId: String,
         apiClient: any GmailAPIClientProtocol,
+        fetches: RecoveryBodyFetches,
         includeHTMLMimeParts: Bool,
         includeEmbeddedRawSource: Bool
     ) async -> [HTMLRecoveryCandidate] {
-        guard !isAttachmentContentPart(part) else {
+        guard !MIMEBodyExtractor.isAttachmentContentPart(part) else {
             return []
         }
 
         var candidates: [HTMLRecoveryCandidate] = []
-        let resolvedMimeType = resolvedMimeType(for: part)
-        let isHTMLPart = isHTMLMimeType(resolvedMimeType)
+        let resolvedMimeType = MIMEBodyExtractor.resolvedMimeType(for: part)
+        let isHTMLPart = MIMEBodyExtractor.isHTMLMimeType(resolvedMimeType)
         let shouldExtractHTMLPart = includeHTMLMimeParts && isHTMLPart
         let shouldExtractEmbeddedRawSource = includeEmbeddedRawSource && !isHTMLPart && canContainEmbeddedRawSourceHTML(resolvedMimeType)
 
         if (shouldExtractHTMLPart || shouldExtractEmbeddedRawSource),
-           let decodedBody = await decodedTextualBody(from: part, messageId: messageId, apiClient: apiClient) {
+           let decodedBody = await decodedTextualBody(
+               from: part,
+               messageId: messageId,
+               apiClient: apiClient,
+               fetches: fetches
+           ) {
             if isHTMLPart {
                 appendCandidate(
                     decodedBody,
@@ -574,6 +613,7 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
                     from: subpart,
                     messageId: messageId,
                     apiClient: apiClient,
+                    fetches: fetches,
                     includeHTMLMimeParts: includeHTMLMimeParts,
                     includeEmbeddedRawSource: includeEmbeddedRawSource
                 ))
@@ -596,22 +636,38 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         candidates.append(HTMLRecoveryCandidate(html: trimmed, source: source))
     }
 
+    /// The bodies one recovery attempt fetched, by attachmentId: the walk
+    /// sync uses and the scoring after it read the same parts, and a part is
+    /// fetched once. A failure is not kept, so a later pass tries the part
+    /// again. Lives for one attempt, on the actor.
+    private final class RecoveryBodyFetches {
+        var bodies: [String: String] = [:]
+    }
+
     private func decodedTextualBody(
         from part: MessagePart,
         messageId: String,
-        apiClient: any GmailAPIClientProtocol
+        apiClient: any GmailAPIClientProtocol,
+        fetches: RecoveryBodyFetches
     ) async -> String? {
         if let data = part.body?.data {
             return decodeBody(data, headers: part.headers)
         }
 
         if let attachmentId = part.body?.attachmentId {
-            return await fetchLargeBodyContent(
+            if let fetched = fetches.bodies[attachmentId] {
+                return fetched
+            }
+            let fetched = await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
                 headers: part.headers,
                 apiClient: apiClient
             )
+            if let fetched {
+                fetches.bodies[attachmentId] = fetched
+            }
+            return fetched
         }
 
         return nil
@@ -668,35 +724,6 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         return decodedData
     }
 
-    private func resolvedMimeType(for part: MessagePart) -> String? {
-        if let directMimeType = part.mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !directMimeType.isEmpty {
-            return directMimeType
-        }
-
-        guard let contentType = part.headers?
-            .first(where: { $0.name.lowercased() == "content-type" })?
-            .value
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !contentType.isEmpty else {
-            return nil
-        }
-
-        return contentType
-    }
-
-    private func isHTMLMimeType(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !mimeType.isEmpty else {
-            return false
-        }
-
-        return mimeType.hasPrefix("text/html")
-    }
-
     private func canContainEmbeddedRawSourceHTML(_ mimeType: String?) -> Bool {
         guard let mimeType = mimeType?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -706,20 +733,6 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
         }
 
         return mimeType.hasPrefix("text/") || mimeType.hasPrefix("message/")
-    }
-
-    private func isAttachmentContentPart(_ part: MessagePart) -> Bool {
-        let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedFilename.isEmpty {
-            return true
-        }
-
-        let contentDisposition = part.headers?
-            .first(where: { $0.name.lowercased() == "content-disposition" })?
-            .value
-            .lowercased() ?? ""
-
-        return contentDisposition.contains("attachment")
     }
 
     private func bestMeaningfulHTMLCandidate(from candidates: [HTMLRecoveryCandidate]) -> String? {

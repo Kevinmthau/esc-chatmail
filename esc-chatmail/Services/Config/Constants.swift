@@ -122,6 +122,12 @@ struct SyncConfig {
     /// the processed result remains serialized to preserve conversation-routing order.
     static let maxConcurrentMessageProcessing = max(2, min(ProcessInfo.processInfo.activeProcessorCount, 6))
 
+    /// Text and HTML body bytes past which a message is prepared on its own,
+    /// one such message at a time (`MessagePersister.prepareMessagesConcurrently`).
+    /// Unmeasured: chosen so ordinary newsletters (tens to a few hundred KB)
+    /// never wait, while a batch of multi-megabyte bodies is not derived six at once.
+    static let oversizedPreparationBodyBytes = 1_048_576
+
     /// Delay before retrying failed message fetches (in seconds)
     static let retryDelaySeconds: UInt64 = 1_000_000_000
 
@@ -276,6 +282,16 @@ struct NetworkConfig {
 
     /// Resource timeout interval (in seconds)
     static let resourceTimeout: TimeInterval = 60.0
+
+    /// Whole-request cap for messages.send only (`GmailAPIClient.createSendSession`).
+    /// A send is one request carrying every attachment (about 1.83 times
+    /// their bytes): 300 s covers the 25 MB attachment budget
+    /// (`DraftAttachmentImport.maximumTotalBytes`) above about 1.3 Mbit/s of
+    /// uplink and three or four photos above about 0.5 Mbit/s. It is per
+    /// attempt: with a retry (a 401, a 429 or a pre-transmission failure) a
+    /// send, and the sign-out that drains it, can take about 420 s
+    /// (`GmailAPIClient.createSendSession`).
+    static let sendResourceTimeout: TimeInterval = 300.0
 
     /// Maximum retry attempts for API requests
     static let maxRetries = 3

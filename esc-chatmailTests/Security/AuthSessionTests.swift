@@ -1452,6 +1452,69 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // The crash-resume pair signs Google out through the injected seam, in its place in
+    // the teardown: after the drains, before the downloads close. It called the SDK
+    // singleton directly, which no stub covered, and in a Mac test host that would delete
+    // the installed MushMail's Google keychain item (inferred, not measured; architecture
+    // review 2026-11, account-boundary-auth#5).
+    // Revert-check: fails if `resumeInterruptedAccountRemovalIfNeeded()` or
+    // `resumeInterruptedCredentialCleanupIfNeeded()` goes back to
+    // `GIDSignIn.sharedInstance.signOut()` in place of `signOutGoogleSession()`
+    // (no "google-sign-out" is recorded for that marker). Run that revert-check on the iOS
+    // simulator only: reverted, a Mac test host would delete the installed app's Google
+    // session, which is the damage this test exists to prevent.
+    func testRestoreResumedCleanup_signsGoogleOutThroughTheSeamBeforeDownloadsClose() async throws {
+        for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
+            let keychain = MockKeychainService()
+            try keychain.save(Data([1]), for: key.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                keychainService: keychain,
+                signOutGoogleSession: { cleanup.record("google-sign-out") },
+                clearParticipantCaches: { cleanup.record("participants-closed") },
+                cleanupDownloads: { cleanup.record("downloads-closed") }
+            )
+
+            let outcome = await session.restorePreviousSignIn()
+
+            XCTAssertEqual(outcome, .terminalNoSession, key.rawValue)
+            // The participant drain is the last one before the sign-out.
+            XCTAssertEqual(
+                cleanup.events
+                    .filter { ["participants-closed", "google-sign-out", "downloads-closed"].contains($0) }
+                    .prefix(3),
+                ["participants-closed", "google-sign-out", "downloads-closed"],
+                key.rawValue
+            )
+            XCTAssertEqual(cleanup.events.filter { $0 == "google-sign-out" }.count, 1, key.rawValue)
+        }
+    }
+
+    // In AuthSession.swift the SDK's sign-out is called only as the seam's production
+    // default, and its disconnect not at all, so neither reaches the real Google session
+    // past a test's stub. Comment lines are skipped, so a note may quote the call.
+    // HONEST SCOPE: this reads one spelling; an alias of the singleton would slip past.
+    // Revert-check: fails if a `GIDSignIn.sharedInstance.signOut()` or `.disconnect` is
+    // added to AuthSession.swift outside the `signOutGoogleSession` default.
+    func testGoogleSDKSignOut_isCalledOnlyFromTheSeamDefault() throws {
+        let fullSource = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+        let source = fullSource
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        let call = "GIDSignIn.sharedInstance.signOut()"
+        XCTAssertEqual(source.components(separatedBy: call).count - 1, 1)
+        XCTAssertFalse(source.contains("GIDSignIn.sharedInstance.disconnect"))
+        let seamDefault = try XCTUnwrap(source.range(of: "signOutGoogleSession: @escaping @MainActor @Sendable () -> Void = {"))
+        let callSite = try XCTUnwrap(source.range(of: call))
+        XCTAssertLessThan(seamDefault.lowerBound, callSite.lowerBound)
+        XCTAssertLessThan(
+            source.distance(from: seamDefault.upperBound, to: callSite.lowerBound),
+            40,
+            "The one SDK sign-out is the body of the seam's default closure"
+        )
+    }
+
     // Revert-check: fails if `clearFailedGoogleSession()` drops its
     // `cancelBackgroundTaskRequests()` step. A restore rejected with an
     // invalidated credential concludes signed out with tokens cleared, so every
@@ -2189,6 +2252,108 @@ final class AuthSessionTests: XCTestCase {
             defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
             resetTime
         )
+    }
+
+    // MARK: - A store reset by recovery, not by a sign-out
+
+    // Revert-check: the `isStoreRecoveryOfAccount` branch of
+    // `prepareLocalStoreForAuthenticatedAccount` (setting `resetRequired` there runs the
+    // full cleanup: a second store reset, which removes every backup, and a mailbox start
+    // moved to now, so about five minutes of mail came back), and the
+    // `StoreRecoveryResetMarker.clear` in `removeMailboxFilesLeftByStoreRecovery`.
+    func testAccountPreparation_restoreAfterRecoveryResetOfSameAccount_removesFilesOnlyAndKeepsStart() async throws {
+        let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com")
+        let session = fixture.makeSession(in: self)
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("Person@Example.com")
+
+        XCTAssertEqual(fixture.htmlCleanup.attemptCount, 1, "The orphaned bodies go before anything is published")
+        XCTAssertEqual(fixture.fileCleanup.attemptCount, 1, "The orphaned attachments go too")
+        XCTAssertEqual(fixture.storeReset.attemptCount, 0, "A second reset would remove the reset's own backup")
+        XCTAssertEqual(
+            fixture.defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            fixture.mailboxStart,
+            "A store reset with no sign-out moves nothing"
+        )
+        XCTAssertFalse(StoreRecoveryResetMarker.isMarked(in: fixture.defaults))
+        XCTAssertFalse(fixture.defaults.bool(forKey: AuthSession.localStoreResetRequiredKey))
+        XCTAssertEqual(
+            try fixture.keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+            "person@example.com",
+            "The account's credentials are not part of the cleanup"
+        )
+    }
+
+    // Revert-check: the `StoreRecoveryResetMarker.isMarked` condition of
+    // `AuthSession.isStoreRecoveryOfAccount`. Without it any empty store beside files
+    // whose keychain names the account skips the store reset.
+    func testAccountPreparation_filesBesideEmptyStoreWithNoMarker_runsFullCleanup() async throws {
+        let fixture = RecoveryResetFixture(markerSet: false, keychainEmail: "person@example.com")
+        let session = fixture.makeSession(in: self)
+        let cleanupTime = Date().timeIntervalSince1970
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertEqual(fixture.storeReset.attemptCount, 1)
+        XCTAssertGreaterThanOrEqual(fixture.defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), cleanupTime)
+    }
+
+    // Revert-check: the email comparison in `AuthSession.isStoreRecoveryOfAccount`.
+    // Without it a reset store's files are kept from another account's cleanup.
+    func testAccountPreparation_recoveryMarkerButAnotherAccount_runsFullCleanupAndClearsMarker() async throws {
+        let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "first@example.com")
+        let session = fixture.makeSession(in: self)
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("second@example.com")
+
+        XCTAssertEqual(fixture.storeReset.attemptCount, 1)
+        XCTAssertFalse(StoreRecoveryResetMarker.isMarked(in: fixture.defaults), "The full cleanup consumes the marker")
+    }
+
+    // Revert-check: the order of the `hasAccountScopedRows` check ahead of
+    // `hasAccountScopedFiles` in `prepareLocalStoreForAuthenticatedAccount`. Rows with no
+    // Account row are never proof of anything, marker or not.
+    func testAccountPreparation_recoveryMarkerButRowsRemain_runsFullCleanup() async throws {
+        let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com", hasRows: true)
+        let session = fixture.makeSession(in: self)
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertEqual(fixture.storeReset.attemptCount, 1)
+    }
+
+    // Revert-check: `AuthSession.isStoreRecoveryOfAccount` taking an unreadable keychain
+    // for the account being prepared. A keychain that cannot be read is not proof that the
+    // files are this account's, so they get the full cleanup, as before the exception.
+    // (Throwing instead would not defer the decision: the restore's catch clears the failed
+    // Google session, which deletes the keychain's account.)
+    func testAccountPreparation_recoveryMarkerButKeychainUnreadable_runsFullCleanup() async throws {
+        let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com")
+        let session = fixture.makeSession(
+            in: self,
+            keychainService: EmailReadFailingKeychain(wrapping: fixture.keychain)
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertEqual(fixture.storeReset.attemptCount, 1)
+        XCTAssertFalse(StoreRecoveryResetMarker.isMarked(in: fixture.defaults))
+    }
+
+    // Revert-check: the `StoreRecoveryResetMarker.clear` in the no-reset path of
+    // `prepareLocalStoreForAuthenticatedAccount`. A marker left by a reset whose store then
+    // refilled would otherwise wait for a later, unrelated empty store.
+    func testAccountPreparation_matchingAccountRow_clearsStaleRecoveryMarker() async throws {
+        let defaults = makeDefaults()
+        StoreRecoveryResetMarker.mark(in: defaults)
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            fetchStoredAccountEmails: { ["person@example.com"] }
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertFalse(StoreRecoveryResetMarker.isMarked(in: defaults))
     }
 
     // Revert-check: fails if `clearAccountScopedSyncDefaults()` stops removing
@@ -3320,6 +3485,7 @@ final class AuthSessionTests: XCTestCase {
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
         fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = { [] },
         hasStoredAccountScopedMailboxData: @escaping @Sendable () async throws -> Bool = { false },
+        hasStoredAccountScopedFiles: @escaping @Sendable () async throws -> Bool = { false },
         deleteAttachmentFiles: @escaping @Sendable () async throws -> Void = {},
         clearAttachmentCache: @escaping @Sendable () async -> Void = {},
         cleanupHTMLContent: @escaping @MainActor @Sendable () async throws -> Void = {},
@@ -3350,7 +3516,8 @@ final class AuthSessionTests: XCTestCase {
             inspectLocalMailboxStore: {
                 LocalMailboxStoreInspection(
                     accountEmails: try await fetchStoredAccountEmails(),
-                    hasAccountScopedMailboxData: try await hasStoredAccountScopedMailboxData()
+                    hasAccountScopedRows: try await hasStoredAccountScopedMailboxData(),
+                    hasAccountScopedFiles: try await hasStoredAccountScopedFiles()
                 )
             },
             deleteAttachmentFiles: deleteAttachmentFiles,
@@ -3360,6 +3527,28 @@ final class AuthSessionTests: XCTestCase {
             syncRunCoordinator: syncRunCoordinator,
             outboundTaskRegistry: outboundTaskRegistry ?? OutboundTaskRegistry(),
             revokeGoogleToken: revokeGoogleToken
+        )
+    }
+
+    /// `makeAuthSession` for `RecoveryResetFixture`, which is outside this class.
+    fileprivate func makeRecoveryResetSession(
+        keychainService: KeychainServiceProtocol,
+        userDefaults: UserDefaults,
+        resetCoreDataStore: @escaping @Sendable () async throws -> Void,
+        hasStoredAccountScopedMailboxData: @escaping @Sendable () async throws -> Bool,
+        hasStoredAccountScopedFiles: @escaping @Sendable () async throws -> Bool,
+        deleteAttachmentFiles: @escaping @Sendable () async throws -> Void,
+        cleanupHTMLContent: @escaping @MainActor @Sendable () async throws -> Void
+    ) -> AuthSession {
+        makeAuthSession(
+            keychainService: keychainService,
+            userDefaults: userDefaults,
+            resetCoreDataStore: resetCoreDataStore,
+            fetchStoredAccountEmails: { [] },
+            hasStoredAccountScopedMailboxData: hasStoredAccountScopedMailboxData,
+            hasStoredAccountScopedFiles: hasStoredAccountScopedFiles,
+            deleteAttachmentFiles: deleteAttachmentFiles,
+            cleanupHTMLContent: cleanupHTMLContent
         )
     }
 
@@ -3754,5 +3943,95 @@ private final class AuthSessionCleanupRecorder: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return body()
+    }
+}
+
+/// A restore that finds an empty store beside stored files, with or without the marker a
+/// recovery reset leaves, and the keychain naming the previous session's account.
+@MainActor
+private final class RecoveryResetFixture {
+    let defaults = UserDefaults(suiteName: "AuthSessionTests.recovery.\(UUID().uuidString)")!
+    let keychain = MockKeychainService()
+    let storeReset = AuthSessionStoreResetScript()
+    let fileCleanup = AuthSessionFileCleanupScript(failuresBeforeSuccess: 0)
+    let htmlCleanup = AuthSessionHTMLCleanupScript(failuresBeforeSuccess: 0)
+    let mailboxStart = Date().timeIntervalSince1970 - 90 * 86_400
+    private let hasRows: Bool
+
+    init(markerSet: Bool, keychainEmail: String, hasRows: Bool = false) {
+        self.hasRows = hasRows
+        defaults.set(mailboxStart, forKey: SyncConfig.mailboxStartTimestampKey)
+        if markerSet {
+            StoreRecoveryResetMarker.mark(in: defaults)
+        }
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: keychainEmail])
+    }
+
+    func makeSession(in tests: AuthSessionTests, keychainService: KeychainServiceProtocol? = nil) -> AuthSession {
+        let storeReset = self.storeReset
+        let fileCleanup = self.fileCleanup
+        let htmlCleanup = self.htmlCleanup
+        let hasRows = self.hasRows
+        return tests.makeRecoveryResetSession(
+            keychainService: keychainService ?? keychain,
+            userDefaults: defaults,
+            resetCoreDataStore: { try storeReset.reset() },
+            hasStoredAccountScopedMailboxData: { hasRows },
+            hasStoredAccountScopedFiles: { true },
+            deleteAttachmentFiles: { try fileCleanup.deleteFiles() },
+            cleanupHTMLContent: { try htmlCleanup.cleanup() }
+        )
+    }
+}
+
+/// `MockKeychainService`, except that the account's email cannot be read.
+private final class EmailReadFailingKeychain: KeychainServiceProtocol {
+    private struct ReadFailure: Error {}
+    private let base: MockKeychainService
+
+    init(wrapping base: MockKeychainService) {
+        self.base = base
+    }
+
+    func save(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.save(data, for: key, withAccess: access)
+    }
+
+    func load(for key: String) throws -> Data {
+        if key == KeychainService.Key.googleUserEmail.rawValue { throw ReadFailure() }
+        return try base.load(for: key)
+    }
+
+    func delete(for key: String) throws {
+        try base.delete(for: key)
+    }
+
+    func exists(for key: String) -> Bool {
+        base.exists(for: key)
+    }
+
+    func update(_ data: Data, for key: String, withAccess access: KeychainService.AccessLevel?) throws {
+        try base.update(data, for: key, withAccess: access)
+    }
+
+    func clearAll() throws {
+        try base.clearAll()
+    }
+
+    func saveString(_ string: String, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.saveString(string, for: key, withAccess: access)
+    }
+
+    func loadString(for key: String) throws -> String {
+        if key == KeychainService.Key.googleUserEmail.rawValue { throw ReadFailure() }
+        return try base.loadString(for: key)
+    }
+
+    func saveCodable<T: Codable>(_ object: T, for key: String, withAccess access: KeychainService.AccessLevel) throws {
+        try base.saveCodable(object, for: key, withAccess: access)
+    }
+
+    func loadCodable<T: Codable>(_ type: T.Type, for key: String) throws -> T {
+        try base.loadCodable(type, for: key)
     }
 }

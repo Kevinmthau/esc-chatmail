@@ -247,7 +247,11 @@ final class VirtualScrollState: ObservableObject {
     /// row out and back, so its return re-records it from the row's own
     /// `onAppear`, which is an idempotent insert. Cleared by `cleanup()`,
     /// after which the rows remount. Not published; a row's `onAppear` and
-    /// `onDisappear` must not re-render the transcript.
+    /// `onDisappear` must not re-render the transcript. It also decides how
+    /// many rows a scroll-driven replace keeps (`VirtualScrollWindowPolicy`):
+    /// the realized rows running on from the position's rows are kept, so a
+    /// tall viewport keeps its on-screen rows, which is a second reason the
+    /// record must follow the view out.
     var realizedRowIdentities: Set<ChatMessageDisplayIdentity> = []
     /// Identity of the newest published row, computed once per publish for
     /// `isNewestVisibleRowRealized`, which the view reads on every layout.
@@ -436,7 +440,13 @@ final class VirtualScrollState: ObservableObject {
               !isInitialAnchorHoldActive,
               abs(index - scrollPosition) > 2 else { return }
 
-        let requestedStartIndex = max(0, index - configuration.bufferSize)
+        // The rows the load below would ask for, from the same definition
+        // (`VirtualScrollWindowPolicy`): a replay whose rows start above the
+        // window would prepend. Today their start is above the window exactly
+        // when the position's own rows' start is (the rows kept beyond those
+        // are the window's), so no test can tell this from the position's
+        // rows; it keeps the check from drifting from the load.
+        let requestedStartIndex = requestedWindowRows(forPosition: index).startIndex
         if requestedStartIndex < window.startIndex && !isUserScrolling {
             deferredLeadingReplayIndex = index
             return

@@ -128,10 +128,21 @@ extension OutboundSendMutationRecord {
         NSFetchRequest<OutboundSendMutationRecord>(entityName: "OutboundSendMutationRecord")
     }
 
+    /// When the send crossed the transmission barrier (`recordRemoteSendAdmission`),
+    /// read only by the "Delivery unknown" probe (`DeliveryUnknownProbePolicy`).
+    /// Nil on every record admitted before model 7, which the probe never
+    /// resolves: the oldest of them carried another Message-ID in their MIME, so
+    /// a search for the deterministic one proves nothing about them, and nothing
+    /// else tells them apart.
+    @NSManaged public var admittedAt: Date?
     @NSManaged public var archivedAt: Date?
     @NSManaged public var conversationId: UUID?
     @NSManaged public var conversationURI: String?
     @NSManaged public var createdAt: Date
+    /// When the probe last asked about this send without resolving it (found
+    /// but not consumed by its echo, or no verdict); it waits
+    /// `DeliveryUnknownProbePolicy.reprobeInterval` before asking again.
+    @NSManaged public var deliveryProbedAt: Date?
     @NSManaged public var displayName: String?
     @NSManaged public var hidden: Bool
     @NSManaged public var id: String

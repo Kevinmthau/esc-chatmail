@@ -160,49 +160,65 @@ func makeConversationIdentity(
     myAliases: Set<String>,
     contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
 ) -> ConversationIdentity {
-    // Extract all participant emails from From, To, Cc headers
-    // BCC is explicitly excluded for both identity and display
-    func extractEmailsWithDisplayNames() -> (Set<String>, [String: String]) {
-        func values(_ h: String) -> [String] {
-            headers.filter { $0.name.caseInsensitiveCompare(h) == .orderedSame }
-                .flatMap { $0.value.split(separator: ",").map(String.init) }
-        }
-
-        let raw = values("From") + values("To") + values("Cc")
-        // Note: BCC is intentionally excluded
-
-        var displayNames: [String: String] = [:]
-        var allEmails = Set<String>()
-
-        for headerValue in raw {
-            guard let email = EmailNormalizer.extractEmail(from: headerValue) else { continue }
-            let normalized = normalizedEmail(email)
-            guard !normalized.isEmpty else { continue }
-
-            // Extract display name if it's better than what we have
-            if let displayName = EmailNormalizer.extractDisplayName(from: headerValue) {
-                // "Hide My Email" is an Apple relay placeholder, not a real participant.
-                if EmailNormalizer.isHideMyEmailDisplayName(displayName) {
-                    continue
-                }
-                if EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized], forEmail: normalized) {
-                    displayNames[normalized] = displayName
-                }
-            }
-
-            allEmails.insert(normalized)
-        }
-
-        return (allEmails, displayNames)
+    func mailboxes(_ name: String) -> [EmailAddress] {
+        headers.filter { $0.name.caseInsensitiveCompare(name) == .orderedSame }
+            .flatMap { EmailAddressListParser.mailboxes(from: $0.value) }
     }
 
-    let (allEmails, displayNames) = extractEmailsWithDisplayNames()
+    // BCC is intentionally excluded for both identity and display.
+    let rawListId = headers.first { $0.name.caseInsensitiveCompare("List-Id") == .orderedSame }?.value
+    return makeConversationIdentity(
+        participants: mailboxes("From") + mailboxes("To") + mailboxes("Cc"),
+        rawListId: rawListId,
+        myAliases: myAliases,
+        contactLinks: contactLinks
+    )
+}
+
+/// The identity of a message whose From, To and Cc mailboxes are already
+/// parsed (`EmailAddressListParser.mailboxes(from:)`): the one place the
+/// participant set is built from a message's addresses.
+///
+/// It takes the parsed addresses and never a header rebuilt from them. The
+/// router used to join each parsed To/Cc as `name <email>` and split the
+/// result again on every comma, and the name there is already decoded and
+/// unquoted: a name `"bob@old.example, Bob"` added bob@old.example to the
+/// chat, an encoded name that decoded to `<boss@corp.example>` replaced the
+/// recipient's address with that one, and a nameless address the bare-address
+/// pattern rejects (`<étudiant@x.fr>`, `<ops@intranet>`) was dropped. The
+/// message's rows and the web app read the parsed values, so the chat was
+/// keyed on people its messages did not name.
+func makeConversationIdentity(
+    participants: [EmailAddress],
+    rawListId: String?,
+    myAliases: Set<String>,
+    contactLinks: ContactLinkedAddresses = ContactLinkedAddressStore.shared.snapshot()
+) -> ConversationIdentity {
+    var displayNames: [String: String] = [:]
+    var allEmails = Set<String>()
+
+    for participant in participants {
+        let normalized = normalizedEmail(participant.email)
+        guard !normalized.isEmpty else { continue }
+
+        // Extract display name if it's better than what we have
+        if let displayName = participant.displayName {
+            // "Hide My Email" is an Apple relay placeholder, not a real participant.
+            if EmailNormalizer.isHideMyEmailDisplayName(displayName) {
+                continue
+            }
+            if EmailNormalizer.isBetterDisplayName(displayName, than: displayNames[normalized], forEmail: normalized) {
+                displayNames[normalized] = displayName
+            }
+        }
+
+        allEmails.insert(normalized)
+    }
 
     // Mailing-list mail groups by List-Id, not by participant set: list
     // participants vary per message (rotating From, changing Cc), which would
     // shatter one list into many chats. A malformed List-Id parses to nil and
     // falls back to participant grouping.
-    let rawListId = headers.first { $0.name.caseInsensitiveCompare("List-Id") == .orderedSame }?.value
     if let parsed = ParsedListId.parse(rawListId) {
         let listIdentity = makeListSetIdentity(normalizedListId: parsed.id,
                                                normalizedEmails: allEmails,
@@ -218,8 +234,7 @@ func makeConversationIdentity(
                                                  contactLinks: contactLinks)
 
     #if DEBUG
-    let fromHeader = headers.first(where: { $0.name.caseInsensitiveCompare("From") == .orderedSame })?.value ?? "unknown"
-    Log.debug("[ConversationIdentity] participants=\(setIdentity.participants) from=\(fromHeader.prefix(40))", category: .conversation)
+    Log.debug("[ConversationIdentity] participants=\(setIdentity.participants.count)", category: .conversation)
     #endif
 
     return makeConversationIdentity(from: setIdentity, displayNames: displayNames)

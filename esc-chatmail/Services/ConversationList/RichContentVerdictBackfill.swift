@@ -34,6 +34,9 @@ struct RichContentVerdictBackfill {
     }
 
     let htmlContentHandler: HTMLContentHandler
+    /// The launch pass's poison-row guard. A quarantined row keeps its unknown
+    /// verdict and the cursor moves past it; nil classifies every row.
+    var rowQuarantine: LaunchPassRowQuarantine?
 
     /// Stamps one slice of received rows below `messageID`, newest first: descending by ID,
     /// which for Gmail's IDs is newest mail first, so the chats people open are stamped
@@ -72,7 +75,9 @@ struct RichContentVerdictBackfill {
 
             var batch = Batch(lastMessageID: messageID, didDrain: messages.count < limit)
             for message in messages {
-                if message.storedRichContentVerdict == .unknown {
+                if message.storedRichContentVerdict == .unknown,
+                   rowQuarantine?.isQuarantined(message.id) != true {
+                    rowQuarantine?.beginRow(message.id)
                     let verdict = autoreleasepool {
                         RichContentVerdictResolver.verdict(
                             for: message.richContentVerdictInputs,
@@ -80,6 +85,7 @@ struct RichContentVerdictBackfill {
                             expectedAccountGeneration: generation
                         )
                     }
+                    rowQuarantine?.endRow()
                     if verdict == .unknown {
                         guard htmlContentHandler.isAccountGenerationCurrent(generation) else {
                             throw BackfillError.htmlStorageClosed

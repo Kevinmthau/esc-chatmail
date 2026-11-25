@@ -42,6 +42,8 @@ final class InitialSyncOrchestrator {
     private let attachmentDownloader: AttachmentDownloader
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
+    /// The "now" the window's start is measured against (`ServerTimeSource`).
+    private let serverTime: any ServerTimeSource
     private let failureCounterStore: SyncFailureCounterCheckpointStore
     private let windowCheckpointStore: SyncWindowCheckpointStore
     private let performanceLogger: CoreDataPerformanceLogger
@@ -69,8 +71,10 @@ final class InitialSyncOrchestrator {
         windowCheckpointStore: SyncWindowCheckpointStore = .initialSync,
         performanceLogger: CoreDataPerformanceLogger = .shared,
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
+        serverTime: any ServerTimeSource = ServerClockEstimate.shared,
         makeSyncContext: (() -> NSManagedObjectContext)? = nil
     ) {
+        self.serverTime = serverTime
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
         self.conversationManager = conversationManager
@@ -360,7 +364,16 @@ final class InitialSyncOrchestrator {
             log.warning("No install timestamp found, using fallback window")
         }
 
-        let windowStart = SyncTimeCalculator.calculateStartTime(config: .initialSync)
+        // Measured against the earlier of the device's time and Gmail's: a mailbox start
+        // written while the device clock was ahead is read as no later than that, which
+        // only ever moves the window earlier. HONEST SCOPE: only while that now is still
+        // before the start. The start is written with the device's clock
+        // (`AuthSession.restartMailboxStartTime`), so a first initial sync that runs
+        // longer than the clock's lead after the sign-in still starts the lead late.
+        let windowStart = SyncTimeCalculator.calculateStartTime(
+            config: .initialSync,
+            now: serverTime.conservativeNow().timeIntervalSince1970
+        )
         try await windowCheckpointStore.stageFreeze(
             windowStart: windowStart,
             accountEmail: accountEmail,

@@ -8,46 +8,69 @@ enum PlainTextQuoteRemover {
     // MARK: - Quote Indicator Patterns
 
     /// Regex patterns that indicate quoted content (string form for reference)
+    ///
+    /// Each pattern with `.+` starts at a line start (`(?:^|\n)`, with the
+    /// line's leading spaces), and a pattern with two or three of them bounds
+    /// each one. Unanchored, a pattern was tried at every occurrence of its
+    /// first word ("le ", "am ", "from: "…) with `.+` running to the end of
+    /// the line, and nested `.+` made each try quadratic or cubic in the line:
+    /// one crafted 30,000-character line held a sync for 43 s. Anchored and
+    /// bounded, a line costs at most the product of its bounds
+    /// (`PlainTextQuoteRemoverPatternCostTests`). An attribution in the middle
+    /// of a line, or longer than the bounds, is no longer recognized here;
+    /// `web/src/mime/text.ts` keeps the same patterns. The exceptions are
+    /// Apple Mail's quoted attributions ("> On …, at …, … wrote:", "> Am …
+    /// schrieb …:" and the other languages'), which stay unanchored and are
+    /// only bounded: the line unwrapping ahead of this pass joins them to the
+    /// sign-off above ("Jordan > On Feb 15, …"), and each starts at its
+    /// literal "> On ", "> Am "…, so each try is bounded and the cost stays
+    /// linear.
     private static let quoteIndicatorPatternStrings = [
         // Time-based quotes - English
         // Require "On" at start of string or after newline to avoid mid-sentence matches
         // (e.g., "I need to reload on the Chablis" should not match)
         "(?:^|\\n)On .+ wrote:",
-        "(?:^|\\n)On .+, .+ wrote:",
-        "> On .+, at .+, .+ wrote:",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:",
         // iOS/Apple Mail format: "On Jan 30, 2026 at 7:32 PM, Name" (wrote: may be on next line)
         "On [A-Z][a-z]+ \\d{1,2}, \\d{4} at \\d{1,2}:\\d{2}\\s*[AP]M,",
 
         // International quote patterns
         // German: "Am [date] schrieb [name]:"
-        "Am .+ schrieb .+:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:",
+        "> Am .{1,200} schrieb .{1,200}:",
         // French: "Le [date] [name] a écrit :" or "Le [date], [name] a écrit :"
-        "Le .+ a écrit\\s*:",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:",
+        "> Le .{1,200} a écrit\\s*:",
         // Spanish: "El [date] [name] escribió:"
-        "El .+ escribió:",
+        "(?:^|\\n)[ \\t]*El .+ escribió:",
+        "> El .{1,200} escribió:",
         // Italian: "Il [date] [name] ha scritto:"
-        "Il .+ ha scritto:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:",
+        "> Il .{1,200} ha scritto:",
         // Portuguese: "Em [date] [name] escreveu:"
-        "Em .+ escreveu:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:",
+        "> Em .{1,200} escreveu:",
         // Dutch: "Op [date] schreef [name]:"
-        "Op .+ schreef .+:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:",
+        "> Op .{1,200} schreef .{1,200}:",
 
         // Header-based quotes - Outlook style (uses "Sent:")
-        "From: .+\nSent: .+\nTo: .+\nSubject: .+",
-        "From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+",
         // Header-based quotes - Apple Mail style (uses "Date:")
-        "From: .+\nDate: .+\nTo: .+\nSubject: .+",
-        "From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+",
         "-----Original Message-----",
         "________________________________",
 
         // International header patterns
         // German
-        "Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+",
         // French
-        "De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
+        "(?:^|\\n)[ \\t]*De\\s*: .+\nEnvoyé\\s*: .+\nÀ\\s*: .+\nObjet\\s*: .+",
         // Spanish
-        "De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+",
 
         // Forward indicators - English
         "Begin forwarded message:",
@@ -55,12 +78,14 @@ enum PlainTextQuoteRemover {
         // "---------- Forwarded message ---------"
         // "---------- Forwarded message"
         // "----- Forwarded message -----"
-        "(?:^|\\n)\\s*-{2,}\\s*Forwarded message\\b.*",
+        // Leading spaces only: a `\s*` here crossed newlines, and a run of
+        // blank lines before the marker cost the run's length at each of them.
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Forwarded message\\b.*",
         // Handles soft-wrapped variants where the marker appears inline after intro text.
         "\\s-{2,}\\s*Forwarded message\\b.*",
         "---------- Forwarded message ---------",
         "------ Original Message ------",
-        "(?:^|\\n)\\s*-{2,}\\s*Original Message\\b.*",
+        "(?:^|\\n)[ \\t]*-{2,}\\s*Original Message\\b.*",
 
         // Forward indicators - International
         "Weitergeleitete Nachricht",   // German
@@ -71,10 +96,91 @@ enum PlainTextQuoteRemover {
         "Doorgestuurd bericht",         // Dutch
     ]
 
+    /// A run of literal characters that every match of the pattern contains,
+    /// for the patterns whose `.+` makes a miss expensive. `Le .+ a écrit`
+    /// is tried at every "le " in the text (no anchor, no word boundary, any
+    /// case), each try reading to the end of the line, so a long joined
+    /// paragraph cost one line's length per "table ", "people " or "simple ".
+    /// The literal is searched once, with the same options; where it is
+    /// absent the pattern cannot match and is skipped, so the result is the
+    /// same. Each literal is the pattern's own run of literal characters,
+    /// between two non-literal atoms, so case folding treats it alike in both.
+    private static let requiredLiteralByPattern: [String: String] = [
+        "(?:^|\\n)On .+ wrote:": " wrote:",
+        "(?:^|\\n)On .{1,200}, .{1,200} wrote:": " wrote:",
+        "> On .{1,100}, at [^,\\n]{1,40}, .{1,200} wrote:": " wrote:",
+        "(?:^|\\n)[ \\t]*Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "> Am .{1,200} schrieb .{1,200}:": " schrieb ",
+        "(?:^|\\n)[ \\t]*Le .+ a écrit\\s*:": " a écrit",
+        "> Le .{1,200} a écrit\\s*:": " a écrit",
+        "(?:^|\\n)[ \\t]*El .+ escribió:": " escribió:",
+        "> El .{1,200} escribió:": " escribió:",
+        "(?:^|\\n)[ \\t]*Il .+ ha scritto:": " ha scritto:",
+        "> Il .{1,200} ha scritto:": " ha scritto:",
+        "(?:^|\\n)[ \\t]*Em .+ escreveu:": " escreveu:",
+        "> Em .{1,200} escreveu:": " escreveu:",
+        "(?:^|\\n)[ \\t]*Op .{1,200} schreef .{1,200}:": " schreef ",
+        "> Op .{1,200} schreef .{1,200}:": " schreef ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nSent: .+\nTo: .+\nCc: .+\nSubject: .+": "\nSent: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*From: .+\nDate: .+\nTo: .+\nCc: .+\nSubject: .+": "\nDate: ",
+        "(?:^|\\n)[ \\t]*Von: .+\nGesendet: .+\nAn: .+\nBetreff: .+": "\nGesendet: ",
+        "(?:^|\\n)[ \\t]*De: .+\nEnviado: .+\nPara: .+\nAsunto: .+": "\nEnviado: ",
+    ]
+
+    private struct QuotePattern {
+        let regex: NSRegularExpression
+        /// The `requiredLiteralByPattern` entry and its compiled search.
+        let requiredLiteral: (text: String, regex: NSRegularExpression)?
+        /// Apple Mail's quoted attributions only: the "> On ", "> Am "… every
+        /// match starts with (`quotedAttributionSearchRange`).
+        let quotedStartLiteral: NSRegularExpression?
+    }
+
+    /// How many starts of an Apple Mail quoted attribution ("> On ", "> Am "…)
+    /// are tried. Those patterns stay unanchored (see
+    /// `quoteIndicatorPatternStrings`), so each is tried at every occurrence of
+    /// its start literal at the cost of its bounds: about 36 µs each, 4 to 5 s
+    /// a megabyte of crafted text for each pattern on a path that is not capped
+    /// (the ingest snippet, `TextSnippetCreator`, reads the whole body). Past
+    /// this many occurrences the search stops a little after the last one it
+    /// tries (`quotedAttributionSearchTail`), which bounds each pattern at
+    /// about 40 ms. The text itself is never cut: the other patterns and
+    /// detectors still read all of it, and `bodyText` and `cleanedSnippet` are
+    /// not capped. Only a text with more than this many "> On " (or "> Am "…)
+    /// before its first such attribution reads differently.
+    static let quotedAttributionStartLimit = 1_024
+
+    /// UTF-16 units searched past the last tried start: more than the longest
+    /// match of a quoted pattern's bounds (two of 200 characters, each up to
+    /// two units), with room for about 3,000 units of the unbounded `\s*`
+    /// before "a écrit"'s colon. A longer run there is not found past the limit.
+    static let quotedAttributionSearchTail = 4_096
+
     /// Pre-compiled regex patterns for performance (compiled once at class load)
-    private static let compiledQuotePatterns: [NSRegularExpression] = {
-        quoteIndicatorPatternStrings.compactMap {
-            try? NSRegularExpression(pattern: $0, options: [.caseInsensitive])
+    private static let compiledQuotePatterns: [QuotePattern] = {
+        quoteIndicatorPatternStrings.compactMap { pattern in
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+                return nil
+            }
+            let requiredLiteral = requiredLiteralByPattern[pattern].flatMap { literal in
+                (try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: literal),
+                    options: [.caseInsensitive]
+                )).map { (text: literal, regex: $0) }
+            }
+            let quotedStartLiteral: NSRegularExpression? = pattern.hasPrefix("> ")
+                ? try? NSRegularExpression(
+                    pattern: NSRegularExpression.escapedPattern(for: String(pattern.prefix(5))),
+                    options: [.caseInsensitive]
+                )
+                : nil
+            return QuotePattern(
+                regex: regex,
+                requiredLiteral: requiredLiteral,
+                quotedStartLiteral: quotedStartLiteral
+            )
         }
     }()
 
@@ -227,14 +333,32 @@ enum PlainTextQuoteRemover {
         return findEarliestPatternMatchWithAttribution(in: text).0
     }
 
-    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution
-    private static func findEarliestPatternMatchWithAttribution(in text: String) -> (Int, String?) {
+    /// Finds the earliest match of any quote indicator pattern, returning both index and attribution.
+    /// `skipsPatternsMissingTheirLiteral` is false only in the test that shows the
+    /// `requiredLiteralByPattern` shortcut changes no answer.
+    static func findEarliestPatternMatchWithAttribution(
+        in text: String,
+        skipsPatternsMissingTheirLiteral: Bool = true
+    ) -> (Int, String?) {
         var earliestIndex = text.count
         var attribution: String?
         let range = NSRange(location: 0, length: text.utf16.count)
+        var literalIsPresent: [String: Bool] = [:]
 
-        for regex in compiledQuotePatterns {
-            if let match = regex.firstMatch(in: text, options: [], range: range),
+        for pattern in compiledQuotePatterns {
+            if skipsPatternsMissingTheirLiteral, let literal = pattern.requiredLiteral {
+                let isPresent = literalIsPresent[literal.text] ?? {
+                    let found = literal.regex.firstMatch(in: text, options: [], range: range) != nil
+                    literalIsPresent[literal.text] = found
+                    return found
+                }()
+                guard isPresent else { continue }
+            }
+            let regex = pattern.regex
+            let searchRange = pattern.quotedStartLiteral.map {
+                quotedAttributionSearchRange(in: text, fullRange: range, startLiteral: $0)
+            } ?? range
+            if let match = regex.firstMatch(in: text, options: [], range: searchRange),
                let matchRange = Range(match.range, in: text) {
                 let index = text.distance(from: text.startIndex, to: matchRange.lowerBound)
                 if index < earliestIndex {
@@ -268,6 +392,42 @@ enum PlainTextQuoteRemover {
         }
 
         return (earliestIndex, attribution)
+    }
+
+    /// The whole text, unless its start literal occurs more than
+    /// `quotedAttributionStartLimit` times: then up to the last occurrence tried
+    /// plus `quotedAttributionSearchTail`. A match found in the shorter range is
+    /// a match in the text (the quoted patterns read nothing past their end),
+    /// and a match that starts at a tried occurrence fits in it unless the
+    /// `\s*` before "a écrit"'s colon, which is unbounded, runs past the tail.
+    static func quotedAttributionSearchRange(
+        in text: String,
+        fullRange: NSRange,
+        startLiteral: NSRegularExpression
+    ) -> NSRange {
+        var seen = 0
+        var lastTriedStart: Int?
+        var searchFrom = fullRange.location
+        let end = NSMaxRange(fullRange)
+        while searchFrom < end,
+              let match = startLiteral.firstMatch(
+                in: text,
+                options: [],
+                range: NSRange(location: searchFrom, length: end - searchFrom)
+              ) {
+            seen += 1
+            if seen > quotedAttributionStartLimit, let lastTriedStart {
+                var cut = min(end, lastTriedStart + quotedAttributionSearchTail)
+                // Never between the two halves of a surrogate pair.
+                if cut < end, UTF16.isLeadSurrogate((text as NSString).character(at: cut - 1)) {
+                    cut -= 1
+                }
+                return NSRange(location: fullRange.location, length: cut - fullRange.location)
+            }
+            lastTriedStart = match.range.location
+            searchFrom = match.range.location + max(1, match.range.length)
+        }
+        return fullRange
     }
 
     /// Pre-compiled regex for collapsing excessive newlines (performance optimization)

@@ -364,8 +364,9 @@ struct ComposeInputBar: View {
                 attachment.localURL = originalPath
                 attachment.previewURL = finalizedPreviewPath
 
-                attachment.width = Int16(clamping: Int(prepared.size.width.rounded()))
-                attachment.height = Int16(clamping: Int(prepared.size.height.rounded()))
+                let persistedSize = AttachmentMetadataBounds.persistedImageDimensions(prepared.size)
+                attachment.width = persistedSize.width
+                attachment.height = persistedSize.height
                 return true
             }
             switch AttachmentImportFinalizationResult.resolve(

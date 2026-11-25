@@ -72,6 +72,15 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
 
     // MARK: - Error Simulation
 
+    /// listMessages() responses keyed by the exact query, checked before
+    /// `listMessagesResponse`, for a run that lists with more than one query.
+    var listMessagesResponsesByQuery: [String: MessagesListResponse] = [:]
+    /// Answers a listMessages() query the test cannot spell out in full (one with
+    /// computed date bounds), checked after `listMessagesResponsesByQuery`; nil falls
+    /// through to the rest.
+    var listMessagesResponder: (@Sendable (String) -> MessagesListResponse?)?
+    /// listMessages() errors keyed by the exact query (reset after throwing).
+    var listMessagesErrorsByQuery: [String: Error] = [:]
     /// Error to throw on listMessages() (resets after throwing)
     var listMessagesError: Error?
     /// Optional page-token keyed listMessages() errors (reset after throwing).
@@ -116,6 +125,8 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Every listMessages() query in call order (a run can list more than
     /// once, e.g. history recovery and then reconciliation).
     var listMessagesQueries: [String?] = []
+    /// Every searchAllMessages() query (Spam and Trash included), in call order.
+    private(set) var searchAllMessagesQueries: [String] = []
     private(set) var listMessagesLastMaxResults: Int?
     private(set) var listMessagesLastPageToken: String?
 
@@ -204,6 +215,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             // Errors
             listMessagesError = nil
             listMessagesErrorsByPageToken = [:]
+            listMessagesResponsesByQuery = [:]
+            listMessagesResponder = nil
+            listMessagesErrorsByQuery = [:]
             getMessageError = nil
             getMessageErrors = [:]
             modifyMessageError = nil
@@ -220,6 +234,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listMessagesCallCount = 0
             listMessagesLastQuery = nil
             listMessagesQueries = []
+            searchAllMessagesQueries = []
             listMessagesLastMaxResults = nil
             listMessagesLastPageToken = nil
             getMessageCallCount = 0
@@ -270,6 +285,15 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             if let error = listMessagesErrorsByPageToken.removeValue(forKey: pageTokenKey(pageToken)) {
                 throw error
             }
+            if let query, let error = listMessagesErrorsByQuery.removeValue(forKey: query) {
+                throw error
+            }
+            if let query, let response = listMessagesResponsesByQuery[query] {
+                return response
+            }
+            if let query, let response = listMessagesResponder?(query) {
+                return response
+            }
             if let error = listMessagesError {
                 listMessagesError = nil
                 throw error
@@ -279,6 +303,14 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             }
             return listMessagesResponse
         }
+    }
+
+    /// Served by `listMessages(pageToken:maxResults:query:)`'s responses and
+    /// errors, and recorded in `searchAllMessagesQueries` as well as in the
+    /// list calls, so a test can tell the Spam-and-Trash search apart.
+    func searchAllMessages(query: String, maxResults: Int) async throws -> MessagesListResponse {
+        withStateLock { searchAllMessagesQueries.append(query) }
+        return try await listMessages(pageToken: nil, maxResults: maxResults, query: query)
     }
 
     func getMessage(id: String, format: String) async throws -> GmailMessage {

@@ -45,15 +45,6 @@ enum SynthesizedInlineAttachmentRecovery {
         let savedOriginal: Bool
     }
 
-    static func persistedImageDimension(_ dimension: CGFloat) -> Int16 {
-        guard dimension.isFinite else { return 0 }
-        return Int16(clamping: Int(dimension.rounded()))
-    }
-
-    static func persistedPDFPageCount(_ pageCount: Int) -> Int16 {
-        Int16(clamping: pageCount)
-    }
-
     static func recover(
         messageId: String,
         requestedAttachmentObjectID: NSManagedObjectID,
@@ -176,8 +167,10 @@ enum SynthesizedInlineAttachmentRecovery {
                             if let dimensions = ImageProcessor.getImageDimensions(
                                 from: candidate.payload.data
                             ) {
-                                width = persistedImageDimension(dimensions.width)
-                                height = persistedImageDimension(dimensions.height)
+                                let persisted = AttachmentMetadataBounds
+                                    .persistedImageDimensions(dimensions)
+                                width = persisted.width
+                                height = persisted.height
                             }
                             if let thumbnail = ImageProcessor.generateThumbnail(
                                 from: candidate.payload.data,
@@ -192,7 +185,7 @@ enum SynthesizedInlineAttachmentRecovery {
                             if let count = ImageProcessor.getPDFPageCount(
                                 from: candidate.payload.data
                             ) {
-                                pageCount = persistedPDFPageCount(count)
+                                pageCount = AttachmentMetadataBounds.persistedPDFPageCount(count)
                             }
                             if let thumbnail = ImageProcessor.generatePDFThumbnail(
                                 from: candidate.payload.data
@@ -855,9 +848,12 @@ final class AttachmentDownloader: ObservableObject {
 
                 if mimeType.starts(with: "image/") {
                     // Process image: get dimensions and create preview
+                    // The size is the sender's: never convert it with a trapping
+                    // `Int16(_:)`, which crash-looped the app on a 40,000-pixel side.
                     if let dimensions = ImageProcessor.getImageDimensions(from: data) {
-                        width = Int16(dimensions.width)
-                        height = Int16(dimensions.height)
+                        let persisted = AttachmentMetadataBounds.persistedImageDimensions(dimensions)
+                        width = persisted.width
+                        height = persisted.height
                     }
 
                     if !generation.isCancelled,
@@ -868,7 +864,7 @@ final class AttachmentDownloader: ObservableObject {
                 } else if mimeType == "application/pdf" {
                     // Process PDF: get page count and create preview
                     if let count = ImageProcessor.getPDFPageCount(from: data) {
-                        pageCount = Int16(count)
+                        pageCount = AttachmentMetadataBounds.persistedPDFPageCount(count)
                     }
 
                     if !generation.isCancelled,
@@ -1296,6 +1292,9 @@ final class AttachmentDownloader: ObservableObject {
         let context = coreDataStack.newBackgroundContext()
         let validFiles: Set<String>? = await context.perform {
             do {
+                // Outside the injectable fetch: with no store attached the
+                // fetch answers [] and every file would be an orphan.
+                try CoreDataStack.requireAttachedStore(in: context)
                 let references = try fetchAttachmentFileReferences(context)
                 return Set(references.flatMap { reference -> [String] in
                     [reference["localURL"] as? String, reference["previewURL"] as? String].compactMap { $0 }

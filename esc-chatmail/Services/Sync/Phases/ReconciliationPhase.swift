@@ -8,6 +8,11 @@ struct ReconciliationInput {
     /// List missed messages but leave their fetches, with any deferred
     /// earlier, to a sync with a larger budget (an app refresh).
     var defersMissedMessageFetches = false
+    /// Look up "Delivery unknown" sends in Gmail by Message-ID
+    /// (`DeliveryUnknownProbe`). The orchestrator sets it only from
+    /// `DeliveryUnknownProbePolicy.allowsProbing`: a run that may do expensive
+    /// work and whose history slice was terminal and clean.
+    var probesDeliveryUnknownSends = false
 }
 
 struct ReconciliationPhaseResult: Sendable, Equatable {
@@ -67,6 +72,10 @@ struct ReconciliationPhase: SyncPhase {
             installTimestamp: installTimestamp
         )
         diagnostics.merge(missedResult.diagnostics)
+        // A message the run knows is missing and could not fetch may be a
+        // "Delivery unknown" send's echo, which neither history nor the
+        // store then shows: no "Not sent" verdict in such a run.
+        var missedRecoveryFailed = false
 
         if input.defersMissedMessageFetches {
             // The list call above is the per-sync safety net and stays; the
@@ -76,6 +85,9 @@ struct ReconciliationPhase: SyncPhase {
                 log.info("Deferring \(missedResult.missingIds.count) missed-message fetches to a sync with a larger budget")
                 reconciliation.deferMissedMessageFetches(missedResult.missingIds)
             }
+            // Missed messages this run leaves unfetched, found now or deferred
+            // earlier, are as unresolved as a failed fetch.
+            missedRecoveryFailed = true
         }
 
         var attemptedDeferredMissedIds: [String] = []
@@ -115,6 +127,39 @@ struct ReconciliationPhase: SyncPhase {
                 // kept for the next sync, which no later check would list.
                 log.warning("Failed to recover \(recoveryOutcome.blockingFailureIds.count) missed messages")
                 failedMissedIds = recoveryOutcome.blockingFailureIds
+                missedRecoveryFailed = true
+            }
+        }
+
+        if input.probesDeliveryUnknownSends {
+            let probeOutcome = try await DeliveryUnknownProbe(messageFetcher: messageFetcher)
+                .run(
+                    runStartedAt: context.syncStartTime,
+                    allowsNotSentVerdict: !missedRecoveryFailed,
+                    in: context.coreDataContext
+                )
+            if !probeOutcome.foundMessageIDs.isEmpty {
+                // Persisted as any synced echo is: the persister's Message-ID
+                // match consumes the record in this run's context.
+                let foundOutcome = try await BatchProcessor.retryFailedMessages(
+                    failedIds: probeOutcome.foundMessageIDs,
+                    messageFetcher: messageFetcher
+                ) { [messagePersister] messages in
+                    try await messagePersister.saveMessages(
+                        messages,
+                        labelIds: context.labelIds,
+                        myAliases: context.myAliases,
+                        sendAsAliases: context.sendAsAliases,
+                        modificationTransaction: context.modificationTransaction,
+                        in: context.coreDataContext
+                    )
+                }
+                if foundOutcome.hasBlockingFailures {
+                    // No verdict was written for them: the record stays
+                    // "Delivery unknown" and is looked up again once
+                    // `DeliveryUnknownProbePolicy.reprobeInterval` has passed.
+                    log.warning("Failed to persist \(foundOutcome.blockingFailureIds.count) message(s) a delivery-unknown lookup found")
+                }
             }
         }
 

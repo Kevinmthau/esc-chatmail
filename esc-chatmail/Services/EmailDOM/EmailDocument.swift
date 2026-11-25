@@ -72,12 +72,13 @@ final class EmailDocument {
     // MARK: - Parsing
 
     /// Parses an HTML fragment or document into an `EmailDocument`.
-    /// Returns `nil` if the input is `nil`. Throws only on catastrophic
-    /// SwiftSoup parser failure; SwiftSoup normally returns a best-effort DOM
-    /// even for malformed HTML.
+    /// Returns `nil` if the input is `nil`. Throws `EmailDOMParseRefusal`
+    /// for HTML nested too deeply to parse safely (`EmailDOMParseAdmission`),
+    /// and on catastrophic SwiftSoup parser failure; SwiftSoup normally
+    /// returns a best-effort DOM even for malformed HTML.
     static func parse(_ html: String?) throws -> EmailDocument? {
         guard let html else { return nil }
-        let document = try SwiftSoup.parse(html)
+        let document = try EmailDOMParseAdmission.parseDocument(html)
         // Disable pretty-printing so emitted HTML stays close to the input for
         // whitespace-sensitive callers and tests.
         document.outputSettings().prettyPrint(pretty: false)
@@ -633,6 +634,10 @@ final class EmailDocument {
 
 /// Parses standalone table-section fragments with their required parent
 /// context so SwiftSoup does not foster their cells into plain body text.
+/// Throws `EmailDOMParseRefusal` for HTML nested too deeply or too costly to
+/// parse safely (`EmailDOMParseAdmission`): the sanitizer then shows the
+/// body as escaped text (`HTMLSanitizerService.textOnlyReplacement`, never
+/// its legacy regex pass), and quote removal returns its input.
 enum EmailDOMFragmentParser {
     static func parse(_ html: String, inputIsFragment: Bool) throws -> Document {
         if inputIsFragment, let contextTagName = tableFragmentContextTagName(for: html) {
@@ -640,19 +645,19 @@ enum EmailDOMFragmentParser {
         }
 
         if inputIsFragment {
-            return try SwiftSoup.parseBodyFragment(html)
+            return try EmailDOMParseAdmission.parseBodyFragment(html)
         }
-        return try SwiftSoup.parse(html)
+        return try EmailDOMParseAdmission.parseDocument(html)
     }
 
     private static func parseFragment(_ html: String, contextTagName: String) throws -> Document {
         let document = Document.createShell("")
         guard let body = document.body() else {
-            return try SwiftSoup.parseBodyFragment(html)
+            return try EmailDOMParseAdmission.parseBodyFragment(html)
         }
 
         let context = try Element(Tag.valueOf(contextTagName), "")
-        let nodes = try Parser.parseFragment(html, context, [UInt8]())
+        let nodes = try EmailDOMParseAdmission.parseFragment(html, context: context)
         for node in nodes {
             try body.appendChild(node)
         }

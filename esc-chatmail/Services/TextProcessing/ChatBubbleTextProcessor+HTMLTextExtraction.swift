@@ -35,7 +35,7 @@ extension ChatBubbleTextProcessor {
         let extracted = TextProcessing.extractPlainText(from: html)
         guard !extracted.isEmpty else { return nil }
 
-        let decoded = decodeHTMLEntities ? HTMLEntityDecoder.decode(extracted) : extracted
+        let decoded = cappedExtractedText(decodeHTMLEntities ? HTMLEntityDecoder.decode(extracted) : extracted)
         let textBeforeUnwrap = applyPlainTextQuoteRemoval
             ? decoded
             : removeConsecutivePlainTextQuoteLines(from: decoded)

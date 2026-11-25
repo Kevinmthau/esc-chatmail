@@ -46,13 +46,23 @@ final class LogRedactionTests: XCTestCase {
         XCTAssertEqual(Log.redact(address: "jane@example.com"), "j***@example.com")
     }
 
-    func testRedactAddress_malformedAngleBracketHeader_isFullyMasked() {
-        let redacted = Log.redact(address: "Jane <jane@example.com (Jane Doe)>")
+    /// RFC 5322 allows a comment inside the angle-addr, and the address
+    /// parser leaves it out of the address (`EmailNormalizer.scanMailbox`),
+    /// so this is redacted as the address alone. An angle-addr whose comment
+    /// never closes has no address, and is masked whole. Either way no part
+    /// of the name is logged.
+    func testRedactAddress_commentInsideAngleAddr_logsNoPartOfTheName() {
+        let cases = [
+            ("Jane <jane@example.com (Jane Doe)>", "j***@example.com"),
+            ("Jane <jane@example.com (Jane Doe>", "<redacted>")
+        ]
+        for (header, expected) in cases {
+            let redacted = Log.redact(address: header)
 
-        XCTAssertEqual(redacted, "<redacted>")
-        XCTAssertFalse(redacted.contains("Jane"))
-        XCTAssertFalse(redacted.contains("Doe"))
-        XCTAssertFalse(redacted.contains("example.com"))
+            XCTAssertEqual(redacted, expected, header)
+            XCTAssertFalse(redacted.contains("Jane"), header)
+            XCTAssertFalse(redacted.contains("Doe"), header)
+        }
     }
 
     func testRedactAddress_noParseableEmail_isFullyMasked() {
@@ -310,7 +320,6 @@ final class LogRedactionTests: XCTestCase {
         "esc-chatmail/Services/Conversation/ConversationCreationSerializer.swift|Log.error(\"Failed to save new conversation: \\(error)\", category: .coreData)",
         "esc-chatmail/Services/Conversation/ConversationRollupUpdater.swift|Log.diagnostic(.conversationRollups, \"Excluding self: \\(email)\", category: .conversation)",
         "esc-chatmail/Services/CoreData/CoreDataBackupManager.swift|Log.warning(\"Failed to remove old backup: \\(error.localizedDescription)\", category: .coreData)",
-        "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.info(\"Created backup before migration recovery: \\(backupURL.path)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.info(\"Created backup before store reset: \\(backupURL.path)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataRecoveryHandler.swift|Log.warning(\"Core Data load attempt \\(currentAttempts) failed with recoverable error: \\(error)\", category: .coreData)",
         "esc-chatmail/Services/CoreData/CoreDataSaveOperations.swift|Log.debug(\"  - Detail: \\(detailedError.localizedDescription)\", category: .coreData)",

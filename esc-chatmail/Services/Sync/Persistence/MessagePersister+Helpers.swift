@@ -577,13 +577,14 @@ extension MessagePersister {
 
         if info.mimeType.hasPrefix("image/"),
            let dimensions = ImageProcessor.getImageDimensions(from: inlineData) {
-            attachment.width = Int16(clamping: Int(dimensions.width.rounded()))
-            attachment.height = Int16(clamping: Int(dimensions.height.rounded()))
+            let persisted = AttachmentMetadataBounds.persistedImageDimensions(dimensions)
+            attachment.width = persisted.width
+            attachment.height = persisted.height
         }
 
         if info.mimeType == "application/pdf",
            let pageCount = ImageProcessor.getPDFPageCount(from: inlineData) {
-            attachment.pageCount = Int16(clamping: pageCount)
+            attachment.pageCount = AttachmentMetadataBounds.persistedPDFPageCount(pageCount)
         }
 
         var savedPreviewPath: String?

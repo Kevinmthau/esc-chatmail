@@ -75,7 +75,8 @@ struct DataCleanupService: Sendable {
         case notDue
         /// The cadence was due and the passes did not start: another
         /// maintenance run was active, the task was cancelled while it
-        /// waited, or an account transition began. The cadence stays due.
+        /// waited, an account transition began, or the store is not loaded
+        /// and attached. The cadence stays due.
         case notAdmitted
         /// The passes ran, and ended this way. Only `.completed` marked the
         /// cadence.
@@ -278,7 +279,21 @@ struct DataCleanupService: Sendable {
             return .notDue
         }
         let outcome = await exclusiveRunner.resultOfExclusiveRun(operationName: "store maintenance") { [self] in
-            await runStoreMaintenanceIfDue(in: coreDataStack.newBackgroundContext())
+            // As the daily cleanup does: never the code that starts the
+            // store's load, and nothing on a coordinator with no store, where
+            // a fetch answers [] and the draft pass's batch delete raises
+            // (`CoreDataStack.requireAttachedStore(in:)`). The cadence stays
+            // due.
+            guard coreDataStack.isStoreLoaded else {
+                Log.info("Store maintenance skipped: the store is not loaded", category: .coreData)
+                return DueStoreMaintenanceOutcome.notAdmitted
+            }
+            let context = coreDataStack.newBackgroundContext()
+            guard await context.perform({ CoreDataStack.hasAttachedStore(context) }) else {
+                Log.error("Store maintenance skipped: no store is attached", category: .coreData)
+                return .notAdmitted
+            }
+            return await runStoreMaintenanceIfDue(in: context)
         }
         return outcome ?? .notAdmitted
     }

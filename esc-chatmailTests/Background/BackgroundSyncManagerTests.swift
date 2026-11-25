@@ -839,6 +839,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
             manager.runBackgroundTaskOperation(
                 budget: budget,
+                journalName: "test",
                 installExpirationHandler: { handler in handler() },
                 onComplete: { completion.record($0) }
             )
@@ -879,6 +880,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
             manager.runBackgroundTaskOperation(
                 budget: budget,
+                journalName: "test",
                 installExpirationHandler: { expiration.install($0) },
                 onComplete: { completion.record($0) }
             )
@@ -896,6 +898,111 @@ final class BackgroundSyncManagerTests: XCTestCase {
             XCTAssertFalse(taskScheduler.appRefreshTaskPending)
             XCTAssertFalse(taskScheduler.processingTaskPending)
         }
+    }
+
+    // The journal entry is written before the task is reported: iOS may suspend the
+    // process as soon as `setTaskCompleted` returns (architecture review 2026-11,
+    // observability-errors#3).
+    // Revert-check: fails if `runBackgroundTaskOperation` records the run after
+    // `latch.complete` (or not at all): `onComplete` then finds no entry.
+    func testTaskRunner_expiredRun_isJournaledAsExpiredBeforeItIsReported() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let expiration = BackgroundTaskExpirationHandlerProbe()
+        let journal = BackgroundRunJournal(defaults: defaults)
+        let entriesAtReport = BackgroundJournalSnapshotProbe()
+        let manager = makeManager(
+            authoritativeSyncReadiness: { await readinessGate.waitUntilReleased() },
+            runJournal: journal
+        )
+
+        manager.runBackgroundTaskOperation(
+            budget: .appRefresh,
+            journalName: "appRefresh",
+            installExpirationHandler: { expiration.install($0) },
+            onComplete: { reported in entriesAtReport.record(journal.entries(), reported: reported) }
+        )
+        await readinessGate.waitUntilStarted()
+        expiration.fire()
+        await readinessGate.release(succeeded: true)
+        await waitUntil { entriesAtReport.reported != nil }
+
+        XCTAssertEqual(entriesAtReport.reported, false)
+        let entry = try? XCTUnwrap(entriesAtReport.entries.last)
+        XCTAssertEqual(entriesAtReport.entries.count, 1)
+        XCTAssertEqual(entry?.task, "appRefresh")
+        XCTAssertEqual(entry?.outcome, .cancelled)
+        XCTAssertEqual(entry?.expired, true)
+        XCTAssertEqual(entry?.reportedSuccess, false)
+    }
+
+    // Revert-check: fails if a run with no session is journaled the same whether the
+    // account was signed out for good or is only held after a failed restore.
+    func testTaskRunner_noSession_tellsSignedOutFromHeld() async {
+        for (isDurablySignedOut, expected) in [(true, BackgroundRunOutcome.signedOut), (false, .noSessionYet)] {
+            defaults.removeObject(forKey: BackgroundRunJournal.defaultsKey)
+            let journal = BackgroundRunJournal(defaults: defaults)
+            let completion = BackgroundTaskCompletionProbe()
+            let manager = makeManager(
+                authoritativeSyncIsAuthenticated: { false },
+                authoritativeSyncIsDurablySignedOut: { isDurablySignedOut },
+                runJournal: journal
+            )
+
+            manager.runBackgroundTaskOperation(
+                budget: .appRefresh,
+                journalName: "appRefresh",
+                installExpirationHandler: { _ in },
+                onComplete: { completion.record($0) }
+            )
+            await waitUntil { completion.outcomes.count == 1 }
+
+            XCTAssertEqual(completion.outcomes, [true], "Reported as success either way, as before")
+            XCTAssertEqual(journal.entries().map(\.outcome), [expected])
+        }
+    }
+
+    // Revert-check: fails if any executor result maps to another outcome, even one with
+    // the same reported Bool (the journal and its warning line would then be wrong).
+    func testOutcome_eachExecutorResult_mapsToItsOwnOutcome() async {
+        let cases: [(BackgroundMailboxSyncExecutionResult, BackgroundRunOutcome)] = [
+            (.completed, .completed),
+            (.needsFollowUp, .needsFollowUp),
+            (.failed, .failed),
+            (.deferredForInsufficientStorage, .deferredForInsufficientStorage),
+            (.blocked(by: nil), .blockedRetrying),
+            (.blocked(by: .foregroundIncremental), .blockedNoRetry)
+        ]
+        for (result, expected) in cases {
+            let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: result) }
+            let manager = makeManager(authoritativeSyncExecutor: executor)
+
+            let outcome = await manager.performAuthoritativeSyncOutcome(budget: .processing)
+
+            XCTAssertEqual(outcome, expected, "\(result)")
+        }
+        let notReady = makeManager(authoritativeSyncReadiness: { false })
+        let notReadyOutcome = await notReady.performAuthoritativeSyncOutcome()
+        XCTAssertEqual(notReadyOutcome, .notReady)
+    }
+
+    func testTaskRunner_completedRun_isJournaledWithItsOutcome() async {
+        let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: .completed) }
+        let journal = BackgroundRunJournal(defaults: defaults)
+        let completion = BackgroundTaskCompletionProbe()
+        let manager = makeManager(authoritativeSyncExecutor: executor, runJournal: journal)
+
+        manager.runBackgroundTaskOperation(
+            budget: .processing,
+            journalName: "processing",
+            installExpirationHandler: { _ in },
+            onComplete: { completion.record($0) }
+        )
+        await waitUntil { completion.outcomes.count == 1 }
+
+        XCTAssertEqual(completion.outcomes, [true])
+        XCTAssertEqual(journal.entries().map(\.outcome), [.completed])
+        XCTAssertEqual(journal.entries().first?.expired, false)
+        XCTAssertEqual(journal.entries().first?.reportedSuccess, true)
     }
 
     // `BGTaskScheduler.getPendingTaskRequests` is callback-based and the system
@@ -919,6 +1026,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
         manager.runBackgroundTaskOperation(
             budget: .appRefresh,
+            journalName: "test",
             installExpirationHandler: { expiration.install($0) },
             onComplete: { completion.record($0) }
         )
@@ -1600,7 +1708,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
         authoritativeSyncExecutor: (any BackgroundMailboxSyncExecuting)? = nil,
         authoritativeSyncReadiness: @escaping @Sendable () async -> Bool = { true },
         authoritativeSyncIsAuthenticated: @escaping @MainActor @Sendable () -> Bool = { true },
-        authoritativeSyncIsDurablySignedOut: @escaping @MainActor @Sendable () -> Bool = { false }
+        authoritativeSyncIsDurablySignedOut: @escaping @MainActor @Sendable () -> Bool = { false },
+        runJournal: BackgroundRunJournal? = nil
     ) -> BackgroundSyncManager {
         let executor = authoritativeSyncExecutor
         let assertions = sceneAssertions!
@@ -1616,7 +1725,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
             beginSceneBackgroundAssertion: { onExpiration in
                 assertions.begin(onExpiration: onExpiration)
                 return { assertions.end() }
-            }
+            },
+            runJournal: runJournal ?? BackgroundRunJournal(defaults: defaults)
         )
     }
 
@@ -2035,4 +2145,22 @@ private final class BackgroundPendingCheckCounter: @unchecked Sendable {
         lock.unlock()
     }
 }
+/// What the journal held when the task was reported. `@unchecked Sendable`: `lock`
+/// guards both fields.
+private final class BackgroundJournalSnapshotProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEntries: [BackgroundRunJournal.Entry] = []
+    private var storedReported: Bool?
+
+    var entries: [BackgroundRunJournal.Entry] { lock.withLock { storedEntries } }
+    var reported: Bool? { lock.withLock { storedReported } }
+
+    func record(_ entries: [BackgroundRunJournal.Entry], reported: Bool) {
+        lock.withLock {
+            storedEntries = entries
+            storedReported = reported
+        }
+    }
+}
+
 #endif

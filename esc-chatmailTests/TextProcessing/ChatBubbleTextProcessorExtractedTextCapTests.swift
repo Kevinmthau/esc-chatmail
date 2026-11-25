@@ -1,0 +1,111 @@
+import XCTest
+@testable import esc_chatmail
+
+/// Bubble derivation reads at most `ChatBubbleTextProcessor
+/// .extractedTextUTF16Limit` of a body's extracted text, cut at a line break.
+/// Revert-check: the `cappedExtractedText` calls in `processPlainText` and
+/// `extractPlainTextFromHTML`; without them the sentinel past the cap is in
+/// the derived text and the outputs differ.
+final class ChatBubbleTextProcessorExtractedTextCapTests: XCTestCase {
+    private static let sentinel = "SENTINEL-PAST-THE-CAP"
+
+    /// About a megabyte of log lines, each a sentence, then the sentinel.
+    private static func logBody(lineCount: Int = 24_000) -> String {
+        (0..<lineCount).map { "Line \($0): backup of volume \($0 % 7) finished in \($0 % 60) seconds." }
+            .joined(separator: "\n") + "\n" + sentinel
+    }
+
+    func testCappedExtractedText_underTheLimit_isUnchanged() {
+        let text = "short\ntext"
+        XCTAssertEqual(ChatBubbleTextProcessor.cappedExtractedText(text), text)
+        let exact = String(repeating: "a", count: ChatBubbleTextProcessor.extractedTextUTF16Limit)
+        XCTAssertEqual(ChatBubbleTextProcessor.cappedExtractedText(exact), exact)
+    }
+
+    func testCappedExtractedText_overTheLimit_cutsAtTheLastLineBreak() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        let firstLine = String(repeating: "a", count: limit - 10)
+        let text = firstLine + "\nbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        XCTAssertEqual(ChatBubbleTextProcessor.cappedExtractedText(text), firstLine)
+    }
+
+    /// A line break early in the text is not where the cut goes: "Hi," then
+    /// one 70,000-character line would otherwise derive as "Hi,".
+    func testCappedExtractedText_lineBreakOnlyInTheFirstHalf_cutsAtTheLimit() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        let text = "Hi,\n" + String(repeating: "x", count: 70_000)
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit)
+        XCTAssertTrue(capped.hasPrefix("Hi,\nxxx"))
+    }
+
+    func testCappedExtractedText_withoutALineBreak_cutsOnACharacterBoundary() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        // An emoji (two UTF-16 units) straddles the limit.
+        let text = String(repeating: "a", count: limit - 1) + "😀" + "tail"
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped, String(repeating: "a", count: limit - 1))
+        XCTAssertLessThanOrEqual(capped.utf16.count, limit)
+    }
+
+    /// One character can span the limit by any length: a base and 70,000
+    /// combining marks. Cut at its start, the text before it ("Hi") was all
+    /// that was left.
+    /// Revert-check: the `cut < extractedTextUTF16Limit / 2` branch in
+    /// `ChatBubbleTextProcessor.cappedExtractedText`.
+    func testCappedExtractedText_characterSpanningTheLimit_keepsTheTextBeforeTheLimit() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        let text = "Hi" + String(repeating: "\u{0301}", count: 70_000) + "\nreal message text"
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit)
+        // By scalars: as characters, "H" and "i" with its marks is not "Hi".
+        XCTAssertTrue(capped.unicodeScalars.starts(with: "Hi".unicodeScalars))
+    }
+
+    /// Cut inside a character, the cut still falls between scalars, never
+    /// inside a surrogate pair.
+    func testCappedExtractedText_longCharacterOfAstralMarks_neverSplitsASurrogatePair() {
+        let limit = ChatBubbleTextProcessor.extractedTextUTF16Limit
+        // U+1D167, a combining mark outside the BMP (two UTF-16 units), after one ASCII base: the limit falls on a trail surrogate.
+        let text = "a" + String(repeating: "\u{1D167}", count: 40_000)
+        let capped = ChatBubbleTextProcessor.cappedExtractedText(text)
+        XCTAssertEqual(capped.utf16.count, limit - 1)
+        XCTAssertEqual(capped.unicodeScalars.last, "\u{1D167}")
+    }
+
+    func testPlainTextDerivation_megabyteBody_equalsTheDerivationOfItsCappedPrefix() {
+        let body = Self.logBody()
+        XCTAssertGreaterThan(body.utf16.count, 1_000_000)
+        let prefix = ChatBubbleTextProcessor.cappedExtractedText(body)
+
+        let derived = ChatBubbleTextProcessor.plainTextOnlyFallback(from: body).mainText
+        XCTAssertEqual(derived, ChatBubbleTextProcessor.plainTextOnlyFallback(from: prefix).mainText)
+        XCTAssertEqual(derived.map { $0.contains(Self.sentinel) }, false)
+        XCTAssertEqual(derived.map { $0.contains("Line 20000:") }, false)
+        XCTAssertEqual(derived.map { $0.contains("Line 0:") }, true)
+    }
+
+    func testHTMLDerivation_megabyteBody_equalsTheDerivationOfItsCappedPrefix() {
+        let lines = Self.logBody().components(separatedBy: "\n")
+        let html = "<html><body>" + lines.map { "<div>\($0)</div>" }.joined() + "</body></html>"
+        let extracted = TextProcessing.extractPlainText(from: html)
+        XCTAssertGreaterThan(extracted.utf16.count, ChatBubbleTextProcessor.extractedTextUTF16Limit)
+
+        let derived = ChatBubbleTextProcessor.htmlCompatibilityFallback(from: html, classifyRichContent: false).mainText
+        XCTAssertEqual(derived.map { $0.contains(Self.sentinel) }, false)
+        XCTAssertEqual(derived.map { $0.contains("Line 20000:") }, false)
+        XCTAssertEqual(derived.map { $0.contains("Line 0:") }, true)
+    }
+
+    /// Ingest derives the stored preview through the same function, so the
+    /// cap reaches it too; the stored snippet is not capped
+    /// (`docs/scalability-review.md`, `list-search-contains-uncapped-snippet`).
+    func testIngestPreview_megabyteHTML_omitsTextPastTheCap() {
+        let lines = Self.logBody().components(separatedBy: "\n")
+        let html = "<html><body>" + lines.map { "<p>\($0)</p>" }.joined() + "</body></html>"
+        let preview = MessageProcessor.deriveHTMLChatPreview(from: html)
+        XCTAssertEqual(preview.map { $0.contains(Self.sentinel) }, false)
+        XCTAssertEqual(preview.map { $0.contains("Line 20000:") }, false)
+        XCTAssertEqual(preview.map { $0.contains("Line 0:") }, true)
+    }
+}

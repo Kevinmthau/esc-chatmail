@@ -87,16 +87,22 @@ final class SyncReconciliation: Sendable {
     /// `UserDefaults` is thread-safe but not `Sendable`, so
     /// `nonisolated(unsafe)`, as on `DataCleanupService`'s defaults.
     nonisolated(unsafe) private let defaults: UserDefaults
+    /// The "now" the `after:` floors here are measured against: the earlier of the
+    /// device's time and Gmail's. It must be the source `failureTracker` stamps the
+    /// last-sync time with (`ServerTimeSource`).
+    private let serverTime: any ServerTimeSource
     private let log = LogCategory.sync.logger
 
     init(
         messageFetcher: MessageFetcher,
         failureTracker: SyncFailureTracker = .shared,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        serverTime: any ServerTimeSource = ServerClockEstimate.shared
     ) {
         self.messageFetcher = messageFetcher
         self.failureTracker = failureTracker
         self.defaults = defaults
+        self.serverTime = serverTime
     }
 
     // MARK: - Missed Message Detection
@@ -123,7 +129,11 @@ final class SyncReconciliation: Sendable {
         var diagnostics = SyncReconciliationDiagnostics()
 
         do {
-            let reconciliationStartTime = calculateReconciliationStartTime(installTimestamp: installTimestamp)
+            let now = serverTime.conservativeNow()
+            let reconciliationStartTime = calculateReconciliationStartTime(
+                installTimestamp: installTimestamp,
+                now: now
+            )
             let epochSeconds = Int(reconciliationStartTime.timeIntervalSince1970)
 
             let query = "after:\(epochSeconds) -label:spam -label:drafts -label:trash"
@@ -131,7 +141,7 @@ final class SyncReconciliation: Sendable {
             // Scale the reconciliation budget based on time since last sync and
             // page through results up to a bounded cap so we can recover missed
             // mail beyond the first results page on busy accounts.
-            let timeSinceStart = Date().timeIntervalSince(reconciliationStartTime)
+            let timeSinceStart = now.timeIntervalSince(reconciliationStartTime)
             let maxMessagesToCheck = min(
                 SyncConfig.maxReconciliationMessages,
                 max(
@@ -489,11 +499,16 @@ final class SyncReconciliation: Sendable {
     }
 
     /// Calculates the start time for reconciliation window
-    private func calculateReconciliationStartTime(installTimestamp: TimeInterval) -> Date {
+    ///
+    /// Measured against `now`, the earlier of the device's time and Gmail's, which also
+    /// reads the stored last-sync time as no later than it: a device clock set ahead
+    /// stamped a time Gmail had not reached, and the window then started past mail it
+    /// owed (`SyncTimeCalculator.calculateStartTime`).
+    private func calculateReconciliationStartTime(installTimestamp: TimeInterval, now: Date) -> Date {
         let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
 
         if lastSuccessfulSync > 0 {
-            let timeSinceLastSync = Date().timeIntervalSince1970 - lastSuccessfulSync
+            let timeSinceLastSync = now.timeIntervalSince1970 - lastSuccessfulSync
             log.debug("Reconciliation window: since last sync (\(Int(timeSinceLastSync / 60)) minutes ago)")
         } else {
             log.debug("Reconciliation window: using fallback (no previous sync time)")
@@ -502,6 +517,8 @@ final class SyncReconciliation: Sendable {
         return SyncTimeCalculator.calculateStartDate(
             config: .reconciliation,
             installTimestamp: installTimestamp,
+            now: now.timeIntervalSince1970,
+            deviceClockLead: serverTime.deviceClockLead(),
             defaults: defaults
         )
     }
@@ -696,7 +713,7 @@ final class SyncReconciliation: Sendable {
 
         do {
             // Query recent messages (last 24 hours)
-            let oneDayAgo = Date().addingTimeInterval(-86400)
+            let oneDayAgo = serverTime.conservativeNow().addingTimeInterval(-86400)
             let epochSeconds = Int(oneDayAgo.timeIntervalSince1970)
             let query = "after:\(epochSeconds) -label:spam -label:drafts -label:trash"
 
@@ -909,6 +926,22 @@ final class SyncReconciliation: Sendable {
                 localMessageDict[id] = preferred
             }
 
+            // A live pending action still has to change these in Gmail, so
+            // Gmail's state for them is the state before the user's change.
+            // The 30-minute marker alone stopped protecting them, and a queued
+            // archive came back to the inbox or read mail turned unread
+            // whenever the queue had not drained by then (an outage, a kill
+            // before the drain, a background launch, which never drains).
+            // A failed read repairs nothing: it is never "no live actions".
+            let queuedTargetIDs: Set<String>
+            do {
+                queuedTargetIDs = try PendingActionTargets.liveTargetMessageIDs(in: context)
+            } catch {
+                Log.error("Failed to read live pending actions for label reconciliation", category: .sync, error: error)
+                stats.processingFailed = true
+                return (stats, modifiedConversationIDs)
+            }
+
             // Pre-fetch INBOX label once for all messages that might need it
             let labelRequest = Label.fetchRequest()
             labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
@@ -931,6 +964,10 @@ final class SyncReconciliation: Sendable {
 
                 // Skip if message has pending local changes that have not yet been synced.
                 if HistoryProcessor.hasPendingLocalModification(message: localMessage) {
+                    stats.skippedChecks += 1
+                    continue
+                }
+                if queuedTargetIDs.contains(messageId) {
                     stats.skippedChecks += 1
                     continue
                 }

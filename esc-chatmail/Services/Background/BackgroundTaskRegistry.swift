@@ -23,6 +23,9 @@ final class BackgroundTaskRegistry {
     private let submitTaskRequest: @Sendable (BGTaskRequest) throws -> Void
     private let pendingTaskIdentifiers: @Sendable () async -> Set<String>
     private let cancelPendingTaskRequest: @Sendable (String) -> Void
+    /// Where each run's outcome is recorded (`BackgroundRunJournal`).
+    private let runJournal: BackgroundRunJournal
+    private let now: @Sendable () -> Date
 
     /// Internal (not private) only so tests can construct an instance with
     /// spy seams. Never build a second instance around the default real
@@ -54,12 +57,23 @@ final class BackgroundTaskRegistry {
         },
         cancelPendingTaskRequest: @escaping @Sendable (String) -> Void = { identifier in
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
-        }
+        },
+        runJournal: BackgroundRunJournal = .shared,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.registerLaunchHandler = registerLaunchHandler
         self.submitTaskRequest = submitTaskRequest
         self.pendingTaskIdentifiers = pendingTaskIdentifiers
         self.cancelPendingTaskRequest = cancelPendingTaskRequest
+        self.runJournal = runJournal
+        self.now = now
+    }
+
+    /// A maintenance task's name in `BackgroundRunJournal`: its identifier without the
+    /// bundle prefix (`database.analyze`).
+    static func journalName(for identifier: String) -> String {
+        let prefix = "com.esc.inboxchat."
+        return identifier.hasPrefix(prefix) ? String(identifier.dropFirst(prefix.count)) : identifier
     }
 
     // MARK: - Registration
@@ -232,6 +246,10 @@ final class BackgroundTaskRegistry {
     ) {
         let completionLatch = BackgroundTaskCompletionLatch(onComplete: onComplete)
         let cancellationLatch = BackgroundTaskCancellationLatch()
+        let startedAt = now()
+        let journal = runJournal
+        let now = self.now
+        journal.recordStart(task: Self.journalName(for: identifier), startedAt: startedAt)
 
         // Installed before the worker exists. The cancellation latch
         // remembers an expiration that arrives first.
@@ -251,7 +269,17 @@ final class BackgroundTaskRegistry {
             let success = await worker.value
             // Reschedule for next time
             self.schedule(identifier)
-            completionLatch.complete(success: success)
+            completionLatch.complete(success: success) { reported, didExpire in
+                // Before `setTaskCompleted`, after which iOS may suspend the process.
+                journal.record(
+                    task: Self.journalName(for: identifier),
+                    startedAt: startedAt,
+                    endedAt: now(),
+                    outcome: success ? .maintenanceSucceeded : .maintenanceFailed,
+                    reported: reported,
+                    expired: didExpire
+                )
+            }
         }
     }
 

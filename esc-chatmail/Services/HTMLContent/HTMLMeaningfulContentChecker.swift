@@ -3,34 +3,28 @@ import Foundation
 enum HTMLMeaningfulContentChecker {
     private static let maxHiddenElementStripPasses = 4
 
-    private static let hiddenElementRegexes: [NSRegularExpression] = {
-        let patterns = [
-            // Explicit hidden attribute.
-            "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*\\bhidden\\b[^>]*>[\\s\\S]*?</\\1>",
-            // Inline style patterns that are genuinely non-rendered. Avoid treating
-            // `font-size:0`/`line-height:0` as hidden by itself because many table-based
-            // transactional templates use those on visible layout wrappers.
-            "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|opacity\\s*:\\s*0(?:\\.0+)?)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
-            // Hidden class conventions seen in email templates.
-            "<([a-zA-Z][a-zA-Z0-9]*)\\b[^>]*class\\s*=\\s*['\"][^'\"]*(?:\\bm-hide\\b|\\bpreheader\\b|\\bpreview-text\\b)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>"
-        ]
+    /// The hidden-element rules (an explicit `hidden` attribute; a style that
+    /// does not render; the hidden-class conventions of email templates) are
+    /// `HiddenElementRule.meaningfulContentRules`, and the comment and head
+    /// rules `HTMLBlockRule`s: each removes what its regex did, read once. The
+    /// regexes read to the end of the text at every start with nothing to
+    /// close it, and SwiftSoup writes `<` and `>` in attribute values back out
+    /// as they came, so markup a sender hid in one attribute reached them
+    /// after every cleanup mode (an attribute of 5,000 `<a style='display:none'>`
+    /// cost 8 s at 120 KB, of 10,000 `<!--` 4 s at 40 KB).
+    private static let htmlCommentRule = HTMLBlockRule(
+        start: "<!--",
+        close: "-->",
+        readsToTagEnd: false,
+        options: [.caseInsensitive]
+    )
 
-        return patterns.compactMap { pattern in
-            try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-        }
-    }()
-
-    /// Compiled once with `.caseInsensitive`, the option the per-call
-    /// `replacingOccurrences(options: [.regularExpression, .caseInsensitive])`
-    /// in `stripNonRenderableContent` passed. This check runs once per cleanup
-    /// mode on every bubble derivation.
-    private static let htmlCommentRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [.caseInsensitive])
-    }()
-
-    private static let headElementRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<head\\b[^>]*>[\\s\\S]*?</head>", options: [.caseInsensitive])
-    }()
+    private static let headElementRule = HTMLBlockRule(
+        start: "<head\\b",
+        close: "</head>",
+        readsToTagEnd: true,
+        options: [.caseInsensitive]
+    )
 
     private static let invisibleCharacterRegex: NSRegularExpression? = {
         try? NSRegularExpression(
@@ -64,13 +58,12 @@ enum HTMLMeaningfulContentChecker {
     }
 
     private static func stripNonRenderableContent(from html: String) -> String {
-        var filtered = RegexSanitizer.replace(in: html, regex: htmlCommentRegex)
-        filtered = RegexSanitizer.replace(in: filtered, regex: headElementRegex)
+        var filtered = htmlCommentRule?.removingBlocks(from: html) ?? html
+        filtered = headElementRule?.removingBlocks(from: filtered) ?? filtered
 
-        for regex in hiddenElementRegexes {
+        for rule in HiddenElementRule.meaningfulContentRules {
             for _ in 0..<maxHiddenElementStripPasses {
-                let range = NSRange(location: 0, length: filtered.utf16.count)
-                let updated = regex.stringByReplacingMatches(in: filtered, options: [], range: range, withTemplate: "")
+                let updated = rule.removing(from: filtered)
                 guard updated != filtered else {
                     break
                 }

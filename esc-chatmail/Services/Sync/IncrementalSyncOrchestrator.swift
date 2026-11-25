@@ -49,6 +49,8 @@ final class IncrementalSyncOrchestrator {
     private let historyCheckpointStore: ForegroundHistoryCheckpointStore
     private let failureCounterStore: SyncFailureCounterCheckpointStore
     private let recoveryWindowCheckpointStore: SyncWindowCheckpointStore
+    /// The repair a history recovery owes the rows it did not visit (`HistoryRecoveryRepair`).
+    private let recoveryRepairStore: HistoryRecoveryRepairCheckpointStore
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
     /// Where the run reads `lastSuccessfulSyncTime` and `installTimestamp` and
@@ -58,6 +60,9 @@ final class IncrementalSyncOrchestrator {
     /// `UserDefaults.standard`, which in a Mac test host is the preferences of
     /// the Mac app the user runs.
     private let defaults: UserDefaults
+    /// The "now" recovery's window is measured against: the earlier of the device's time
+    /// and Gmail's. It must be the source `failureTracker` stamps the last-sync time with.
+    private let serverTime: any ServerTimeSource
     private let historyPageLimit: Int
     private let historyPageSize: Int
     /// Production supplies AuthSession's current-or-persisted email. Keeping
@@ -109,9 +114,11 @@ final class IncrementalSyncOrchestrator {
         historyCheckpointStore: ForegroundHistoryCheckpointStore = ForegroundHistoryCheckpointStore(),
         failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
         recoveryWindowCheckpointStore: SyncWindowCheckpointStore = .historyRecovery,
+        recoveryRepairStore: HistoryRecoveryRepairCheckpointStore = HistoryRecoveryRepairCheckpointStore(),
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         defaults: UserDefaults = .standard,
+        serverTime: any ServerTimeSource = ServerClockEstimate.shared,
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
         historyPageSize: Int = SyncConfig.maxHistoryResultsPerRequest,
         authenticatedAccountEmail: (() -> String?)? = nil,
@@ -128,9 +135,11 @@ final class IncrementalSyncOrchestrator {
         self.historyCheckpointStore = historyCheckpointStore
         self.failureCounterStore = failureCounterStore
         self.recoveryWindowCheckpointStore = recoveryWindowCheckpointStore
+        self.recoveryRepairStore = recoveryRepairStore
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
         self.defaults = defaults
+        self.serverTime = serverTime
         self.historyPageLimit = historyPageLimit
         self.historyPageSize = historyPageSize
         self.authenticatedAccountEmail = authenticatedAccountEmail
@@ -439,7 +448,12 @@ final class IncrementalSyncOrchestrator {
             let reconciliationResult = try await reconciliationPhase.execute(
                 input: ReconciliationInput(
                     skipLabelReconciliation: shouldSkipReconciliation,
-                    defersMissedMessageFetches: !allowsDeferrableWork
+                    defersMissedMessageFetches: !allowsDeferrableWork,
+                    probesDeliveryUnknownSends: DeliveryUnknownProbePolicy.allowsProbing(
+                        allowsExpensiveWork: allowsExpensiveRecovery,
+                        historySliceIsTerminal: historyResult.nextPageToken == nil,
+                        hadFetchFailures: fetchResult.hasFailures
+                    )
                 ),
                 context: phaseContext
             )
@@ -447,6 +461,22 @@ final class IncrementalSyncOrchestrator {
                 reconciliationTimer,
                 detail: "labelOutcome=\(reconciliationResult.labelOutcome) \(reconciliationResult.diagnostics.summary)"
             )
+
+            // One batch of the repair an earlier history recovery owes the rows it did
+            // not visit. Planned here (network work, nothing written), applied in the
+            // final save's rollup block and saved with its progress. Only after a
+            // terminal, clean slice, as the delivery-unknown probe: its requests come
+            // before the final save, and a slice still catching up, or one that will
+            // retry its failures, should commit its own mail first.
+            let repairTimer = timing.start("historyRecoveryRepair")
+            let recoveryRepairStep = try await planHistoryRecoveryRepair(
+                accountEmail: accountData.email,
+                allowsExpensiveWork: allowsExpensiveRecovery
+                    && historyResult.nextPageToken == nil
+                    && !fetchResult.hasFailures,
+                in: context
+            )
+            timing.finish(repairTimer, detail: recoveryRepairStep.map { "\($0.plan.progress)" } ?? "none")
 
             // Resolve this slice's ledger before advancing either continuation
             // or cursor. Below the failure threshold the current checkpoint is
@@ -496,7 +526,11 @@ final class IncrementalSyncOrchestrator {
                 log.info("History slice remains at its current durable position for retry")
             }
 
-            let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            let trackedModifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            // The repair's conversations take their turns with the rest, and get their
+            // rollups recomputed whether or not the repair ends up changing them.
+            let modifiedConversations = trackedModifiedConversations
+                .union(recoveryRepairStep?.plan.conversationObjectIDs ?? [])
             let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
@@ -520,6 +554,11 @@ final class IncrementalSyncOrchestrator {
                         conversationIDs: affectedConversationIDs,
                         in: context
                     ) {
+                        // Inside the conversations' turns, so an Archive or a mark-read
+                        // of one of them is wholly before or after it.
+                        if let recoveryRepairStep {
+                            try await self.applyHistoryRecoveryRepair(recoveryRepairStep, in: context)
+                        }
                         if !modifiedConversations.isEmpty {
                             await conversationManager.updateRollupsForModifiedConversations(
                                 conversationIDs: modifiedConversations,
@@ -931,6 +970,16 @@ final class IncrementalSyncOrchestrator {
                 // The replacement cursor and deletion of every state derived
                 // from the expired cursor commit together.
                 try await recoveryWindowCheckpointStore.stageClear(in: context)
+                // The rows stored before the window were not visited: whatever happened
+                // to them during the gap is in no history the new cursor returns. Owed
+                // from the end of time, never the device's clock, which can be behind
+                // the rows; a repair a recovery before this one left unfinished starts
+                // over, since this gap's changes can be on rows it had already compared.
+                try await recoveryRepairStore.stageOwed(
+                    upperBound: .distantFuture,
+                    accountEmail: accountEmail,
+                    in: context
+                )
                 await messagePersister.setAccountHistoryId(cursorHistoryId, in: context)
             } else {
                 // A held recovery keeps its frozen window so the retry
@@ -996,6 +1045,74 @@ final class IncrementalSyncOrchestrator {
         }
     }
 
+    /// One planned batch of an owed history-recovery repair, and the bound it was owed at.
+    struct RecoveryRepairStep: Sendable {
+        let plan: HistoryRecoveryRepair.Plan
+        let owed: HistoryRecoveryRepairCheckpoint
+    }
+
+    /// Plans the next batch of an owed history-recovery repair, or returns nil when none
+    /// is owed or the run may not do expensive work. Writes nothing: the plan is applied,
+    /// and its progress staged, in the final save's rollup block
+    /// (`applyHistoryRecoveryRepair`). Cancellation and account-scoped failures are
+    /// rethrown and end the run.
+    private func planHistoryRecoveryRepair(
+        accountEmail: String,
+        allowsExpensiveWork: Bool,
+        in context: NSManagedObjectContext
+    ) async throws -> RecoveryRepairStep? {
+        guard allowsExpensiveWork,
+              let owed = try await recoveryRepairStore.load(accountEmail: accountEmail, in: context) else {
+            return nil
+        }
+        let plan = try await HistoryRecoveryRepair(messageFetcher: messageFetcher)
+            .planNextBatch(before: owed.upperBound, in: context)
+        return RecoveryRepairStep(plan: plan, owed: owed)
+    }
+
+    /// Applies a planned batch and stages its progress, after the application: a row it
+    /// left alone because a user's action was queued meanwhile keeps the bound above it.
+    /// Only inside the final save's rollup block.
+    private func applyHistoryRecoveryRepair(
+        _ step: RecoveryRepairStep,
+        in context: NSManagedObjectContext
+    ) async throws {
+        let skippedDates = try await HistoryRecoveryRepair.apply(step.plan, in: context)
+        let applied = HistoryRecoveryRepairPolicy.progressAfterApply(
+            planned: step.plan.progress,
+            owedUpperBound: step.owed.upperBound,
+            skippedDates: skippedDates
+        )
+        let (progress, runsWithoutProgress) = HistoryRecoveryRepairPolicy.progressAfterStall(
+            applied,
+            owedUpperBound: step.owed.upperBound,
+            runsWithoutProgressBefore: step.owed.runsWithoutProgress,
+            escapeBound: step.plan.escapeBound
+        )
+        switch progress {
+        case .holds:
+            try await recoveryRepairStore.stageOwed(
+                upperBound: step.owed.upperBound,
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
+        case .advances(let upperBound):
+            if case .advances(let planned) = applied, planned >= step.owed.upperBound, upperBound < step.owed.upperBound {
+                log.warning("History-recovery repair stepped past a row that held it for \(HistoryRecoveryRepairPolicy.maximumRunsWithoutProgress) runs")
+            }
+            try await recoveryRepairStore.stageOwed(
+                upperBound: min(upperBound, step.owed.upperBound),
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
+        case .finished:
+            log.info("History-recovery repair finished")
+            try await recoveryRepairStore.stageClear(in: context)
+        }
+    }
+
     /// Recovery normally starts just before `lastSuccessfulSyncTime`. Without
     /// it (teardown clears it, including the paths that keep the store and
     /// the expired cursor), the install branch would re-list the whole
@@ -1013,15 +1130,25 @@ final class IncrementalSyncOrchestrator {
             return PagedSyncListing(resuming: frozen, now: Date().timeIntervalSince1970)
         }
 
+        // Gmail's time where the device's is ahead of it: the stored times are read as no
+        // later than this, which can only move the window's start earlier. Never a cap:
+        // recovery stays uncapped (`SyncTimeCalculator.Config.historyRecovery`).
+        let now = serverTime.conservativeNow().timeIntervalSince1970
         let windowStart: TimeInterval
         if defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
-            windowStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, defaults: defaults)
+            windowStart = SyncTimeCalculator.calculateStartTime(
+                config: .historyRecovery,
+                now: now,
+                deviceClockLead: serverTime.deviceClockLead(),
+                defaults: defaults
+            )
         } else {
             // A failed read throws and holds the run: falling back to the
             // unbounded install branch is the whole-mailbox re-list this bounds.
-            let newestReceived = try await Self.newestReceivedInternalDate(in: context)
+            let newestReceived = try await Self.newestReceivedInternalDate(in: context, now: now)
             windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
                 newestReceivedInternalDate: newestReceived,
+                now: now,
                 defaults: defaults
             )
         }
@@ -1037,15 +1164,17 @@ final class IncrementalSyncOrchestrator {
     }
 
     nonisolated private static func newestReceivedInternalDate(
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        now: TimeInterval
     ) async throws -> TimeInterval? {
         try await context.perform {
             let request = NSFetchRequest<NSDictionary>(entityName: "Message")
             // A future-dated row (skewed sender clock, imported mail) would
-            // anchor the window at now and skip the whole gap.
+            // anchor the window at now and skip the whole gap. `now` is the
+            // conservative one: internal dates are Gmail's times.
             request.predicate = NSPredicate(
                 format: "isFromMe == NO AND internalDate <= %@",
-                Date() as NSDate
+                Date(timeIntervalSince1970: now) as NSDate
             )
             request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
             request.fetchLimit = 1
