@@ -1282,9 +1282,21 @@ private struct TokenizingScanner {
     private var firstPossibleCopyAtByName: [[UInt8]: Int] = [:]
     /// Names kept since the last token that may rebuild.
     private var keptAwaitingRebuild: Set<[UInt8]> = []
-    /// By formatting name, the kept ones the agency has certainly taken out
-    /// of the list (`consumeAKeptOne`).
-    private var keptConsumedByName: [[UInt8]: Int] = [:]
+    /// By formatting name, the elements popped but kept in the active
+    /// formatting list, in the order they were pushed, which is the list's:
+    /// the agency takes the last one (`consumeAKeptOne`), and its counts go
+    /// with it.
+    private var keptByName: [[UInt8]: [(pushedAt: Int, key: Int, weight: Int)]] = [:]
+    /// By formatting name, the `pushCount` after which a copy of a kept one
+    /// may still be on the builder's stack though out of the list (Noah's
+    /// ark took its entry, or the agency did not find it): an end tag of the
+    /// name may close it, with everything above it, through
+    /// `anyOtherEndTag`.
+    private var lingeringCopySinceByName: [[UInt8]: Int] = [:]
+    /// The `pushCount` at the last token that may have rebuilt formatting
+    /// elements while some may be off the builder's stack: after it the
+    /// builder's current node may be a copy above the innermost element.
+    private var lastRebuildAt = 0
     /// Over the formatting keys, the held elements of each, at most three
     /// (Noah's ark): the most the tree builder can rebuild at one token,
     /// whatever this scan knows about which are open.
@@ -1590,6 +1602,12 @@ private struct TokenizingScanner {
     /// builder does (`crossingClose`). Otherwise nothing is closed here, and
     /// what the tree builder may have closed is marked.
     private mutating func closeElement(named name: [UInt8]) {
+        if let since = lingeringCopySinceByName[name] {
+            let from = firstPosition(pushedAfter: since)
+            if from < stack.count {
+                markPossiblyClosed(from: from)
+            }
+        }
         if ScannedTagName.formattingNames.contains(name) {
             // An end tag the agency cannot act on is ignored by the builder
             // (`anyOtherEndTag` stops at the boundary, which is special), so
@@ -1661,6 +1679,13 @@ private struct TokenizingScanner {
                     releaseFormatting(element)
                 } else {
                     keptWeight += element.weight
+                    if !element.retiredFromTheList {
+                        // In place: a copy of the array at every keep was
+                        // quadratic in the kept ones.
+                        let entry = (pushedAt: element.pushedAt, key: element.formattingKey, weight: element.weight)
+                        let at = keptByName[element.name]?.lastIndex { $0.pushedAt < element.pushedAt }.map { $0 + 1 } ?? 0
+                        keptByName[element.name, default: []].insert(entry, at: at)
+                    }
                     if firstKeptAtByName[element.name] == nil {
                         firstKeptAtByName[element.name] = pushCount
                         keptAwaitingRebuild.insert(element.name)
@@ -1831,13 +1856,16 @@ private struct TokenizingScanner {
         let retired = retiredByName[name, default: 0]
         let onStack = positionsByName[name] ?? []
         let live = onStack[min(retired, onStack.count)...]
-        let kept = formattingHeldByName[name, default: 0] - onStack.count - keptConsumedByName[name, default: 0]
+        let kept = formattingHeldByName[name, default: 0] - onStack.count
         return (live, max(0, kept))
     }
 
     /// A token after which the builder may have rebuilt formatting elements
     /// (any run of text, and a start tag whose handler rebuilds).
     private mutating func noteTokenThatMayRebuild() {
+        if rebuildCandidates > 0 {
+            lastRebuildAt = pushCount
+        }
         guard !keptAwaitingRebuild.isEmpty else { return }
         for name in keptAwaitingRebuild where firstPossibleCopyAtByName[name] == nil {
             firstPossibleCopyAtByName[name] = pushCount
@@ -1857,8 +1885,8 @@ private struct TokenizingScanner {
     /// document, and `<p><strong>…</p></strong>` marked the whole stack at
     /// every line.
     private mutating func consumeAKeptOne(_ name: [UInt8], atStartTag: Bool) {
-        let (_, kept) = listEntries(of: name)
-        guard kept > 0, let keptAt = firstKeptAtByName[name], latestMarkerPossiblyLeftInTheList < keptAt else {
+        guard let last = keptByName[name]?.last,
+              let keptAt = firstKeptAtByName[name], latestMarkerPossiblyLeftInTheList < keptAt else {
             return
         }
         if let marker = markerPositions.last, stack[marker].pushedAt > keptAt {
@@ -1872,11 +1900,17 @@ private struct TokenizingScanner {
             if copiedFrom < stack.count {
                 markPossiblyClosed(from: copiedFrom)
             }
+            // The copy may stay on the stack out of the list (Noah's ark
+            // took it before this tag), where a later end tag closes it.
+            lingeringCopySinceByName[name] = min(lingeringCopySinceByName[name] ?? copyAt, copyAt)
         } else {
-            openWeight -= ScannedTagName.weight(of: name)
+            openWeight -= last.weight
         }
-        keptConsumedByName[name, default: 0] += 1
-        if kept == 1 {
+        keptByName[name]?.removeLast()
+        formattingHeldByName[name, default: 0] -= 1
+        formattingHeld -= 1
+        updateRebuildCandidates(key: last.key) { $0.heldByKey[last.key] -= 1 }
+        if keptByName[name]?.isEmpty ?? true {
             firstKeptAtByName[name] = nil
             latestKeptAtByName[name] = nil
             firstPossibleCopyAtByName[name] = nil
@@ -2174,8 +2208,14 @@ private struct TokenizingScanner {
         if N.closesParagraph.contains(name), name != N.form, innermostIs(N.p) {
             popInnermostForStartTag()
         }
+        // A copy rebuilt since the heading was pushed may be the current
+        // node above it, where SwiftSoup closes no heading.
         if N.headings.contains(name), headingWasInnermost, innermostIs(in: N.headings) {
-            popInnermostForStartTag()
+            if stack[stack.count - 1].pushedAt > lastRebuildAt {
+                popInnermostForStartTag()
+            } else {
+                markPossiblyClosed(from: stack.count - 1)
+            }
         }
         if name == N.li, innermostIs(N.li) {
             popInnermostForStartTag()

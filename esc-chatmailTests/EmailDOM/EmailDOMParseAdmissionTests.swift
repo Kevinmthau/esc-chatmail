@@ -335,7 +335,14 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// - SwiftSoup closes a heading for a heading only if the current node
     ///   was one before it closed the `p`, so the second `h1` nests in the
     ///   first, which keeps its `<br>`s. Revert-check: `headingWasInnermost`
-    ///   in `closeImpliedElements`.
+    ///   in `closeImpliedElements`. Nor when a copy rebuilt since the
+    ///   heading was pushed is the current node: text after `</p>` rebuilds
+    ///   the `b` inside the first `h1`. Revert-check: `lastRebuildAt` in
+    ///   `closeImpliedElements`.
+    /// - A copy of a kept `b` that Noah's ark took out of the list stays on
+    ///   the stack, and a later `</b>` closes it with the `span` above it
+    ///   (`anyOtherEndTag`), whose `<br>`s go to the `div`. Revert-check:
+    ///   `lingeringCopySinceByName` in `closeElement`.
     func testChildMoveWork_childrenGivenToALowerElement_reachIt() {
         let children = 1_000
         let brs = String(repeating: "<br>", count: 1_000)
@@ -353,6 +360,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             ("<p><a>t</p><table><td><table></table><a></a></table>z<div>" + brs + "</a>", false),
             ("<div><ruby><b><rp></rp><table>x<p>" + brs + "</b>", false),
             ("<a><h1>" + brs + "<p><h1></a>", false),
+            ("<font><h1>" + brs + "<p><b>t</p> <h1></font>", false),
+            ("<i><div><p><b>t</p>x<b><b><b></b></b></b><p></b></p><span></b>" + brs + "</span></i>", false),
+            ("<i><div><p><b>t</p>x" + String(repeating: "<b class=x>", count: 4) + String(repeating: "</b>", count: 4)
+                + "<p></b></p><span></b>" + brs + "</span></i>", false),
         ]
         for shape in shapes {
             XCTAssertGreaterThanOrEqual(
@@ -405,7 +416,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// `lowestTargetOfStartTag` (a stray `</font>` between rows), the
     /// effective kept count in `markPossiblyClosed(by:)` (`</strong>` after
     /// `</p>` on every line), the copy branch of `consumeAKeptOne` (`</b>`
-    /// after text rebuilt it).
+    /// after text rebuilt it), and the release of a kept one's counts in
+    /// `consumeAKeptOne` (4,000 lines of `<p><font face=Arial>text</p></font>`,
+    /// whose held `font`s otherwise grew a line at a time, and with them the
+    /// active-formatting comparisons).
     func testChildMoveWork_strayFormattingEndTags_chargeNothing() {
         func lines(_ count: Int, _ line: String) -> String { String(repeating: line, count: count) }
         let mailingTemplate = "<font face=Arial><center>"
@@ -423,6 +437,8 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             "<font face=Arial><table width=600>" + lines(200, "<tr><td><font size=2>Row text</td></tr></font>\n") + "</table></font>",
             "<div><font face=Verdana><center>" + lines(1_000, "<p><strong>text<br></p></strong>\n") + "</center></font></div>",
             "<div><font face=Verdana><center>" + lines(1_000, "<p><b>x</p> tail</b>\n") + "</center></font></div>",
+            "<div>" + lines(4_000, "<p><font face=Arial>text</p></font>\n"),
+            "<div><font face=Verdana><center>" + lines(3_000, "<p><strong>text<br></p></strong>\n") + "</center></font></div>",
         ]
         for html in shapes {
             XCTAssertLessThan(EmailDOMParseAdmission.estimatedCost(of: html).childMoveWork, 100_000, String(html.prefix(40)))
