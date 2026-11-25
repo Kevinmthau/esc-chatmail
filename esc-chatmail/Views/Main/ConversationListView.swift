@@ -257,7 +257,10 @@ struct ConversationListView: View {
     }
 
     private var filterMenu: some View {
-        ConversationFilterMenu(currentFilter: viewModel.currentFilter) { filter in
+        ConversationFilterMenu(
+            currentFilter: viewModel.currentFilter,
+            showsDiagnosticsShare: AppPlatform.current == .iOS
+        ) { filter in
             // Each choice resigns search focus itself: the menu now
             // sits in the navigation bar, where SwiftUI hosts it as a
             // native bar-button menu and a gesture on its label (the
