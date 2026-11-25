@@ -146,7 +146,8 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
             appVersion: "1.0",
             appBuild: "612",
             osVersion: "iOS 27.0",
-            generatedAt: Date(timeIntervalSince1970: 0)
+            generatedAt: Date(timeIntervalSince1970: 0),
+            backgroundRuns: []
         )
 
         let report = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])

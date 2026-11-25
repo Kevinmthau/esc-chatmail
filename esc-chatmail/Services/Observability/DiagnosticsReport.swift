@@ -18,7 +18,7 @@ enum DiagnosticsReport {
         appBuild: String?,
         osVersion: String,
         generatedAt: Date,
-        backgroundRuns: [Any] = []
+        backgroundRuns: [Any]
     ) -> Data {
         let records: [[String: Any]] = recordContents.map { name, data in
             var record: [String: Any] = ["file": name]

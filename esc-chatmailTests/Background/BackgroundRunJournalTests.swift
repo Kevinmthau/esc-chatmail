@@ -105,11 +105,21 @@ final class BackgroundRunJournalTests: XCTestCase {
         XCTAssertEqual(journal.entries().map(\.outcome), [.started, .completed])
     }
 
-    func testReport_carriesTheJournal() throws {
+    // Revert-check: fails if `DiagnosticsReport.writeFile` stops passing
+    // `backgroundRunsForReport()`: the shared file would then carry no runs.
+    func testReportFile_carriesTheJournal() throws {
         BackgroundRunJournal.shared.append(entry(42, outcome: .noSessionYet))
+        let temporary = FileManager.default.temporaryDirectory
+            .appendingPathComponent("BackgroundRunJournalTests-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = DiagnosticsRecordStore(directory: temporary.appendingPathComponent("Records", isDirectory: true))
 
-        let runs = try XCTUnwrap(DiagnosticsReport.backgroundRunsForReport() as? [[String: Any]])
+        let url = try DiagnosticsReport.writeFile(store: store, temporaryDirectory: temporary)
 
+        let report = try XCTUnwrap(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        )
+        let runs = try XCTUnwrap(report["backgroundRuns"] as? [[String: Any]])
         XCTAssertEqual(runs.last?["outcome"] as? String, "noSessionYet")
         XCTAssertEqual(runs.last?["task"] as? String, "processing")
     }
