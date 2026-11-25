@@ -1430,7 +1430,11 @@ final class ChatViewModelTests: XCTestCase {
                     }
                     row.localURL = downloadedPath
                     row.state = .downloaded
-                    XCTAssertNoThrow(try background.save())
+                    do {
+                        try background.save()
+                    } catch {
+                        XCTFail("Saving the download failed: \(error)")
+                    }
                 }
             }
         )
