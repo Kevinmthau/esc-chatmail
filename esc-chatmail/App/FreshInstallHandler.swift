@@ -254,8 +254,11 @@ struct FreshInstallHandler {
     private func clearCoreData() async {
         Log.debug("Clearing Core Data", category: .coreData)
         do {
-            try await CoreDataStack.shared.destroyAndReloadAsync()
-            Log.debug("Core Data cleared and reloaded", category: .coreData)
+            // Removed without being loaded: this runs before the launch's
+            // first load (`AppStartupBootstrap`), which then opens an empty
+            // store, so the old store's migration never runs.
+            try await CoreDataStack.shared.removeStoreForFreshInstall()
+            Log.debug("Core Data cleared", category: .coreData)
         } catch {
             Log.warning("Failed to clear Core Data: \(error)", category: .coreData)
         }
