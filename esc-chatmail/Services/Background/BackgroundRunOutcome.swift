@@ -16,8 +16,13 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
     case failed
     /// Skipped: the device is too full to sync.
     case deferredForInsufficientStorage
-    /// Nobody is signed in (or the account was signed out): a successful no-op.
-    case noSession
+    /// The account was signed out for good: a successful no-op (and the cadence was swept).
+    case signedOut
+    /// No session, though the account may still be held: the launch restore failed with
+    /// the credentials kept (offline, Google unreachable). Reported as success, as it
+    /// always was, so the cadence lives on; worth a warning, since every run like it is a
+    /// mailbox that did not sync.
+    case noSessionYet
     /// The launch's persistence or auth restore did not get ready.
     case notReady
     /// The run was cancelled, by expiration or before it began.
@@ -29,7 +34,7 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
 
     var reportsSuccess: Bool {
         switch self {
-        case .completed, .blockedNoRetry, .noSession, .maintenanceSucceeded:
+        case .completed, .blockedNoRetry, .signedOut, .noSessionYet, .maintenanceSucceeded:
             return true
         case .needsFollowUp, .blockedRetrying, .failed, .deferredForInsufficientStorage,
              .notReady, .cancelled, .maintenanceFailed:
@@ -40,7 +45,7 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
     /// An ending worth one warning line in a Release build.
     var isAbnormal: Bool {
         switch self {
-        case .failed, .notReady, .maintenanceFailed:
+        case .failed, .notReady, .noSessionYet, .maintenanceFailed:
             return true
         default:
             return false

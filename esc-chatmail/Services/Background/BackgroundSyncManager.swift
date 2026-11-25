@@ -322,7 +322,7 @@ final class BackgroundSyncManager {
             await cancelPendingRequestsIfDurablySignedOut()
             return .cancelled
         }
-        let canAccessMailbox = await MainActor.run { () -> Bool in
+        let (canAccessMailbox, wasDurablySignedOut) = await MainActor.run { () -> (Bool, Bool) in
             let isDurablySignedOut = authoritativeSyncIsDurablySignedOut()
             guard authoritativeSyncIsAuthenticated(), !isDurablySignedOut else {
                 // A stale request delivered after logout is a successful no-op.
@@ -333,13 +333,15 @@ final class BackgroundSyncManager {
                 if isDurablySignedOut {
                     taskScheduler.cancelPendingTaskRequests()
                 }
-                return false
+                return (false, isDurablySignedOut)
             }
-            return true
+            return (true, false)
         }
         guard !Task.isCancelled else { return .cancelled }
         guard canAccessMailbox else {
-            return .noSession
+            // Both report success, as before; the journal tells a signed-out device from
+            // one whose restore keeps failing with the account still held.
+            return wasDurablySignedOut ? .signedOut : .noSessionYet
         }
 
         BackgroundSyncStateManager.clearContinuationState(in: defaults)

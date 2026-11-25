@@ -935,6 +935,33 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(entry?.reportedSuccess, false)
     }
 
+    // Revert-check: fails if a run with no session is journaled the same whether the
+    // account was signed out for good or is only held after a failed restore.
+    func testTaskRunner_noSession_tellsSignedOutFromHeld() async {
+        for (isDurablySignedOut, expected) in [(true, BackgroundRunOutcome.signedOut), (false, .noSessionYet)] {
+            let journal = BackgroundRunJournal(
+                defaults: UserDefaults(suiteName: "BackgroundSyncManagerTests.journal.\(UUID().uuidString)")!
+            )
+            let completion = BackgroundTaskCompletionProbe()
+            let manager = makeManager(
+                authoritativeSyncIsAuthenticated: { false },
+                authoritativeSyncIsDurablySignedOut: { isDurablySignedOut },
+                runJournal: journal
+            )
+
+            manager.runBackgroundTaskOperation(
+                budget: .appRefresh,
+                journalName: "appRefresh",
+                installExpirationHandler: { _ in },
+                onComplete: { completion.record($0) }
+            )
+            await waitUntil { completion.outcomes.count == 1 }
+
+            XCTAssertEqual(completion.outcomes, [true], "Reported as success either way, as before")
+            XCTAssertEqual(journal.entries().map(\.outcome), [expected])
+        }
+    }
+
     func testTaskRunner_completedRun_isJournaledWithItsOutcome() async {
         let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: .completed) }
         let journal = BackgroundRunJournal(

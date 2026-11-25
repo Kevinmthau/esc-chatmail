@@ -46,17 +46,85 @@ final class BackgroundRunJournalTests: XCTestCase {
         XCTAssertEqual(journal.entries(), [entry(7)])
     }
 
-    /// `reportsSuccess` is what each path of `performAuthoritativeSync` used to return.
-    func testOutcomes_reportWhatTheRunUsedToReturn() {
-        let succeeding: Set<BackgroundRunOutcome> = [.completed, .blockedNoRetry, .noSession, .maintenanceSucceeded]
+    /// The outcomes reported as success. That each path maps to the right outcome is pinned
+    /// by `BackgroundSyncManagerTests`' existing `performAuthoritativeSync` Bool tests.
+    func testOutcomes_reportedAsSuccess() {
+        let succeeding: Set<BackgroundRunOutcome> = [
+            .completed, .blockedNoRetry, .signedOut, .noSessionYet, .maintenanceSucceeded
+        ]
         for outcome in BackgroundRunOutcome.allCases {
             XCTAssertEqual(outcome.reportsSuccess, succeeding.contains(outcome), outcome.rawValue)
         }
     }
 
+    func testReport_carriesTheJournal() throws {
+        BackgroundRunJournal.shared.append(entry(42, outcome: .noSessionYet))
+
+        let runs = try XCTUnwrap(DiagnosticsReport.backgroundRunsForReport() as? [[String: Any]])
+
+        XCTAssertEqual(runs.last?["outcome"] as? String, "noSessionYet")
+        XCTAssertEqual(runs.last?["task"] as? String, "processing")
+    }
+
+    // Revert-check: fails if `BackgroundTaskRegistry.runTaskOperation` records the run
+    // after `completionLatch.complete` (or not at all), or maps an expired handler's
+    // success to anything but an expired, unreported entry.
+    func testMaintenanceRunner_journalsBeforeItReports() async {
+        let journal = BackgroundRunJournal(defaults: makeDefaults())
+        let registry = BackgroundTaskRegistry(
+            registerLaunchHandler: { _, _ in },
+            submitTaskRequest: { _ in },
+            pendingTaskIdentifiers: { [] },
+            cancelPendingTaskRequest: { _ in },
+            runJournal: journal
+        )
+        let completed = expectation(description: "completed")
+        let seen = JournalAtReportProbe()
+        var expire: (() -> Void)?
+
+        registry.runTaskOperation(
+            identifier: "com.esc.inboxchat.database.analyze",
+            handler: {
+                while !Task.isCancelled { try? await Task.sleep(nanoseconds: 2_000_000) }
+                return true
+            },
+            installExpirationHandler: { expire = $0 },
+            onComplete: { reported in
+                seen.record(journal.entries(), reported: reported)
+                completed.fulfill()
+            }
+        )
+        expire?()
+        await fulfillment(of: [completed], timeout: 4)
+
+        XCTAssertEqual(seen.reported, false)
+        XCTAssertEqual(seen.entries.count, 1)
+        XCTAssertEqual(seen.entries.first?.task, "database.analyze")
+        XCTAssertEqual(seen.entries.first?.outcome, .maintenanceSucceeded)
+        XCTAssertEqual(seen.entries.first?.expired, true)
+        XCTAssertEqual(seen.entries.first?.reportedSuccess, false)
+    }
+
     func testMaintenanceJournalName_dropsTheBundlePrefix() {
         XCTAssertEqual(BackgroundTaskRegistry.journalName(for: "com.esc.inboxchat.database.analyze"), "database.analyze")
         XCTAssertEqual(BackgroundTaskRegistry.journalName(for: "other.task"), "other.task")
+    }
+}
+/// What the journal held when the task was reported. `@unchecked Sendable`: `lock` guards
+/// both fields.
+private final class JournalAtReportProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedEntries: [BackgroundRunJournal.Entry] = []
+    private var storedReported: Bool?
+
+    var entries: [BackgroundRunJournal.Entry] { lock.withLock { storedEntries } }
+    var reported: Bool? { lock.withLock { storedReported } }
+
+    func record(_ entries: [BackgroundRunJournal.Entry], reported: Bool) {
+        lock.withLock {
+            storedEntries = entries
+            storedReported = reported
+        }
     }
 }
 #endif

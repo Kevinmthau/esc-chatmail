@@ -11,6 +11,9 @@ import Foundation
 /// - It is written before the task's `setTaskCompleted` (`BackgroundTaskCompletionLatch`'s
 ///   `beforeReporting`): iOS may suspend the process as soon as that call returns.
 /// - At most `capacity` entries; the oldest go first.
+/// - Before the device's first unlock the preferences cannot be read: the list then reads
+///   as empty and the entry written may be lost, or may replace the earlier history.
+///   Nothing waits on it either way (not measured on a device).
 /// - Shared via Share Diagnostics (`DiagnosticsReport`).
 ///
 /// `@unchecked Sendable`: `lock` serializes every read and write of the stored list; the
