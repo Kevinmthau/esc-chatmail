@@ -19,6 +19,7 @@ final class StubURLProtocol: URLProtocol {
     private static var _requestCount = 0
     private static var _requestURLs: [URL] = []
     private static var _requests: [URLRequest] = []
+    private static var _onStartLoading: (@Sendable (URLRequest) -> Void)?
 
     static var script: [Response] {
         get { lock.withLock { _script } }
@@ -41,8 +42,17 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock { _requests }
     }
 
+    /// Called with each request as it starts loading, before it is answered:
+    /// lets a test look at what exists at that moment (an upload's file) and
+    /// read an upload's body from `httpBodyStream`.
+    static var onStartLoading: (@Sendable (URLRequest) -> Void)? {
+        get { lock.withLock { _onStartLoading } }
+        set { lock.withLock { _onStartLoading = newValue } }
+    }
+
     static func reset() {
         lock.withLock {
+            _onStartLoading = nil
             _script = []
             _requestCount = 0
             _requestURLs = []
@@ -73,6 +83,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.onStartLoading?(request)
         guard let url = request.url, let response = Self.nextResponse(for: request) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return

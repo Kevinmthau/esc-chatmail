@@ -9,6 +9,56 @@ private actor StreamedSendBarrierProbe {
     }
 }
 
+/// What one attempt looked like as it started: the body the loading system handed
+/// the protocol (an upload's `httpBodyStream`, drained) and the upload files on disk.
+private struct StreamedSendAttempt {
+    let contentType: String?
+    let streamedBody: Data?
+    let uploadFiles: [Data]
+}
+
+/// Collects `StreamedSendAttempt`s from `StubURLProtocol.onStartLoading`, which runs on
+/// the loading system's thread. `@unchecked Sendable`: `lock` guards `attempts`.
+private final class StreamedSendAttemptRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _attempts: [StreamedSendAttempt] = []
+    private let uploadDirectory: URL
+
+    init(uploadDirectory: URL) {
+        self.uploadDirectory = uploadDirectory
+    }
+
+    var attempts: [StreamedSendAttempt] {
+        lock.withLock { _attempts }
+    }
+
+    func record(_ request: URLRequest) {
+        let files = ((try? FileManager.default.contentsOfDirectory(
+            at: uploadDirectory,
+            includingPropertiesForKeys: nil
+        )) ?? []).compactMap { try? Data(contentsOf: $0) }
+        let attempt = StreamedSendAttempt(
+            contentType: request.value(forHTTPHeaderField: "Content-Type"),
+            streamedBody: request.httpBodyStream.map(Self.drain),
+            uploadFiles: files
+        )
+        lock.withLock { _attempts.append(attempt) }
+    }
+
+    private static func drain(_ stream: InputStream) -> Data {
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        stream.open()
+        defer { stream.close() }
+        while true {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
+    }
+}
+
 /// The real `GmailAPIClient` through `StubURLProtocol`: messages.send goes to the
 /// upload endpoint as a multipart body streamed from a file, the file lives exactly
 /// as long as the send, and the send's outcome rules are those of the in-memory body
@@ -48,6 +98,24 @@ final class GmailAPIClientStreamedSendTests: XCTestCase {
             retryClock: FakeSyncClock(),
             sendUploadDirectory: uploadDirectory
         )
+    }
+
+    private func expectedBody(boundary: String, threadId: String?) -> Data {
+        let metadata = threadId.map { #"{"threadId":"\#($0)"}"# } ?? "{}"
+        return Data(
+            ("--\(boundary)\r\n"
+                + "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+                + metadata
+                + "\r\n--\(boundary)\r\n"
+                + "Content-Type: message/rfc822\r\n\r\n").utf8
+        ) + Self.mime + Data("\r\n--\(boundary)--\r\n".utf8)
+    }
+
+    private func boundary(of contentType: String?) throws -> String {
+        let prefix = "multipart/related; boundary="
+        let value = try XCTUnwrap(contentType)
+        XCTAssertTrue(value.hasPrefix(prefix), value)
+        return String(value.dropFirst(prefix.count))
     }
 
     private func uploadFilesLeft() -> [String] {
@@ -106,19 +174,49 @@ final class GmailAPIClientStreamedSendTests: XCTestCase {
         XCTAssertEqual(uploadFilesLeft(), [])
     }
 
+    /// What goes out is the file, and the file is the multipart body.
+    ///
+    /// Revert-check: the `if let bodyFile` branch in
+    /// `GmailAPIClient.performRetryingRequest`, or `uploadingBodyFrom:` in
+    /// `sendMessage(mimeData:…)`: the send then goes out as a data task with no
+    /// body, and the protocol is handed no body stream.
+    /// HONEST SCOPE: that the loading system hands a custom protocol an upload's
+    /// file as `httpBodyStream` is URLSession's behavior, read here and not
+    /// documented; the file assertions hold whether or not it does.
+    func testSendMessage_uploadsTheMultipartBodyFromItsFile() async throws {
+        let recorder = StreamedSendAttemptRecorder(uploadDirectory: uploadDirectory)
+        StubURLProtocol.onStartLoading = { recorder.record($0) }
+        StubURLProtocol.script = [.data(200, Self.sendResponseBody)]
+
+        _ = try await client.sendMessage(mimeData: Self.mime, threadId: "thread-1")
+
+        let attempt = try XCTUnwrap(recorder.attempts.first)
+        let sentBoundary = try boundary(of: attempt.contentType)
+        let expected = expectedBody(boundary: sentBoundary, threadId: "thread-1")
+        XCTAssertEqual(attempt.uploadFiles, [expected], "One file, the multipart body, while the upload runs")
+        XCTAssertEqual(attempt.streamedBody, expected, "The request's body is the file")
+    }
+
     /// The retry after a 401 uploads the same file again, so the file must still be
-    /// there for it. Revert-check: removing the file after each attempt makes the
-    /// second attempt fail on a missing file instead of reaching the scripted 200.
+    /// there for it. Revert-check: removing the file after each attempt (or the
+    /// `defer` moving above the retry loop) leaves the second attempt no file.
     func testSendMessage_unauthorizedThenSuccess_uploadsTheSameFileTwiceThenRemovesIt() async throws {
+        let recorder = StreamedSendAttemptRecorder(uploadDirectory: uploadDirectory)
+        StubURLProtocol.onStartLoading = { recorder.record($0) }
         StubURLProtocol.script = [.status(401), .data(200, Self.sendResponseBody)]
 
         let response = try await client.sendMessage(mimeData: Self.mime)
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2)
-        let boundaries = StubURLProtocol.requests.compactMap { $0.value(forHTTPHeaderField: "Content-Type") }
-        XCTAssertEqual(boundaries.count, 2)
-        XCTAssertEqual(Set(boundaries).count, 1, "Both attempts carry the one body")
+        let attempts = recorder.attempts
+        XCTAssertEqual(attempts.count, 2)
+        let sentBoundary = try boundary(of: attempts.first?.contentType)
+        let expected = expectedBody(boundary: sentBoundary, threadId: nil)
+        for attempt in attempts {
+            XCTAssertEqual(attempt.uploadFiles, [expected], "Every attempt finds the one body file")
+            XCTAssertEqual(attempt.streamedBody, expected, "Every attempt sends it")
+        }
         XCTAssertEqual(uploadFilesLeft(), [])
     }
 
