@@ -2253,9 +2253,8 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// A row whose answer cannot be read gets the same answer on every retry: it is left
     /// as it is and the repair moves past it, never held at it for good.
     ///
-    /// Revert-check: the `APIError.decodingError, APIError.invalidData` case in
-    /// `HistoryRecoveryRepair.askGmail` (the row is then unanswered and the bound stays
-    /// just above it).
+    /// Revert-check: the `APIError.decodingError` case in `HistoryRecoveryRepair.askGmail`
+    /// (the row is then unanswered and the bound stays just above it).
     @MainActor
     func testOwedRepair_unreadableAnswer_movesPastTheRow() async throws {
         let base = Date().addingTimeInterval(-3 * 86_400)
