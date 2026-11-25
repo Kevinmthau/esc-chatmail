@@ -18,8 +18,9 @@ struct AttachmentGrid: View {
                 AttachmentGridItem(
                     attachment: attachment,
                     downloader: downloader,
-                    showOverlay: attachments.count > 6 && attachment == attachments[5],
-                    overlayCount: attachments.count - 5,
+                    showOverlay: attachments.count > Self.visibleCellCount
+                        && attachment == attachments[Self.visibleCellCount - 1],
+                    overlayCount: attachments.count - (Self.visibleCellCount - 1),
                     imagePresentation: imagePresentations[attachment.objectID] ?? .standard,
                     onTap: { onTap(attachment) }
                 )
@@ -39,19 +40,23 @@ struct AttachmentGrid: View {
         // The grid draws six cells and folds the rest into the sixth's "+N", which opens them
         // in Quick Look (and on the Mac, Save All saves them). Attachments download only when
         // asked for (`AttachmentDownloader`), and those past the sixth have no view of their
-        // own to ask when it appears, so the grid asks for them when it appears.
-        .task(id: overflowAttachmentIDs) {
-            for attachment in attachments.dropFirst(Self.visibleCellCount) {
-                guard !Task.isCancelled else { return }
-                guard !attachment.isDeleted, attachment.managedObjectContext != nil else { continue }
-                await downloader.downloadAttachmentIfNeeded(for: attachment)
+        // own to ask when it appears, so the grid asks for them when it appears. Not a
+        // `.task`, which a lazy list cancels as the grid scrolls away: like the cells' own
+        // downloads, these run to their end.
+        .onAppear {
+            let overflow = attachments.dropFirst(Self.visibleCellCount).filter {
+                !$0.isDeleted && $0.managedObjectContext != nil &&
+                    !InlineImagePresentationPolicy.requiresExplicitRetry(attachment: $0, isFromMe: $0.message?.isFromMe ?? false)
+            }
+            guard !overflow.isEmpty else { return }
+            Task {
+                for attachment in overflow where !attachment.isDeleted {
+                    await downloader.downloadAttachmentIfNeeded(for: attachment)
+                }
             }
         }
     }
 
     static let visibleCellCount = 6
 
-    private var overflowAttachmentIDs: [NSManagedObjectID] {
-        attachments.dropFirst(Self.visibleCellCount).map(\.objectID)
-    }
 }

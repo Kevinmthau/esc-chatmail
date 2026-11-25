@@ -872,8 +872,10 @@ final class ChatViewModel: ObservableObject {
     /// that still has no file is left out, or refuses the forward if it is inline, as before
     /// (`ForwardAttachmentDownloadPolicy`). Meanwhile each attachment shows its own progress
     /// in the bubble. Forward on the same message again is the same request and is ignored;
-    /// Forward on another message replaces it. The draft does not open over anything the
-    /// user opened meanwhile, nor after the chat went away (`cancelPrefetch`).
+    /// Forward on another message replaces it. The draft does not open over any sheet or
+    /// screen the user opened meanwhile (`hasOpenScreenOverChat`). It is not cancelled when
+    /// the chat disappears: a full-screen Quick Look does that too, and the draft of a chat
+    /// that has closed is never shown.
     func setMessageToForward(_ message: Message) {
         let messageObjectID = message.objectID
         if forwardPreparation != nil {
@@ -899,7 +901,7 @@ final class ChatViewModel: ObservableObject {
             guard let self, self.forwardPreparation?.id == preparationID else { return }
             self.forwardPreparation = nil
             guard !Task.isCancelled,
-                  self.destination == nil,
+                  !self.hasOpenScreenOverChat,
                   let message = self.resolveMessage(with: messageObjectID) else { return }
             // The downloads saved on background contexts; read what they stored now
             // rather than wait for the merge into this context.
@@ -913,6 +915,19 @@ final class ChatViewModel: ObservableObject {
             messageObjectID: messageObjectID,
             task: task
         )
+    }
+
+    /// Whether the chat shows a sheet, screen or alert of its own, in either of the places
+    /// that keep one (`ChatView.activeDestination`, `ChatView.isChatActiveAndUncovered`):
+    /// a late forward must not replace it.
+    var hasOpenScreenOverChat: Bool {
+        destination != nil ||
+            sendErrorAlert != nil ||
+            contactManager.contactToAdd != nil ||
+            contactManager.showingContactPicker ||
+            contactManager.showingParticipantsList ||
+            contactManager.showingContactAccessPicker ||
+            contactManager.contactActionAlert != nil
     }
 
     private func cancelForwardPreparation() {
@@ -1774,12 +1789,9 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Cancels all prefetch tasks, and a forward still waiting for its attachments, whose
-    /// draft would otherwise open over whatever replaced the chat. Call from
-    /// ChatView.onDisappear.
+    /// Cancels all prefetch tasks. Call from ChatView.onDisappear.
     func cancelPrefetch() {
         prefetchTaskManager.cancelAll()
-        cancelForwardPreparation()
     }
 
     // MARK: - Display Name Resolution

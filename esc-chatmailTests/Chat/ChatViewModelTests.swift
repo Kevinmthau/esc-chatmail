@@ -1451,7 +1451,7 @@ final class ChatViewModelTests: XCTestCase {
 
     /// The draft opens late, so it must not open over what the user opened meanwhile.
     ///
-    /// Revert-check: dropping `self.destination == nil` from the forward's last guard makes
+    /// Revert-check: dropping `!self.hasOpenScreenOverChat` from the forward's last guard makes
     /// this fail: the forward replaces the email reader.
     func testSetMessageToForward_doesNotOpenOverWhatTheUserOpenedWhileDownloading() async throws {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
@@ -1492,8 +1492,57 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.forwardPreparationTask)
     }
 
-    /// The chat went away before the forward's attachments arrived: no draft opens later.
-    func testCancelPrefetch_cancelsAForwardStillWaiting() async throws {
+    /// The participants list lives on the contact manager, not in `destination`; a forward
+    /// that finishes while it is open must not replace it.
+    func testSetMessageToForward_doesNotOpenOverParticipantsListOpenedWhileDownloading() async throws {
+        let (viewModel, message) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-participants")
+
+        viewModel.setMessageToForward(message)
+        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        viewModel.contactManager.showingParticipantsList = true
+        await preparation.value
+
+        XCTAssertNil(viewModel.destination)
+        XCTAssertTrue(viewModel.contactManager.showingParticipantsList)
+        XCTAssertNil(viewModel.forwardPreparationTask)
+    }
+
+    /// A full-screen Quick Look makes the chat disappear too; the forward still opens its draft.
+    func testCancelPrefetch_doesNotCancelAForwardStillWaiting() async throws {
+        let (viewModel, message) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-quicklook")
+
+        viewModel.setMessageToForward(message)
+        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        viewModel.cancelPrefetch()
+        await preparation.value
+
+        guard case .forwardCompose = viewModel.destination else {
+            return XCTFail("Expected the forward draft, got \(String(describing: viewModel.destination))")
+        }
+    }
+
+    /// Forward on another message while one waits replaces the waiting one.
+    func testSetMessageToForward_onAnotherMessageReplacesTheWaitingOne() async throws {
+        let (viewModel, first) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-first")
+        let second = MessageBuilder()
+            .withId("message-forward-second")
+            .withSubject("Second")
+            .inConversation(try XCTUnwrap(first.conversation))
+            .build(in: try XCTUnwrap(first.managedObjectContext))
+
+        viewModel.setMessageToForward(first)
+        let firstPreparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        viewModel.setMessageToForward(second)
+        await firstPreparation.value
+
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected the second message's draft, got \(String(describing: viewModel.destination))")
+        }
+        XCTAssertEqual(forwardContext.initialSubject?.contains("Second"), true)
+        XCTAssertNil(viewModel.forwardPreparationTask)
+    }
+
+    private func makeViewModelWithQueuedForwardAttachment(messageID: String) -> (ChatViewModel, Message) {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
         let conversation = ConversationBuilder()
@@ -1502,13 +1551,13 @@ final class ChatViewModelTests: XCTestCase {
             .recentlyActive()
             .build(in: context)
         let message = MessageBuilder()
-            .withId("message-forward-cancelled")
+            .withId(messageID)
             .withSubject("Forward Me")
             .withAttachments()
             .inConversation(conversation)
             .build(in: context)
         _ = AttachmentBuilder()
-            .withId("attachment-cancelled")
+            .withId("\(messageID)-attachment")
             .withFilename("report.pdf")
             .withMimeType("application/pdf")
             .queued()
@@ -1520,14 +1569,7 @@ final class ChatViewModelTests: XCTestCase {
                 downloadAttachmentForForwarding: { _ in }
             )
         )
-
-        viewModel.setMessageToForward(message)
-        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
-        viewModel.cancelPrefetch()
-        await preparation.value
-
-        XCTAssertNil(viewModel.destination)
-        XCTAssertNil(viewModel.forwardPreparationTask)
+        return (viewModel, message)
     }
 
     private func makeChatDependencies(
