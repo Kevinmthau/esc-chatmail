@@ -249,14 +249,19 @@ enum EmailDOMParseAdmission {
     /// have to be checked against first.
     ///
     /// A wrong move starts at a byte of 0x80 or more and is one character's
-    /// width, at most four bytes, so with four ASCII bytes after the last
-    /// byte of 0x80 or more it ends inside the input, on ASCII. Measured
-    /// against SwiftSoup over 121 bodies that trapped: one space after them
-    /// still trapped 39, two or more none. Spaces change nothing a reader
-    /// sees: they extend trailing text, raw text or a comment, or leave a
-    /// tag cut off by the end as it was. Only bodies ending in text outside
-    /// ASCII are padded, and refusing them would have shown much ordinary
-    /// mail as escaped text.
+    /// width, at most four bytes (two in practice: the decoder keeps at
+    /// most two bytes ahead), so with four ASCII bytes after the last byte
+    /// of 0x80 or more it ends inside the input, on ASCII. Measured against
+    /// SwiftSoup: of 121 bodies that trapped, one space after them still
+    /// trapped 39, two or more none; review then found no trap among 14
+    /// million padded bodies. The spaces add trailing whitespace to text,
+    /// raw text or a comment, which nothing shows outside `pre` and the
+    /// like, and leave a tag cut off by the end as it was. Two endings read
+    /// differently: a literal `</` just after text outside ASCII becomes an
+    /// empty comment instead of text (`Café</`), and a cut-off RCDATA end
+    /// tag is no longer echoed with its last letter doubled. Only bodies
+    /// whose last four bytes are not all ASCII are padded; refusing them
+    /// instead would have shown ordinary mail as escaped text.
     static func paddedAgainstTheTokenizerOverread(_ html: String) -> String {
         let utf8 = html.utf8
         let endsOutsideASCII = utf8.suffix(Self.overreadReach).contains { $0 >= 0x80 }

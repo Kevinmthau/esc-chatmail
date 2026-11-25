@@ -473,7 +473,9 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     }
 
     /// Only a body whose last four bytes hold one outside ASCII is padded,
-    /// and the padding changes no text a reader sees.
+    /// and the padding changes no text a reader sees. HONEST SCOPE: `text()`
+    /// trims whitespace, so the text comparison holds for any padding of
+    /// spaces; what pins the padding is the `html + "    "` check.
     func testPadding_bodiesEndingInTextOutsideASCII_readTheSame() throws {
         XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("<p>Caf\u{E9}</p>"), "<p>Caf\u{E9}</p>")
         XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("plain"), "plain")
