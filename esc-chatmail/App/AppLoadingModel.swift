@@ -92,10 +92,12 @@ final class AppLoadingModel: ObservableObject {
     /// the reset: a failure of another kind may have replaced it while the
     /// confirmation was up.
     ///
-    /// Runs on the main actor, where every launch attempt loads the store, so
-    /// no load can start between the stack's checks and the removal. The
-    /// backup is a file copy, which APFS performs as a clone, so it does not
-    /// stall the main thread on a large store.
+    /// The stack refuses while a load is in flight and holds the load's
+    /// in-flight claim through the removal, so no load can start between its
+    /// checks and the removal (`CoreDataStack.resetStoreAfterLoadFailure()`);
+    /// loads run off the main thread, so the main actor no longer does that.
+    /// The backup is a file copy, which APFS performs as a clone, so it does
+    /// not stall the main thread on a large store.
     func resetMailbox() {
         guard storeLoadFailure?.offersMailboxReset == true else { return }
         switch resetStore() {

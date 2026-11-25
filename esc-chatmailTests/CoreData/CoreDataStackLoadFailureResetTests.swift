@@ -85,6 +85,69 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
         XCTAssertEqual(container.persistentStoreCoordinator.persistentStores.count, 1)
     }
 
+    /// The production add is asynchronous: the failed load latches on a
+    /// background queue, and the reset and the reload after it run the same.
+    ///
+    /// Revert-check: removing `startClaimedStoreLoad` from the `.claimed` case
+    /// of `CoreDataStack.retryLoadAfterFailure` leaves the store unloaded.
+    func testResetStoreAfterLoadFailure_asyncAddedUnopenableStore_reloadsEmptyStore() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let container = TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL, addsStoreAsynchronously: true)
+        let stack = makeStack(container)
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+        XCTAssertFalse(stack.isStoreLoadInFlight, "A latched failure must end the load's claim")
+
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .removed)
+        XCTAssertFalse(stack.isStoreLoadInFlight, "The reset must hand its claim back")
+        stack.retryLoadAfterFailure()
+
+        try await stack.waitForStoreToLoad(timeout: 5)
+        XCTAssertEqual(container.persistentStoreCoordinator.persistentStores.count, 1)
+        let labelCount = try await countLabels(in: container)
+        XCTAssertEqual(labelCount, 0, "The reset store must start empty")
+    }
+
+    /// Loads run off the main thread, so the main actor no longer keeps one
+    /// out of Reset Mailbox's removal: the reset refuses while a load holds
+    /// the in-flight claim, and goes ahead once it is released.
+    ///
+    /// Revert-check: dropping `!_isStoreLoadInFlight` from
+    /// `CoreDataStack.claimStoreForResetAfterLoadFailure` removes the store
+    /// from under the load.
+    func testResetStoreAfterLoadFailure_loadInFlight_keepsStore() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let stack = makeStack(TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL))
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+        XCTAssertTrue(stack.debugClaimStoreLoadForTesting())
+
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path))
+        XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+        XCTAssertTrue(stack.isStoreLoadInFlight, "A refused reset must leave the load's claim alone")
+
+        stack.debugReleaseStoreLoadClaimForTesting()
+        XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .removed)
+    }
+
+    /// Revert-check: dropping `!_isStoreLoadInFlight` from
+    /// `CoreDataStack.claimReloadAfterFailure` starts a second load, whose
+    /// failure ends the claim.
+    func testRetryLoadAfterFailure_loadInFlight_startsNoSecondLoad() async throws {
+        let storeURL = try makeStoreThatCannotBeOpened(labelCount: 1)
+        let stack = makeStack(TestCoreDataStack.makeUnloadedSQLiteContainer(storeURL: storeURL))
+        _ = stack.persistentContainer
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+        XCTAssertTrue(stack.debugClaimStoreLoadForTesting())
+
+        stack.retryLoadAfterFailure()
+
+        XCTAssertTrue(stack.isStoreLoadInFlight, "No load may have started or ended")
+        try await assertLoadFailedKeepingStore(stack, storeURL: storeURL)
+        stack.debugReleaseStoreLoadClaimForTesting()
+    }
+
     /// Freeing space is the fix for a full disk and keeps the data, so the
     /// stack refuses even if a caller asks.
     ///
@@ -180,6 +243,9 @@ final class CoreDataStackLoadFailureResetTests: XCTestCase {
         XCTAssertEqual(stack.resetStoreAfterLoadFailure(), .notResettable)
         XCTAssertTrue(FileManager.default.fileExists(atPath: storeURL.path))
         XCTAssertTrue(CoreDataBackupManager.listBackups(for: storeURL).isEmpty)
+        // Revert-check: removing the `defer` that releases the claim in
+        // `CoreDataStack.resetStoreAfterLoadFailure` leaves it held.
+        XCTAssertFalse(stack.isStoreLoadInFlight, "A refused reset must hand its claim back")
     }
 
     /// Revert-check: making `StoreVolumeFreeSpace.hasRoomForStoreReset` treat
