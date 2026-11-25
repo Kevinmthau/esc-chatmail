@@ -118,7 +118,9 @@ final class AliasManagerTests: XCTestCase {
         XCTAssertEqual(aliases, ["alias@gmail.com", "kmthau@gmail.com"])
     }
 
-    func testGetCachedAliasesRecomputesWhenContactDependenciesChange() async throws {
+    /// Revert-check: the `cachedContactSelfAddresses ==` term of
+    /// `AliasManager.getCachedAliases`.
+    func testGetCachedAliasesRecomputesWhenTheAdoptedSetChanges() async throws {
         let selfAddresses = SelfAddressesBox()
         let rollupDependencyTracker = StubRollupDependencyTracker()
         let manager = AliasManager(

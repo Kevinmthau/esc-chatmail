@@ -126,7 +126,9 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     private var adopted: ContactLinkedAddresses
     private var applied: ContactLinkedAddresses
     private var adoptedSelf: AdoptedSelfAddresses?
-    private var appliedSelf: Set<String>?
+    /// The self set the stored conversations were last brought in line with,
+    /// and the account addresses it was decided for.
+    private var appliedSelf: AdoptedSelfAddresses?
     /// What the rule before this one would have taken as the user's from the
     /// last read in this process (every address of a card listing an account
     /// address, and the "me" card): the set the stored conversations were
@@ -166,8 +168,8 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
         self.loadMeCardAddresses = loadMeCardAddresses
         self.adoptedSelf = defaults?.data(forKey: Self.adoptedSelfDefaultsKey)
             .flatMap { try? JSONDecoder().decode(AdoptedSelfAddresses.self, from: $0) }
-        self.appliedSelf = defaults?.array(forKey: Self.appliedSelfDefaultsKey)
-            .map { Set($0.compactMap { $0 as? String }) }
+        self.appliedSelf = defaults?.data(forKey: Self.appliedSelfDefaultsKey)
+            .flatMap { try? JSONDecoder().decode(AdoptedSelfAddresses.self, from: $0) }
         self.adopted = ContactLinkedAddresses(
             encoded: defaults?.string(forKey: Self.adoptedLinksDefaultsKey)
         )
@@ -227,7 +229,10 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
                 contactsGeneration,
                 adopted,
                 generationOfAdoptedRead == contactsGeneration,
-                known.isEmpty || adoptedSelf?.knownAddresses == known
+                // Read once a process for the account's addresses too: the
+                // first pass after the switch needs the old rule's set
+                // (`legacySelfOfLastRead`), which only a read can give.
+                known.isEmpty || (adoptedSelf?.knownAddresses == known && legacySelfOfLastRead != nil)
             )
         }
         guard !isCurrent || !selfIsCurrent,
@@ -331,9 +336,15 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
 
     /// The self set every stored conversation was last brought in line with,
     /// or nil when none was recorded (no pass ran since the self set was
-    /// adopted here instead of read live).
-    func appliedSelfAddresses() -> Set<String>? {
-        lock.withLock { appliedSelf }
+    /// adopted here instead of read live) or it was recorded for an account
+    /// that shares none of `knownAddresses`: the stored conversations of this
+    /// account were never hashed with it.
+    func appliedSelfAddresses(forKnown knownAddresses: Set<String>) -> Set<String>? {
+        let known = Set(knownAddresses.map(EmailNormalizer.normalize))
+        return lock.withLock {
+            guard let appliedSelf, !appliedSelf.knownAddresses.isDisjoint(with: known) else { return nil }
+            return appliedSelf.addresses
+        }
     }
 
     /// What the stored conversations were hashed with before
@@ -345,9 +356,13 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
 
     /// Records that every stored conversation carries the hashes of this self
     /// set. Only for the cleanup pass, once its repair completed.
-    func markSelfAddressesApplied(_ addresses: Set<String>) {
-        lock.withLock { appliedSelf = addresses }
-        defaults?.set(Array(addresses).sorted(), forKey: Self.appliedSelfDefaultsKey)
+    func markSelfAddressesApplied(_ addresses: Set<String>, knownAddresses: Set<String>) {
+        let applied = AdoptedSelfAddresses(
+            knownAddresses: Set(knownAddresses.map(EmailNormalizer.normalize)),
+            addresses: addresses
+        )
+        lock.withLock { appliedSelf = applied }
+        defaults?.set(try? JSONEncoder().encode(applied), forKey: Self.appliedSelfDefaultsKey)
     }
 
     /// Contacts access was withdrawn: nothing is linked any more, and the

@@ -55,12 +55,17 @@ extension DataCleanupService {
     /// naming an address either rule took as the user's onto the new one.
     func unifyConversationsByContactIfNeeded(in context: NSManagedObjectContext) async {
         let known = await accountAddresses(in: context)
+        // What the router has hashed with until now, read before the adoption:
+        // after a switch of accounts it is not the applied set.
+        let routedBefore = contactLinkStore.selfAddressesSnapshot(forKnown: known)
         let links = contactLinkStore.refreshIfNeeded(knownAddresses: known)
         let applied = contactLinkStore.appliedToConversations()
         let selfAddresses = contactLinkStore.selfAddressesSnapshot(forKnown: known)
         let selfChange = SelfAddressChange(
-            applied: contactLinkStore.appliedSelfAddresses(),
+            applied: contactLinkStore.appliedSelfAddresses(forKnown: known),
+            routedBefore: routedBefore,
             current: selfAddresses,
+            knownAddresses: known,
             legacyOfLastRead: contactLinkStore.legacySelfAddressesOfLastRead()
         )
         // The steady state, and the whole pass without Contacts access: a few
@@ -78,7 +83,7 @@ extension DataCleanupService {
         case .completed:
             contactLinkStore.markAppliedToConversations(links)
             if selfChange.isRecordable {
-                contactLinkStore.markSelfAddressesApplied(selfAddresses)
+                contactLinkStore.markSelfAddressesApplied(selfAddresses, knownAddresses: known)
             }
             Log.info(
                 "Applied contact-linked addresses to conversations (\(changedAddresses.count) changed address(es))",
@@ -113,8 +118,8 @@ extension DataCleanupService {
 
     /// Which stored conversations a change in the user's own addresses moves.
     struct SelfAddressChange: Equatable {
-        /// The addresses that came into or left the set: every conversation
-        /// with a participant row for one of them is given its hash again.
+        /// The addresses whose conversations are given their hash again: every
+        /// conversation with a participant row for one of them.
         let changedAddresses: Set<String>
         /// Whether the pass has anything to do for the self set.
         let needsPass: Bool
@@ -123,30 +128,58 @@ extension DataCleanupService {
         let isRecordable: Bool
 
         /// - Parameters:
-        ///   - applied: The set the stored conversations were last brought
-        ///     in line with, or nil when none was ever recorded.
+        ///   - applied: The set this account's stored conversations were last
+        ///     brought in line with, or nil when none was recorded for it.
+        ///   - routedBefore: The set the router hashed with until this pass
+        ///     adopted `current`. After a switch of accounts it differs from
+        ///     `applied`, and the conversations stored since were hashed with it.
         ///   - current: The adopted set, which the router hashes with now.
+        ///   - knownAddresses: The account's address and send-as addresses.
         ///   - legacyOfLastRead: What the rule before the adopted set took as
         ///     the user's, from this process's read; nil when nothing was read.
         ///     Until a set is first recorded, the conversations were hashed
         ///     with that one (or with less, on an install that never ran it),
         ///     so every address either set names is in scope; giving a
         ///     conversation the hash it already has changes nothing. With no
-        ///     read there is nothing to compare with: the pass waits.
-        init(applied: Set<String>?, current: Set<String>, legacyOfLastRead: Set<String>?) {
+        ///     read and no recorded set there is nothing to record.
+        init(
+            applied: Set<String>?,
+            routedBefore: Set<String>,
+            current: Set<String>,
+            knownAddresses known: Set<String>,
+            legacyOfLastRead: Set<String>?
+        ) {
+            var changed = routedBefore.symmetricDifference(current)
+            var forced = false
             if let applied {
-                changedAddresses = applied.symmetricDifference(current)
-                needsPass = !changedAddresses.isEmpty
+                changed.formUnion(applied.symmetricDifference(current))
                 isRecordable = true
             } else if let legacyOfLastRead {
-                changedAddresses = legacyOfLastRead.union(current)
-                needsPass = true
+                changed.formUnion(legacyOfLastRead.union(current))
+                forced = true
                 isRecordable = true
             } else {
-                changedAddresses = []
-                needsPass = false
                 isRecordable = false
             }
+            // A note-to-self chat is keyed on the first of the user's addresses
+            // in sorted order (`makeParticipantSetIdentity`), and its one row is
+            // that address, which need not be one that changed: an address
+            // added that sorts first moves the key, and the chat holding the
+            // old key names only the old one.
+            let keyNow = Self.noteToSelfKey(known: known, contactAddresses: current)
+            let earlierKeys = [applied, routedBefore, legacyOfLastRead]
+                .compactMap { $0 }
+                .compactMap { Self.noteToSelfKey(known: known, contactAddresses: $0) }
+            if let keyNow, earlierKeys.contains(where: { $0 != keyNow }) {
+                changed.insert(keyNow)
+                changed.formUnion(earlierKeys)
+            }
+            changedAddresses = changed
+            needsPass = forced || !changed.isEmpty
+        }
+
+        private static func noteToSelfKey(known: Set<String>, contactAddresses: Set<String>) -> String? {
+            known.union(contactAddresses).sorted().first
         }
     }
 }

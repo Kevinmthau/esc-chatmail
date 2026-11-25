@@ -240,7 +240,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 - **Contacts.**
   - `EditContactView`, `AddContactView` and `ContactPickerView` (35 errors) use iOS-only ContactsUI. On the Mac, compile them out and offer "Open in Contacts" instead.
   - The `.limited` authorization status (6 places) and `.contactAccessPicker` (`ChatView`) are iOS-only.
-  - The repo's only existing `#if os(macOS)` code is in `ContactsSelfAliasProvider.swift`, and its block at lines 41–45 has never compiled. The macOS method name is `unifiedMeContactWithKeys(toFetch:)`.
+  - The repo's only existing `#if os(macOS)` code was in `ContactsSelfAliasProvider.swift` (since removed; the "me" card is now read by `ContactLinkedAddressStore.makeMeCardLoader`), and its block at lines 41–45 had never compiled. The macOS method name is `unifiedMeContactWithKeys(toFetch:)`.
 - **iPhone keyboard and screen code.** `KeyboardResponder` (8 errors) and the `UIScreen` sizing (7) are compiled out or replaced with geometry.
 - **iOS-only SwiftUI modifiers (about 8).**
   - Toolbar placements: `topBarLeading`, `topBarTrailing` and `navigationBarTrailing` become `.navigation` or `.primaryAction`.

@@ -300,6 +300,9 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
 
     /// The first read also says what the rule before the adopted set took as the
     /// user's: every address of a card listing the account's address.
+    ///
+    /// Revert-check: the `!card.isDisjoint(with: known)` condition of
+    /// `ContactLinkedAddressStore.legacySelfAddresses` (every card's addresses count).
     func testSelfAddresses_legacySetOfTheRead_isEveryAddressOfACardListingTheAccount() {
         addressBook.cards = [[Self.me, "partner@example.com"], ["partner@example.com", "partner@work.example"]]
         let store = makeStore()
@@ -309,6 +312,20 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
 
         XCTAssertEqual(store.legacySelfAddressesOfLastRead(), [Self.me, "partner@example.com"])
         XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [], "The partner's own card disqualifies the household card")
+    }
+
+    /// The applied set is the account's: one recorded for an account that shares none
+    /// of these addresses says nothing about this account's conversations.
+    ///
+    /// Revert-check: the `isDisjoint(with: known)` guard of
+    /// `ContactLinkedAddressStore.appliedSelfAddresses(forKnown:)`.
+    func testAppliedSelfAddresses_recordedForAnotherAccount_isNil() {
+        let store = makeStore()
+        store.markSelfAddressesApplied([Self.me, Self.icloud], knownAddresses: [Self.me])
+
+        XCTAssertEqual(store.appliedSelfAddresses(forKnown: [Self.me]), [Self.me, Self.icloud])
+        XCTAssertNil(store.appliedSelfAddresses(forKnown: ["next@example.com"]))
+        XCTAssertEqual(makeStore().appliedSelfAddresses(forKnown: [Self.me]), [Self.me, Self.icloud], "Kept in defaults")
     }
 
     #if os(iOS)
