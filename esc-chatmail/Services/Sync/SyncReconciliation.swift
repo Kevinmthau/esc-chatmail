@@ -786,6 +786,22 @@ final class SyncReconciliation: Sendable {
                 localMessageDict[id] = preferred
             }
 
+            // A live pending action still has to change these in Gmail, so
+            // Gmail's state for them is the state before the user's change.
+            // The 30-minute marker alone stopped protecting them, and a queued
+            // archive came back to the inbox or read mail turned unread
+            // whenever the queue had not drained by then (an outage, a kill
+            // before the drain, a background launch, which never drains).
+            // A failed read repairs nothing: it is never "no live actions".
+            let queuedTargetIDs: Set<String>
+            do {
+                queuedTargetIDs = try PendingActionTargets.liveTargetMessageIDs(in: context)
+            } catch {
+                Log.error("Failed to read live pending actions for label reconciliation", category: .sync, error: error)
+                stats.processingFailed = true
+                return (stats, modifiedConversationIDs)
+            }
+
             // Pre-fetch INBOX label once for all messages that might need it
             let labelRequest = Label.fetchRequest()
             labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
@@ -808,6 +824,10 @@ final class SyncReconciliation: Sendable {
 
                 // Skip if message has pending local changes that have not yet been synced.
                 if HistoryProcessor.hasPendingLocalModification(message: localMessage) {
+                    stats.skippedChecks += 1
+                    continue
+                }
+                if queuedTargetIDs.contains(messageId) {
                     stats.skippedChecks += 1
                     continue
                 }
