@@ -135,6 +135,13 @@ extension Message {
     @NSManaged public var listId: String?
     @NSManaged public var hasAttachments: Bool
     @NSManaged public var bodyStorageURI: String?
+    /// True once a retention pass has removed this message's HTML body from disk to save
+    /// space (model 8; scalability review steps 10 and 12). Nothing sets it yet. When the
+    /// eviction lands, an evicted body must read as "fetch it again", never as "this
+    /// message has no HTML": the recovery gate opens for it and the rich-content verdict
+    /// and preview it stored are kept. Not optional, default NO: model 8's migration
+    /// gives every existing row NO (`IndexesAndBodyEvictedV8MigrationTests`).
+    @NSManaged public var bodyEvicted: Bool
     @NSManaged public var bodyText: String?
     @NSManaged public var senderName: String?
     @NSManaged public var senderEmail: String?
