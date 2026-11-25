@@ -195,4 +195,6 @@ private final class RecordingWebViewAdopter: FullEmailWebViewAdopting {
         checkins.append(Checkin(messageId: messageId, webView: webView))
         return true
     }
+
+    func discard(messageId: String, webView: WKWebView) {}
 }

@@ -414,8 +414,9 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
     }
 }
 
+/// Internal, not private, only so a test can end a render with a WebContent termination.
 @MainActor
-private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
+final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
     private let request: EmailPreviewSnapshotRequest
     /// Never in a window, so no input can reach it; `makeNonInteractive()` keeps it display-only
     /// anyway, as every non-interactive web view in the app is.
@@ -628,6 +629,19 @@ private final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDel
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         finish(.failure(EmailPreviewSnapshotRenderError.navigationFailed(error)))
+    }
+
+    /// The render's WebContent process died, so nothing it could snapshot remains: the render
+    /// fails at once rather than at its 5 s timeout, and the preview's retry takes it from there.
+    /// Implementing this also stops WebKit's own reload of the dead view, which for a load still in
+    /// progress fetched its base URL, the sender's site, from the network (measured on the iOS 27.0
+    /// simulator; see `FullEmailReaderWebView.Coordinator`).
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        finish(.failure(EmailPreviewSnapshotRenderError.navigationFailed(WKError(.webContentProcessTerminated))))
+    }
+
+    var isAwaitingRenderForTesting: Bool {
+        continuation != nil
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
