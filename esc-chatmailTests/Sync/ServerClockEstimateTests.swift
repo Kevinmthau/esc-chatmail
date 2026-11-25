@@ -5,8 +5,8 @@ import XCTest
 /// that is never later than the device's.
 final class ServerClockEstimateTests: XCTestCase {
     /// A wall clock and a monotonic clock the test moves by hand.
+    /// `@unchecked Sendable`: only the test's own thread touches it.
     private final class Clocks: @unchecked Sendable {
-        /// `@unchecked Sendable`: only the test's own thread touches it.
         var device = Date(timeIntervalSince1970: 1_800_000_000)
         var elapsed: Duration = .zero
     }

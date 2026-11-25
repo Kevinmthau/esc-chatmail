@@ -320,8 +320,11 @@ final class InitialSyncOrchestrator {
         }
 
         // Measured against the earlier of the device's time and Gmail's: a mailbox start
-        // written while the device clock was ahead is read as no later than that, so the
-        // window cannot start past mail Gmail already had. Only ever earlier.
+        // written while the device clock was ahead is read as no later than that, which
+        // only ever moves the window earlier. HONEST SCOPE: only while that now is still
+        // before the start. The start is written with the device's clock
+        // (`AuthSession.restartMailboxStartTime`), so a first initial sync that runs
+        // longer than the clock's lead after the sign-in still starts the lead late.
         let windowStart = SyncTimeCalculator.calculateStartTime(
             config: .initialSync,
             now: serverTime.conservativeNow().timeIntervalSince1970

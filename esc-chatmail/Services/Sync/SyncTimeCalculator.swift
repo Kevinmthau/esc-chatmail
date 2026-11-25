@@ -96,8 +96,11 @@ struct SyncTimeCalculator {
     /// clamp to now does not reach once now has passed them (a history expiry takes days):
     /// - The last-sync time is read `deviceClockLead` earlier: an earlier build stamped it
     ///   with the device's clock, which was then ahead by about as much as it is now. A
-    ///   stamp this build wrote from Gmail's time is moved that much earlier too, which
-    ///   costs a few more minutes of listing and skips nothing.
+    ///   stamp this build wrote from Gmail's time is moved that much earlier too: every
+    ///   recovery and reconciliation then lists the whole lead again (reconciliation within
+    ///   its 24-hour cap), which costs listing and skips nothing. HONEST SCOPE: a stamp an
+    ///   earlier build wrote ahead is not reached once the clock is set right, because the
+    ///   lead is then zero.
     /// - The mailbox start is read as no later than the last-sync time where both are
     ///   set. A sync always follows the move of the start (the sign-out that moves it
     ///   also clears the last-sync time), so a start after the last sync was written by a

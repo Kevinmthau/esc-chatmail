@@ -90,7 +90,8 @@ final class SyncReconciliationTests: XCTestCase {
             messageFetcher: MessageFetcher(apiClient: mockAPI),
             failureTracker: SyncFailureTracker(defaults: defaults),
             defaults: defaults,
-            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600)
+            // No lead: only `conservativeNow()` can move the floor, so the revert fails.
+            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600, reportsLead: false)
         )
 
         _ = await sut.checkForMissedMessagesWithDiagnostics(
