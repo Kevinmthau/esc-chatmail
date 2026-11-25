@@ -110,6 +110,67 @@ final class SyncWindowCheckpointStoreTests: XCTestCase {
         XCTAssertNil(loaded, "An unknown payload version must read as no frozen window")
     }
 
+    /// The page progress round-trips with the window, and staging the window
+    /// alone (a held completion) drops it while keeping the window.
+    ///
+    /// Revert-check: drop `progress` from the `Payload` that `stageFreeze`
+    /// encodes and the loaded progress is nil.
+    func testStageFreeze_progressRoundTripsAndAWindowOnlyFreezeDropsIt() async throws {
+        let store = SyncWindowCheckpointStore.initialSync
+        let progress = PagedSyncProgress(
+            watermarkHistoryId: "history-500",
+            listingStartedAt: 1_700_000_100,
+            nextPageToken: "page-3",
+            fetchFailedIds: ["fetch-1"],
+            persistenceFailedIds: ["save-1"],
+            resolvedTrackedIds: ["deferred-1"]
+        )
+        let context = coreDataStack.newBackgroundContext()
+        try await store.stageFreeze(
+            windowStart: 1_700_000_000,
+            progress: progress,
+            accountEmail: Self.email,
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
+
+        let loaded = try await store.load(accountEmail: Self.email, in: coreDataStack.newBackgroundContext())
+        XCTAssertEqual(loaded?.windowStart, 1_700_000_000)
+        XCTAssertEqual(loaded?.progress, progress)
+
+        let heldContext = coreDataStack.newBackgroundContext()
+        try await store.stageFreeze(windowStart: 1_700_000_000, accountEmail: Self.email, in: heldContext)
+        try await coreDataStack.saveAsync(context: heldContext)
+
+        let held = try await store.load(accountEmail: Self.email, in: coreDataStack.newBackgroundContext())
+        XCTAssertEqual(held?.windowStart, 1_700_000_000, "The window survives a held completion")
+        XCTAssertNil(held?.progress, "A held completion lists its window again from the first page")
+    }
+
+    /// A row an earlier build wrote (version 1, no progress) still reads as
+    /// its frozen window.
+    func testLoad_payloadWithoutProgressReadsAsItsWindow() async throws {
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            let row = SyncCheckpoint(context: context)
+            row.id = UUID()
+            row.kind = SyncWindowCheckpoint.historyRecoveryKind
+            row.accountEmail = Self.email
+            row.pendingMessageIdsJSON = "{\"version\":1,\"windowStart\":1234}"
+            row.createdAt = Date()
+            row.updatedAt = Date()
+        }
+        try await coreDataStack.saveAsync(context: context)
+
+        let loaded = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.email,
+            in: coreDataStack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(loaded?.windowStart, 1234)
+        XCTAssertNil(loaded?.progress)
+    }
+
     private func committedRowCount(kind: String) async throws -> Int {
         let context = coreDataStack.newBackgroundContext()
         return try await context.perform {

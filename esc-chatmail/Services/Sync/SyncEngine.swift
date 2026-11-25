@@ -283,7 +283,8 @@ final class SyncEngine: ObservableObject, Sendable {
             resultRecorder: resultRecorder,
             historyPageLimit: budget.historyPageLimit,
             historyPageSize: budget.historyPageSize,
-            allowsExpensiveRecovery: budget.allowsExpensiveRecovery
+            allowsExpensiveRecovery: budget.allowsExpensiveRecovery,
+            allowsDeferrableWork: budget.allowsDeferrableWork
         ) {
         case .started(let syncRunTask):
             let outcome = await withTaskCancellationHandler {
@@ -457,7 +458,8 @@ final class SyncEngine: ObservableObject, Sendable {
     private func performIncrementalSyncInternal(
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
-        allowsExpensiveRecovery: Bool = true
+        allowsExpensiveRecovery: Bool = true,
+        allowsDeferrableWork: Bool = true
     ) async throws -> IncrementalSyncResult {
         uiState.update(isSyncing: true, progress: 0.0, status: "Checking for updates...")
 
@@ -465,6 +467,7 @@ final class SyncEngine: ObservableObject, Sendable {
             historyPageLimit: historyPageLimit,
             historyPageSize: historyPageSize,
             allowsExpensiveRecovery: allowsExpensiveRecovery,
+            allowsDeferrableWork: allowsDeferrableWork,
             progressHandler: { [weak self] progress, status in
                 self?.uiState.update(progress: progress, status: status)
             },
@@ -498,7 +501,8 @@ final class SyncEngine: ObservableObject, Sendable {
         resultRecorder: IncrementalSyncResultRecorder? = nil,
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
-        allowsExpensiveRecovery: Bool = true
+        allowsExpensiveRecovery: Bool = true,
+        allowsDeferrableWork: Bool = true
     ) async -> IncrementalSyncPreparationResult {
         // Ahead of the network check: when both refuse, the full disk is what the user can fix.
         switch await storageAdmission() {
@@ -525,7 +529,8 @@ final class SyncEngine: ObservableObject, Sendable {
                 let result = try await self.performIncrementalSyncInternal(
                     historyPageLimit: historyPageLimit,
                     historyPageSize: historyPageSize,
-                    allowsExpensiveRecovery: allowsExpensiveRecovery
+                    allowsExpensiveRecovery: allowsExpensiveRecovery,
+                    allowsDeferrableWork: allowsDeferrableWork
                 )
                 if let resultRecorder {
                     await resultRecorder.record(result)

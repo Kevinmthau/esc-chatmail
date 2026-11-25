@@ -26,6 +26,15 @@ enum BackgroundMailboxSyncBudget: Equatable, Sendable {
         self == .processing
     }
 
+    /// Whether the sync may do what does not move the cursor: the
+    /// abandoned-message drain, label reconciliation and the fetches of
+    /// missed messages (`IncrementalSyncOrchestrator.performSync`'s
+    /// `allowsDeferrableWork`). An app refresh leaves them for a processing
+    /// task or the next foreground sync.
+    var allowsDeferrableWork: Bool {
+        self == .processing
+    }
+
     /// Whether the 6-hour store-wide maintenance may follow this task's
     /// sync. An app refresh has about half a minute, and the passes read
     /// every active conversation: they wait for a processing task or for
