@@ -53,8 +53,20 @@ extension DataCleanupService {
     /// given the hash the router now makes (`SelfAddressChange`). The set was
     /// read live before; the first pass after that brings every conversation
     /// naming an address either rule took as the user's onto the new one.
-    func unifyConversationsByContactIfNeeded(in context: NSManagedObjectContext) async {
-        let known = await accountAddresses(in: context)
+    ///
+    /// - Parameter knownAddresses: The account's addresses, when the caller
+    ///   has them before the `Account` row is saved (the initial sync); nil
+    ///   reads them from the row.
+    func unifyConversationsByContactIfNeeded(
+        in context: NSManagedObjectContext,
+        knownAddresses: Set<String>? = nil
+    ) async {
+        let known: Set<String>
+        if let knownAddresses {
+            known = Set(knownAddresses.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
+        } else {
+            known = await accountAddresses(in: context)
+        }
         // What the router has hashed with until now, read before the adoption:
         // after a switch of accounts it is not the applied set.
         let routedBefore = contactLinkStore.selfAddressesSnapshot(forKnown: known)
@@ -100,6 +112,28 @@ extension DataCleanupService {
                 category: .coreData
             )
         }
+    }
+
+    /// Runs the adoption pass (`unifyConversationsByContactIfNeeded`) before a
+    /// sync run routes its mail, so the mail is stored with what Contacts say
+    /// now. Without it the first run after the self set was first adopted
+    /// here (an upgrade, a new install, a sign-in to another account) stored
+    /// its mail with nothing from Contacts, since the pass in the run's
+    /// cleanup comes after the run's mail: mail the user sent from an address
+    /// their card adds was stored as someone else's, for good, because nothing
+    /// repairs a stored `isFromMe`.
+    ///
+    /// The same guarantees as the pass in the cleanup: the caller's run owns
+    /// the store, and the cleanup-sensitive gate is held here, so nothing
+    /// routes or sends between the adoption and the repair. On a context of
+    /// its own, never the run's: only the run's save points save that one.
+    func adoptContactsBeforeRouting(knownAddresses: Set<String>? = nil) async {
+        let context = coreDataStack.newBackgroundContext()
+        await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
+            await unifyConversationsByContactIfNeeded(in: context, knownAddresses: knownAddresses)
+            _ = await context.performSaveIfNeeded(caller: "DataCleanupService.adoptContactsBeforeRouting")
+        }
+        announceCleanupFinished()
     }
 
     /// The account's address and its send-as addresses, normalized, read from

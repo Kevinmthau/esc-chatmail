@@ -151,7 +151,8 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
     ///     the read failed. Called only while the cards may be read
     ///     (`ContactsAccess.readable`). Tests pass their own of both; nothing
     ///     in a test reads the real address book or its authorization.
-    ///   - loadMeCardAddresses: The Mac's "me" card, or nil (iOS has none).
+    ///   - loadMeCardAddresses: The Mac's "me" card's addresses, empty where
+    ///     there is none (iOS has none), or nil when it could not be read.
     init(
         defaults: UserDefaults? = .standard,
         notificationCenter: NotificationCenter = .default,
@@ -278,7 +279,17 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
         knownAddresses known: Set<String>,
         isLimitedAccess: Bool
     ) {
-        let meCard = Set((loadMeCardAddresses() ?? []).map(EmailNormalizer.normalize).filter { !$0.isEmpty })
+        // A "me" card that could not be read is not a missing one: without its
+        // addresses trusted, its own entry among the cards would claim them for
+        // someone else and disqualify the user's own card. Nothing is adopted;
+        // the next pass reads again (`legacySelfOfLastRead` stays unset).
+        guard let meCardList = loadMeCardAddresses() else {
+            // Unset, so the next pass reads again even with no change in Contacts.
+            lock.withLock { legacySelfOfLastRead = nil }
+            Log.warning("Could not read the \"me\" card; keeping the user's own addresses as adopted", category: .conversation)
+            return
+        }
+        let meCard = Set(meCardList.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
         let fromCards = isLimitedAccess
             ? []
             : SelfContactCards.selfAddresses(
@@ -435,14 +446,14 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
         return { addressBook.contactAddressLists() }
     }
 
-    /// The Mac's "me" card's addresses; nil on iOS, which has no "me" card,
-    /// and when it cannot be read.
+    /// The Mac's "me" card's addresses: empty on iOS, which has no "me" card,
+    /// and where none is set; nil when it could not be read.
     static func makeMeCardLoader() -> @Sendable () -> [String]? {
         #if os(macOS)
         let addressBook = AddressBook()
         return { addressBook.meCardAddresses() }
         #else
-        return { nil }
+        return { [] }
         #endif
     }
 
@@ -473,10 +484,16 @@ final class ContactLinkedAddressStore: @unchecked Sendable {
         #if os(macOS)
         func meCardAddresses() -> [String]? {
             let keys = [CNContactEmailAddressesKey as CNKeyDescriptor]
-            guard let contact = try? contactStore.unifiedMeContactWithKeys(toFetch: keys) else {
+            do {
+                let contact = try contactStore.unifiedMeContactWithKeys(toFetch: keys)
+                return contact.emailAddresses.map { String($0.value) }
+            } catch let error as CNError where error.code == .recordDoesNotExist {
+                // No "me" card is set: an answer, not a failed read.
+                return []
+            } catch {
+                Log.error("Failed to read the \"me\" card", category: .general, error: error)
                 return nil
             }
-            return contact.emailAddresses.map { String($0.value) }
         }
         #endif
     }

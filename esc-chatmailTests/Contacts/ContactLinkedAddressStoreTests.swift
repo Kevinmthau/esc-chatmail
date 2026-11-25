@@ -14,6 +14,8 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
     private var defaults: UserDefaults!
     private var notificationCenter: NotificationCenter!
     private var addressBook: AddressBookStub!
+    /// The Mac's "me" card the store reads: empty is none, nil a failed read.
+    private var meCard: MeCardBox!
 
     override func setUp() {
         super.setUp()
@@ -21,6 +23,7 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         defaults = UserDefaults(suiteName: suiteName)
         notificationCenter = NotificationCenter()
         addressBook = AddressBookStub(cards: [[Self.work, Self.home]])
+        meCard = MeCardBox()
     }
 
     override func tearDown() {
@@ -29,6 +32,7 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         suiteName = nil
         notificationCenter = nil
         addressBook = nil
+        meCard = nil
         super.tearDown()
     }
 
@@ -328,6 +332,46 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         XCTAssertEqual(makeStore().appliedSelfAddresses(forKnown: [Self.me]), [Self.me, Self.icloud], "Kept in defaults")
     }
 
+    /// The Mac's "me" card is the user's by the user's own say: its addresses are
+    /// adopted, and trusted when the cards are judged, so its own entry among the cards
+    /// claims nothing and the user's card that shares an address with it still counts.
+    ///
+    /// Revert-check: `trustedAddresses: meCard` in
+    /// `ContactLinkedAddressStore.adoptSelfAddresses` (pass `[]`).
+    func testSelfAddresses_meCard_isAdoptedAndTrusted() {
+        let mac = "me@mac.example"
+        let alt = "me@alt.example"
+        addressBook.cards = [[Self.me, mac, alt], [mac]]
+        meCard.value = [mac]
+        let store = makeStore()
+
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, mac, alt])
+    }
+
+    /// A "me" card that could not be read is not a missing one: adopted as none, its own
+    /// entry among the cards would claim its addresses for someone else and shrink the
+    /// set. Nothing is adopted, and the next pass reads again.
+    ///
+    /// Revert-check: the `guard let meCardList = loadMeCardAddresses()` early return in
+    /// `ContactLinkedAddressStore.adoptSelfAddresses` (read nil as none).
+    func testSelfAddresses_meCardUnreadable_keepsTheSetAndReadsAgain() {
+        let mac = "me@mac.example"
+        let alt = "me@alt.example"
+        addressBook.cards = [[Self.me, mac, alt], [mac]]
+        meCard.value = [mac]
+        let store = makeStore()
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        meCard.value = nil
+        store.markContactsChanged()
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, mac, alt])
+        XCTAssertNil(store.legacySelfAddressesOfLastRead(), "Nothing was decided, so the next pass reads again")
+    }
+
     #if os(iOS)
     /// Limited access walks only the cards the user shared, so the card that would
     /// disqualify a household card may be missing: no card counts.
@@ -350,12 +394,24 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
 
     private func makeStore(addressBook: AddressBookStub? = nil) -> ContactLinkedAddressStore {
         let addressBook = addressBook ?? self.addressBook!
+        let meCard = self.meCard!
         return ContactLinkedAddressStore(
             defaults: defaults,
             notificationCenter: notificationCenter,
             contactsAuthorizationStatus: { addressBook.authorization },
             loadContactAddressLists: { addressBook.read() },
-            loadMeCardAddresses: { nil }
+            loadMeCardAddresses: { meCard.value }
         )
+    }
+}
+
+/// `@unchecked Sendable`: `lock` guards `_value`.
+private final class MeCardBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: [String]? = []
+
+    var value: [String]? {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
     }
 }

@@ -731,6 +731,40 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertFalse(waiting.isRecordable)
     }
 
+    /// Before a run routes mail the adoption runs with the addresses the caller passes:
+    /// the initial sync has them before its Account row is saved, and the mail it
+    /// stores must be routed with what Contacts say for them.
+    ///
+    /// Revert-check: the `knownAddresses` branch of
+    /// `DataCleanupService.unifyConversationsByContactIfNeeded` (read the row, which
+    /// is not there).
+    func testAdoptContactsBeforeRouting_withPassedAddresses_adoptsWithoutAnAccountRow() async {
+        let icloud = "me@icloud.example"
+        let contacts = makeContacts(cards: [[Self.me, icloud]])
+        let service = makeService(contacts: contacts, aliasesFromContacts: true)
+
+        await service.adoptContactsBeforeRouting(knownAddresses: [Self.me])
+
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, icloud])
+    }
+
+    /// Both orchestrators adopt before the run's aliases are read, which is before any
+    /// mail is routed. Pinned from source: a run in a test uses the shared store, which
+    /// holds nothing.
+    ///
+    /// Revert-check: either `adoptContactsBeforeRouting` call.
+    func testOrchestrators_adoptBeforeTheirAliasesAreRead() throws {
+        let incremental = try repositorySource("esc-chatmail/Services/Sync/IncrementalSyncOrchestrator.swift")
+        let incrementalAdopt = try XCTUnwrap(incremental.range(of: "await dataCleanupService.adoptContactsBeforeRouting()"))
+        let incrementalAliases = try XCTUnwrap(incremental.range(of: "myAliases = await AliasManager.shared.getAliases(from: context)"))
+        XCTAssertLessThan(incrementalAdopt.lowerBound, incrementalAliases.lowerBound)
+
+        let initial = try repositorySource("esc-chatmail/Services/Sync/InitialSyncOrchestrator.swift")
+        let initialAdopt = try XCTUnwrap(initial.range(of: "await dataCleanupService.adoptContactsBeforeRouting(knownAddresses: accountAddresses)"))
+        let initialAliases = try XCTUnwrap(initial.range(of: "myAliases = await AliasManager.shared.setAliases(accountAddresses)"))
+        XCTAssertLessThan(initialAdopt.lowerBound, initialAliases.lowerBound)
+    }
+
     /// After a switch of accounts the router hashed with nothing from Contacts until
     /// this pass adopted the new account's set; the applied set, if any, is another
     /// account's. What the router used until now is in scope too.
@@ -835,7 +869,7 @@ final class ContactUnificationCleanupTests: XCTestCase {
             notificationCenter: NotificationCenter(),
             contactsAuthorizationStatus: { addressBook.authorization },
             loadContactAddressLists: { addressBook.read() },
-            loadMeCardAddresses: { nil }
+            loadMeCardAddresses: { [] }
         )
     }
 

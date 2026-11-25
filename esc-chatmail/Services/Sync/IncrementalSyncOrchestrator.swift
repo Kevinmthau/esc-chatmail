@@ -262,6 +262,9 @@ final class IncrementalSyncOrchestrator {
         let modificationTransaction = await ModificationTracker.shared.beginTransaction()
         var committedModificationTransaction = false
         sendAsAliases = await refreshSendAsAliases(accountEmail: accountData.email, in: context)
+        // What Contacts say about the user's own addresses is adopted before the
+        // run routes mail, not only in its cleanup after it (`adoptContactsBeforeRouting`).
+        await dataCleanupService.adoptContactsBeforeRouting()
         myAliases = await AliasManager.shared.getAliases(from: context)
         let labelIds = await messagePersister.prefetchLabelIds(in: context)
         timing.finish(setupTimer, detail: "aliases=\(myAliases.count) sendAs=\(sendAsAliases.count) labels=\(labelIds.count)")

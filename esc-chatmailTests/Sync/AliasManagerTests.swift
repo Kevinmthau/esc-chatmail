@@ -131,7 +131,6 @@ final class AliasManagerTests: XCTestCase {
         _ = await manager.setAliases(["me@example.com"])
 
         selfAddresses.value = ["me@icloud.com"]
-        rollupDependencyTracker.simulateContactDependencyChange()
 
         let refreshedAliases = await manager.getCachedAliases()
 
@@ -144,7 +143,7 @@ final class AliasManagerTests: XCTestCase {
             notificationCenter: NotificationCenter(),
             contactsAuthorizationStatus: { .authorized },
             loadContactAddressLists: { addressBook.read() },
-            loadMeCardAddresses: { nil }
+            loadMeCardAddresses: { [] }
         )
     }
 }
