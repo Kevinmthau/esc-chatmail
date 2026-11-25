@@ -167,17 +167,35 @@ final class TestCoreDataStack: @unchecked Sendable {
     /// loaded, for tests that drive `CoreDataStack`'s own load and recovery
     /// ladder (`CoreDataStack(unloadedPersistentContainerForTesting:)`).
     /// Name the store's directory with the `TestCoreDataStack-` prefix so the
-    /// stale-store sweep removes it in a later run.
-    static func makeUnloadedSQLiteContainer(storeURL: URL) -> NSPersistentContainer {
+    /// stale-store sweep removes it in a later run. `addsStoreAsynchronously`
+    /// gives the store production's asynchronous add, whose load completes on
+    /// a background queue after `loadPersistentStores` returns.
+    static func makeUnloadedSQLiteContainer(
+        storeURL: URL,
+        addsStoreAsynchronously: Bool = false
+    ) -> NSPersistentContainer {
         creationLock.lock()
         let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: sharedModel)
         creationLock.unlock()
 
         let description = NSPersistentStoreDescription(url: storeURL)
         description.type = NSSQLiteStoreType
-        description.shouldAddStoreAsynchronously = false
+        description.shouldAddStoreAsynchronously = addsStoreAsynchronously
         container.persistentStoreDescriptions = [description]
         return container
+    }
+
+    /// The store URL a container named "ESCChatmail" is given by default,
+    /// which is the production store's (`CoreDataStack.defaultStoreURL`).
+    static func defaultAppStoreURL() -> URL? {
+        creationLock.lock()
+        let container = NSPersistentContainer(name: "ESCChatmail", managedObjectModel: sharedModel)
+        creationLock.unlock()
+        let url = container.persistentStoreDescriptions.first?.url
+        creationLock.lock()
+        graveyard.append(container)
+        creationLock.unlock()
+        return url
     }
 
     deinit {

@@ -3,9 +3,20 @@ import CoreData
 
 /// CoreDataStack uses @unchecked Sendable because:
 /// - newBackgroundContext() and save() must remain synchronous for critical Core Data paths
-/// - DispatchQueue (isolationQueue) provides thread safety for mutable state (_loadAttempts, _isStoreLoaded, _storeLoadError)
+/// - DispatchQueue (isolationQueue) provides thread safety for mutable state (_loadAttempts, _isStoreLoaded,
+///   _storeLoadError, _isStoreLoadInFlight, _isContainerCreated, _loadWaiters)
 ///
 /// Future consideration: Create a companion CoreDataStackActor for async-only operations
+///
+/// The production store is added asynchronously (`shouldAddStoreAsynchronously`), so a
+/// load, and any migration it runs, happens off the main thread, and the readiness gate
+/// is `waitForStoreToLoad`, never the first touch of `persistentContainer`. At most one
+/// load is in flight (`_isStoreLoadInFlight`): it is claimed when a load starts and
+/// released when the load attaches the store, latches an error or schedules a timed
+/// retry. Reset Mailbox takes the same claim for its removal, so it refuses while a load
+/// runs and no load can start while it removes the files. The unit-test host keeps the
+/// synchronous add: its tests expect the shared store attached once the app has
+/// initialized.
 final class CoreDataStack: @unchecked Sendable {
     static let shared = CoreDataStack()
 
@@ -16,6 +27,17 @@ final class CoreDataStack: @unchecked Sendable {
     private var _isStoreLoaded = false
     private var _storeLoadError: Error?
     private var _deterministicReloadPermitted = false
+    /// A load is running (or a corrupt-store reset is carrying one into its
+    /// reload), or Reset Mailbox is removing the store. No second load starts
+    /// while it is set, and Reset Mailbox refuses.
+    private var _isStoreLoadInFlight = false
+    /// Whether `persistentContainer` has been created, which starts its first
+    /// load. Fresh-install cleanup removes the store by path, unloaded, while
+    /// it is not (`removeStoreForFreshInstall()`).
+    private var _isContainerCreated = false
+    /// `waitForStoreToLoad` callers, answered when the store attaches or a
+    /// load error is latched, or by their own timeout or cancellation.
+    private var _loadWaiters: [UUID: CheckedContinuation<Void, Error>] = [:]
 
     // Extracted services
     private let recoveryHandler = CoreDataRecoveryHandler()
@@ -60,6 +82,7 @@ final class CoreDataStack: @unchecked Sendable {
         self.currentModelOrdinal = { StoreModelCompatibility.currentModelOrdinal() }
         self.markStoreRemovedByRecovery = {}
         self._isStoreLoaded = true
+        self._isContainerCreated = true
     }
 
 #if DEBUG
@@ -110,35 +133,78 @@ final class CoreDataStack: @unchecked Sendable {
         return isolationQueue.sync { _storeLoadError }
     }
 
-    private var storeLoadState: (isLoaded: Bool, loadError: Error?) {
-        #if DEBUG
-        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
-        #endif
-        return isolationQueue.sync {
-            (isLoaded: _isStoreLoaded, loadError: _storeLoadError)
-        }
-    }
-
+    /// Marks the store loaded, ends the load's in-flight claim and answers
+    /// every waiter.
     private func setStoreLoaded(_ loaded: Bool) {
         #if DEBUG
         dispatchPrecondition(condition: .notOnQueue(isolationQueue))
         #endif
-        isolationQueue.sync {
+        let waiters: [CheckedContinuation<Void, Error>] = isolationQueue.sync {
             _isStoreLoaded = loaded
-            if loaded {
-                _storeLoadError = nil
-            }
+            guard loaded else { return [] }
+            _storeLoadError = nil
+            _isStoreLoadInFlight = false
+            return removeAllLoadWaitersOnIsolationQueue()
+        }
+        for waiter in waiters {
+            waiter.resume()
         }
     }
 
+    /// Latches a load error, ends the load's in-flight claim and fails every
+    /// waiter with it.
     private func setStoreLoadError(_ error: Error?) {
         #if DEBUG
         dispatchPrecondition(condition: .notOnQueue(isolationQueue))
         #endif
-        isolationQueue.sync {
+        let waiters: [CheckedContinuation<Void, Error>] = isolationQueue.sync {
             _isStoreLoaded = false
             _storeLoadError = error
+            _isStoreLoadInFlight = false
+            guard error != nil else { return [] }
+            return removeAllLoadWaitersOnIsolationQueue()
         }
+        guard let error else { return }
+        for waiter in waiters {
+            waiter.resume(throwing: CoreDataError.storeLoadFailed(error))
+        }
+    }
+
+    /// Call only on `isolationQueue`.
+    private func removeAllLoadWaitersOnIsolationQueue() -> [CheckedContinuation<Void, Error>] {
+        let waiters = Array(_loadWaiters.values)
+        _loadWaiters.removeAll()
+        return waiters
+    }
+
+    /// Claims the one load that may be in flight. False while another load
+    /// (or Reset Mailbox's removal) holds it.
+    private func claimStoreLoad() -> Bool {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync {
+            guard !_isStoreLoadInFlight else { return false }
+            _isStoreLoadInFlight = true
+            return true
+        }
+    }
+
+    /// Ends an in-flight claim that neither attached the store nor latched an
+    /// error: a timed retry is scheduled, or Reset Mailbox's removal is over.
+    private func releaseStoreLoadClaim() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        isolationQueue.sync { _isStoreLoadInFlight = false }
+    }
+
+    /// Whether a load (or Reset Mailbox's removal) is in flight.
+    var isStoreLoadInFlight: Bool {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync { _isStoreLoadInFlight }
     }
 
     private func resetStoreLoadTracking() {
@@ -162,9 +228,25 @@ final class CoreDataStack: @unchecked Sendable {
     func debugSetStoreLoadedForTesting(_ loaded: Bool) {
         setStoreLoaded(loaded)
     }
+
+    /// Test-only: holds the in-flight claim as a running load would, so a
+    /// test can ask what refuses while one runs.
+    func debugClaimStoreLoadForTesting() -> Bool {
+        claimStoreLoad()
+    }
+
+    func debugReleaseStoreLoadClaimForTesting() {
+        releaseStoreLoadClaim()
+    }
+
+    /// Test-only: how many `waitForStoreToLoad` callers are still waiting.
+    var debugPendingLoadWaiterCount: Int {
+        isolationQueue.sync { _loadWaiters.count }
+    }
 #endif
 
     lazy var persistentContainer: NSPersistentContainer = {
+        markContainerCreated()
         if let injectedContainerForTesting {
             if injectedContainerNeedsLoading {
                 loadPersistentStores(for: injectedContainerForTesting)
@@ -194,12 +276,34 @@ final class CoreDataStack: @unchecked Sendable {
         // observes .NSPersistentStoreRemoteChange.
         description?.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
 
+        // Off the main thread: the first touch of this container is on the
+        // main actor (`AppStartupBootstrap`), and a synchronous add ran the
+        // whole load, and any migration of a large store, there. The gate is
+        // `waitForStoreToLoad`. The unit-test host keeps the synchronous add,
+        // because it touches the container in `App.init` so that the shared
+        // store is attached before any test runs.
+        description?.shouldAddStoreAsynchronously = !RuntimeEnvironment.isRunningUnitTests
+
         loadPersistentStores(for: container)
 
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
         return container
     }()
+
+    private func markContainerCreated() {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        isolationQueue.sync { _isContainerCreated = true }
+    }
+
+    /// The URL `NSPersistentContainer(name: "ESCChatmail")` gives its store,
+    /// read without creating the container (which would load the model a
+    /// second time). `CoreDataStackAsyncLoadTests` pins that the two agree.
+    static let defaultStoreURL: URL = NSPersistentContainer.defaultDirectoryURL()
+        .appendingPathComponent("ESCChatmail")
+        .appendingPathExtension("sqlite")
 
     #if os(macOS)
     private static let unitTestHostStoreDirectoryPrefix = "UnitTestHostStore-"
@@ -263,7 +367,22 @@ final class CoreDataStack: @unchecked Sendable {
     // loaded model at runtime. ModelConstraintMetadataTests pins the declared
     // constraints.
 
+    /// Starts a load through the recovery ladder unless one is already in
+    /// flight, whose outcome then answers every waiter.
     private func loadPersistentStores(for container: NSPersistentContainer) {
+        guard claimStoreLoad() else {
+            Log.debug("A store load is already in flight; not starting another", category: .coreData)
+            return
+        }
+        startClaimedStoreLoad(for: container)
+    }
+
+    /// Loads with the in-flight claim already held. The completion runs on a
+    /// background queue when the store is added asynchronously, and on the
+    /// caller's thread otherwise; it ends the claim by attaching the store,
+    /// latching an error or scheduling a timed retry, and a corrupt-store
+    /// reset carries it into its reload.
+    private func startClaimedStoreLoad(for container: NSPersistentContainer) {
         container.loadPersistentStores { [weak self] storeDescription, error in
             guard let self = self else { return }
 
@@ -271,8 +390,8 @@ final class CoreDataStack: @unchecked Sendable {
                 self.handleStoreLoadError(error, for: container)
             } else {
                 self.stampCurrentModelOrdinal(on: container, storeURL: storeDescription.url)
-                self.setStoreLoaded(true)
                 self.loadAttempts = 0
+                self.setStoreLoaded(true)
                 Log.info("Core Data store loaded successfully: \(storeDescription)", category: .coreData)
                 if let storeURL = storeDescription.url {
                     CoreDataBackupManager.pruneBackups(for: storeURL)
@@ -304,6 +423,9 @@ final class CoreDataStack: @unchecked Sendable {
 
         switch result {
         case .retry(let delay):
+            // Nothing is in flight during the delay, and nothing is latched,
+            // so Reset Mailbox still refuses and waiters keep waiting.
+            releaseStoreLoadClaim()
             Task { @MainActor [weak self] in
                 guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
                 self?.retryLoadingStore(for: container)
@@ -337,23 +459,54 @@ final class CoreDataStack: @unchecked Sendable {
     /// failed migration, a newer build's store) is reloaded only once the user
     /// has asked (`permitReloadAfterDeterministicFailure()`), not by the launch
     /// loop's timed retries or a background task: each reload runs the whole
-    /// migration again, on the main actor, before it fails the same way.
+    /// migration again before it fails the same way.
+    ///
+    /// Clearing the latch and claiming the load are one step, so no second
+    /// load and no Reset Mailbox can start between them.
     func retryLoadAfterFailure() {
         let container = persistentContainer
-        guard let loadError = storeLoadError,
-              container.persistentStoreCoordinator.persistentStores.isEmpty else {
+        guard container.persistentStoreCoordinator.persistentStores.isEmpty else {
             return
         }
-        // Consumed by every retry, so a permit Try Again gave a retry that did
-        // not need it is not left for a later timed one.
-        let isPermitted = consumeDeterministicReloadPermit()
-        if Self.isDeterministicLoadFailure(loadError), !isPermitted {
+        switch claimReloadAfterFailure() {
+        case .claimed:
+            Log.info("Retrying Core Data store load after a latched failure", category: .coreData)
+            startClaimedStoreLoad(for: container)
+        case .nothingToRetry:
+            return
+        case .awaitingUserPermit:
             Log.debug("Not reloading a store whose migration cannot succeed until the user asks", category: .coreData)
-            return
         }
-        Log.info("Retrying Core Data store load after a latched failure", category: .coreData)
-        resetStoreLoadTracking()
-        loadPersistentStores(for: container)
+    }
+
+    private enum ReloadClaim {
+        case claimed
+        /// No load error is latched, or a load or a reset is in flight.
+        case nothingToRetry
+        case awaitingUserPermit
+    }
+
+    private func claimReloadAfterFailure() -> ReloadClaim {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync {
+            guard let loadError = _storeLoadError, !_isStoreLoadInFlight else {
+                return .nothingToRetry
+            }
+            // Consumed by every retry, so a permit Try Again gave a retry that
+            // did not need it is not left for a later timed one.
+            let isPermitted = _deterministicReloadPermitted
+            _deterministicReloadPermitted = false
+            if Self.isDeterministicLoadFailure(loadError), !isPermitted {
+                return .awaitingUserPermit
+            }
+            _isStoreLoaded = false
+            _storeLoadError = nil
+            _loadAttempts = 0
+            _isStoreLoadInFlight = true
+            return .claimed
+        }
     }
 
     /// What `resetStoreAfterLoadFailure()` did.
@@ -384,14 +537,18 @@ final class CoreDataStack: @unchecked Sendable {
     /// `StoreVolumeFreeSpace.lowStorageThresholdBytes` free: a full disk
     /// usually latches `.unavailable` (SQLite reports CANTOPEN, not FULL), so
     /// the latched error alone cannot rule one out, and there freeing space
-    /// keeps the data while a reset frees nothing. Call it on the main actor,
-    /// where launch attempts load the store synchronously, so a load cannot
-    /// start between these checks and the removal.
+    /// keeps the data while a reset frees nothing. Loads now run off the main
+    /// thread, so the main actor no longer keeps a load out of the removal:
+    /// the reset takes the load's in-flight claim for it instead, and refuses
+    /// while a load holds it.
     func resetStoreAfterLoadFailure() -> StoreResetOutcome {
         let container = persistentContainer
-        guard let loadError = storeLoadError,
-              Self.allowsResetAfterLoadFailure(loadError),
-              container.persistentStoreCoordinator.persistentStores.isEmpty,
+        guard let loadError = claimStoreForResetAfterLoadFailure() else {
+            return .notResettable
+        }
+        // The latch stays: the retry that follows the removal reloads it.
+        defer { releaseStoreLoadClaim() }
+        guard container.persistentStoreCoordinator.persistentStores.isEmpty,
               let storeURL = container.persistentStoreDescriptions.first?.url,
               StoreVolumeFreeSpace.hasRoomForStoreReset(availableBytes: availableStorageBytes()) else {
             return .notResettable
@@ -417,6 +574,24 @@ final class CoreDataStack: @unchecked Sendable {
         return .removed
     }
 
+    /// The latched error, with the in-flight claim taken so that no load can
+    /// start until the reset is over. Nil, with nothing claimed, unless a
+    /// resettable error is latched and no load is in flight.
+    private func claimStoreForResetAfterLoadFailure() -> Error? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        return isolationQueue.sync {
+            guard let loadError = _storeLoadError,
+                  Self.allowsResetAfterLoadFailure(loadError),
+                  !_isStoreLoadInFlight else {
+                return nil
+            }
+            _isStoreLoadInFlight = true
+            return loadError
+        }
+    }
+
     /// Lets the next `retryLoadAfterFailure()` reload a deterministic latch.
     /// The launch screen's Try Again and Reset Mailbox call it.
     func permitReloadAfterDeterministicFailure() {
@@ -424,16 +599,6 @@ final class CoreDataStack: @unchecked Sendable {
         dispatchPrecondition(condition: .notOnQueue(isolationQueue))
         #endif
         isolationQueue.sync { _deterministicReloadPermitted = true }
-    }
-
-    private func consumeDeterministicReloadPermit() -> Bool {
-        #if DEBUG
-        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
-        #endif
-        return isolationQueue.sync {
-            defer { _deterministicReloadPermitted = false }
-            return _deterministicReloadPermitted
-        }
     }
 
     /// Latched load errors that reloading the same store cannot change.
@@ -461,9 +626,17 @@ final class CoreDataStack: @unchecked Sendable {
     }
 
     private func retryLoadingStore(for container: NSPersistentContainer) {
+        // A timed retry loads only a store that is still detached and
+        // unlatched; anything else was settled by another load meanwhile.
+        guard !isStoreLoaded, storeLoadError == nil,
+              container.persistentStoreCoordinator.persistentStores.isEmpty else {
+            return
+        }
         loadPersistentStores(for: container)
     }
 
+    /// Runs inside the failed load's completion, still holding its in-flight
+    /// claim, which the reload carries on.
     private func attemptStoreReset(for container: NSPersistentContainer, originalError: NSError) {
         guard let storeURL = container.persistentStoreDescriptions.first?.url else {
             setStoreLoadError(PersistentStoreLoadError(classifying: originalError))
@@ -472,7 +645,7 @@ final class CoreDataStack: @unchecked Sendable {
 
         markStoreRemovedByRecovery()
         if recoveryHandler.prepareStoreReset(for: storeURL) {
-            loadPersistentStores(for: container)
+            startClaimedStoreLoad(for: container)
         } else {
             // The backup could not be written (often a full disk), so the
             // store stays and the load can be retried.
@@ -484,29 +657,92 @@ final class CoreDataStack: @unchecked Sendable {
         persistentContainer.viewContext
     }
 
+    /// Returns once the store is attached; throws `storeLoadFailed` with the
+    /// latched error as soon as one is latched, with a timeout error after
+    /// `timeout` seconds (`.infinity`: none), and `CancellationError` when the
+    /// calling task is cancelled. Answered by the load itself, not by polling:
+    /// a waiter registers here and `setStoreLoaded`/`setStoreLoadError` resume
+    /// it. A store that is not loaded and has no load in flight is waited
+    /// for all the same, as before: a retry may still start one.
     func waitForStoreToLoad(timeout: TimeInterval = 10) async throws {
-        let startTime = Date()
-
-        while true {
-            let state = storeLoadState
-            if state.isLoaded {
-                return
+        let waiterID = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                self.registerLoadWaiter(waiterID, continuation: continuation, timeout: timeout)
             }
-
-            if let loadError = state.loadError {
-                throw CoreDataError.storeLoadFailed(loadError)
-            }
-
-            if Date().timeIntervalSince(startTime) > timeout {
-                throw CoreDataError.storeLoadFailed(storeLoadError ?? NSError(domain: "CoreData", code: -1, userInfo: [NSLocalizedDescriptionKey: "Store load timeout"]))
-            }
-
-            try await Task.sleep(nanoseconds: 100_000_000) // 0.1 seconds
+        } onCancel: {
+            self.resumeLoadWaiter(waiterID, throwing: CancellationError())
         }
     }
 
-    /// Loads persistent stores asynchronously without blocking the main thread.
+    private func registerLoadWaiter(
+        _ waiterID: UUID,
+        continuation: CheckedContinuation<Void, Error>,
+        timeout: TimeInterval
+    ) {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        let immediateOutcome: Result<Void, Error>? = isolationQueue.sync {
+            if _isStoreLoaded {
+                return .success(())
+            }
+            if let loadError = _storeLoadError {
+                return .failure(CoreDataError.storeLoadFailed(loadError))
+            }
+            _loadWaiters[waiterID] = continuation
+            return nil
+        }
+        if let immediateOutcome {
+            continuation.resume(with: immediateOutcome)
+            return
+        }
+        // Read after registering: a cancellation whose handler ran before the
+        // waiter was registered found nothing to resume, and has set the flag
+        // by then. Resuming removes the waiter first, so it resumes once.
+        if Task.isCancelled {
+            resumeLoadWaiter(waiterID, throwing: CancellationError())
+            return
+        }
+        if let deadline = Self.loadWaitDeadline(after: timeout) {
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: deadline) {
+                self.resumeLoadWaiter(
+                    waiterID,
+                    throwing: CoreDataError.storeLoadFailed(NSError(
+                        domain: "CoreData",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Store load timeout"]
+                    ))
+                )
+            }
+        }
+    }
+
+    /// Resumes one waiter, if it is still waiting, with `error`.
+    private func resumeLoadWaiter(_ waiterID: UUID, throwing error: Error) {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        let waiter = isolationQueue.sync { _loadWaiters.removeValue(forKey: waiterID) }
+        waiter?.resume(throwing: error)
+    }
+
+    /// Nil for a timeout that is not finite (no timer). A finite one is
+    /// capped at a year so that converting it to nanoseconds cannot overflow.
+    static func loadWaitDeadline(after timeout: TimeInterval, now: DispatchTime = .now()) -> DispatchTime? {
+        guard timeout.isFinite else { return nil }
+        let seconds = min(max(timeout, 0), 365 * 24 * 60 * 60)
+        return now + .nanoseconds(Int(seconds * 1_000_000_000))
+    }
+
+    /// Loads persistent stores asynchronously without blocking the main
+    /// thread. Bypasses the recovery ladder, but not the in-flight claim: with
+    /// a load already in flight it waits for that one instead.
     func loadStoresAsync() async throws {
+        guard claimStoreLoad() else {
+            try await waitForStoreToLoad(timeout: .infinity)
+            return
+        }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             persistentContainer.loadPersistentStores { [weak self] storeDescription, error in
                 if let error = error {
@@ -517,8 +753,8 @@ final class CoreDataStack: @unchecked Sendable {
                     if let self {
                         self.stampCurrentModelOrdinal(on: self.persistentContainer, storeURL: storeDescription.url)
                     }
-                    self?.setStoreLoaded(true)
                     self?.loadAttempts = 0
+                    self?.setStoreLoaded(true)
                     Log.info("Core Data store loaded successfully (async): \(storeDescription)", category: .coreData)
                     continuation.resume()
                 }
@@ -526,12 +762,51 @@ final class CoreDataStack: @unchecked Sendable {
         }
     }
 
+    /// Fresh-install cleanup of the store. Before the container exists (the
+    /// launch's own first load comes after this cleanup) the store is removed
+    /// by path, with its `-wal`, `-shm` and backups, and never opened: opening
+    /// it first ran its migration, on the main thread until 2026-11, only to
+    /// delete what it migrated. The launch's load then creates an empty one.
+    /// If the container already exists, its store is destroyed and reloaded
+    /// (`destroyAndReloadAsync()`).
+    func removeStoreForFreshInstall() async throws {
+        guard let storeURL = storeURLIfContainerNotCreated() else {
+            try await destroyAndReloadAsync()
+            return
+        }
+        if FileManager.default.fileExists(atPath: storeURL.path) {
+            try CoreDataBackupManager.removeStore(at: storeURL)
+        } else {
+            // A store's journal files can outlive it; remove them anyway.
+            try? FileManager.default.removeItem(atPath: storeURL.path + "-wal")
+            try? FileManager.default.removeItem(atPath: storeURL.path + "-shm")
+        }
+        CoreDataBackupManager.removeAllBackups(for: storeURL)
+        Log.info("Removed the store before its first load (fresh install)", category: .coreData)
+    }
+
+    /// The store's URL while `persistentContainer` has not been created, read
+    /// without creating it; nil once it has been.
+    private func storeURLIfContainerNotCreated() -> URL? {
+        #if DEBUG
+        dispatchPrecondition(condition: .notOnQueue(isolationQueue))
+        #endif
+        guard !isolationQueue.sync(execute: { _isContainerCreated }) else { return nil }
+        if let injectedContainerForTesting {
+            return injectedContainerForTesting.persistentStoreDescriptions.first?.url
+        }
+        return Self.defaultStoreURL
+    }
+
     /// Destroys all data and reloads the persistent stores asynchronously without
     /// blocking the calling thread.
     func destroyAndReloadAsync() async throws {
         _ = persistentContainer
         if !isStoreLoaded {
-            try await waitForStoreToLoad()
+            // No timeout: the store is added off the main thread, so a load
+            // in flight here may be running a long migration, and a timeout
+            // would leave the store this cleanup exists to remove.
+            try await waitForStoreToLoad(timeout: .infinity)
         }
 
         try destroyAllData()
@@ -609,7 +884,9 @@ final class CoreDataStack: @unchecked Sendable {
         // Safely reset the store
         try destroyAllData()
 
-        // Reinitialize
+        // Reinitialize. In production the add is asynchronous, so the wait
+        // below, not this call, is when the empty store is back; sign-out
+        // runs this under quiescence, with sync drained.
         loadPersistentStores(for: persistentContainer)
 
         // Wait for store to be ready
