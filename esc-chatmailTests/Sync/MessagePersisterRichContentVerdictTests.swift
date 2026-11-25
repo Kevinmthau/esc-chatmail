@@ -542,8 +542,7 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
             coreDataStack: coreDataStack,
             htmlContentHandler: handler,
             saveHTML: saveHTML,
-            photoPrefetcher: { _ in },
-            inlineCIDPrefetchScheduler: { _, _ in }
+            photoPrefetcher: { _ in }
         )
     }
 

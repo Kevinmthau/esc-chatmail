@@ -4,11 +4,12 @@ import XCTest
 /// (`AttachmentDownloader`; architecture review 2026-11, attachments-storage-disk#3).
 ///
 /// HONEST SCOPE: this reads source text, as `AttachmentExportSourceTests` does. It pins that
-/// no sync file reaches the downloader, which is how the old post-sync sweep was started; it
-/// cannot see a sweep started some other way.
+/// no sync file reaches the downloader, which is how the old post-sync sweep was started, nor
+/// the inline-image prefetch that saving a synced message used to start; it cannot see a
+/// download started some other way.
 final class AttachmentOnDemandDownloadSourceTests: XCTestCase {
-    /// Revert-check: calling `AttachmentDownloader.shared` from `SyncEngine.swift` again
-    /// makes this fail.
+    /// Revert-check: calling `AttachmentDownloader.shared` from `SyncEngine.swift` again, or
+    /// scheduling an inline-image prefetch from `MessagePersister` again, makes this fail.
     func testNoSyncFileReachesTheAttachmentDownloader() throws {
         let syncDirectory = repoFile("esc-chatmail/Services/Sync")
         let enumerator = try XCTUnwrap(
@@ -20,6 +21,10 @@ final class AttachmentOnDemandDownloadSourceTests: XCTestCase {
             XCTAssertFalse(
                 source.contains("AttachmentDownloader") || source.contains("attachmentDownloader"),
                 "\(url.lastPathComponent) reaches the attachment downloader"
+            )
+            XCTAssertFalse(
+                source.contains("InlineCIDAttachmentPrefetch") || source.contains("inlineCIDPrefetch"),
+                "\(url.lastPathComponent) prefetches inline images while saving synced mail"
             )
             checked += 1
         }

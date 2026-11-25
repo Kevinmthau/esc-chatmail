@@ -411,8 +411,7 @@ final class RichContentVerdictIngestLoaderEquivalenceTests: XCTestCase {
             htmlContentHandler: handler,
             saveHTML: saveHTML,
             conversationManager: ConversationManager(currentUserEmail: { myEmail }),
-            photoPrefetcher: { _ in },
-            inlineCIDPrefetchScheduler: { _, _ in }
+            photoPrefetcher: { _ in }
         )
     }
 

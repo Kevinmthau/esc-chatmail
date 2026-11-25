@@ -125,7 +125,6 @@ actor MessagePersister {
     let conversationManager: ConversationManager
     let conversationRouter: MessageConversationRouter
     let photoPrefetcher: @Sendable ([String]) async -> Void
-    let inlineCIDPrefetchScheduler: @Sendable (InlineCIDAttachmentPrefetchRequest, NSManagedObjectContext) -> Void
 
     // MARK: - Initialization
 
@@ -136,8 +135,7 @@ actor MessagePersister {
         saveHTML: ((String, String) -> HTMLSaveResult)? = nil,
         conversationManager: ConversationManager = ConversationManager(),
         conversationRouter: MessageConversationRouter? = nil,
-        photoPrefetcher: (@Sendable ([String]) async -> Void)? = nil,
-        inlineCIDPrefetchScheduler: (@Sendable (InlineCIDAttachmentPrefetchRequest, NSManagedObjectContext) -> Void)? = nil
+        photoPrefetcher: (@Sendable ([String]) async -> Void)? = nil
     ) {
         self.coreDataStack = coreDataStack
         self.messageProcessor = messageProcessor
@@ -151,9 +149,6 @@ actor MessagePersister {
         )
         self.photoPrefetcher = photoPrefetcher ?? { emails in
             await ProfilePhotoResolver.shared.prefetchPhotos(for: emails)
-        }
-        self.inlineCIDPrefetchScheduler = inlineCIDPrefetchScheduler ?? { request, context in
-            InlineCIDAttachmentPrefetchScheduler.schedule(request, in: context)
         }
     }
 

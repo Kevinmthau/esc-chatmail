@@ -603,10 +603,6 @@ extension MessagePersister {
             )
         }
 
-        if result.didUpdate {
-            await scheduleInlineCIDPrefetchIfNeeded(for: processedMessage, in: context)
-        }
-
         if let modifiedConversationID = result.modifiedConversationID {
             await ModificationTracker.shared.trackModifiedConversation(
                 modifiedConversationID,
