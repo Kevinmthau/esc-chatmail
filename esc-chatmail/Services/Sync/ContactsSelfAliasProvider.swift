@@ -65,7 +65,8 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
     }
 
     func aliases(knownEmails: [String]) async -> Set<String> {
-        guard Self.canReadContacts(status: authorizationStatusProvider()) else {
+        let status = authorizationStatusProvider()
+        guard Self.canReadContacts(status: status) else {
             return []
         }
 
@@ -75,20 +76,18 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
         }
 
         let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
+        // The Mac's "me" card is the user's own word for who they are, so it
+        // counts whatever else it lists, and its addresses are known ones
+        // when other cards are judged: otherwise the me card, naming none of
+        // the account's addresses, would read as someone else's card and
+        // disqualify the user's own card that shares an address with it.
+        let meAddresses = meCardAddresses(keysToFetch: keysToFetch)
         let knownAddresses = Set(
             searchEmails
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty }
-        )
-        var aliases = Set<String>()
-
-        #if os(macOS)
-        // The Mac's "me" card is the user's own word for who they are, so it
-        // counts whatever else it lists.
-        if let contact = try? contactStore.unifiedMeContact(withKeysToFetch: keysToFetch) {
-            aliases.formUnion(Self.normalizedEmails(from: contact))
-        }
-        #endif
+        ).union(meAddresses)
+        var aliases = meAddresses
 
         // The cards that list one of the user's addresses as stored. Only
         // their addresses beyond the known ones need a decision, and only a
@@ -125,8 +124,11 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
         // (`SelfContactCards`), which needs every card. A walk that fails
         // admits no such card: someone else's mail drawn as the user's own,
         // and their chats merged into note-to-self, is worse than an alias
-        // missed for one run.
-        guard let allCards = allContactAddressLists(keysToFetch: keysToFetch) else {
+        // missed for one run. Limited access is the same: the walk sees only
+        // the cards the user shared, so the partner's card that would
+        // disqualify a household card may be missing from it.
+        guard !status.isLimitedAccess,
+              let allCards = allContactAddressLists(keysToFetch: keysToFetch) else {
             return aliases
         }
         aliases.formUnion(
@@ -136,6 +138,17 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
             )
         )
         return aliases
+    }
+
+    /// The normalized addresses of the Mac's "me" card; none on iOS, which has
+    /// no "me" card.
+    private func meCardAddresses(keysToFetch: [CNKeyDescriptor]) -> Set<String> {
+        #if os(macOS)
+        if let contact = try? contactStore.unifiedMeContact(withKeysToFetch: keysToFetch) {
+            return Self.normalizedEmails(from: contact)
+        }
+        #endif
+        return []
     }
 
     /// The addresses of every contact card, or nil when the walk failed.

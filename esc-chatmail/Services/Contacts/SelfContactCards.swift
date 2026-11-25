@@ -12,12 +12,16 @@ import Foundation
 ///   which is also on the partner's own card, so it does not count.
 /// - A company card that lists colleagues beside the user's send-as address
 ///   does not count once any of those colleagues has a card of their own.
-/// - The user's own card, and a copy of it kept in a second account, count.
+/// - The user's own card, and a copy of it kept in a second account that lists
+///   a known address too, count.
 /// A card is counted or left out whole: one foreign address on it makes every
 /// address it lists suspect.
 ///
-/// What this cannot tell apart: a card that lists the user beside someone who
-/// has no card of their own counts, as every such card did before this rule.
+/// What this cannot tell apart, because it reads addresses and not names: a
+/// card that lists the user beside someone who has no card of their own
+/// counts, as every such card did before this rule; and a leftover card that
+/// lists only one of the user's other addresses, naming none of the known
+/// ones, reads as someone else's and takes the user's own card out with it.
 enum SelfContactCards {
     /// The addresses of the cards that count as the user's own, normalized.
     /// The user's known addresses are included only where such a card lists

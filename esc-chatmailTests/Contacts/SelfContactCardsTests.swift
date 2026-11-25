@@ -85,6 +85,8 @@ final class SelfContactCardsTests: XCTestCase {
 
     /// One foreign address on a card makes the whole card suspect: a company
     /// card names colleagues, and only some of them may have a card.
+    // Revert-check: the `claimedByOthers` guard in
+    // `SelfContactCards.selfAddresses`.
     func testSelfAddresses_companyCardListingColleagues_doesNotCountAnyColleague() {
         let addresses = SelfContactCards.selfAddresses(
             contactAddressLists: [
@@ -100,6 +102,8 @@ final class SelfContactCardsTests: XCTestCase {
 
     /// The other card spells the partner's Gmail address another way: it is
     /// still the partner's mailbox.
+    // Revert-check: the `claimedByOthers` guard in
+    // `SelfContactCards.selfAddresses`.
     func testSelfAddresses_partnerCardSpellsGmailDifferently_stillDisqualifies() {
         let addresses = SelfContactCards.selfAddresses(
             contactAddressLists: [
@@ -124,6 +128,23 @@ final class SelfContactCardsTests: XCTestCase {
         )
 
         XCTAssertEqual(addresses, [Self.account, "jane@gmail.com"])
+    }
+
+    /// HONEST SCOPE: a second card that lists only one of the user's other
+    /// addresses (a leftover self card in another account, naming none of the
+    /// known addresses) reads as someone else's card and takes the user's own
+    /// card out with it. Telling it from a partner's single-address card would
+    /// need the cards' names, which this rule does not read.
+    func testSelfAddresses_leftoverCardWithOnlyAnOtherOwnAddress_dropsOwnCard() {
+        let addresses = SelfContactCards.selfAddresses(
+            contactAddressLists: [
+                [Self.account, "kevin@icloud.example"],
+                ["kevin@icloud.example"]
+            ],
+            knownAddresses: [Self.account]
+        )
+
+        XCTAssertEqual(addresses, [])
     }
 
     func testSelfAddresses_noKnownAddresses_countsNothing() {
