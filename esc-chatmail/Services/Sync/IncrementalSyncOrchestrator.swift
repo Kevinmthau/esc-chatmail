@@ -149,10 +149,43 @@ final class IncrementalSyncOrchestrator {
     // MARK: - Public API
 
     /// Performs incremental sync using composable phases
+    ///
+    /// - Parameter allowsDeferrableWork: False for an app refresh, whose
+    ///   half minute holds the history slice and little else (scalability
+    ///   review step 8): the abandoned-message drain, label reconciliation
+    ///   and the fetches of missed messages wait for a foreground sync or a
+    ///   processing task, and nothing that marks them done is written. The
+    ///   missed-message list call still runs; the IDs it finds are kept for
+    ///   that later sync (`SyncReconciliation.deferMissedMessageFetches`).
+    ///   Nor does it wait out a rate limit (`MessageFetchWaitBudget.appRefresh`):
+    ///   the IDs a 429 refused hold the cursor and the slice saves the rest.
     func performSync(
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
         allowsExpensiveRecovery: Bool = true,
+        allowsDeferrableWork: Bool = true,
+        progressHandler: @escaping (Double, String) -> Void,
+        initialSyncFallback: @escaping () async throws -> Void
+    ) async throws -> IncrementalSyncResult {
+        try await MessageFetchWaitBudget.$current.withValue(
+            allowsDeferrableWork ? .standard : .appRefresh
+        ) {
+            try await performSyncWithinWaitBudget(
+                historyPageLimit: historyPageLimit,
+                historyPageSize: historyPageSize,
+                allowsExpensiveRecovery: allowsExpensiveRecovery,
+                allowsDeferrableWork: allowsDeferrableWork,
+                progressHandler: progressHandler,
+                initialSyncFallback: initialSyncFallback
+            )
+        }
+    }
+
+    private func performSyncWithinWaitBudget(
+        historyPageLimit: Int?,
+        historyPageSize: Int?,
+        allowsExpensiveRecovery: Bool,
+        allowsDeferrableWork: Bool,
         progressHandler: @escaping (Double, String) -> Void,
         initialSyncFallback: @escaping () async throws -> Void
     ) async throws -> IncrementalSyncResult {
@@ -334,8 +367,14 @@ final class IncrementalSyncOrchestrator {
             // resolution commits atomically with the recovered messages; if the save
             // fails, the staged changes die with the context and every record stays
             // for the next drain.
+            //
+            // Not in an app refresh: up to `maxAbandonedMessagesPerSync` full
+            // fetches the cursor does not wait on, and the drain alone owns
+            // the rows' retry counts, so leaving them is not a failure.
             let abandonedRetryTimer = timing.start("abandonedRetry")
-            let abandonedOutcome = try await retryAbandonedMessages(phaseContext: phaseContext)
+            let abandonedOutcome = allowsDeferrableWork
+                ? try await retryAbandonedMessages(phaseContext: phaseContext)
+                : .empty
             await failureTracker.stageAbandonedRetryOutcome(
                 recoveredIds: abandonedOutcome.recoveredIds,
                 goneIds: abandonedOutcome.goneIds,
@@ -397,7 +436,10 @@ final class IncrementalSyncOrchestrator {
             // expensive half (~1 metadata GET per recent message) and is
             // TTL-gated below.
             let noHistoryChanges = historyResult.records.isEmpty && historyResult.newMessageIds.isEmpty
-            let shouldSkipReconciliation = Self.shouldSkipLabelReconciliation(
+            // An app refresh skips label reconciliation (about one metadata
+            // GET per recent message) and records no reconciliation time, so
+            // the next foreground or processing sync still finds it due.
+            let shouldSkipReconciliation = !allowsDeferrableWork || Self.shouldSkipLabelReconciliation(
                 noHistoryChanges: noHistoryChanges,
                 lastReconciliation: defaults.double(forKey: SyncConfig.lastReconciliationTimeKey),
                 now: Date().timeIntervalSince1970
@@ -406,6 +448,7 @@ final class IncrementalSyncOrchestrator {
             let reconciliationResult = try await reconciliationPhase.execute(
                 input: ReconciliationInput(
                     skipLabelReconciliation: shouldSkipReconciliation,
+                    defersMissedMessageFetches: !allowsDeferrableWork,
                     probesDeliveryUnknownSends: DeliveryUnknownProbePolicy.allowsProbing(
                         allowsExpensiveWork: allowsExpensiveRecovery,
                         historySliceIsTerminal: historyResult.nextPageToken == nil,
@@ -546,6 +589,12 @@ final class IncrementalSyncOrchestrator {
                         recordsSuccessfulSync: !historyResult.wasTruncated
                     )
                     await failureTracker.retireLegacyCounterState()
+                    // Their messages, where fetched, are in the save above;
+                    // those that failed are kept for the next sync.
+                    self.reconciliation.settleMissedMessageFetches(
+                        attemptedDeferredIds: reconciliationResult.attemptedDeferredMissedIds,
+                        failedIds: reconciliationResult.failedMissedIds
+                    )
                 },
                 recordReconciliation: {
                     self.recordReconciliationTime()
@@ -768,11 +817,15 @@ final class IncrementalSyncOrchestrator {
                 )
             }
 
-            let query = try await resolveHistoryRecoveryQuery(
+            let listing = try await resolveHistoryRecoveryListing(
                 accountEmail: accountEmail,
                 in: context
             )
-            log.info("Recovery query: \(query)")
+            log.info("Recovery query: \(listing.query)")
+            // A resumed recovery advances to the watermark its first attempt
+            // took before listing (`PagedSyncProgress`): the history from it
+            // covers what arrived, and what changed on the pages saved, since.
+            let cursorHistoryId = listing.progress?.watermarkHistoryId ?? profile.historyId
 
             // The recovery window can start after a message the ledger
             // deferred earlier (it is bounded by the newest received row
@@ -784,48 +837,72 @@ final class IncrementalSyncOrchestrator {
             // listing; nothing in it touches the ledger.
             let deferredLedgerIds = Set(try await failureTracker.deferredMessageIds(in: context))
 
-            let result = try await MessageListPaginator.fetchAndProcess(
-                query: query,
-                messageFetcher: messageFetcher,
-                trackedIds: deferredLedgerIds
-            ) { checkpoint in
-                let progress = 0.1 + Self.streamingRecoveryProgressFraction(for: checkpoint) * 0.7
-                await MainActor.run {
-                    progressHandler(
-                        progress,
-                        "Recovering... \(checkpoint.processedCount)/\(checkpoint.listedCount)"
-                    )
-                }
-            } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
-                // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
-                try await messagePersister.saveMessages(
-                    messages,
-                    labelIds: labelIds,
-                    myAliases: myAliases,
-                    sendAsAliases: sendAsAliases,
-                    modificationTransaction: modificationTransaction,
-                    in: context
-                )
-            } pageCompletion: { [conversationManager, coreDataStack, rollupMutationSerializer] in
-                // Roll up each page's modified conversations before its save so messages
-                // and their derived state persist together (mirrors initial sync); an
-                // interrupted recovery keeps every saved page fully presentable.
-                let pageConversationIDs = await ModificationTracker.shared
-                    .claimPendingRollupConversations(in: modificationTransaction)
-                try await rollupMutationSerializer.performThrowingSyncMutation(
-                    conversationIDs: pageConversationIDs,
-                    in: context
-                ) {
-                    if !pageConversationIDs.isEmpty {
-                        await conversationManager.updateRollupsForModifiedConversations(
-                            conversationIDs: pageConversationIDs,
-                            in: context
+            let prior = listing.progress
+            let listingStartedAt = prior?.listingStartedAt ?? Date().timeIntervalSince1970
+            let recoveryWindowCheckpointStore = self.recoveryWindowCheckpointStore
+            let result: BatchProcessingResult
+            if let prior, prior.isListingComplete {
+                log.info("Recovery listing already complete; resuming at its deferred retry")
+                result = prior.completedListingResult
+            } else {
+                let listedResult = try await MessageListPaginator.fetchAndProcess(
+                    query: listing.query,
+                    messageFetcher: messageFetcher,
+                    trackedIds: deferredLedgerIds,
+                    startPageToken: prior?.nextPageToken
+                ) { checkpoint in
+                    let progress = 0.1 + Self.streamingRecoveryProgressFraction(for: checkpoint) * 0.7
+                    await MainActor.run {
+                        progressHandler(
+                            progress,
+                            "Recovering... \(checkpoint.processedCount)/\(checkpoint.listedCount)"
                         )
                     }
-                    let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)
-                    try await coreDataStack.saveAsync(context: context)
-                    await SyncContextPageObjectRelease.release(pageObjects, in: context)
+                } messageHandler: { [messagePersister, myAliases, sendAsAliases] messages in
+                    // Capture dependencies strongly to prevent message loss if orchestrator is deallocated
+                    try await messagePersister.saveMessages(
+                        messages,
+                        labelIds: labelIds,
+                        myAliases: myAliases,
+                        sendAsAliases: sendAsAliases,
+                        modificationTransaction: modificationTransaction,
+                        in: context
+                    )
+                } pageCompletion: { [conversationManager, coreDataStack, rollupMutationSerializer] page in
+                    // The page progress commits in the page's own save, so a
+                    // resumed recovery starts after exactly the pages saved.
+                    try await recoveryWindowCheckpointStore.stageFreeze(
+                        windowStart: listing.windowStart,
+                        progress: .afterPage(
+                            page,
+                            prior: prior,
+                            watermarkHistoryId: cursorHistoryId,
+                            listingStartedAt: listingStartedAt
+                        ),
+                        accountEmail: accountEmail,
+                        in: context
+                    )
+                    // Roll up each page's modified conversations before its save so messages
+                    // and their derived state persist together (mirrors initial sync); an
+                    // interrupted recovery keeps every saved page fully presentable.
+                    let pageConversationIDs = await ModificationTracker.shared
+                        .claimPendingRollupConversations(in: modificationTransaction)
+                    try await rollupMutationSerializer.performThrowingSyncMutation(
+                        conversationIDs: pageConversationIDs,
+                        in: context
+                    ) {
+                        if !pageConversationIDs.isEmpty {
+                            await conversationManager.updateRollupsForModifiedConversations(
+                                conversationIDs: pageConversationIDs,
+                                in: context
+                            )
+                        }
+                        let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)
+                        try await coreDataStack.saveAsync(context: context)
+                        await SyncContextPageObjectRelease.release(pageObjects, in: context)
+                    }
                 }
+                result = prior?.merging(into: listedResult) ?? listedResult
             }
 
             log.info(
@@ -891,8 +968,7 @@ final class IncrementalSyncOrchestrator {
             try await historyCheckpointStore.stageClear(in: context)
             if advancePlan.shouldAdvance {
                 // The replacement cursor and deletion of every state derived
-                // from the expired cursor commit together. A held recovery
-                // keeps its frozen window so the retry re-lists the same span.
+                // from the expired cursor commit together.
                 try await recoveryWindowCheckpointStore.stageClear(in: context)
                 // The rows stored before the window were not visited: whatever happened
                 // to them during the gap is in no history the new cursor returns. Owed
@@ -904,8 +980,16 @@ final class IncrementalSyncOrchestrator {
                     accountEmail: accountEmail,
                     in: context
                 )
-                await messagePersister.setAccountHistoryId(profile.historyId, in: context)
+                await messagePersister.setAccountHistoryId(cursorHistoryId, in: context)
             } else {
+                // A held recovery keeps its frozen window so the retry
+                // re-lists the same span, from its first page: its failures
+                // are in the ledger now, so the page progress goes.
+                try await recoveryWindowCheckpointStore.stageFreeze(
+                    windowStart: listing.windowStart,
+                    accountEmail: accountEmail,
+                    in: context
+                )
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
             }
 
@@ -941,11 +1025,14 @@ final class IncrementalSyncOrchestrator {
 
             // The save above committed the staged ledger rows with the cursor;
             // only now may the tracker's success state change.
-            await failureTracker.commit(advancePlan)
+            // The last-sync time recorded is no later than the listing's
+            // start, the first attempt's for a resumed recovery: the cursor
+            // is that attempt's watermark.
+            await failureTracker.commit(advancePlan, listingStartedAt: listingStartedAt)
             await failureTracker.retireLegacyCounterState()
 
             if advancePlan.shouldAdvance {
-                log.info("History recovery complete, new historyId: \(profile.historyId)")
+                log.info("History recovery complete, new historyId: \(cursorHistoryId)")
             } else {
                 log.info("History recovery complete with warnings; historyId not advanced")
             }
@@ -1031,16 +1118,16 @@ final class IncrementalSyncOrchestrator {
     /// the expired cursor), the install branch would re-list the whole
     /// mailbox, so that branch is bounded by the newest received row. The
     /// bound is frozen at the first attempt; a retry reuses it.
-    private func resolveHistoryRecoveryQuery(
+    private func resolveHistoryRecoveryListing(
         accountEmail: String,
         in context: NSManagedObjectContext
-    ) async throws -> String {
+    ) async throws -> PagedSyncListing {
         if let frozen = try await recoveryWindowCheckpointStore.load(
             accountEmail: accountEmail,
             in: context
         ) {
             log.info("Resuming history recovery window frozen at \(Date(timeIntervalSince1970: frozen.windowStart))")
-            return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
+            return PagedSyncListing(resuming: frozen, now: Date().timeIntervalSince1970)
         }
 
         // Gmail's time where the device's is ahead of it: the stored times are read as no
@@ -1073,7 +1160,7 @@ final class IncrementalSyncOrchestrator {
             accountEmail: accountEmail,
             in: context
         )
-        return SyncTimeCalculator.buildSyncQuery(startTime: windowStart)
+        return PagedSyncListing(windowStart: windowStart, progress: nil)
     }
 
     nonisolated private static func newestReceivedInternalDate(

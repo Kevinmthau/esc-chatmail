@@ -173,6 +173,37 @@ struct SyncConfig {
     /// UserDefaults key for resuming bounded missed-message reconciliation windows
     static let missedMessageReconciliationCursorKey = "missedMessageReconciliationCursor"
 
+    /// UserDefaults key for the missed-message IDs a later sync is to fetch,
+    /// with each one's failed attempts (JSON): those an app refresh's check
+    /// found and left for a sync with a larger budget
+    /// (`SyncReconciliation.deferMissedMessageFetches`), and those a sync
+    /// failed to fetch or store (`settleMissedMessageFetches`). Account
+    /// data: removed by `AuthSession.clearAccountScopedSyncDefaults`.
+    static let deferredMissedMessageIdsKey = "deferredMissedMessageIds"
+
+    /// The most deferred missed-message IDs kept; the newest are kept. One
+    /// check finds at most `maxReconciliationMessages`. An ID dropped here
+    /// is found again only by a check whose window still holds it, which
+    /// after its sync is none.
+    static let maxDeferredMissedMessageIds = 2 * maxReconciliationMessages
+
+    /// How many counted failures to fetch or store one deferred missed
+    /// message drop it, as `maxAbandonedMessageRetries` bounds the drain.
+    static let maxDeferredMissedMessageFetchAttempts = 5
+
+    /// The least time between two failures of a deferred missed message that
+    /// both count toward `maxDeferredMissedMessageFetchAttempts`, the drain's
+    /// first backoff: five counted failures span an hour at least.
+    static let deferredMissedMessageFailureSpacing: TimeInterval = abandonedRetryBackoffBase
+
+    /// The oldest an interrupted initial sync's or history recovery's listing
+    /// may be and still resume at its next page (`PagedSyncProgress`). Its
+    /// cursor is the watermark taken before its first page, and a resumed
+    /// listing leaves the mail that arrived since to the history from that
+    /// watermark. Gmail keeps history for about a week and documents no
+    /// floor, so a listing older than this lists again from its first page.
+    static let pagedSyncResumeMaxAge: TimeInterval = 3 * 24 * 60 * 60
+
     /// UserDefaults key for the moment the local mailbox began: no sync lists
     /// mail from before it (less a clock-drift buffer). The stored name is the
     /// key's first meaning, the app's first launch, which `FreshInstallHandler`

@@ -20,6 +20,15 @@ final class StubURLProtocol: URLProtocol {
     private static var _requestURLs: [URL] = []
     private static var _requests: [URLRequest] = []
     private static var _onStartLoading: (@Sendable (URLRequest) -> Void)?
+    private static var _responder: (@Sendable (URLRequest) -> Response)?
+
+    /// Answers each request at the moment it arrives, in place of `script`:
+    /// for a response that depends on when it is asked (a rate limit that
+    /// ends at a time on a `FakeSyncClock`).
+    static var responder: (@Sendable (URLRequest) -> Response)? {
+        get { lock.withLock { _responder } }
+        set { lock.withLock { _responder = newValue } }
+    }
 
     static var script: [Response] {
         get { lock.withLock { _script } }
@@ -57,6 +66,7 @@ final class StubURLProtocol: URLProtocol {
             _requestCount = 0
             _requestURLs = []
             _requests = []
+            _responder = nil
         }
     }
 
@@ -68,12 +78,18 @@ final class StubURLProtocol: URLProtocol {
     }
 
     private static func nextResponse(for request: URLRequest) -> Response? {
-        lock.withLock {
+        let responder: (@Sendable (URLRequest) -> Response)? = lock.withLock {
             _requestCount += 1
             _requests.append(request)
             if let url = request.url {
                 _requestURLs.append(url)
             }
+            return _responder
+        }
+        if let responder {
+            return responder(request)
+        }
+        return lock.withLock {
             guard !_script.isEmpty else { return nil }
             return _script.count > 1 ? _script.removeFirst() : _script[0]
         }
