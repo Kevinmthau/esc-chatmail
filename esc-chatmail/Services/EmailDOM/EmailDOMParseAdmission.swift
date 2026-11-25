@@ -159,7 +159,7 @@ enum EmailDOMParseAdmission {
         if bound > maximumDepth {
             return try parseOnMeasuringThread(
                 rootDepth: rootDepth,
-                attributeNames: cost.attributeNames,
+                walksPerLevel: cost.attributeWalksPerLevel,
                 roots: roots,
                 parse: parse
             )
@@ -176,7 +176,7 @@ enum EmailDOMParseAdmission {
             runOnMeasuringThread(handOff) { $0.parsed = nil }
             throw refusal(depth: depth)
         }
-        if let excess = attributeWalkRefusal(depth: depth, attributeNames: cost.attributeNames) {
+        if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: cost.attributeWalksPerLevel) {
             // Within `maximumDepth`: released here.
             throw refusal(excessWork: excess)
         }
@@ -185,7 +185,7 @@ enum EmailDOMParseAdmission {
 
     private static func parseOnMeasuringThread<Parsed>(
         rootDepth: Int,
-        attributeNames: Int,
+        walksPerLevel: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
@@ -195,7 +195,7 @@ enum EmailDOMParseAdmission {
                 let parsed = try parse()
                 let depth = measuredDepth(of: roots(parsed), rootDepth: rootDepth)
                 if depth <= maximumDepth {
-                    if let excess = attributeWalkRefusal(depth: depth, attributeNames: attributeNames) {
+                    if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: walksPerLevel) {
                         handOff.error = refusal(excessWork: excess)
                     } else {
                         handOff.parsed = parsed
@@ -380,13 +380,15 @@ enum EmailDOMParseAdmission {
     ///   `<html a b c d>`s took 10 s in a Release build, in the parse. The
     ///   scan charges, at each name of every such tag, the size of every
     ///   name such tags gave before it, in bytes and one for each name.
-    /// - `attributeNames`, for the walks after the parse: each name made
-    ///   into an element's list, or removed from it, marks the element's
-    ///   query indexes stale up every ancestor (1,000 `<b>`s of 100 names
-    ///   under 500 `div`s: 6.3 s to make, 7.5 s more for the sanitizer to
-    ///   remove them, in a Release build). The tree's real depth decides
-    ///   that, and every tree handed back is measured, so the names times
-    ///   the measured depth are checked then (`attributeWalkRefusal`); the
+    /// - `attributeWalksPerLevel`, for the walks after the parse: each name
+    ///   made into an element's list, or removed from it, marks the
+    ///   element's query indexes stale up every ancestor, and making an
+    ///   element's names walks a few times more whatever their number
+    ///   (1,000 `<b>`s of 100 names under 500 `div`s: 6.3 s to make, 7.5 s
+    ///   more for the sanitizer to remove them, in a Release build). The
+    ///   tree's real depth decides that, and every tree handed back is
+    ///   measured, so these times the measured depth are checked then
+    ///   (`attributeWalkRefusal`); the
     ///   scan's depth bound would refuse an old-style newsletter its
     ///   unclosed tags give a bound in the thousands. SwiftSoup's own copies
     ///   (a rebuilt formatting element, the adoption agency's adopter) are
@@ -406,11 +408,14 @@ enum EmailDOMParseAdmission {
         let childMoveWork: Int
         let attributeDedupWork: Int
         let rootAttributeMergeWork: Int
-        /// Attribute names begun in every tag the scan read, and the `on…`
-        /// names SwiftSoup copies into elements it makes (rebuilt formatting
-        /// elements and the adoption agency's adopters), which the
-        /// sanitizer then removes.
-        let attributeNames: Int
+        /// The walks up their ancestors that attributes cost once the tree
+        /// is built, per level: one for every name begun in every tag the
+        /// scan read, two more for each tag with a name (an element's names
+        /// are made with walks of their own, whatever their number), and
+        /// one for each `on…` name the sanitizer removes, those SwiftSoup
+        /// copies into elements it makes (rebuilt formatting elements and
+        /// the adoption agency's adopters) included.
+        let attributeWalksPerLevel: Int
 
         /// The refusal past one of the work limits.
         var excessWork: EmailDOMParseRefusal? {
@@ -466,21 +471,27 @@ enum EmailDOMParseAdmission {
     /// rebuild costs about 68 ns whatever its length).
     static let maximumRootAttributeMergeWork = 20_000_000
     /// About a second of walks up the ancestors of attribute-holding
-    /// elements where the names are only made, as in ordinary mail (about
-    /// 126 ns a name and level), two where each is removed too (about 275
-    /// ns), in names times levels. A long reply chain at depth 250 with
-    /// 16,000 names is 4 million.
+    /// elements, in `ParseCost.attributeWalksPerLevel` times levels, at
+    /// about 126 ns a unit: a name made costs about that, an element whose
+    /// names are made about 180 ns more whatever their number, and a name
+    /// removed about 154 ns (one `on…` name on each of 15,900 `<br>`s under
+    /// 495 `div`s: 3.7 s to make and remove, 7.9 million names times
+    /// levels, four units each). A long reply chain at depth 250 with
+    /// 16,000 names on 4,000 elements is 6 million.
     static let maximumAttributeWalkWork = 8_000_000
     /// `treeWork` units for each name of a rebuilt copy at each level of
-    /// the depth bound, in a fragment's parse (about 159 ns a name and
-    /// level, against about 33 ns a unit).
-    static let fragmentCopyWalkWeight = 5
+    /// the depth bound, in a fragment's parse. A copy's names cost 155 to
+    /// 195 ns a name and level, and the scan counts each candidate at two
+    /// tokens, so three units of about 33 ns (198 ns) bound it. Five
+    /// refused 300 paragraphs of `<p><font face size color>line</p>`.
+    static let fragmentCopyWalkWeight = 3
 
     /// The refusal of a tree whose attribute names, made into their lists,
-    /// would walk past `maximumAttributeWalkWork` (`ParseCost`): checked
-    /// against the measured depth, which every name's walk is within.
-    static func attributeWalkRefusal(depth: Int, attributeNames: Int) -> EmailDOMParseRefusal? {
-        let work = Saturating.multiply(depth, attributeNames)
+    /// would walk past `maximumAttributeWalkWork`
+    /// (`ParseCost.attributeWalksPerLevel`): checked against the measured
+    /// depth, which every walk is within.
+    static func attributeWalkRefusal(depth: Int, walksPerLevel: Int) -> EmailDOMParseRefusal? {
+        let work = Saturating.multiply(depth, walksPerLevel)
         guard work > maximumAttributeWalkWork else { return nil }
         return .tooCostlyToParse(work: work, limit: maximumAttributeWalkWork)
     }
@@ -580,8 +591,12 @@ enum EmailDOMParseAdmission {
         let copiedAttributeNames: Int
         // All the names of rebuilt copies, for a fragment's parse.
         let rebuiltCopyNames: Int
+        // The `on…` names of every tag read.
+        let eventNames: Int
         if scanner.readModeDependentTag {
             attributeWork = AttributeWorkBound.work(in: bytes)
+            // Any name may be an `on…` name.
+            eventNames = attributeWork.names
             depth = countedBound
             formattingCompareWork = Saturating.add(
                 Saturating.multiply(count.formattingTagCount, count.formattingTagCount * 16),
@@ -630,6 +645,7 @@ enum EmailDOMParseAdmission {
             )
             childMoveWork = scanner.childMoveWork
             attributeWork = scanner.attributeWork
+            eventNames = scanner.eventNames
             copiedAttributeNames = Saturating.add(scanner.rebuildNamesAcrossTokens, scanner.formattingStartTagEventNames)
             rebuiltCopyNames = scanner.rebuildAllNamesAcrossTokens
         }
@@ -650,7 +666,10 @@ enum EmailDOMParseAdmission {
             childMoveWork: childMoveWork,
             attributeDedupWork: attributeWork.dedupWork,
             rootAttributeMergeWork: attributeWork.rootMergeWork,
-            attributeNames: Saturating.add(attributeWork.names, copiedAttributeNames)
+            attributeWalksPerLevel: Saturating.add(
+                Saturating.add(attributeWork.names, Saturating.multiply(attributeWork.namedTags, 2)),
+                Saturating.add(eventNames, copiedAttributeNames)
+            )
         )
     }
 }
@@ -1146,6 +1165,8 @@ private struct AttributeWork {
     var rootListSize = 0
     /// `ParseCost.rootAttributeMergeWork`.
     var rootMergeWork = 0
+    /// Tags with at least one name.
+    var namedTags = 0
 
     /// A byte read into an attribute's name. For the dedup, a comparison
     /// with each name before it in its tag, of one more byte (three for a
@@ -1157,6 +1178,9 @@ private struct AttributeWork {
         if startsAttribute {
             namesInTag += 1
             names += 1
+            if namesInTag == 1 {
+                namedTags += 1
+            }
         }
         dedupWork = Saturating.add(
             dedupWork,
@@ -1177,6 +1201,7 @@ private struct AttributeWork {
         names = max(names, other.names)
         rootListSize = max(rootListSize, other.rootListSize)
         rootMergeWork = max(rootMergeWork, other.rootMergeWork)
+        namedTags = max(namedTags, other.namedTags)
     }
 }
 
@@ -1584,7 +1609,7 @@ private struct TokenizingScanner {
     /// Over every token, the rebuild costs of those elements.
     private(set) var rebuildCostAcrossTokens = 0
     /// Over every token, the `on…` names those elements' rebuilt copies are
-    /// given (`ParseCost.attributeNames`). A copy's names are made into its
+    /// given (`ParseCost.attributeWalksPerLevel`). A copy's names are made into its
     /// list as it is made, inside the parse, where no walk is made; the
     /// sanitizer's removal of its `on…` names walks.
     private(set) var rebuildNamesAcrossTokens = 0
@@ -1710,6 +1735,8 @@ private struct TokenizingScanner {
     private(set) var childMoveWork = 0
     /// The attribute names of every tag read (`AttributeWork`).
     private(set) var attributeWork = AttributeWork()
+    /// The `on…` names of every tag read (`Tag.eventNameCount`).
+    private(set) var eventNames = 0
 
     private let isTableContextFragment: Bool
 
@@ -2784,6 +2811,7 @@ private struct TokenizingScanner {
             work: &attributeWork,
             mergesIntoRoot: !isEndTag && (name == ScannedTagName.html || name == ScannedTagName.body)
         )
+        eventNames = Saturating.add(eventNames, attributes.eventNameCount)
         return Tag(
             name: name,
             isEndTag: isEndTag,

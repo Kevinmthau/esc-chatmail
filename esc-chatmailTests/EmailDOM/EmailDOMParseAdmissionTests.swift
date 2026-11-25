@@ -673,7 +673,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
         XCTAssertNil(cost.excessWork)
-        XCTAssertGreaterThanOrEqual(cost.attributeNames, 100_000)
+        XCTAssertGreaterThanOrEqual(cost.attributeWalksPerLevel, 100_000)
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
             guard case let .tooCostlyToParse(work, limit) = error as? EmailDOMParseRefusal else {
                 return XCTFail("\(error)")
@@ -738,7 +738,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         for events in [body("on"), body("\u{0B}on")] {
             let cost = EmailDOMParseAdmission.estimatedCost(of: events, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
             XCTAssertNil(cost.excessWork)
-            XCTAssertGreaterThan(cost.attributeNames, 20 * 1_000)
+            XCTAssertGreaterThan(cost.attributeWalksPerLevel, 20 * 1_000)
             XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(events)) { error in
                 guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
                     return XCTFail("\(error)")
@@ -746,7 +746,8 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
             }
         }
-        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: body("class")).attributeNames, 20)
+        // 20 names, and two for the `b` that holds them.
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: body("class")).attributeWalksPerLevel, 22)
     }
 
     /// A fragment is parsed without SwiftSoup's bulk building, so a rebuilt
@@ -772,6 +773,37 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
                 .tooCostlyToParse(work: fragment.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
             )
         }
+    }
+
+    /// Making an element's names walks its ancestors a few times whatever
+    /// their number, so names one to an element cost the most: one `on…`
+    /// name on each of 15,900 `<br>`s under 495 `div`s took 3.7 s to make
+    /// and remove in a Release build. Each such element counts four walks a
+    /// level, not one.
+    /// Revert-check: the `namedTags` term of `attributeWalksPerLevel` in
+    /// `estimate(in:limit:…)` (the count is halved; with the `on…` term too,
+    /// the body is admitted).
+    func testParseDocument_oneEventNameOnEachOfManyElements_isRefusedAsTooCostly() {
+        let html = String(repeating: "<div>", count: 495) + String(repeating: "<br onclick=1>", count: 15_900)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertNil(cost.excessWork)
+        XCTAssertEqual(cost.attributeWalksPerLevel, 4 * 15_900)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        }
+    }
+
+    /// A fragment of paragraphs each with a `font` the `</p>` leaves open is
+    /// ordinary enough (7 ms in `parseBodyFragment`, 9 deep), though the
+    /// scan's bound grows two a paragraph; the copies' walks are charged at
+    /// what they measured, so 300 of them are admitted.
+    /// Revert-check: `fragmentCopyWalkWeight` at 5 (refused).
+    func testParseBodyFragment_paragraphsOverUnclosedFonts_areAdmitted() {
+        let html = String(repeating: "<p><font face=\"Arial\" size=\"2\" color=\"#333333\">line of text</p>", count: 300)
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseBodyFragment(html))
     }
 
     /// SwiftSoup takes a tag for the run of its name after the last NUL
@@ -842,7 +874,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             XCTAssertLessThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork / 100, String(html.prefix(60)))
             XCTAssertLessThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork / 10, String(html.prefix(60)))
             XCTAssertNil(
-                EmailDOMParseAdmission.attributeWalkRefusal(depth: cost.depth, attributeNames: cost.attributeNames),
+                EmailDOMParseAdmission.attributeWalkRefusal(depth: cost.depth, walksPerLevel: cost.attributeWalksPerLevel),
                 String(html.prefix(60))
             )
             XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(60)))
