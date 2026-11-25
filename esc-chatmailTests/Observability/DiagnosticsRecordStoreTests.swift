@@ -155,7 +155,10 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
         XCTAssertNotNil(records[0]["payload"])
         XCTAssertEqual(records[1]["unreadable"] as? Bool, true)
         XCTAssertEqual(report["appBuild"] as? String, "612")
-        XCTAssertEqual(Set(report.keys), ["formatVersion", "generatedAt", "appVersion", "appBuild", "os", "records"])
+        XCTAssertEqual(
+            Set(report.keys),
+            ["formatVersion", "generatedAt", "appVersion", "appBuild", "os", "records", "backgroundRuns"]
+        )
     }
 
     private func hangPayload() -> Data {

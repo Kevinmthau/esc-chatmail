@@ -1,7 +1,8 @@
 import Foundation
 
-/// One JSON file the user can share from the app: the app's version, the OS, and every
-/// record `DiagnosticsRecordStore` keeps. It is made when the user shares it
+/// One JSON file the user can share from the app: the app's version, the OS, every record
+/// `DiagnosticsRecordStore` keeps, and the last background-task runs
+/// (`BackgroundRunJournal`, iOS). It is made when the user shares it
 /// (`DiagnosticsReportFile`), and goes only where the user sends it.
 ///
 /// It names no account and holds no mail: the records are MetricKit payloads already cut
@@ -16,7 +17,8 @@ enum DiagnosticsReport {
         appVersion: String?,
         appBuild: String?,
         osVersion: String,
-        generatedAt: Date
+        generatedAt: Date,
+        backgroundRuns: [Any] = []
     ) -> Data {
         let records: [[String: Any]] = recordContents.map { name, data in
             var record: [String: Any] = ["file": name]
@@ -33,7 +35,8 @@ enum DiagnosticsReport {
             "appVersion": appVersion ?? "unknown",
             "appBuild": appBuild ?? "unknown",
             "os": osVersion,
-            "records": records
+            "records": records,
+            "backgroundRuns": backgroundRuns
         ]
         return (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]))
             ?? Data("{}".utf8)
@@ -54,7 +57,8 @@ enum DiagnosticsReport {
             appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
-            generatedAt: now
+            generatedAt: now,
+            backgroundRuns: backgroundRunsForReport()
         )
         let parent = temporaryDirectory.appendingPathComponent("DiagnosticsReport", isDirectory: true)
         removeStaleReports(in: parent, now: now)
@@ -66,6 +70,22 @@ enum DiagnosticsReport {
         let url = directory.appendingPathComponent("MushMail Diagnostics \(formatter.string(from: now)).json")
         try data.write(to: url, options: [.atomic])
         return url
+    }
+
+    /// The background-task journal (`BackgroundRunJournal`) as JSON values. iOS only: the
+    /// Mac has no background tasks.
+    static func backgroundRunsForReport() -> [Any] {
+        #if os(iOS)
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let data = try? encoder.encode(BackgroundRunJournal.shared.entries()),
+              let runs = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            return []
+        }
+        return runs
+        #else
+        return []
+        #endif
     }
 
     static let staleReportAge: TimeInterval = 10 * 60
