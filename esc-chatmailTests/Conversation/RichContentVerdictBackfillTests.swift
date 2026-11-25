@@ -297,6 +297,35 @@ final class RichContentVerdictBackfillTests: XCTestCase {
         XCTAssertEqual(stored, expected)
     }
 
+    // A row that names a body whose file is gone (not brought back by a device restore, or
+    // evicted) has a body to fetch again. The backfill writes no verdict from its plain text
+    // and moves past it; the bubble load publishes what the row stores until the body is back.
+    //
+    // Revert-check: `noCandidate(for:)` in `RichContentVerdictResolver.classifierCandidate`
+    // answering `.none`. "002" is then stamped not rich from its plain body.
+    func testPrepareBatch_bodyFileGoneButNamedByStorageURI_leavesRowUnknownAndAdvancesPastIt() async throws {
+        try row("003", html: plainHTML)
+        try row("002", html: richHTML)
+        try row("001")
+        try viewContext.save()
+        handler.deleteHTML(for: "002")
+        XCTAssertFalse(handler.htmlFileExists(for: "002"), "Precondition: the body is gone")
+        let backfill = makeBackfill()
+        let background = stack.newBackgroundContext()
+
+        let batch = try await backfill.prepareBatch(in: background, before: nil, limit: 5)
+        XCTAssertEqual(batch, Batch(lastMessageID: "001", stampedCount: 2, didDrain: true))
+        XCTAssertTrue(stack.saveIfNeeded(context: background))
+
+        let stored = try await storedVerdicts()
+        let expected: [String: RichContentVerdict] = [
+            "003": .notRich,
+            "002": .unknown,
+            "001": .notRich
+        ]
+        XCTAssertEqual(stored, expected)
+    }
+
     // MARK: - ConversationLaunchRepairCoordinator.backfillRichContentVerdicts
 
     // Revert-check: the cursor and latch writes after a saved batch in

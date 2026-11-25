@@ -133,10 +133,15 @@ enum RichContentVerdictResolver {
     /// (`MessagePersister+Creation`, `FullEmailOpenSession.updateBodyStorageURIIfNeeded`),
     /// so its classifier term is false. A row with a URI did have one, and both file checks
     /// above have just found it gone: evicted under a storage cap (`Message.bodyEvicted`), or
-    /// not brought back by a device restore, which returns the store without `Messages`. Its body is to be fetched again, not a body it never had, so the
-    /// answer is undetermined: every writer then keeps the verdict the row stored, and the
-    /// loader publishes it with no refresh, so a card stays a card while its pipeline and the
-    /// reader fetch the body again (architecture review 2026-11, attachments-storage-disk#4).
+    /// not brought back by a device restore, which returns the store without `Messages`. Its
+    /// body is to be fetched again, not a body it never had, so the answer is undetermined.
+    /// No writer then works a verdict out from the row's plain text: the launch backfill and
+    /// the refresher write nothing, and the loader publishes the stored verdict with no
+    /// refresh, so a card stays a card while its pipeline and the reader fetch the body again
+    /// (architecture review 2026-11, attachments-storage-disk#4). Sync's update is the one
+    /// writer that does not keep the stored verdict: where it re-stamps such a row without
+    /// having saved HTML (its inputs changed, or its verdict was unknown), it stamps unknown
+    /// (`MessagePersister.stampRichContentVerdict`).
     ///
     /// Only these two exits change. A missing file alone is not the test: a plain-text row
     /// has no file either, and would stay unknown for good.

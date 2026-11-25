@@ -527,6 +527,63 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
         XCTAssertEqual(updated.rawVerdict, 0)
     }
 
+    // MARK: - A body that is gone from disk
+
+    /// A row whose body the app removed still names it in `bodyStorageURI` and is marked
+    /// `bodyEvicted`. A refetch that saves the HTML puts the body back, so the marker comes
+    /// off in that update's save.
+    ///
+    /// Revert-check: `existingMessage.bodyEvicted = false` in
+    /// `MessagePersister+Updates.swift`. Without it the row stays marked evicted with its
+    /// body on disk.
+    func testUpdateExistingMessage_evictedRowRefetchedWithHTML_clearsTheEvictedMarker() async throws {
+        let id = uniqueID("evicted-refetch")
+        let persister = makePersister()
+        let created = try await createRow(
+            makeProcessedMessage(id: id, html: RichVerdictFixture.richHTML),
+            using: persister
+        )
+        try await removeBody(ofMessageID: id, markingEvicted: true)
+        let evicted = try await storedRow(id: id)
+        XCTAssertTrue(evicted.bodyEvicted, "premise: the row is marked")
+        XCTAssertFalse(handler.htmlFileExists(for: id), "premise: the body is gone")
+
+        let updated = try await updateRow(
+            makeProcessedMessage(id: id, html: RichVerdictFixture.richHTML),
+            using: persister
+        )
+
+        XCTAssertTrue(handler.htmlFileExists(for: id))
+        XCTAssertEqual(updated.inputs, created.inputs)
+        XCTAssertEqual(updated.verdict, .rich)
+        XCTAssertFalse(updated.bodyEvicted)
+    }
+
+    /// A refetch that brings no HTML for a row whose body is gone must not work a verdict
+    /// out from the row's plain `bodyText`, which is not its body: the read-through stamp
+    /// is unknown, and the marker stays for the fetch that brings the body back.
+    ///
+    /// Revert-check: `noCandidate(for:)` in `RichContentVerdictResolver.classifierCandidate`
+    /// answering `.none`. The stamp is then `.notRich`.
+    func testUpdateExistingMessage_bodyFileGoneAndNoIncomingHTML_stampsUnknownAndKeepsTheMarker() async throws {
+        let id = uniqueID("gone-no-html")
+        let persister = makePersister()
+        let created = try await createRow(
+            makeProcessedMessage(id: id, html: RichVerdictFixture.richHTML),
+            using: persister
+        )
+        XCTAssertNotNil(created.inputs.bodyStorageURI, "premise: the row names its body")
+        try await removeBody(ofMessageID: id, markingEvicted: true)
+        // Unknown opens the re-stamp gate with no input changed.
+        try await overwriteRawVerdict(0, forMessageID: id)
+
+        let updated = try await updateRow(makeProcessedMessage(id: id, html: nil), using: persister)
+
+        XCTAssertEqual(updated.inputs, created.inputs)
+        XCTAssertEqual(updated.verdict, .unknown)
+        XCTAssertTrue(updated.bodyEvicted)
+    }
+
     // MARK: - Helpers
 
     private func uniqueID(_ label: String) -> String {
@@ -670,7 +727,8 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
             return StoredVerdictRow(
                 rawVerdict: message.richContentVerdict,
                 verdict: message.storedRichContentVerdict,
-                inputs: message.richContentVerdictInputs
+                inputs: message.richContentVerdictInputs,
+                bodyEvicted: message.bodyEvicted
             )
         }
         return try XCTUnwrap(row, "No committed row for \(id)", file: file, line: line)
@@ -684,6 +742,21 @@ final class MessagePersisterRichContentVerdictTests: XCTestCase {
             request.fetchLimit = 1
             let message = try XCTUnwrap(context.fetch(request).first)
             message.richContentVerdict = rawValue
+            try context.save()
+        }
+    }
+
+    /// Leaves the row as an evicting pass would: the body file removed, `bodyStorageURI`
+    /// still naming it, and the row marked.
+    private func removeBody(ofMessageID id: String, markingEvicted: Bool) async throws {
+        handler.deleteHTML(for: id)
+        let context = testStack.newBackgroundContext()
+        try await context.perform {
+            let request: NSFetchRequest<Message> = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            request.fetchLimit = 1
+            let message = try XCTUnwrap(context.fetch(request).first)
+            message.bodyEvicted = markingEvicted
             try context.save()
         }
     }
@@ -708,6 +781,7 @@ private struct StoredVerdictRow: Sendable {
     let rawVerdict: Int16
     let verdict: RichContentVerdict
     let inputs: RichContentVerdictInputs
+    let bodyEvicted: Bool
 }
 
 private enum RichVerdictFixture {
