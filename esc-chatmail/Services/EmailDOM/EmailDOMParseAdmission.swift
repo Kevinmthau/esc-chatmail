@@ -172,7 +172,13 @@ enum EmailDOMParseAdmission {
             throw earlier
         }
         do {
-            return try measuredParse(bound: bound, rootDepth: rootDepth, roots: roots, parse: parse)
+            return try measuredParse(
+                bound: bound,
+                walksPerLevel: cost.attributeWalksPerLevel,
+                rootDepth: rootDepth,
+                roots: roots,
+                parse: parse
+            )
         } catch let refused as EmailDOMParseRefusal {
             if let memoKey {
                 RefusedParseMemo.shared.record(refused, for: memoKey)
@@ -183,21 +189,31 @@ enum EmailDOMParseAdmission {
 
     /// Whether the scan leaves the answer to the parse: a bound past
     /// `maximumDepth` sends the body to the measuring thread, where the real
-    /// depth may refuse it.
+    /// depth may refuse it, and attribute walks the bound would take past
+    /// `maximumAttributeWalkWork` may be refused at the measured depth
+    /// (`attributeWalkRefusal`), which is never more than the bound.
     private static func mayBeRefusedOnlyByItsParse(_ cost: ParseCost) -> Bool {
         cost.depth > maximumDepth
+            || attributeWalkRefusal(depth: cost.depth, walksPerLevel: cost.attributeWalksPerLevel) != nil
     }
 
     /// The parse and its measurement, on the measuring thread where the
-    /// bound is past `maximumDepth`.
+    /// bound is past `maximumDepth`, with the refusals only the measured
+    /// depth can reach.
     private static func measuredParse<Parsed>(
         bound: Int,
+        walksPerLevel: Int,
         rootDepth: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
         if bound > maximumDepth {
-            return try parseOnMeasuringThread(rootDepth: rootDepth, roots: roots, parse: parse)
+            return try parseOnMeasuringThread(
+                rootDepth: rootDepth,
+                walksPerLevel: walksPerLevel,
+                roots: roots,
+                parse: parse
+            )
         }
 
         var parsed: Parsed? = try parse()
@@ -211,11 +227,16 @@ enum EmailDOMParseAdmission {
             runOnMeasuringThread(handOff) { $0.parsed = nil }
             throw refusal(depth: depth)
         }
+        if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: walksPerLevel) {
+            // Within `maximumDepth`: released here.
+            throw refusal(excessWork: excess)
+        }
         return parsed!
     }
 
     private static func parseOnMeasuringThread<Parsed>(
         rootDepth: Int,
+        walksPerLevel: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
@@ -225,7 +246,11 @@ enum EmailDOMParseAdmission {
                 let parsed = try parse()
                 let depth = measuredDepth(of: roots(parsed), rootDepth: rootDepth)
                 if depth <= maximumDepth {
-                    handOff.parsed = parsed
+                    if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: walksPerLevel) {
+                        handOff.error = refusal(excessWork: excess)
+                    } else {
+                        handOff.parsed = parsed
+                    }
                 } else {
                     // `parsed` is released when this closure returns, on
                     // this thread.
@@ -383,12 +408,65 @@ enum EmailDOMParseAdmission {
     ///   of that name the agency may go through. Where the second scan
     ///   cannot follow the markup, every node of the body is counted in one
     ///   block.
+    /// - `attributeDedupWork`: a tag's attributes are kept pending until
+    ///   something first reads one (a selector, the sanitizer), and are
+    ///   then made into the element's list with each name compared with
+    ///   every name kept before it, without the key index
+    ///   (`Attributes.ensureMaterialized`), so a tag of n distinct names
+    ///   costs n² (one `<div>` of 16,000 names took 0.9 s in a Release build
+    ///   and 27 s in the app's Debug build, none of it in the parse). The
+    ///   second scan charges, for each attribute, the names before it in
+    ///   its tag times one more than its length in bytes, which bounds
+    ///   each comparison (a NUL counts three: SwiftSoup writes U+FFFD for
+    ///   it). The sanitizer's removal of `on…` names
+    ///   (`EmailDOMHTMLSanitizer.removeEventHandlerAttributes`) searches the
+    ///   list for each, which costs no more. Where the second scan cannot
+    ///   follow the markup, every `<` and letter is read as a tag
+    ///   (`AttributeWorkBound`).
+    /// - `rootAttributeMergeWork`: an `html` or `body` start tag gives the
+    ///   root element each of its names that element lacks, and each name
+    ///   added rebuilds the list's two key indexes, over every name it holds
+    ///   (`HtmlTreeBuilderState`'s `html`/`body` handling, `put(attribute:)`,
+    ///   `hasKeyIgnoreCase`); the list grows across tags, so 4,000
+    ///   `<html a b c d>`s took 10 s in a Release build, in the parse. The
+    ///   scan charges, at each name of every such tag, the size of every
+    ///   name such tags gave before it, in bytes and one for each name.
+    /// - `attributeWalksPerLevel`, for the walks after the parse: each name
+    ///   made into an element's list, or removed from it, marks the
+    ///   element's query indexes stale up every ancestor, and making an
+    ///   element's names walks a few times more whatever their number
+    ///   (1,000 `<b>`s of 100 names under 500 `div`s: 6.3 s to make, 7.5 s
+    ///   more for the sanitizer to remove them, in a Release build). The
+    ///   tree's real depth decides that, and every tree handed back is
+    ///   measured, so these times the measured depth are checked then
+    ///   (`attributeWalkRefusal`); the
+    ///   scan's depth bound would refuse an old-style newsletter its
+    ///   unclosed tags give a bound in the thousands. SwiftSoup's own copies
+    ///   (a rebuilt formatting element, the adoption agency's adopter) are
+    ///   made inside the parse, where no walk is made, so of theirs only
+    ///   the `on…` names the sanitizer removes count. Except in a
+    ///   fragment's parse, which SwiftSoup makes without its bulk building:
+    ///   there a rebuilt copy is given its names once it is in the tree,
+    ///   each a walk inside the parse, so every name of every copy the scan
+    ///   counts, times the depth bound, is added to `treeWork` (a `b` of 100
+    ///   names under 400 `div`s rebuilt 1,000 times: 6.4 s in
+    ///   `parseBodyFragment`, 0.2 s in `parseDocument`).
     struct ParseCost: Equatable {
         let depth: Int
         let treeWork: Int
         let titleSearchBytes: Int
         let formattingCompareWork: Int
         let childMoveWork: Int
+        let attributeDedupWork: Int
+        let rootAttributeMergeWork: Int
+        /// The walks up their ancestors that attributes cost once the tree
+        /// is built, per level: one for every name begun in every tag the
+        /// scan read, two more for each tag with a name (an element's names
+        /// are made with walks of their own, whatever their number), and
+        /// one for each `on…` name the sanitizer removes, those SwiftSoup
+        /// copies into elements it makes (rebuilt formatting elements and
+        /// the adoption agency's adopters) included.
+        let attributeWalksPerLevel: Int
 
         /// The refusal past one of the work limits.
         var excessWork: EmailDOMParseRefusal? {
@@ -407,6 +485,18 @@ enum EmailDOMParseAdmission {
             if childMoveWork > EmailDOMParseAdmission.maximumChildMoveWork {
                 return .tooCostlyToParse(work: childMoveWork, limit: EmailDOMParseAdmission.maximumChildMoveWork)
             }
+            if attributeDedupWork > EmailDOMParseAdmission.maximumAttributeDedupWork {
+                return .tooCostlyToParse(
+                    work: attributeDedupWork,
+                    limit: EmailDOMParseAdmission.maximumAttributeDedupWork
+                )
+            }
+            if rootAttributeMergeWork > EmailDOMParseAdmission.maximumRootAttributeMergeWork {
+                return .tooCostlyToParse(
+                    work: rootAttributeMergeWork,
+                    limit: EmailDOMParseAdmission.maximumRootAttributeMergeWork
+                )
+            }
             return nil
         }
     }
@@ -423,6 +513,39 @@ enum EmailDOMParseAdmission {
     /// About half a second of child moves (measured at about eight hundred
     /// million children² a second).
     static let maximumChildMoveWork = 400_000_000
+    /// About half a second of attribute name comparisons (measured at about
+    /// eight hundred million a second, for short names and for names of
+    /// 2 KB alike).
+    static let maximumAttributeDedupWork = 400_000_000
+    /// About half a second of index rebuilds (measured at 14 to 25 ns a
+    /// unit, for `html` and `body` alike, short names the dearest: a name's
+    /// rebuild costs about 68 ns whatever its length).
+    static let maximumRootAttributeMergeWork = 20_000_000
+    /// About a second of walks up the ancestors of attribute-holding
+    /// elements, in `ParseCost.attributeWalksPerLevel` times levels, at
+    /// about 126 ns a unit: a name made costs about that, an element whose
+    /// names are made about 180 ns more whatever their number, and a name
+    /// removed about 154 ns (one `on…` name on each of 15,900 `<br>`s under
+    /// 495 `div`s: 3.7 s to make and remove, 7.9 million names times
+    /// levels, four units each). A long reply chain at depth 250 with
+    /// 16,000 names on 4,000 elements is 6 million.
+    static let maximumAttributeWalkWork = 8_000_000
+    /// `treeWork` units for each name of a rebuilt copy at each level of
+    /// the depth bound, in a fragment's parse. A copy's names cost 155 to
+    /// 195 ns a name and level, and the scan counts each candidate at two
+    /// tokens, so three units of about 33 ns (198 ns) bound it. Five
+    /// refused 300 paragraphs of `<p><font face size color>line</p>`.
+    static let fragmentCopyWalkWeight = 3
+
+    /// The refusal of a tree whose attribute names, made into their lists,
+    /// would walk past `maximumAttributeWalkWork`
+    /// (`ParseCost.attributeWalksPerLevel`): checked against the measured
+    /// depth, which every walk is within.
+    static func attributeWalkRefusal(depth: Int, walksPerLevel: Int) -> EmailDOMParseRefusal? {
+        let work = Saturating.multiply(depth, walksPerLevel)
+        guard work > maximumAttributeWalkWork else { return nil }
+        return .tooCostlyToParse(work: work, limit: maximumAttributeWalkWork)
+    }
 
     /// `isTableContextFragment`: parsed in a table part's context
     /// (`EmailDOMFragmentParser`), where SwiftSoup ignores table parts that
@@ -510,7 +633,21 @@ enum EmailDOMParseAdmission {
         let formattingCompareWork: Int
         let rebuildWork: Int
         let childMoveWork: Int
+        let attributeWork: AttributeWork
+        // `on…` names SwiftSoup gives elements it makes itself (a rebuilt
+        // formatting element's copy, and the adoption agency's adopter),
+        // which the sanitizer removes. Where the second scan cannot follow
+        // the markup, every name of every formatting tag counts, at each
+        // token for the rebuilds.
+        let copiedAttributeNames: Int
+        // All the names of rebuilt copies, for a fragment's parse.
+        let rebuiltCopyNames: Int
+        // The `on…` names of every tag read.
+        let eventNames: Int
         if scanner.readModeDependentTag {
+            attributeWork = AttributeWorkBound.work(in: bytes)
+            // Any name may be an `on…` name.
+            eventNames = attributeWork.names
             depth = countedBound
             formattingCompareWork = Saturating.add(
                 Saturating.multiply(count.formattingTagCount, count.formattingTagCount * 16),
@@ -523,6 +660,14 @@ enum EmailDOMParseAdmission {
                 Saturating.multiply(count.formattingTagsAcrossTokens, 2),
                 Saturating.add(depth, TokenizingScanner.rebuildCost(attributeCount: attributes))
             )
+            copiedAttributeNames = Saturating.multiply(
+                Saturating.add(
+                    Saturating.multiply(count.formattingTagsAcrossTokens, 2),
+                    count.formattingTagCount
+                ),
+                attributes
+            )
+            rebuiltCopyNames = Saturating.multiply(Saturating.multiply(count.formattingTagsAcrossTokens, 2), attributes)
             // Every node of the body in one block: each `<` gives an element
             // at most the run of text before it and itself, each pass of the
             // adoption agency an adopter and a moved block, at most one pass
@@ -550,13 +695,32 @@ enum EmailDOMParseAdmission {
                 scanner.rebuildCostAcrossTokens
             )
             childMoveWork = scanner.childMoveWork
+            attributeWork = scanner.attributeWork
+            eventNames = scanner.eventNames
+            copiedAttributeNames = Saturating.add(scanner.rebuildNamesAcrossTokens, scanner.formattingStartTagEventNames)
+            rebuiltCopyNames = scanner.rebuildAllNamesAcrossTokens
         }
         return ParseCost(
             depth: depth,
-            treeWork: Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
+            treeWork: Saturating.add(
+                Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
+                // A fragment is parsed without SwiftSoup's bulk building
+                // (only a document's parse turns it on), so a rebuilt copy is
+                // given its names in the tree, each a walk up its ancestors.
+                readsHead ? 0 : Saturating.multiply(
+                    Saturating.multiply(depth, rebuiltCopyNames),
+                    fragmentCopyWalkWeight
+                )
+            ),
             titleSearchBytes: TitleSearchCost.bytesRead(in: bytes),
             formattingCompareWork: formattingCompareWork,
-            childMoveWork: childMoveWork
+            childMoveWork: childMoveWork,
+            attributeDedupWork: attributeWork.dedupWork,
+            rootAttributeMergeWork: attributeWork.rootMergeWork,
+            attributeWalksPerLevel: Saturating.add(
+                Saturating.add(attributeWork.names, Saturating.multiply(attributeWork.namedTags, 2)),
+                Saturating.add(eventNames, copiedAttributeNames)
+            )
         )
     }
 }
@@ -621,6 +785,24 @@ private enum ScannedTagName {
     /// (measured).
     static let alwaysModeDependent: Set<[UInt8]> = Set(["select", "frameset"].map { Array($0.utf8) })
     static let noscript = Array("noscript".utf8)
+    static let html = Array("html".utf8)
+    static let body = Array("body".utf8)
+
+    /// SwiftSoup 2.13.5's `Token.Tag.TagId` names: after a NUL in a tag
+    /// name, the run that follows names the tag only if it is one of these
+    /// (`setTagIdFromSlice`); `link`, `font`, `wbr` and every other name
+    /// leave it unknown.
+    static let swiftSoupTagIds: Set<[UInt8]> = Set([
+        "a", "span", "p", "div", "em", "strong", "b", "i", "small", "li", "body", "html", "head",
+        "title", "form", "br", "meta", "img", "script", "style", "caption", "col", "colgroup",
+        "table", "tbody", "thead", "tfoot", "tr", "td", "th", "input", "hr", "select", "option",
+        "optgroup", "textarea", "noscript", "noframes", "plaintext", "button", "base", "frame",
+        "frameset", "iframe", "noembed", "embed", "dd", "dt", "dl", "ol", "ul", "pre", "listing",
+        "address", "article", "aside", "blockquote", "center", "dir", "fieldset", "figcaption",
+        "figure", "footer", "header", "hgroup", "menu", "nav", "section", "summary", "h1", "h2",
+        "h3", "h4", "h5", "h6", "applet", "marquee", "object", "ruby", "rp", "rt", "rb", "sub",
+        "sup", "code",
+    ].map { Array($0.utf8) })
 
     /// The start tags SwiftSoup's head takes without leaving it
     /// (`InHead`), from before the document's `html` on.
@@ -1017,6 +1199,63 @@ private enum TagAttributeReading {
     }
 }
 
+/// What the attribute names read so far cost once the tree is built, added
+/// up a name byte at a time. Every field only grows with what is read, and
+/// each byte's cost grows with the fields alone, so the field-by-field
+/// maximum of two readings costs at least as much as either from then on
+/// (`AttributeWorkBound` relies on it).
+private struct AttributeWork {
+    /// Names begun in the tag being read.
+    var namesInTag = 0
+    /// `ParseCost.attributeDedupWork`.
+    var dedupWork = 0
+    /// Names begun in every tag read.
+    var names = 0
+    /// The bytes, and one for each name, of every name an `html` or `body`
+    /// start tag gave the root's list.
+    var rootListSize = 0
+    /// `ParseCost.rootAttributeMergeWork`.
+    var rootMergeWork = 0
+    /// Tags with at least one name.
+    var namedTags = 0
+
+    /// A byte read into an attribute's name. For the dedup, a comparison
+    /// with each name before it in its tag, of one more byte (three for a
+    /// NUL, which SwiftSoup writes as U+FFFD), plus each comparison's length
+    /// check at its first byte. `mergesIntoRoot`: the tag is an `html` or
+    /// `body` start tag, whose names go into the root element's list.
+    mutating func read(nameByte byte: UInt8, startsAttribute: Bool, mergesIntoRoot: Bool) {
+        let width = byte == 0 ? 3 : 1
+        if startsAttribute {
+            namesInTag += 1
+            names += 1
+            if namesInTag == 1 {
+                namedTags += 1
+            }
+        }
+        dedupWork = Saturating.add(
+            dedupWork,
+            Saturating.multiply(namesInTag - 1, startsAttribute ? width + 1 : width)
+        )
+        if mergesIntoRoot {
+            if startsAttribute {
+                rootMergeWork = Saturating.add(rootMergeWork, rootListSize)
+                rootListSize = Saturating.add(rootListSize, 1)
+            }
+            rootListSize = Saturating.add(rootListSize, width)
+        }
+    }
+
+    mutating func merge(_ other: AttributeWork) {
+        namesInTag = max(namesInTag, other.namesInTag)
+        dedupWork = max(dedupWork, other.dedupWork)
+        names = max(names, other.names)
+        rootListSize = max(rootListSize, other.rootListSize)
+        rootMergeWork = max(rootMergeWork, other.rootMergeWork)
+        namedTags = max(namedTags, other.namedTags)
+    }
+}
+
 /// The most attribute names any formatting start tag could hold, for a body
 /// whose tokenizer states the second scan cannot follow: each formatting
 /// name is read as a tag from its first letter, as if the tokenizer were in
@@ -1115,6 +1354,126 @@ private enum FormattingAttributeBound {
     }
 }
 
+/// `AttributeWork` for a body whose tokenizer states the second scan cannot
+/// follow: every `<` or `</` and a letter is read as a tag, as if the
+/// tokenizer were in its data state there, and every `<html` or `<body` and
+/// a byte that ends the name as an `html` or `body` start tag too. One
+/// reading per state (and per kind of tag) carries the most of each field
+/// any reading there has, its own tag's and those of the tags any
+/// tokenization ended before it began, so reads in the same state at the
+/// same byte go on together (as in `FormattingAttributeBound`) and the cost
+/// is linear. The tags SwiftSoup reads, one after another, are among the
+/// readings, and a merged reading bounds each it stands for
+/// (`AttributeWork`).
+private enum AttributeWorkBound {
+    private static let stateCount = 10
+    private static let tagNameSlot = 0
+    /// Readings of an `html` or `body` start tag, after the others.
+    private static let rootTagSlots = stateCount
+
+    private static func slot(of state: TagAttributeReading.State) -> Int {
+        switch state {
+        case .beforeName: return 1
+        case .name: return 2
+        case .afterName: return 3
+        case .beforeValue: return 4
+        case let .quotedValue(quote): return quote == 0x22 ? 5 : 6
+        case .unquotedValue: return 7
+        case .afterQuotedValue: return 8
+        case .selfClosing: return 9
+        }
+    }
+
+    private static let states: [TagAttributeReading.State?] = [
+        nil, .beforeName, .name, .afterName, .beforeValue,
+        .quotedValue(0x22), .quotedValue(0x27), .unquotedValue, .afterQuotedValue, .selfClosing
+    ]
+
+    private static let rootTagNames = [ScannedTagName.html, ScannedTagName.body]
+
+    /// An `html` or `body` start tag's name ends before `index`.
+    private static func rootTagNameEnds(before index: Int, in bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        // After "<", or after a NUL in a longer name (`TokenizingScanner.readTag`).
+        guard index >= 5, bytes[index - 5] == 0x3C || bytes[index - 5] == 0 else { return false }
+        return rootTagNames.contains { name in
+            (0..<4).allSatisfy { ScannedTagName.lowercasedASCII(bytes[index - 4 + $0]) == name[$0] }
+        }
+    }
+
+    static func work(in bytes: UnsafeBufferPointer<UInt8>) -> AttributeWork {
+        // The most of each field over the tags ended so far, in any
+        // tokenization.
+        var ended = AttributeWork()
+        var readings = [AttributeWork?](repeating: nil, count: 2 * stateCount)
+        var next = readings
+        var index = 0
+        while index < bytes.count {
+            let byte = bytes[index]
+            var start = ended
+            start.namesInTag = 0
+            // A tag's name begins at a letter after "<" or "</", and the tag
+            // after every tag ended before it.
+            if ScannedTagName.isASCIIAlpha(byte), index >= 1,
+               bytes[index - 1] == 0x3C || (index >= 2 && bytes[index - 1] == 0x2F && bytes[index - 2] == 0x3C) {
+                merge(start, into: &readings[tagNameSlot])
+            }
+            // The same reading, as an `html` or `body` start tag, from where
+            // its name ends.
+            if ScannedTagName.endsTagName(byte), rootTagNameEnds(before: index, in: bytes) {
+                merge(start, into: &readings[rootTagSlots + tagNameSlot])
+            }
+            for position in 0..<next.count {
+                next[position] = nil
+            }
+            for position in 0..<readings.count {
+                guard var work = readings[position] else { continue }
+                let family = position < rootTagSlots ? 0 : rootTagSlots
+                var state = states[position - family]
+                // A name ends at whitespace, "/" or ">", which the attribute
+                // states then read; NUL and "<" go on in it.
+                if state == nil {
+                    if ScannedTagName.endsTagName(byte) {
+                        state = .beforeName
+                    } else {
+                        merge(work, into: &next[family + tagNameSlot])
+                        continue
+                    }
+                }
+                while let current = state {
+                    switch TagAttributeReading.step(current, byte) {
+                    case let .consume(following, startsAttribute):
+                        if following == .name {
+                            work.read(nameByte: byte, startsAttribute: startsAttribute, mergesIntoRoot: family != 0)
+                        }
+                        merge(work, into: &next[family + slot(of: following)])
+                        state = nil
+                    case let .reconsume(following):
+                        state = following
+                    case .end:
+                        ended.merge(work)
+                        state = nil
+                    }
+                }
+            }
+            swap(&readings, &next)
+            index += 1
+        }
+        // A tag the input ended inside is never emitted; counted anyway.
+        for case let work? in readings {
+            ended.merge(work)
+        }
+        return ended
+    }
+
+    private static func merge(_ work: AttributeWork, into reading: inout AttributeWork?) {
+        if reading == nil {
+            reading = work
+        } else {
+            reading?.merge(work)
+        }
+    }
+}
+
 // MARK: - First scan
 
 /// Counts every `<` followed by an ASCII letter as an element that never
@@ -1144,6 +1503,19 @@ private struct StartTagCount {
         let count = bytes.count
         var index = 0
         while index < count {
+            // After a NUL in a tag name, SwiftSoup may take the tag for the
+            // run that follows (`TokenizingScanner.readTag`): counted as a
+            // name of its own wherever it is, which only over-counts.
+            // It may be an end tag's, so a formatting name may run the
+            // adoption agency.
+            if bytes[index] == 0, index + 1 < count, ScannedTagName.isASCIIAlpha(bytes[index + 1]) {
+                if ScannedTagName.formattingNames.contains(Self.name(in: bytes, from: index + 1)) {
+                    mayRunAdoptionAgency = true
+                }
+                countName(startingAt: index + 1, in: bytes)
+                index += 1
+                continue
+            }
             guard bytes[index] == 0x3C else {
                 index += 1
                 continue
@@ -1161,28 +1533,26 @@ private struct StartTagCount {
                 index += 1
                 continue
             }
-            // At most `nameLengthRead` bytes: every name the scan looks up
-            // is shorter, so a longer one counts as unknown either way. The
-            // scan goes on from the next byte, not past the name, so reading
-            // names to their end was quadratic on `<a<a<a…` with no
-            // delimiter (`testEstimatedDepth_delimiterlessTagRun_isLinear`).
-            var nameEnd = nameStart
-            var name: [UInt8] = []
-            while nameEnd < count,
-                  nameEnd - nameStart < Self.nameLengthRead,
-                  !ScannedTagName.endsTagName(bytes[nameEnd]) {
-                name.append(ScannedTagName.lowercasedASCII(bytes[nameEnd]))
-                nameEnd += 1
-            }
-            weight += ScannedTagName.weight(of: name)
-            if ScannedTagName.formattingNames.contains(name) {
-                formattingTagCount += 1
-                formattingNameStarts.append(nameStart)
-                if name == ScannedTagName.anchor {
-                    mayRunAdoptionAgency = true
-                }
-            }
+            countName(startingAt: nameStart, in: bytes)
             index = nameStart
+        }
+    }
+
+    /// Weighs the name starting at `nameStart`. At most `nameLengthRead`
+    /// bytes: every name the scan looks up is shorter, so a longer one
+    /// counts as unknown either way. The scan goes on from the next byte,
+    /// not past the name, so reading names to their end was quadratic on
+    /// `<a<a<a…` with no delimiter
+    /// (`testEstimatedDepth_delimiterlessTagRun_isLinear`).
+    private mutating func countName(startingAt nameStart: Int, in bytes: UnsafeBufferPointer<UInt8>) {
+        let name = Self.name(in: bytes, from: nameStart)
+        weight += ScannedTagName.weight(of: name)
+        if ScannedTagName.formattingNames.contains(name) {
+            formattingTagCount += 1
+            formattingNameStarts.append(nameStart)
+            if name == ScannedTagName.anchor {
+                mayRunAdoptionAgency = true
+            }
         }
     }
 
@@ -1230,6 +1600,9 @@ private struct TokenizingScanner {
         let end: Int?
         /// Attribute names begun, duplicates included.
         let attributeCount: Int
+        /// Of those, the names that begin with "on" in any case: the ones
+        /// the sanitizer removes (`EmailDOMHTMLSanitizer`).
+        var eventNameCount = 0
     }
 
     private let bytes: UnsafeBufferPointer<UInt8>
@@ -1267,6 +1640,10 @@ private struct TokenizingScanner {
     private var heldByKey: [Int] = []
     private var certainlyOpenByKey: [Int] = []
     private var rebuildCostByKey: [Int] = []
+    /// By key: the `on…` names a rebuilt copy of the element is given, and
+    /// all its names.
+    private var rebuildNamesByKey: [Int] = []
+    private var rebuildAllNamesByKey: [Int] = []
     /// Over the keys, the held elements that may be off the stack, at most
     /// three of each: the active formatting list keeps no more than three
     /// entries of one name and attributes after its last marker (Noah's
@@ -1274,12 +1651,29 @@ private struct TokenizingScanner {
     /// costs. `<div><b>x</div>` 800 times keeps three `b`s, not 800.
     private var rebuildCandidates = 0
     private var rebuildCandidatesCost = 0
+    private var rebuildCandidatesNames = 0
+    private var rebuildCandidatesAllNames = 0
     /// Over every token, the held formatting elements that may be off the
     /// tree builder's stack: each costs a search of the stack when SwiftSoup
     /// looks for the last one on it.
     private(set) var rebuildCandidatesAcrossTokens = 0
     /// Over every token, the rebuild costs of those elements.
     private(set) var rebuildCostAcrossTokens = 0
+    /// Over every token, the `on…` names those elements' rebuilt copies are
+    /// given (`ParseCost.attributeWalksPerLevel`). A copy's names are made into its
+    /// list as it is made, inside the parse, where no walk is made; the
+    /// sanitizer's removal of its `on…` names walks.
+    private(set) var rebuildNamesAcrossTokens = 0
+    /// Over every token, all the names those copies are given: in a
+    /// fragment's parse each is given its names once it is in the tree,
+    /// each name a walk up its ancestors (`ParseCost.treeWork`).
+    private(set) var rebuildAllNamesAcrossTokens = 0
+    /// The `on…` names of every formatting start tag. Each pass of the
+    /// adoption agency gives a new element (the adopter) the names of the
+    /// formatting element it takes out of the active formatting list, and
+    /// only a formatting start tag puts one there (a rebuild replaces its
+    /// entry with a copy of the same names), so this bounds the adopters'.
+    private(set) var formattingStartTagEventNames = 0
     /// `EmailDOMParseAdmission.ParseCost.formattingCompareWork`.
     private(set) var formattingCompareWork = 0
     /// Whether a start tag only the body takes has been read, so the tree
@@ -1390,6 +1784,10 @@ private struct TokenizingScanner {
     private var latestMarkerPossiblyLeftInTheList = 0
     /// `EmailDOMParseAdmission.ParseCost.childMoveWork`.
     private(set) var childMoveWork = 0
+    /// The attribute names of every tag read (`AttributeWork`).
+    private(set) var attributeWork = AttributeWork()
+    /// The `on…` names of every tag read (`Tag.eventNameCount`).
+    private(set) var eventNames = 0
 
     private let isTableContextFragment: Bool
 
@@ -1471,6 +1869,7 @@ private struct TokenizingScanner {
                 tagStart: index,
                 tagLength: end - index,
                 attributeCount: tag.attributeCount,
+                eventNameCount: tag.eventNameCount,
                 selfClosing: tag.selfClosing
             )
             switch ScannedTagName.rawText(after: tag.name, selfClosing: tag.selfClosing) {
@@ -1538,6 +1937,7 @@ private struct TokenizingScanner {
                 tagStart: index,
                 tagLength: end - index,
                 attributeCount: tag.attributeCount,
+                eventNameCount: tag.eventNameCount,
                 selfClosing: tag.selfClosing
             )
             switch ScannedTagName.rawText(after: tag.name, selfClosing: tag.selfClosing) {
@@ -1566,6 +1966,7 @@ private struct TokenizingScanner {
         tagStart: Int,
         tagLength: Int,
         attributeCount: Int,
+        eventNameCount: Int,
         selfClosing: Bool
     ) {
         var entersHeadNoscript = false
@@ -1622,8 +2023,11 @@ private struct TokenizingScanner {
             && (isTableContextFragment || (name != ScannedTagName.table && certainlyOpenTable() == nil)))
         let isFormatting = ScannedTagName.formattingNames.contains(name)
         let key = isFormatting
-            ? formattingKey(of: tagStart..<(tagStart + tagLength), attributeCount: attributeCount)
+            ? formattingKey(of: tagStart..<(tagStart + tagLength), attributeCount: attributeCount, eventNameCount: eventNameCount)
             : -1
+        if isFormatting {
+            formattingStartTagEventNames = Saturating.add(formattingStartTagEventNames, eventNameCount)
+        }
         var clearedWithMarkerAt = -1
         if isFormatting, let marker = markerPositions.last, isRobustlyOpen(at: marker) {
             clearedWithMarkerAt = marker
@@ -2136,7 +2540,7 @@ private struct TokenizingScanner {
         }
     }
 
-    private mutating func formattingKey(of range: Range<Int>, attributeCount: Int) -> Int {
+    private mutating func formattingKey(of range: Range<Int>, attributeCount: Int, eventNameCount: Int) -> Int {
         let bytesOfTag = Array(bytes[range])
         if let key = formattingKeys[bytesOfTag] {
             return key
@@ -2146,6 +2550,8 @@ private struct TokenizingScanner {
         heldByKey.append(0)
         certainlyOpenByKey.append(0)
         rebuildCostByKey.append(Self.rebuildCost(attributeCount: attributeCount))
+        rebuildNamesByKey.append(eventNameCount)
+        rebuildAllNamesByKey.append(attributeCount)
         return key
     }
 
@@ -2160,6 +2566,14 @@ private struct TokenizingScanner {
         rebuildCandidatesCost = Saturating.add(
             rebuildCandidatesCost,
             Saturating.multiply(after - before, rebuildCostByKey[key])
+        )
+        rebuildCandidatesNames = Saturating.add(
+            rebuildCandidatesNames,
+            Saturating.multiply(after - before, rebuildNamesByKey[key])
+        )
+        rebuildCandidatesAllNames = Saturating.add(
+            rebuildCandidatesAllNames,
+            Saturating.multiply(after - before, rebuildAllNamesByKey[key])
         )
     }
 
@@ -2185,6 +2599,11 @@ private struct TokenizingScanner {
         let cost = rebuildCandidatesCost
         rebuildCandidatesAcrossTokens = Saturating.add(rebuildCandidatesAcrossTokens, Saturating.multiply(candidates, 2))
         rebuildCostAcrossTokens = Saturating.add(rebuildCostAcrossTokens, Saturating.multiply(cost, 2))
+        rebuildNamesAcrossTokens = Saturating.add(rebuildNamesAcrossTokens, Saturating.multiply(rebuildCandidatesNames, 2))
+        rebuildAllNamesAcrossTokens = Saturating.add(
+            rebuildAllNamesAcrossTokens,
+            Saturating.multiply(rebuildCandidatesAllNames, 2)
+        )
     }
 
     private func innermostIs(_ name: [UInt8]) -> Bool {
@@ -2390,14 +2809,35 @@ private struct TokenizingScanner {
     /// Reads a tag from the first letter of its name to the end of its `>`,
     /// through the same states as SwiftSoup's tokenizer, so a `>` inside a
     /// quoted attribute value does not end it.
-    private func readTag(nameStart: Int, isEndTag: Bool) -> Tag {
+    private mutating func readTag(nameStart: Int, isEndTag: Bool) -> Tag {
         var index = nameStart
         var name: [UInt8] = []
-        // NUL is replaced and the name goes on; keep it so the name stays
-        // unknown, as SwiftSoup's does.
+        // NUL is replaced and the name goes on, and SwiftSoup takes the tag
+        // for the run after the last NUL when that run has no uppercase
+        // letter and is one of its `TagId` names (`readTagName` sets the
+        // tag's identity from each run it reads): `<x\0html a>` is an
+        // `html` start tag, `<p\0div>` a `div`, and `<x\0link>` an unknown
+        // element that stays open. Otherwise the name stays unknown.
+        var lastRunStart = 0
+        var sawNul = false
+        var lastRunHasUppercase = false
         while index < count, !ScannedTagName.endsTagName(bytes[index]) {
-            name.append(ScannedTagName.lowercasedASCII(bytes[index]))
+            let byte = bytes[index]
+            if byte == 0 {
+                sawNul = true
+                lastRunStart = name.count + 1
+                lastRunHasUppercase = false
+            } else if byte >= 0x41, byte <= 0x5A {
+                lastRunHasUppercase = true
+            }
+            name.append(ScannedTagName.lowercasedASCII(byte))
             index += 1
+        }
+        if sawNul, lastRunStart < name.count, !lastRunHasUppercase {
+            let run = Array(name[lastRunStart...])
+            if ScannedTagName.swiftSoupTagIds.contains(run) {
+                name = run
+            }
         }
 
         // SwiftSoup's fast path right after the name: optional whitespace,
@@ -2413,13 +2853,23 @@ private struct TokenizingScanner {
             }
         }
 
-        let attributes = endOfAttributes(from: index)
+        // Every tag read is charged, end tags and tags the builder ignores
+        // too: an upper bound, as some are never made into elements. So is
+        // every `html` and `body` start tag's merge into the root.
+        attributeWork.namesInTag = 0
+        let attributes = endOfAttributes(
+            from: index,
+            work: &attributeWork,
+            mergesIntoRoot: !isEndTag && (name == ScannedTagName.html || name == ScannedTagName.body)
+        )
+        eventNames = Saturating.add(eventNames, attributes.eventNameCount)
         return Tag(
             name: name,
             isEndTag: isEndTag,
             selfClosing: attributes.selfClosing,
             end: attributes.end,
-            attributeCount: attributes.attributeCount
+            attributeCount: attributes.attributeCount,
+            eventNameCount: attributes.eventNameCount
         )
     }
 
@@ -2433,26 +2883,52 @@ private struct TokenizingScanner {
 
     /// From the byte after a tag name to the index after the tag's `>` (nil
     /// at the end of the input), whether `/>` closed it, and how many
-    /// attribute names it began.
-    private func endOfAttributes(from start: Int) -> (end: Int?, selfClosing: Bool, attributeCount: Int) {
+    /// attribute names it began; each name byte is added to `work`.
+    private func endOfAttributes(
+        from start: Int,
+        work: inout AttributeWork,
+        mergesIntoRoot: Bool
+    ) -> (end: Int?, selfClosing: Bool, attributeCount: Int, eventNameCount: Int) {
         var index = start
         var state = TagAttributeReading.State.beforeName
         var attributeCount = 0
+        var eventNameCount = 0
+        var nameLength = 0
+        var nameStartsWithO = false
         while index < count {
-            switch TagAttributeReading.step(state, bytes[index]) {
+            let byte = bytes[index]
+            switch TagAttributeReading.step(state, byte) {
             case let .consume(next, startsAttribute):
                 state = next
                 index += 1
                 if startsAttribute {
                     attributeCount += 1
                 }
+                if next == .name {
+                    work.read(nameByte: byte, startsAttribute: startsAttribute, mergesIntoRoot: mergesIntoRoot)
+                    if startsAttribute {
+                        nameLength = 0
+                    }
+                    // SwiftSoup trims a name when it makes it, and a vertical
+                    // tab is the one byte it trims that a name can hold:
+                    // `\u{0B}onclick` is `onclick`.
+                    if nameLength > 0 || byte != 0x0B {
+                        nameLength += 1
+                        if nameLength == 1 {
+                            nameStartsWithO = ScannedTagName.lowercasedASCII(byte) == 0x6F
+                        } else if nameLength == 2, nameStartsWithO, ScannedTagName.lowercasedASCII(byte) == 0x6E {
+                            eventNameCount += 1
+                        }
+                    }
+                }
             case let .reconsume(next):
                 state = next
             case let .end(selfClosing):
-                return (index + 1, selfClosing, attributeCount)
+                return (index + 1, selfClosing, attributeCount, eventNameCount)
             }
         }
-        return (nil, false, attributeCount)
+        // A tag the input ended inside is never emitted; charged anyway.
+        return (nil, false, attributeCount, eventNameCount)
     }
 
     // MARK: Comments and declarations

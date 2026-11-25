@@ -86,6 +86,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Where a read's response date goes (`ServerClockEstimate`), for the `after:` floors
     /// sync draws from Gmail's time. Never fed by messages.send.
     let serverClock: ServerClockEstimate
+    /// Where messages.send writes the body it streams (`GmailMultipartSendUpload`):
+    /// one file for each send, removed when the send ends.
+    let sendUploadDirectory: URL
 
     /// Tracks cumulative rate limit backoff time to prevent API exhaustion
     let rateLimitTracker = RateLimitTracker()
@@ -111,10 +114,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         sendSession: URLSession? = nil,
         retryClock: any SyncClock = SystemSyncClock(),
         circuitBreakerClock: any SyncClock = SystemSyncClock(),
-        serverClock: ServerClockEstimate = .shared
+        serverClock: ServerClockEstimate = .shared,
+        sendUploadDirectory: URL = GmailMultipartSendUpload.defaultDirectory
     ) {
         self.tokenManager = tokenManager
         self.serverClock = serverClock
+        self.sendUploadDirectory = sendUploadDirectory
         self.retryStrategy = retryStrategy
         self.retryClock = retryClock
         self.circuitBreakerClock = circuitBreakerClock
@@ -266,16 +271,20 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     ///
     /// `session` overrides the transport for every attempt; nil means the
     /// client's `session`. Only `sendMessage` passes one (`sendSession`).
+    /// `bodyFile`, when given, is the request's body, streamed from disk on every
+    /// attempt; only `sendMessage` passes one.
     nonisolated func performRequestWithRetry<T: Decodable>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
         allowsRetransmission: Bool = true,
-        session requestSession: URLSession? = nil
+        session requestSession: URLSession? = nil,
+        uploadingBodyFrom bodyFile: URL? = nil
     ) async throws -> T {
         try await performRetryingRequest(
             request,
             maxRetries: maxRetries,
             session: requestSession,
+            uploadingBodyFrom: bodyFile,
             behavior: GmailRetryPathBehavior(
                 allowsRetransmission: allowsRetransmission,
                 thrownAPIErrorsAbortImmediately: false,
@@ -360,11 +369,14 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     ///
     /// Every attempt, including a retransmission after a pre-transmission
     /// failure, uses the same transport: `requestSession` when given,
-    /// otherwise the client's `session`.
+    /// otherwise the client's `session`. With a `bodyFile` every attempt is an
+    /// upload of that file (`URLSession.upload(for:fromFile:)`), never a data
+    /// task: the request's own `httpBody` is not sent.
     nonisolated func performRetryingRequest<T>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
         session requestSession: URLSession? = nil,
+        uploadingBodyFrom bodyFile: URL? = nil,
         behavior: GmailRetryPathBehavior,
         handleStatus: (Int?, Data) async throws -> T
     ) async throws -> T {
@@ -396,7 +408,13 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             }
 
             do {
-                let (data, response) = try await transport.data(for: currentRequest)
+                let data: Data
+                let response: URLResponse
+                if let bodyFile {
+                    (data, response) = try await transport.upload(for: currentRequest, fromFile: bodyFile)
+                } else {
+                    (data, response) = try await transport.data(for: currentRequest)
+                }
                 guard let httpResponse = response as? HTTPURLResponse else {
                     return try await handleStatus(nil, data)
                 }

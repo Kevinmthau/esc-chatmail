@@ -102,10 +102,15 @@ actor DiskImageCache: PeriodicCleanupHandler {
     }
 
     /// Gets cached image for a URL, decoded with a bounded bitmap size.
-    /// Disk keeps the original bytes; only the decoded bitmap is capped
-    /// (consumers render at most full-screen width, and the downsampled
-    /// result being promoted to the memory cache is the desired behavior —
-    /// it is what keeps the memory cache's cost accounting meaningful).
+    /// What disk keeps depends on the writer: `save(_ data:)` keeps the bytes
+    /// it is given, and `save(_ image:)`, the remote image tier's only writer,
+    /// keeps a JPEG re-encoding of an image `RemoteImageFetcher` has already
+    /// downsampled. Either way the decoded bitmap is capped here, and an entry
+    /// past `ImageDownsampler`'s source-pixel budget (one an earlier build
+    /// wrote) is refused undecoded. Consumers render at most full-screen
+    /// width, and the downsampled result being promoted to the memory cache is
+    /// the desired behavior — it is what keeps the memory cache's cost
+    /// accounting meaningful.
     func getImage(for urlString: String) -> PlatformImage? {
         guard let data = getData(for: urlString) else { return nil }
         return ImageDownsampler.decode(data: data)

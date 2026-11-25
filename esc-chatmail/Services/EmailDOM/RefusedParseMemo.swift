@@ -2,7 +2,9 @@ import Foundation
 import os
 
 /// The refusals `EmailDOMParseAdmission` reaches only by parsing (a body
-/// sent to the measuring thread and found too deep there), kept so that the
+/// sent to the measuring thread and found too deep there, or one whose
+/// attribute names would walk too far up the depth its parse measured,
+/// `attributeWalkRefusal`), kept so that the
 /// same body is not parsed again only to be refused again. Processing one
 /// message asks the gate for its body seven times (text extraction, quote
 /// removal, the sanitizer, the snippet and preview passes), and a 193 KB

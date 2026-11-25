@@ -82,7 +82,7 @@ final class GmailAPIClientServerDateTests: XCTestCase {
             StubURLProtocol.reset()
             StubURLProtocol.script = [.dataWithHeaders(200, Self.sendBody, ["Date": header])]
 
-            let response = try await client.sendMessage(rawMessage: "raw")
+            let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
             XCTAssertEqual(response.id, "sent-1", "header \(header)")
             XCTAssertEqual(StubURLProtocol.requestCount, 1, "header \(header)")

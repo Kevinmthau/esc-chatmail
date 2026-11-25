@@ -221,6 +221,20 @@ final class ChatViewModel: ObservableObject {
     private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
+    private let downloadAttachmentForForwarding: @MainActor (Attachment) async -> Void
+    private struct ForwardPreparation {
+        let id: UUID
+        let messageObjectID: NSManagedObjectID
+        let task: Task<Void, Never>
+    }
+    /// A forward waiting for its message's attachments to download before its draft opens
+    /// (`setMessageToForward`).
+    private var forwardPreparation: ForwardPreparation?
+    /// Internal for tests, which await it.
+    var forwardPreparationTask: Task<Void, Never>? { forwardPreparation?.task }
+    /// Whether anything modal covers the app, wherever it was presented from
+    /// (`AppModalPresentation`). Internal so tests can stand in for Quick Look.
+    var isModalShownOverApp: @MainActor () -> Bool = { AppModalPresentation.isShowing() }
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
@@ -338,6 +352,7 @@ final class ChatViewModel: ObservableObject {
         self.outboundAttachmentContextBuilder = chatDependencies.messaging.outboundAttachmentContextBuilder
         self.outboundReplyContextBuilder = chatDependencies.messaging.outboundReplyContextBuilder
         self.composeForwardModeContextBuilder = chatDependencies.messaging.composeForwardModeContextBuilder
+        self.downloadAttachmentForForwarding = chatDependencies.messaging.downloadAttachmentForForwarding
         self.contactManager = chatDependencies.contacts.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
@@ -854,7 +869,91 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Opens the forward's draft. Attachments download only when asked for
+    /// (`AttachmentDownloader`), so the message's attachments that have no file yet are
+    /// downloaded first and the draft opens once they are done, whatever the outcome: one
+    /// that still has no file is left out, or refuses the forward if it is inline, as before
+    /// (`ForwardAttachmentDownloadPolicy`). Meanwhile each attachment shows its own progress
+    /// in the bubble. Forward on the same message again is the same request and is ignored;
+    /// Forward on another message replaces it. The draft opens only if nothing covers the
+    /// chat when the downloads end (`hasOpenScreenOverChat`), since it could not be shown
+    /// then; otherwise it is dropped. It is not cancelled when the chat disappears: a
+    /// full-screen Quick Look does that too, and the draft of a chat that has closed is
+    /// never shown.
     func setMessageToForward(_ message: Message) {
+        let messageObjectID = message.objectID
+        if forwardPreparation != nil {
+            guard forwardPreparation?.messageObjectID != messageObjectID else { return }
+            cancelForwardPreparation()
+        }
+        let missingFileIDs = message.attachmentsForForwarding
+            .filter(ForwardAttachmentDownloadPolicy.needsDownload)
+            .map(\.objectID)
+        guard !missingFileIDs.isEmpty else {
+            openForwardCompose(for: message)
+            return
+        }
+        let preparationID = UUID()
+        let task = Task { [weak self] in
+            for attachmentID in missingFileIDs {
+                guard !Task.isCancelled, let self else { return }
+                // Asked again after every wait: a sync may have deleted the row meanwhile,
+                // which leaves this context an object with no properties to read.
+                guard let attachment = self.liveAttachment(with: attachmentID) else { continue }
+                // In a task of its own: cancelling the forward (Forward on another message)
+                // must not cancel a download a bubble on screen also waits for.
+                let download = self.downloadAttachmentForForwarding
+                await Task { await download(attachment) }.value
+            }
+            guard let self, self.forwardPreparation?.id == preparationID else { return }
+            self.forwardPreparation = nil
+            guard !Task.isCancelled,
+                  !self.hasOpenScreenOverChat,
+                  let message = self.resolveMessage(with: messageObjectID) else { return }
+            // The downloads saved on background contexts; read what they stored now
+            // rather than wait for the merge into this context.
+            for attachment in message.attachmentsArray where !attachment.isDeleted {
+                self.viewContext.refresh(attachment, mergeChanges: true)
+            }
+            self.openForwardCompose(for: message)
+        }
+        forwardPreparation = ForwardPreparation(
+            id: preparationID,
+            messageObjectID: messageObjectID,
+            task: task
+        )
+    }
+
+    /// Whether a sheet, screen or alert covers the chat: its own, kept in either of the
+    /// places that keep one (`ChatView.activeDestination`, `ChatView.isChatActiveAndUncovered`),
+    /// or one presented from elsewhere, such as Quick Look or the reply bar's pickers
+    /// (`AppModalPresentation`). A late forward must not replace or try to cover it.
+    var hasOpenScreenOverChat: Bool {
+        destination != nil ||
+            isModalShownOverApp() ||
+            sendErrorAlert != nil ||
+            contactManager.contactToAdd != nil ||
+            contactManager.showingContactPicker ||
+            contactManager.showingParticipantsList ||
+            contactManager.showingContactAccessPicker ||
+            contactManager.contactActionAlert != nil
+    }
+
+    private func cancelForwardPreparation() {
+        forwardPreparation?.task.cancel()
+        forwardPreparation = nil
+    }
+
+    private func liveAttachment(with objectID: NSManagedObjectID) -> Attachment? {
+        guard let attachment = try? viewContext.existingObject(with: objectID) as? Attachment,
+              !attachment.isDeleted,
+              attachment.managedObjectContext != nil else {
+            return nil
+        }
+        return attachment
+    }
+
+    private func openForwardCompose(for message: Message) {
         do {
             let context = try composeForwardModeContextBuilder.build(
                 input: makeForwardModeInput(message)

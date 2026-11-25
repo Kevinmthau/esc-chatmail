@@ -35,6 +35,34 @@ final class RefusedParseMemoTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(RefusedParseMemo.shared.hitCount, hits + 1)
     }
 
+    /// A body the scan lets parse in place, whose attribute names the
+    /// measured depth then refuses (`attributeWalkRefusal`), is parsed once
+    /// too: its refusal is recorded and the next ask is answered with it.
+    /// Revert-check: the `attributeWalkRefusal` term of
+    /// `EmailDOMParseAdmission.mayBeRefusedOnlyByItsParse` (no key is made,
+    /// so nothing is recorded).
+    func testParseDocument_bodyRefusedForItsAttributeWalks_isRecordedAndRefusedAgain() throws {
+        var html = String(repeating: "<div>", count: 500) + "<p>\(UUID().uuidString)</p>"
+        for tag in 0..<1_000 {
+            html += "<br" + (0..<20).map { " n\(tag)x\($0)=1" }.joined() + ">"
+        }
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertNil(cost.excessWork)
+
+        var first: EmailDOMParseRefusal?
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { first = $0 as? EmailDOMParseRefusal }
+        guard case let .tooCostlyToParse(_, limit)? = first else {
+            return XCTFail("\(String(describing: first))")
+        }
+        XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        XCTAssertEqual(RefusedParseMemo.shared.refusal(for: RefusedParseMemo.Key(html, kind: .document)), first)
+
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(error as? EmailDOMParseRefusal, first)
+        }
+    }
+
     /// The same bytes parsed another way are a tree of their own.
     func testKey_sameBytesParsedAnotherWay_isAnotherKey() {
         let html = "<div>x</div>"

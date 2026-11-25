@@ -110,8 +110,7 @@ final class IngestCleanupSharingTests: XCTestCase {
             processed.richContentPrerun = RichContentPrerun(html: prerunHTML, isRich: true)
             let persister = MessagePersister(
                 messageProcessor: FixedMessageProcessor(processedMessage: processed),
-                photoPrefetcher: { _ in },
-                inlineCIDPrefetchScheduler: { _, _ in }
+                photoPrefetcher: { _ in }
             )
             let prepared = try await persister.prepareMessage(Self.message(id: "kept", html: html), myAliases: [])
             guard case .processed(let result) = prepared else {

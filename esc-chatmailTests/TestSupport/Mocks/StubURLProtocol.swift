@@ -18,6 +18,8 @@ final class StubURLProtocol: URLProtocol {
     private static var _script: [Response] = []
     private static var _requestCount = 0
     private static var _requestURLs: [URL] = []
+    private static var _requests: [URLRequest] = []
+    private static var _onStartLoading: (@Sendable (URLRequest) -> Void)?
     private static var _responder: (@Sendable (URLRequest) -> Response)?
 
     /// Answers each request at the moment it arrives, in place of `script`:
@@ -43,11 +45,27 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock { _requestURLs }
     }
 
+    /// Every request served, in arrival order, as the loading system handed it
+    /// over (method and headers; an upload's body is not in it).
+    static var requests: [URLRequest] {
+        lock.withLock { _requests }
+    }
+
+    /// Called with each request as it starts loading, before it is answered:
+    /// lets a test look at what exists at that moment (an upload's file) and
+    /// read an upload's body from `httpBodyStream`.
+    static var onStartLoading: (@Sendable (URLRequest) -> Void)? {
+        get { lock.withLock { _onStartLoading } }
+        set { lock.withLock { _onStartLoading = newValue } }
+    }
+
     static func reset() {
         lock.withLock {
+            _onStartLoading = nil
             _script = []
             _requestCount = 0
             _requestURLs = []
+            _requests = []
             _responder = nil
         }
     }
@@ -62,6 +80,7 @@ final class StubURLProtocol: URLProtocol {
     private static func nextResponse(for request: URLRequest) -> Response? {
         let responder: (@Sendable (URLRequest) -> Response)? = lock.withLock {
             _requestCount += 1
+            _requests.append(request)
             if let url = request.url {
                 _requestURLs.append(url)
             }
@@ -80,6 +99,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        Self.onStartLoading?(request)
         guard let url = request.url, let response = Self.nextResponse(for: request) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return

@@ -130,11 +130,9 @@ final class GmailSendService: ObservableObject {
     ) async throws -> SendResult {
         Log.debug("Sending MIME message (\(mimeData.count) bytes)", category: .api)
 
-        let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
-
         do {
             let response = try await apiClient.sendMessage(
-                rawMessage: rawMessage,
+                mimeData: mimeData,
                 threadId: threadId,
                 beforeTransmission: beforeTransmission
             )

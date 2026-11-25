@@ -176,42 +176,12 @@ struct RecipientInputSection: View {
                         Button {
                             handleAutocompleteSelection(contact)
                         } label: {
-                            HStack(spacing: 12) {
-                                if let imageData = contact.imageData,
-                                   let image = PlatformImage(data: imageData) {
-                                    Image(platformImage: image)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fill)
-                                        .frame(width: 40, height: 40)
-                                        .clipShape(Circle())
-                                } else {
-                                    contactInitialsView(for: contact)
-                                }
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(contact.displayName)
-                                        .font(.system(size: 16))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                    Text(contact.primaryEmail)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-
-                                Spacer()
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .contentShape(Rectangle())
+                            AutocompleteContactRow(contact: contact)
                         }
                         .buttonStyle(.plain)
                         .background(Color.systemBackground)
 
-                        Divider()
-                            .padding(.leading, 68)
+                        AutocompleteContactRowDivider()
                     }
                 }
             }
@@ -219,17 +189,6 @@ struct RecipientInputSection: View {
         }
         .background(Color.systemBackground)
         .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
-    }
-
-    private func contactInitialsView(for contact: ContactsService.ContactMatch) -> some View {
-        ZStack {
-            Circle()
-                .fill(Color.systemGray4)
-                .frame(width: 40, height: 40)
-            Text(contact.displayName.prefix(1).uppercased())
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.white)
-        }
     }
 
     private func handleAutocompleteSelection(_ contact: ContactsService.ContactMatch) {

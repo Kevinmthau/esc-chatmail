@@ -93,7 +93,6 @@ final class SyncEngine: ObservableObject, Sendable {
     private let incrementalSyncOrchestrator: IncrementalSyncOrchestrator
     private let messageFetcher: MessageFetcher
     private let coreDataStack: CoreDataStack
-    private let attachmentDownloader: AttachmentDownloader
     private let networkMonitor: NetworkMonitorService
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
@@ -131,7 +130,6 @@ final class SyncEngine: ObservableObject, Sendable {
             dataCleanupService: DataCleanupService(),
             conversationManager: ConversationManager(),
             coreDataStack: CoreDataStack.shared,
-            attachmentDownloader: AttachmentDownloader.shared,
             networkMonitor: NetworkMonitorService(),
             syncRunCoordinator: .shared,
             storeMaintenanceCoordinator: .shared
@@ -149,7 +147,6 @@ final class SyncEngine: ObservableObject, Sendable {
         dataCleanupService: DataCleanupService,
         conversationManager: ConversationManager,
         coreDataStack: CoreDataStack,
-        attachmentDownloader: AttachmentDownloader,
         networkMonitor: NetworkMonitorService,
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
@@ -162,7 +159,6 @@ final class SyncEngine: ObservableObject, Sendable {
 
         self.messageFetcher = messageFetcher
         self.coreDataStack = coreDataStack
-        self.attachmentDownloader = attachmentDownloader
         self.networkMonitor = networkMonitor
         self.syncRunCoordinator = syncRunCoordinator
         self.clock = clock
@@ -185,7 +181,6 @@ final class SyncEngine: ObservableObject, Sendable {
             messagePersister: messagePersister,
             conversationManager: conversationManager,
             dataCleanupService: dataCleanupService,
-            attachmentDownloader: attachmentDownloader,
             coreDataStack: coreDataStack
         )
 
@@ -486,7 +481,8 @@ final class SyncEngine: ObservableObject, Sendable {
 
         log.info("Incremental sync completed: \(result.newMessagesCount) new messages, \(result.labelChangesProcessed) label changes")
 
-        attachmentDownloader.schedulePendingAttachmentDownloads()
+        // No attachment is downloaded after a sync: they download when a
+        // chat shows them (CLAUDE.md, "A received attachment downloads only when").
         return result
     }
 

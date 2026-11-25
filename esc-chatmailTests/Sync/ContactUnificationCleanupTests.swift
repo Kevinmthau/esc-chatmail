@@ -651,6 +651,224 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(addressBook.readCount, 1, "Nothing is read without access")
     }
 
+    // MARK: - The user's own addresses
+
+    /// The user's own addresses Contacts add are adopted by the same pass and brought
+    /// onto the stored conversations the same way. A chat naming an address that left
+    /// the set gets the hash the router now makes: here a card of its own appears for
+    /// the user's second address, which no longer counts as the user's
+    /// (`SelfContactCards`), and the chat that named it beside Carol counts it again.
+    /// The links stay the same throughout, so only the self change moves the chat.
+    ///
+    /// Revert-check: `.union(selfChange.changedAddresses)` in
+    /// `DataCleanupService.unifyConversationsByContactIfNeeded` (the second pass then
+    /// has nothing in scope and the chat keeps the hash without the address).
+    func testUnify_selfAddressLeavesTheSet_rehashesTheChatsThatNameIt() async throws {
+        let icloud = "me@icloud.example"
+        _ = AccountBuilder().withEmail(Self.me).build(in: context)
+        let chat = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [Self.carol, icloud]))
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.carol, to: chat)
+        addConversationParticipant(email: icloud, to: chat)
+        try addMessage(id: "group-1", date: Date(timeIntervalSince1970: 100), from: Self.carol, to: [Self.me, icloud], in: chat)
+        try context.save()
+        let addressBook = AddressBookStub(cards: [[Self.me, icloud]])
+        let contacts = makeContacts(addressBook: addressBook)
+        let service = makeService(contacts: contacts, aliasesFromContacts: true)
+
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, icloud])
+        XCTAssertEqual(contacts.appliedSelfAddresses(forKnown: [Self.me]), [Self.me, icloud])
+        XCTAssertEqual(
+            try fetchConversationStates().first?.participantHash,
+            calculateParticipantHash(from: [Self.carol]),
+            "The first pass brings the chat onto the adopted set"
+        )
+
+        addressBook.cards = [[Self.me, icloud], [icloud]]
+        contacts.markContactsChanged()
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [])
+        XCTAssertEqual(contacts.appliedSelfAddresses(forKnown: [Self.me]), [])
+        XCTAssertEqual(
+            try fetchConversationStates().first?.participantHash,
+            calculateParticipantHash(from: [Self.carol, icloud])
+        )
+    }
+
+    /// Until a self set was first recorded, the stored conversations were hashed with
+    /// the rule before it: every address of a card listing the account's address. The
+    /// first pass brings a chat naming an address that rule took as the user's, and
+    /// the new one does not, onto the new hash.
+    ///
+    /// Revert-check: the `legacyOfLastRead` branch of
+    /// `DataCleanupService.SelfAddressChange` (with nothing recorded and no legacy set,
+    /// the pass waits).
+    func testUnify_firstPassAfterTheSwitch_rehashesChatsTheOldRuleHashedWithoutAnAddress() {
+        let change = DataCleanupService.SelfAddressChange(
+            applied: nil,
+            routedBefore: [],
+            current: [Self.me],
+            knownAddresses: [Self.me],
+            legacyOfLastRead: [Self.me, "partner@example.com"]
+        )
+        XCTAssertTrue(change.needsPass)
+        XCTAssertTrue(change.isRecordable)
+        XCTAssertEqual(change.changedAddresses, [Self.me, "partner@example.com"])
+
+        let waiting = DataCleanupService.SelfAddressChange(
+            applied: nil,
+            routedBefore: [],
+            current: [],
+            knownAddresses: [Self.me],
+            legacyOfLastRead: nil
+        )
+        XCTAssertFalse(waiting.needsPass)
+        XCTAssertFalse(waiting.isRecordable)
+    }
+
+    /// Before a run routes mail the adoption runs with the addresses the caller passes:
+    /// the initial sync has them before its Account row is saved, and the mail it
+    /// stores must be routed with what Contacts say for them.
+    ///
+    /// Revert-check: the `knownAddresses` branch of
+    /// `DataCleanupService.unifyConversationsByContactIfNeeded` (read the row, which
+    /// is not there).
+    func testAdoptContactsBeforeRouting_withPassedAddresses_adoptsWithoutAnAccountRow() async {
+        let icloud = "me@icloud.example"
+        let contacts = makeContacts(cards: [[Self.me, icloud]])
+        let service = makeService(contacts: contacts, aliasesFromContacts: true)
+
+        await service.adoptContactsBeforeRouting(knownAddresses: [Self.me])
+
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, icloud])
+    }
+
+    /// Both orchestrators adopt before the run's aliases are read, which is before any
+    /// mail is routed. Pinned from source: a run in a test uses the shared store, which
+    /// holds nothing.
+    ///
+    /// Revert-check: either `adoptContactsBeforeRouting` call.
+    func testOrchestrators_adoptBeforeTheirAliasesAreRead() throws {
+        let incremental = try repositorySource("esc-chatmail/Services/Sync/IncrementalSyncOrchestrator.swift")
+        let incrementalAdopt = try XCTUnwrap(incremental.range(of: "await dataCleanupService.adoptContactsBeforeRouting("))
+        let incrementalAliases = try XCTUnwrap(incremental.range(of: "myAliases = await AliasManager.shared.getAliases(from: context)"))
+        XCTAssertLessThan(incrementalAdopt.lowerBound, incrementalAliases.lowerBound)
+
+        let initial = try repositorySource("esc-chatmail/Services/Sync/InitialSyncOrchestrator.swift")
+        let initialAdopt = try XCTUnwrap(initial.range(of: "await dataCleanupService.adoptContactsBeforeRouting(knownAddresses: accountAddresses)"))
+        let initialAliases = try XCTUnwrap(initial.range(of: "myAliases = await AliasManager.shared.setAliases(accountAddresses)"))
+        XCTAssertLessThan(initialAdopt.lowerBound, initialAliases.lowerBound)
+    }
+
+    /// A failed read of the account's addresses is never "none": the pass decides and
+    /// records nothing, so the account's applied record is not replaced by one for no
+    /// addresses.
+    ///
+    /// Revert-check: the `else { return false }` after `accountAddresses(in:)` in
+    /// `DataCleanupService.unifyConversationsByContactIfNeeded` (and read a failure as
+    /// empty, as `try?` did).
+    func testUnify_accountReadFails_decidesAndRecordsNothing() async throws {
+        _ = AccountBuilder().withEmail(Self.me).build(in: context)
+        try context.save()
+        let contacts = makeContacts(cards: [[Self.me, "me@icloud.example"]])
+        contacts.markSelfAddressesApplied([Self.me, "me@old.example"], knownAddresses: [Self.me])
+        let failing = EntityFetchFailingContext(
+            failingEntityName: "Account",
+            coordinator: try XCTUnwrap(stack.persistentContainer.persistentStoreCoordinator as NSPersistentStoreCoordinator?)
+        )
+
+        let repaired = await makeService(contacts: contacts, aliasesFromContacts: true)
+            .unifyConversationsByContactIfNeeded(in: failing)
+
+        XCTAssertFalse(repaired)
+        XCTAssertEqual(contacts.appliedSelfAddresses(forKnown: [Self.me]), [Self.me, "me@old.example"])
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [], "Nothing adopted")
+    }
+
+    /// Once a set is recorded, the old rule's set says nothing about the stored
+    /// conversations: with nothing changed, the pass has nothing to do, even where the
+    /// old rule's note-to-self key differs from the current one (round 4 of PR 481).
+    ///
+    /// Revert-check: `applied ?? legacyOfLastRead` in the note-to-self key block of
+    /// `DataCleanupService.SelfAddressChange` (list `legacyOfLastRead` always).
+    func testSelfAddressChange_steadyState_needsNoPassWhateverTheOldRuleSaid() {
+        let current: Set<String> = [Self.me, "zz.me@old.example"]
+        let change = DataCleanupService.SelfAddressChange(
+            applied: current,
+            routedBefore: current,
+            current: current,
+            knownAddresses: [Self.me],
+            legacyOfLastRead: [Self.me, "zz.me@old.example", "a.me@icloud.example"]
+        )
+
+        XCTAssertFalse(change.needsPass)
+        XCTAssertEqual(change.changedAddresses, [])
+    }
+
+    /// After a switch of accounts the router hashed with nothing from Contacts until
+    /// this pass adopted the new account's set; the applied set, if any, is another
+    /// account's. What the router used until now is in scope too.
+    ///
+    /// Revert-check: `routedBefore.symmetricDifference(current)` in
+    /// `DataCleanupService.SelfAddressChange` (start from an empty set).
+    func testSelfAddressChange_whatTheRouterUsedUntilNow_isInScope() {
+        let change = DataCleanupService.SelfAddressChange(
+            applied: ["b@y.example", "a@x.example", "c@icloud.example"],
+            routedBefore: [],
+            current: ["b@y.example", "a@x.example", "c@icloud.example"],
+            knownAddresses: ["b@y.example"],
+            legacyOfLastRead: nil
+        )
+
+        XCTAssertTrue(change.needsPass)
+        XCTAssertTrue(change.changedAddresses.isSuperset(of: ["a@x.example", "c@icloud.example"]))
+    }
+
+    /// A note-to-self chat is keyed on the first of the user's addresses in sorted
+    /// order, and its one row is that address. An address the cards add that sorts
+    /// before it moves the key, so the chat naming the old key is given the new one,
+    /// though its row is not an address that changed.
+    ///
+    /// Revert-check: the note-to-self key block of `DataCleanupService.SelfAddressChange`.
+    func testUnify_selfAddressThatSortsFirst_movesTheNoteToSelfChat() async throws {
+        let first = "a.me@icloud.example"
+        _ = AccountBuilder().withEmail(Self.me).build(in: context)
+        let notes = ConversationBuilder()
+            .withParticipantHash(calculateParticipantHash(from: [Self.me]))
+            .withLastMessageDate(Date(timeIntervalSince1970: 100))
+            .visible()
+            .build(in: context)
+        addConversationParticipant(email: Self.me, to: notes)
+        try addMessage(id: "note-1", date: Date(timeIntervalSince1970: 100), from: Self.me, to: [Self.me], in: notes)
+        try context.save()
+        // A set is adopted and applied first, so that the second pass's change is the
+        // added address alone and the chat's row (the account's address) is not in it.
+        // The card listing `first` counts only once the one-address card that claims
+        // `first` for someone else is gone, so the links never change.
+        let later = "zz.me@old.example"
+        let addressBook = AddressBookStub(cards: [[Self.me, later], [Self.me, first], [first]])
+        let contacts = makeContacts(addressBook: addressBook)
+        let service = makeService(contacts: contacts, aliasesFromContacts: true)
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+        XCTAssertEqual(try fetchConversationStates().first?.participantHash, calculateParticipantHash(from: [Self.me]))
+
+        addressBook.cards = [[Self.me, later], [Self.me, first]]
+        contacts.markContactsChanged()
+        await service.unifyConversationsByContactIfNeeded(in: coreDataStack.newBackgroundContext())
+
+        XCTAssertEqual(
+            makeParticipantSetIdentity(normalizedEmails: [Self.me], myAliases: [Self.me, later, first]).participantHash,
+            calculateParticipantHash(from: [first]),
+            "The router's key for note-to-self"
+        )
+        XCTAssertEqual(try fetchConversationStates().first?.participantHash, calculateParticipantHash(from: [first]))
+    }
+
     // MARK: - Maintenance
 
     /// The 6-hour hash repair hashes with the adopted links as well, so it
@@ -695,13 +913,17 @@ final class ContactUnificationCleanupTests: XCTestCase {
             defaults: nil,
             notificationCenter: NotificationCenter(),
             contactsAuthorizationStatus: { addressBook.authorization },
-            loadContactAddressLists: { addressBook.read() }
+            loadContactAddressLists: { addressBook.read() },
+            loadMeCardAddresses: { [] }
         )
     }
 
+    /// - Parameter aliasesFromContacts: Adds the store's adopted self set to `aliases`,
+    ///   as `AliasManager` does in the app.
     private func makeService(
         contacts: ContactLinkedAddressStore,
         aliases: Set<String> = [ContactUnificationCleanupTests.me],
+        aliasesFromContacts: Bool = false,
         aliasReads: CallCounter? = nil
     ) -> DataCleanupService {
         DataCleanupService(
@@ -713,7 +935,9 @@ final class ContactUnificationCleanupTests: XCTestCase {
             migrationFlags: migrationFlags,
             identityAliasProvider: { _ in
                 aliasReads?.increment()
-                return aliases
+                return aliasesFromContacts
+                    ? aliases.union(contacts.selfAddressesSnapshot(forKnown: aliases))
+                    : aliases
             },
             contactLinkStore: contacts
         )

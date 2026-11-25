@@ -55,5 +55,48 @@ final class ImageDownsamplerTests: XCTestCase {
         XCTAssertNil(ImageDownsampler.decode(data: Data([0x00, 0x01, 0x02]), maxPixelDimension: 1024))
         XCTAssertNil(ImageDownsampler.decode(data: Data(), maxPixelDimension: 1024))
     }
+
+    // MARK: - The source-pixel budget
+
+    /// The bytes are a sender's, and the header names the size before anything is decoded:
+    /// past the budget the image is refused, and the same bytes decode under a budget that
+    /// takes them in.
+    ///
+    /// Revert-check: the `ImageProcessor.isWithinDecodeBudget` term of the guard in
+    /// `ImageDownsampler.decode`. Without it the image is decoded to the cap.
+    func testDecode_imageOfMorePixelsThanTheBudget_returnsNil() throws {
+        let data = try makeImageData(width: 2000, height: 1500)
+
+        XCTAssertNil(ImageDownsampler.decode(data: data, maxSourcePixelCount: 1_000_000))
+        XCTAssertNotNil(ImageDownsampler.decode(data: data, maxSourcePixelCount: 3_000_000))
+    }
+
+    /// The default budget is the attachment previews' (`ImageProcessor`), and a valid image
+    /// just past it, which is small as a file because zeros compress, is refused.
+    func testDecode_validImageJustPastTheDefaultBudget_returnsNil() throws {
+        let data = try TestImageData.zeroFilledGrayPNG(width: 8_200, height: 8_200)
+        XCTAssertEqual(TestImageData.pixelSizes(of: data), [CGSize(width: 8_200, height: 8_200)])
+        XCTAssertGreaterThan(CGFloat(8_200 * 8_200), ImageProcessor.maxThumbnailSourcePixelCount)
+
+        XCTAssertNil(ImageDownsampler.decode(data: data))
+    }
+
+    /// A header with no picture behind it: ImageIO names no size for it, so it cannot be
+    /// shown to be within the budget, and it is refused.
+    ///
+    /// HONEST SCOPE: the review's pinning case, and it does not survive a revert. With an
+    /// unreadable size sent on to the thumbnail, and a failed thumbnail to
+    /// `PlatformImage(data:)`, as before, these bytes still make no image. No fixture was
+    /// found that the old fallback decoded and this refuses, so neither the unreadable-size
+    /// refusal nor the dropped full-resolution fallback is pinned by a failing test.
+    func testDecode_headerThatNamesNoReadableSize_returnsNil() throws {
+        let whole = try TestImageData.zeroFilledGrayPNG(width: 30_000, height: 30_000)
+        // The signature, the IHDR chunk (which says 30,000 x 30,000) and the first bytes of
+        // the IDAT chunk.
+        let headerOnly = whole.prefix(8 + 25 + 64)
+        XCTAssertEqual(TestImageData.pixelSizes(of: Data(headerOnly)), [], "premise: no size is reported")
+
+        XCTAssertNil(ImageDownsampler.decode(data: Data(headerOnly)))
+    }
 }
 #endif

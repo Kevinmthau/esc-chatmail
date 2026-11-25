@@ -157,12 +157,34 @@ actor HTMLRemoteImageAttachmentFallback {
     private var acceptsAccountWork = true
     private var accountGeneration: UInt64 = 0
     private let maxCandidatesPerDocument = 6
-    private let maxInlineBytes = 2 * 1024 * 1024
+    /// The most bytes of one image this takes, as fetched and again as the data URL's
+    /// payload.
+    static let maxInlineBytes = 2 * 1024 * 1024
+    /// The longer side, in pixels, of an image this puts in a page. Not the image caches'
+    /// 1,440: the page draws this image at the width its HTML gives it, so a tall one
+    /// (600 x 4,000) cut to 1,440 on its longer side would be drawn at nearly three times
+    /// the pixels it has left. 4,096 keeps such an image whole and bounds the bitmap at
+    /// 64 MB.
+    static let maxInlinePixelDimension: CGFloat = 4_096
     private let previewEagerResolutionTimeoutNanoseconds: UInt64
 
+    /// - Parameter requestExecutor: the default reads through
+    ///   `SSRFGuardingURLSession.boundedData`, so a body past `maxInlineBytes` is given up
+    ///   while it arrives and a status that is not a success is refused with none of its
+    ///   body kept. `data(for:)` here buffered whatever the sender's host served, and the
+    ///   size check ran on the result.
     init(
         requestExecutor: @escaping RequestExecutor = { request in
-            try await SSRFGuardingURLSession.shared.data(for: request)
+            try await SSRFGuardingURLSession.boundedData(
+                for: request,
+                maxBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes,
+                acceptResponse: { response in
+                    guard let httpResponse = response as? HTTPURLResponse,
+                          (200...299).contains(httpResponse.statusCode) else {
+                        throw URLError(.badServerResponse)
+                    }
+                }
+            )
         },
         rewrittenDataURLCacheMaxEntries: Int = 32,
         rewrittenDataURLCacheMaxBytes: Int = 8 * 1024 * 1024,
@@ -619,7 +641,7 @@ actor HTMLRemoteImageAttachmentFallback {
         }
 
         let requestExecutor = self.requestExecutor
-        let maxInlineBytes = self.maxInlineBytes
+        let maxInlineBytes = Self.maxInlineBytes
         let task = Task<DataURLResolutionResult, Never> {
             await Self.resolveDataURL(
                 for: url,
@@ -731,6 +753,9 @@ actor HTMLRemoteImageAttachmentFallback {
                 request(for: url, method: "GET", senderBaseURL: senderBaseURL),
                 requestExecutor: requestExecutor
             )
+            // The decode stays in this task, which `closeAccountWorkAndAwait` cancels and
+            // awaits, and is not started for a resolution that was cancelled meanwhile.
+            try Task.checkCancellation()
             guard let dataURL = makeDataURL(
                 from: getResponse.data,
                 response: getResponse.response,
@@ -740,6 +765,10 @@ actor HTMLRemoteImageAttachmentFallback {
             }
 
             return .rewritten(dataURL)
+        } catch is SSRFGuardingURLSession.ResponseTooLarge {
+            // An answer about the image, not a failure of the fetch: asking again brings
+            // the same body, so it is remembered as unchanged and the page keeps its URL.
+            return .unchanged
         } catch is CancellationError {
             return .transientFailure("cancelled for \(url.host ?? "unknown")")
         } catch {
@@ -792,12 +821,21 @@ actor HTMLRemoteImageAttachmentFallback {
         return isRiskyModernImageURL(originalURL) || mimeType == "image/avif" || mimeType == "image/webp"
     }
 
-    private static func makeDataURL(from data: Data, response: HTTPURLResponse, maxInlineBytes: Int) -> String? {
+    /// The image as a PNG or JPEG data URL of at most `maxInlineBytes`, or nil.
+    ///
+    /// Decoded through `ImageDownsampler`, never `PlatformImage(data:)`: the bytes are a
+    /// sender's, and re-encoding an image decodes all of it. An image past the source-pixel
+    /// budget is refused undecoded, and one past `maxInlinePixelDimension` is re-encoded at
+    /// that size. Internal for `HTMLRemoteImageAttachmentFallbackTests`.
+    static func makeDataURL(from data: Data, response: HTTPURLResponse, maxInlineBytes: Int) -> String? {
         guard !data.isEmpty,
               data.count <= maxInlineBytes,
               let mimeType = response.mimeType?.lowercased(),
               Self.rewritableSourceImageMimeTypes.contains(mimeType),
-              let image = PlatformImage(data: data) else {
+              let image = ImageDownsampler.decode(
+                  data: data,
+                  maxPixelDimension: maxInlinePixelDimension
+              ) else {
             return nil
         }
 

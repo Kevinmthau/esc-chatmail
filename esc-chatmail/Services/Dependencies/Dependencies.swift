@@ -253,8 +253,10 @@ final class Dependencies: ObservableObject {
     }
 
     func makeChatDependencies(
-        fullEmailOpener: (any FullEmailOpening)? = nil
+        fullEmailOpener: (any FullEmailOpening)? = nil,
+        downloadAttachmentForForwarding: (@MainActor (Attachment) async -> Void)? = nil
     ) -> ChatDependencies {
+        let attachmentDownloader = self.attachmentDownloader
         let contactsResolver = self.contactsResolver
         let personCache = self.personCache
         let htmlContentHandler = self.htmlContentHandler
@@ -282,7 +284,10 @@ final class Dependencies: ObservableObject {
                 outboundMessageCoordinator: makeOutboundMessageCoordinator(),
                 outboundAttachmentContextBuilder: makeOutboundAttachmentContextBuilder(),
                 outboundReplyContextBuilder: makeOutboundReplyContextBuilder(),
-                composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder()
+                composeForwardModeContextBuilder: makeComposeForwardModeContextBuilder(),
+                downloadAttachmentForForwarding: downloadAttachmentForForwarding ?? { attachment in
+                    await attachmentDownloader.downloadAttachmentIfNeeded(for: attachment)
+                }
             ),
             contacts: ChatContactDependencies(
                 participantLoader: participantLoader,

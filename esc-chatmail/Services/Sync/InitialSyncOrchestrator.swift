@@ -39,7 +39,6 @@ final class InitialSyncOrchestrator {
     private let messagePersister: MessagePersister
     private let conversationManager: ConversationManager
     private let dataCleanupService: DataCleanupService
-    private let attachmentDownloader: AttachmentDownloader
     private let coreDataStack: CoreDataStack
     private let failureTracker: SyncFailureTracker
     /// The "now" the window's start is measured against (`ServerTimeSource`).
@@ -64,7 +63,6 @@ final class InitialSyncOrchestrator {
         messagePersister: MessagePersister,
         conversationManager: ConversationManager,
         dataCleanupService: DataCleanupService,
-        attachmentDownloader: AttachmentDownloader,
         coreDataStack: CoreDataStack,
         failureTracker: SyncFailureTracker = .shared,
         failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
@@ -79,7 +77,6 @@ final class InitialSyncOrchestrator {
         self.messagePersister = messagePersister
         self.conversationManager = conversationManager
         self.dataCleanupService = dataCleanupService
-        self.attachmentDownloader = attachmentDownloader
         self.coreDataStack = coreDataStack
         self.failureTracker = failureTracker
         self.failureCounterStore = failureCounterStore
@@ -116,7 +113,12 @@ final class InitialSyncOrchestrator {
             let profileTimer = timing.start("profileAndAliases")
             let (profile, aliases, validSendAsAliases) = try await fetchProfileAndAliases()
             sendAsAliases = validSendAsAliases
-            myAliases = await AliasManager.shared.setAliases(Set([profile.emailAddress] + aliases))
+            // What Contacts say about the user's own addresses is adopted before
+            // any mail is routed, for this account's addresses: the Account row
+            // is not saved yet, so they are passed (`adoptContactsBeforeRouting`).
+            let accountAddresses = Set([profile.emailAddress] + aliases)
+            await dataCleanupService.adoptContactsBeforeRouting(knownAddresses: accountAddresses)
+            myAliases = await AliasManager.shared.setAliases(accountAddresses)
             await SendAsAliasManager.shared.setAliases(validSendAsAliases)
             // Load migration state before saveAccount stages a new Account:
             // only a previously committed matching account may import the
@@ -286,8 +288,8 @@ final class InitialSyncOrchestrator {
 
             let conversationCount = await countConversations(in: context)
 
-            // Queue attachment downloads
-            attachmentDownloader.schedulePendingAttachmentDownloads()
+            // No attachment is downloaded here: they download when a chat
+            // shows them (CLAUDE.md, "A received attachment downloads only when").
 
             let totalDuration = CFAbsoluteTimeGetCurrent() - syncStartTime
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)

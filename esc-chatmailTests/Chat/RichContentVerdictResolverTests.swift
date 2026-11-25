@@ -164,12 +164,14 @@ final class RichContentVerdictResolverTests: XCTestCase {
 
     /// A blank body still suppresses the snippet: the operator is nil-coalescing, not
     /// "first non-empty", and every writer and the loader must agree on that or a stored
-    /// verdict and the load disagree for these rows.
+    /// verdict and the load disagree for these rows. The row's body file is gone, so the
+    /// classifier term is then undetermined (`noCandidate(for:)`), not the fallback term's
+    /// "rich".
     ///
     /// Revert-check: `inputs.bodyText ?? inputs.snippet` in
     /// `RichContentVerdictResolver.cheapTerms`. Choosing the first non-empty of the two
     /// answers `.decided(true)` here.
-    func testVerdict_blankBodyTextWithFallbackSnippetAndStorageURI_isNotRich() {
+    func testVerdict_blankBodyTextWithFallbackSnippetAndStorageURI_isLeftToTheClassifier() {
         for blankBodyText in ["", "  \n"] {
             let inputs = makeInputs(
                 messageID: makeMessageID(),
@@ -179,8 +181,52 @@ final class RichContentVerdictResolverTests: XCTestCase {
             )
 
             XCTAssertEqual(cheapTerms(for: inputs), .classifierDecides)
-            XCTAssertEqual(RichContentVerdictResolver.verdict(for: inputs, handler: handler), .notRich)
+            XCTAssertEqual(RichContentVerdictResolver.verdict(for: inputs, handler: handler), .unknown)
         }
+    }
+
+    // MARK: - A body that is gone from disk
+
+    /// `bodyStorageURI` is set only after an HTML body was written, so a row that names one
+    /// whose file is gone had a body: evicted under a storage cap or not restored with a
+    /// backup. Its plain `bodyText` is not that body, and "not rich" from it would turn a
+    /// card into text and be written over the stored verdict.
+    ///
+    /// Revert-check: `noCandidate(for:)` in `RichContentVerdictResolver.classifierCandidate`
+    /// answering `.none` (both `.none` exits): the verdict is then `.notRich`.
+    func testClassifierCandidate_bodyFileGoneButNamedByStorageURI_isUndetermined() {
+        let bodyTexts: [String?] = [nil, "See you at noon."]
+        for bodyText in bodyTexts {
+            let inputs = makeInputs(
+                messageID: makeMessageID(),
+                bodyStorageURI: danglingBodyStorageURI(),
+                bodyText: bodyText,
+                snippet: "See you at noon."
+            )
+
+            XCTAssertEqual(candidate(for: inputs), .undetermined, "bodyText \(String(describing: bodyText))")
+            let verdict = RichContentVerdictResolver.verdict(
+                for: inputs,
+                handler: handler,
+                classify: { _ in
+                    XCTFail("A row whose body is gone must not reach the classifier")
+                    return false
+                }
+            )
+            XCTAssertEqual(verdict, .unknown, "bodyText \(String(describing: bodyText))")
+        }
+    }
+
+    /// The candidate order is kept: HTML carried in `bodyText` is still classified when the
+    /// file is gone, as it was before.
+    func testClassifierCandidate_bodyFileGoneWithHTMLBodyText_stillClassifiesBodyText() {
+        let inputs = makeInputs(
+            messageID: makeMessageID(),
+            bodyStorageURI: danglingBodyStorageURI(),
+            bodyText: RichContentVerdictResolverFixture.richHTML
+        )
+
+        XCTAssertEqual(candidate(for: inputs), .html(RichContentVerdictResolverFixture.richHTML))
     }
 
     // MARK: - Candidate order

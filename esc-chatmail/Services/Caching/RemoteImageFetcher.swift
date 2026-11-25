@@ -12,8 +12,11 @@ enum RemoteImageFetchError: Error, Equatable {
     case privateOrReservedHost
     case invalidStatusCode(Int)
     case unsupportedContentType(String?)
+    /// The body is larger than the fetcher takes: the length the response declared, or,
+    /// where it declared none, the limit the body ran past as it arrived.
     case responseTooLarge(Int64)
-    case decodedImageTooLarge(Int)
+    /// The bytes are not an image the app will decode: not an image at all, one whose header
+    /// names no size, or one past `ImageDownsampler`'s source-pixel budget.
     case undecodableImage
 }
 
@@ -44,7 +47,8 @@ actor RemoteImageFetcher: RemoteImageFetching {
 
         do {
             let data = try await imageData(from: urlString)
-            guard let image = PlatformImage(data: data) else {
+            try Task.checkCancellation()
+            guard let image = await Self.decodedImage(from: data) else {
                 throw RemoteImageFetchError.undecodableImage
             }
             return image
@@ -63,7 +67,36 @@ actor RemoteImageFetcher: RemoteImageFetching {
             request.assumesHTTP3Capable = false
         }
 
-        let (data, response) = try await session.data(for: request)
+        // The status, the content type and a declared length are refused on the response's
+        // headers, as its body begins to arrive, and an undeclared body is given up at the
+        // limit. With `data(for:)` all four were checked on a body already downloaded whole.
+        do {
+            let (data, _) = try await SSRFGuardingURLSession.boundedData(
+                for: request,
+                maxBytes: maxImageBytes,
+                session: session,
+                acceptResponse: { response in try RemoteImageFetcher.acceptImageResponse(response) }
+            )
+            return data
+        } catch let tooLarge as SSRFGuardingURLSession.ResponseTooLarge {
+            throw RemoteImageFetchError.responseTooLarge(
+                tooLarge.declaredByteCount ?? Int64(tooLarge.maxBytes)
+            )
+        }
+    }
+
+    /// The image the fetched bytes hold, at no more than the cache's pixel cap, or nil where
+    /// `ImageDownsampler` refuses them. `PlatformImage(data:)` here took whatever size the
+    /// sender's header named, and the disk cache then decoded all of it to re-encode it.
+    ///
+    /// A static async function is not the actor's, so the decode runs off it and a large image
+    /// does not hold up the other fetches' turns on it for as long as it decodes.
+    private static func decodedImage(from data: Data) async -> PlatformImage? {
+        ImageDownsampler.decode(data: data)
+    }
+
+    /// What `imageData` refuses on a response's headers, with none of its body kept.
+    private static func acceptImageResponse(_ response: URLResponse) throws {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw RemoteImageFetchError.invalidStatusCode(-1)
         }
@@ -71,20 +104,10 @@ actor RemoteImageFetcher: RemoteImageFetching {
             throw RemoteImageFetchError.invalidStatusCode(httpResponse.statusCode)
         }
 
-        if httpResponse.expectedContentLength > Int64(maxImageBytes) {
-            throw RemoteImageFetchError.responseTooLarge(httpResponse.expectedContentLength)
-        }
-
         let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type")
-        if let contentType, !Self.isSupportedImageContentType(contentType) {
+        if let contentType, !isSupportedImageContentType(contentType) {
             throw RemoteImageFetchError.unsupportedContentType(contentType)
         }
-
-        guard data.count <= maxImageBytes else {
-            throw RemoteImageFetchError.decodedImageTooLarge(data.count)
-        }
-
-        return data
     }
 
     private func validatedURL(from urlString: String) throws -> URL {

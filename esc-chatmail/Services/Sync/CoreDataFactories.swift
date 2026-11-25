@@ -7,7 +7,7 @@ import CoreData
 /// Centralizes Person creation logic for reuse across services
 ///
 /// Lookups go through a context-scoped `[normalized email: Person]` cache in
-/// `context.userInfo` (precedent: InlineCIDAttachmentPrefetchScheduler), so a
+/// `context.userInfo`, so a
 /// batch `prefetch` turns the per-participant find-or-create fetches into
 /// dictionary hits. Each hit is validated against the context before use:
 /// rollback() and reset() deregister objects (nil `managedObjectContext`)

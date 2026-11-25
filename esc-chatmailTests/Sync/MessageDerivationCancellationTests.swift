@@ -39,8 +39,7 @@ final class MessageDerivationCancellationTests: XCTestCase {
         processed.htmlBody = "<div>Hello there</div>"
         let persister = MessagePersister(
             messageProcessor: CancellingMessageProcessor(processedMessage: processed),
-            photoPrefetcher: { _ in },
-            inlineCIDPrefetchScheduler: { _, _ in }
+            photoPrefetcher: { _ in }
         )
         let message = GmailMessageBuilder().withId("cancelled-prerun").withBodyHtml("<div>Hello there</div>").build()
         do {
@@ -83,8 +82,7 @@ final class OversizedPreparationTests: XCTestCase {
         let processor = OverlapRecordingProcessor()
         let persister = MessagePersister(
             messageProcessor: processor,
-            photoPrefetcher: { _ in },
-            inlineCIDPrefetchScheduler: { _, _ in }
+            photoPrefetcher: { _ in }
         )
         let oversized = SyncConfig.oversizedPreparationBodyBytes + 1
         let sizes = [10, oversized, oversized, 10, oversized, 10, 10, oversized, 10, 10]

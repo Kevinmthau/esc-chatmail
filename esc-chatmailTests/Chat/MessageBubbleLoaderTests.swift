@@ -2878,6 +2878,56 @@ final class MessageBubbleLoaderTests: XCTestCase {
         }
     }
 
+    /// A row whose HTML body is gone from disk (evicted under a storage cap, or not brought
+    /// back by a device restore) still names it in `bodyStorageURI`. Its plain `bodyText` is
+    /// not its body, so the load must not compute "not rich" from it: a stored-rich row stays
+    /// a card, and nothing asks for a re-stamp that would write "not rich" over it.
+    ///
+    /// Revert-check: `noCandidate(for:)` in `RichContentVerdictResolver.classifierCandidate`.
+    /// Answering `.none` there publishes false for a stored-rich row and schedules a refresh.
+    func testLoadContent_bodyFileGoneButNamedByStorageURI_keepsStoredVerdictAndSchedulesNoRefresh() async throws {
+        let cases: [(stored: RichContentVerdict, expectedRich: Bool)] = [
+            (.rich, true),
+            (.unknown, false),
+            (.notRich, false)
+        ]
+        for testCase in cases {
+            let fixture = RichVerdictLoaderFixture()
+            defer { fixture.removeFiles() }
+            let goneBodyURI = fixture.directory
+                .appendingPathComponent("\(fixture.messageID).html")
+                .absoluteString
+            XCTAssertFalse(fixture.handler.htmlFileExists(for: fixture.messageID), "premise: no body on disk")
+
+            let result = await fixture.loader.loadContent(
+                from: fixture.request(
+                    bodyStorageURI: goneBodyURI,
+                    storedRichContentVerdict: testCase.stored
+                )
+            )
+
+            XCTAssertTrue(result.isComplete)
+            XCTAssertEqual(result.hasRichHTMLContent, testCase.expectedRich, "stored \(testCase.stored)")
+            XCTAssertTrue(fixture.refresher.refreshes.isEmpty, "stored \(testCase.stored)")
+        }
+    }
+
+    /// The other side of the same rule: a row that never had an HTML body (no
+    /// `bodyStorageURI`) is still classified from its plain text, and a stored "rich" that
+    /// disagrees is re-stamped.
+    func testLoadContent_plainRowWithoutStorageURI_isNotRichAndRestampsAStaleRichVerdict() async throws {
+        let fixture = RichVerdictLoaderFixture()
+        defer { fixture.removeFiles() }
+
+        let result = await fixture.loader.loadContent(
+            from: fixture.request(bodyStorageURI: nil, storedRichContentVerdict: .rich)
+        )
+
+        XCTAssertTrue(result.isComplete)
+        XCTAssertFalse(result.hasRichHTMLContent)
+        XCTAssertEqual(fixture.refresher.refreshes, [fixture.expectedRefresh])
+    }
+
     func testLoadContent_classifierMemoInvalidatedWhileLoadWaitsOnIt_evaluatesDirectly() async throws {
         let fixture = RichVerdictLoaderFixture()
         defer { fixture.removeFiles() }

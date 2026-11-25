@@ -1,3 +1,4 @@
+import UniformTypeIdentifiers
 import XCTest
 @testable import esc_chatmail
 
@@ -526,6 +527,130 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         XCTAssertEqual(freshLookup.html, html)
         XCTAssertTrue(freshLookup.hasPendingUpdates)
         XCTAssertTrue(freshLookup.needsWarmup)
+    }
+
+    // MARK: - Size limits on the sender's image
+
+    /// A body past the byte limit is an answer about the image, not a failed fetch: the page
+    /// keeps its URL and the image is not asked for again.
+    ///
+    /// Revert-check: the `catch is SSRFGuardingURLSession.ResponseTooLarge` in
+    /// `HTMLRemoteImageAttachmentFallback.resolveDataURL`. As a transient failure the second
+    /// call fetches again (HEAD, GET, HEAD, GET).
+    func testInlineAttachmentStyleImages_bodyPastTheByteLimit_isLeftUnchangedAndNotFetchedAgain() async {
+        let recorder = RequestRecorder()
+        let service = HTMLRemoteImageAttachmentFallback { request in
+            await recorder.record(request)
+
+            if request.httpMethod == "GET" {
+                // What the default executor throws when the body runs past the limit.
+                throw SSRFGuardingURLSession.ResponseTooLarge(
+                    declaredByteCount: nil,
+                    maxBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes
+                )
+            }
+            // The HEAD declares no length, so only the GET finds the size out.
+            let response = HTTPURLResponse(
+                url: request.url ?? URL(string: "https://cdn.example.com/open.php?id=hero")!,
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: [
+                    "Content-Type": "image/png",
+                    "Content-Disposition": "attachment; filename=\"hero.png\""
+                ]
+            )!
+            return (Data(), response)
+        }
+        let html = #"<img src="https://cdn.example.com/open.php?id=hero">"#
+
+        let first = await service.inlineAttachmentStyleImages(in: html, senderEmail: "sender@example.com")
+        let second = await service.inlineAttachmentStyleImages(in: html, senderEmail: "sender@example.com")
+
+        XCTAssertEqual(first, html)
+        XCTAssertEqual(second, html)
+        let snapshot = await recorder.snapshot()
+        XCTAssertEqual(snapshot.methods, ["HEAD", "GET"])
+    }
+
+    /// The image is decoded to be re-encoded, so it is decoded through `ImageDownsampler`:
+    /// one longer than the page's pixel cap goes into the page at that cap.
+    ///
+    /// Revert-check: `ImageDownsampler.decode` in
+    /// `HTMLRemoteImageAttachmentFallback.makeDataURL`. `PlatformImage(data:)` there
+    /// re-encodes all 6,000 pixels of its width.
+    func testMakeDataURL_imageLongerThanThePagePixelCap_isReEncodedAtTheCap() throws {
+        let jpeg = try TestImageData.encoded(as: .jpeg, pixelSizes: [CGSize(width: 6_000, height: 300)])
+
+        let dataURL = try XCTUnwrap(
+            HTMLRemoteImageAttachmentFallback.makeDataURL(
+                from: jpeg,
+                response: try imageResponse(mimeType: "image/jpeg"),
+                maxInlineBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes
+            )
+        )
+
+        let pixelSize = try XCTUnwrap(TestImageData.pixelSizes(of: try payload(of: dataURL)).first)
+        XCTAssertEqual(
+            max(pixelSize.width, pixelSize.height),
+            HTMLRemoteImageAttachmentFallback.maxInlinePixelDimension,
+            accuracy: 1
+        )
+    }
+
+    /// A tall image the page draws at its own width keeps its pixels: the image caches'
+    /// 1,440 cap on the longer side would leave this one 216 pixels wide.
+    ///
+    /// Revert-check: `maxPixelDimension: maxInlinePixelDimension` in `makeDataURL`.
+    func testMakeDataURL_tallImageWithinThePagePixelCap_keepsItsSize() throws {
+        let jpeg = try TestImageData.encoded(as: .jpeg, pixelSizes: [CGSize(width: 600, height: 4_000)])
+
+        let dataURL = try XCTUnwrap(
+            HTMLRemoteImageAttachmentFallback.makeDataURL(
+                from: jpeg,
+                response: try imageResponse(mimeType: "image/jpeg"),
+                maxInlineBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes
+            )
+        )
+
+        XCTAssertEqual(
+            TestImageData.pixelSizes(of: try payload(of: dataURL)).first,
+            CGSize(width: 600, height: 4_000)
+        )
+    }
+
+    /// An image of more pixels than the budget is not decoded at all, so it makes no data
+    /// URL and the page keeps the remote one.
+    ///
+    /// HONEST SCOPE: not revert-checked. With `PlatformImage(data:)` back, this test
+    /// decodes and re-encodes the 67-megapixel picture in the test host. The test above
+    /// fails on the same revert without that.
+    func testMakeDataURL_imageOfMorePixelsThanTheBudget_makesNoDataURL() throws {
+        let png = try TestImageData.zeroFilledGrayPNG(width: 8_200, height: 8_200)
+
+        let dataURL = HTMLRemoteImageAttachmentFallback.makeDataURL(
+            from: png,
+            response: try imageResponse(mimeType: "image/png"),
+            maxInlineBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes
+        )
+
+        XCTAssertNil(dataURL)
+    }
+
+    private func imageResponse(mimeType: String) throws -> HTTPURLResponse {
+        try XCTUnwrap(
+            HTTPURLResponse(
+                url: try XCTUnwrap(URL(string: "https://cdn.example.com/hero")),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": mimeType]
+            )
+        )
+    }
+
+    /// The bytes a `data:<type>;base64,<payload>` URL carries.
+    private func payload(of dataURL: String) throws -> Data {
+        let encoded = try XCTUnwrap(dataURL.components(separatedBy: ";base64,").last)
+        return try XCTUnwrap(Data(base64Encoded: encoded))
     }
 
     /// Polls `condition` until it holds or `timeout` elapses. The condition is

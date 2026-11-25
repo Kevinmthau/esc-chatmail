@@ -148,6 +148,36 @@ final class RichContentVerdictRefresherTests: XCTestCase {
         XCTAssertEqual(try storedVerdicts(of: messageID), [.rich])
     }
 
+    /// Recovery saved the body of a row whose body had been evicted, and scheduled this
+    /// refresh: the marker comes off with the re-stamp, so the row reads as having its body
+    /// again (`Message.bodyEvicted`).
+    ///
+    /// Revert-check: the `bodyIsBack` write in `RichContentVerdictRefresher.refreshHoldingLease`.
+    /// Without it the row stays marked evicted with its body on disk.
+    func testRefresh_evictedRowWhoseBodyWasRecovered_clearsTheEvictedMarker() async throws {
+        let messageID = makeMessageID("evicted-recovered")
+        try insertMessage(id: messageID, storedVerdict: .rich, bodyEvicted: true)
+        XCTAssertNotNil(handler.saveHTML(Self.richHTML, for: messageID))
+
+        let outcome = await refresher.refresh(messageID: messageID, handler: handler)
+
+        XCTAssertEqual(outcome, .updated)
+        XCTAssertEqual(try storedVerdicts(of: messageID), [.rich])
+        XCTAssertEqual(try readRows(withID: messageID) { $0.bodyEvicted }, [false])
+    }
+
+    /// With the body still gone, the marker stays and the stored verdict is kept.
+    func testRefresh_evictedRowWithBodyStillGone_keepsTheMarkerAndTheVerdict() async throws {
+        let messageID = makeMessageID("evicted-still-gone")
+        try insertMessage(id: messageID, storedVerdict: .rich, bodyEvicted: true)
+
+        let outcome = await refresher.refresh(messageID: messageID, handler: handler)
+
+        XCTAssertNotEqual(outcome, .updated)
+        XCTAssertEqual(try storedVerdicts(of: messageID), [.rich])
+        XCTAssertEqual(try readRows(withID: messageID) { $0.bodyEvicted }, [true])
+    }
+
     /// The reverse: recovery replaced a rich file with HTML that is not rich, and the row
     /// would otherwise mount as a card and swap to text.
     ///
@@ -788,15 +818,22 @@ final class RichContentVerdictRefresherTests: XCTestCase {
         isFromMe: Bool = false,
         storedVerdict: RichContentVerdict,
         bodyText: String? = RichContentVerdictRefresherTests.personalBodyText,
-        snippet: String? = RichContentVerdictRefresherTests.personalBodyText
+        snippet: String? = RichContentVerdictRefresherTests.personalBodyText,
+        bodyEvicted: Bool = false
     ) throws {
         let context = stack.newBackgroundContext()
+        // An evicted row still names its body (`noCandidate(for:)`).
+        let evictedBodyURI = directory.appendingPathComponent("\(id).html").absoluteString
         try context.performAndWait {
             let message = MessageBuilder().withId(id).build(in: context)
             message.isFromMe = isFromMe
             message.bodyText = bodyText
             message.snippet = snippet
             message.storedRichContentVerdict = storedVerdict
+            if bodyEvicted {
+                message.bodyStorageURI = evictedBodyURI
+                message.bodyEvicted = true
+            }
             try context.save()
         }
     }

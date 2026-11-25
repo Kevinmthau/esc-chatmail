@@ -284,9 +284,11 @@ struct NetworkConfig {
     static let resourceTimeout: TimeInterval = 60.0
 
     /// Whole-request cap for messages.send only (`GmailAPIClient.createSendSession`).
-    /// A send is one request carrying every attachment (about 1.83 times
-    /// their bytes): 300 s covers the 25 MB attachment budget
-    /// (`DraftAttachmentImport.maximumTotalBytes`) above about 1.3 Mbit/s of
+    /// A send is one request carrying every attachment: about 1.37 times their
+    /// bytes since the body is the MIME itself, streamed from a file
+    /// (`GmailMultipartSendUpload`; 1.83 as the base64-in-JSON body before). 300 s
+    /// covers the 25 MB attachment budget (`DraftAttachmentImport.maximumTotalBytes`)
+    /// above about 1.0 Mbit/s of
     /// uplink and three or four photos above about 0.5 Mbit/s. It is per
     /// attempt: with a retry (a 401, a 429 or a pre-transmission failure) a
     /// send, and the sign-out that drains it, can take about 420 s
@@ -413,7 +415,10 @@ struct APIEndpoints {
         "\(baseURL)/users/me/messages/\(messageId)/attachments/\(attachmentId)"
     }
 
-    static func sendMessage() -> String {
-        "\(baseURL)/users/me/messages/send"
+    /// messages.send's media upload endpoint (`GmailAPIClient.sendMessage(mimeData:…)`).
+    static let uploadBaseURL = "https://gmail.googleapis.com/upload/gmail/v1"
+
+    static func sendMessageUpload() -> String {
+        "\(uploadBaseURL)/users/me/messages/send"
     }
 }

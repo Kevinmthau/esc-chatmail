@@ -421,7 +421,6 @@ final class InitialSyncScaleBoundTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(Self.myEmail)] }
             ),
-            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
             coreDataStack: coreDataStack,
             failureTracker: SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack),
             performanceLogger: .shared,

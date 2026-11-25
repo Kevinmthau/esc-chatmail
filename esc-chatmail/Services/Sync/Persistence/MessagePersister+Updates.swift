@@ -384,6 +384,10 @@ extension MessagePersister {
 
             if let savedBodyStorageURI {
                 existingMessage.bodyStorageURI = savedBodyStorageURI
+                // The body is on disk again (`Message.bodyEvicted`).
+                if existingMessage.bodyEvicted {
+                    existingMessage.bodyEvicted = false
+                }
             }
             // Re-stamp whenever this update could have changed the verdict or
             // left it unknown. A refetch that saved HTML always does (the
@@ -601,10 +605,6 @@ extension MessagePersister {
                 participantDisplayNameUpdateEmails: displayNameUpdateEmails,
                 participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
             )
-        }
-
-        if result.didUpdate {
-            await scheduleInlineCIDPrefetchIfNeeded(for: processedMessage, in: context)
         }
 
         if let modifiedConversationID = result.modifiedConversationID {
