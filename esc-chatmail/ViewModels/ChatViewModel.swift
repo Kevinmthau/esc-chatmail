@@ -232,6 +232,9 @@ final class ChatViewModel: ObservableObject {
     private var forwardPreparation: ForwardPreparation?
     /// Internal for tests, which await it.
     var forwardPreparationTask: Task<Void, Never>? { forwardPreparation?.task }
+    /// Whether anything modal covers the app, wherever it was presented from
+    /// (`AppModalPresentation`). Internal so tests can stand in for Quick Look.
+    var isModalShownOverApp: @MainActor () -> Bool = { AppModalPresentation.isShowing() }
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
@@ -872,10 +875,11 @@ final class ChatViewModel: ObservableObject {
     /// that still has no file is left out, or refuses the forward if it is inline, as before
     /// (`ForwardAttachmentDownloadPolicy`). Meanwhile each attachment shows its own progress
     /// in the bubble. Forward on the same message again is the same request and is ignored;
-    /// Forward on another message replaces it. The draft does not open over any sheet or
-    /// screen the user opened meanwhile (`hasOpenScreenOverChat`). It is not cancelled when
-    /// the chat disappears: a full-screen Quick Look does that too, and the draft of a chat
-    /// that has closed is never shown.
+    /// Forward on another message replaces it. The draft opens only if nothing covers the
+    /// chat when the downloads end (`hasOpenScreenOverChat`), since it could not be shown
+    /// then; otherwise it is dropped. It is not cancelled when the chat disappears: a
+    /// full-screen Quick Look does that too, and the draft of a chat that has closed is
+    /// never shown.
     func setMessageToForward(_ message: Message) {
         let messageObjectID = message.objectID
         if forwardPreparation != nil {
@@ -896,7 +900,10 @@ final class ChatViewModel: ObservableObject {
                 // Asked again after every wait: a sync may have deleted the row meanwhile,
                 // which leaves this context an object with no properties to read.
                 guard let attachment = self.liveAttachment(with: attachmentID) else { continue }
-                await self.downloadAttachmentForForwarding(attachment)
+                // In a task of its own: cancelling the forward (Forward on another message)
+                // must not cancel a download a bubble on screen also waits for.
+                let download = self.downloadAttachmentForForwarding
+                await Task { await download(attachment) }.value
             }
             guard let self, self.forwardPreparation?.id == preparationID else { return }
             self.forwardPreparation = nil
@@ -917,11 +924,13 @@ final class ChatViewModel: ObservableObject {
         )
     }
 
-    /// Whether the chat shows a sheet, screen or alert of its own, in either of the places
-    /// that keep one (`ChatView.activeDestination`, `ChatView.isChatActiveAndUncovered`):
-    /// a late forward must not replace it.
+    /// Whether a sheet, screen or alert covers the chat: its own, kept in either of the
+    /// places that keep one (`ChatView.activeDestination`, `ChatView.isChatActiveAndUncovered`),
+    /// or one presented from elsewhere, such as Quick Look or the reply bar's pickers
+    /// (`AppModalPresentation`). A late forward must not replace or try to cover it.
     var hasOpenScreenOverChat: Bool {
         destination != nil ||
+            isModalShownOverApp() ||
             sendErrorAlert != nil ||
             contactManager.contactToAdd != nil ||
             contactManager.showingContactPicker ||

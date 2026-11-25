@@ -1361,6 +1361,7 @@ final class ChatViewModelTests: XCTestCase {
             )
         )
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
         let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
         await preparation.value
@@ -1435,6 +1436,7 @@ final class ChatViewModelTests: XCTestCase {
         )
         let viewModel = ChatViewModel(conversation: conversation, chatDependencies: chatDependencies)
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
         XCTAssertNil(viewModel.destination, "The draft waits for the download")
         let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
@@ -1481,6 +1483,7 @@ final class ChatViewModelTests: XCTestCase {
             )
         )
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
         let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
         viewModel.openEmailReader(for: message.objectID, source: .textBubble, initialMode: .original)
@@ -1497,6 +1500,7 @@ final class ChatViewModelTests: XCTestCase {
     func testSetMessageToForward_doesNotOpenOverParticipantsListOpenedWhileDownloading() async throws {
         let (viewModel, message) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-participants")
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
         let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
         viewModel.contactManager.showingParticipantsList = true
@@ -1507,10 +1511,12 @@ final class ChatViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.forwardPreparationTask)
     }
 
-    /// A full-screen Quick Look makes the chat disappear too; the forward still opens its draft.
+    /// Leaving the chat (`cancelPrefetch`, from its onDisappear, which a full-screen Quick
+    /// Look also fires) does not cancel a forward that is still waiting.
     func testCancelPrefetch_doesNotCancelAForwardStillWaiting() async throws {
         let (viewModel, message) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-quicklook")
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
         let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
         viewModel.cancelPrefetch()
@@ -1519,6 +1525,22 @@ final class ChatViewModelTests: XCTestCase {
         guard case .forwardCompose = viewModel.destination else {
             return XCTFail("Expected the forward draft, got \(String(describing: viewModel.destination))")
         }
+    }
+
+    /// Quick Look is presented from the bubble, outside the view model; a forward that ends
+    /// while it is up drops its draft, which could not be shown over it.
+    func testSetMessageToForward_doesNotOpenWhileSomethingModalCoversTheApp() async throws {
+        let (viewModel, message) = makeViewModelWithQueuedForwardAttachment(messageID: "message-forward-modal")
+        var modalShown = false
+        viewModel.isModalShownOverApp = { modalShown }
+
+        viewModel.setMessageToForward(message)
+        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        modalShown = true
+        await preparation.value
+
+        XCTAssertNil(viewModel.destination)
+        XCTAssertNil(viewModel.forwardPreparationTask)
     }
 
     /// Forward on another message while one waits replaces the waiting one.
@@ -1530,6 +1552,7 @@ final class ChatViewModelTests: XCTestCase {
             .inConversation(try XCTUnwrap(first.conversation))
             .build(in: try XCTUnwrap(first.managedObjectContext))
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(first)
         let firstPreparation = try XCTUnwrap(viewModel.forwardPreparationTask)
         viewModel.setMessageToForward(second)
@@ -1636,6 +1659,7 @@ final class ChatViewModelTests: XCTestCase {
             )
         )
 
+        viewModel.isModalShownOverApp = { false } // Whatever the test host shows.
         viewModel.setMessageToForward(message)
 
         XCTAssertNil(viewModel.forwardPreparationTask)
