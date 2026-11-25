@@ -73,6 +73,40 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
     }
 
+    /// A last-sync time stamped while the device clock was two hours ahead of Gmail's:
+    /// the missed-message check must list from Gmail's time, not from a point Gmail has
+    /// not reached, where it found nothing (architecture review, gap-wall-clock-time#1).
+    ///
+    /// Revert-check: pass the device's `Date()` again as reconciliation's `now` in
+    /// `SyncReconciliation.checkForMissedMessagesWithDiagnostics`.
+    func testCheckForMissedMessages_stampAheadOfGmail_listsFromGmailsTime() async throws {
+        let suiteName = "SyncReconciliationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            failureTracker: SyncFailureTracker(defaults: defaults),
+            defaults: defaults,
+            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600)
+        )
+
+        _ = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(48 * 60 * 60)).timeIntervalSince1970
+        )
+
+        let query = try XCTUnwrap(mockAPI.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(
+            query.range(of: "after:").flatMap { Int(query[$0.upperBound...].prefix { $0.isNumber }) },
+            query
+        )
+        let gmailNow = Date().timeIntervalSince1970 - 2 * 3600
+        XCTAssertLessThanOrEqual(TimeInterval(floor), gmailNow - SyncConfig.timestampBufferSeconds, query)
+    }
+
     func testCheckForMissedMessagesWithDiagnosticsReportsCappedReconciliation() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.paginatedListMessagesResponses = [

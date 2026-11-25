@@ -85,6 +85,13 @@ struct SyncTimeCalculator {
     ///
     /// Results are capped by maxWindow if specified and never go before install cutoff.
     ///
+    /// The stored last-sync time and mailbox start are read as no later than `now`
+    /// (`clampedToNow`): a device clock that was set ahead when they were written left
+    /// them past Gmail's time, and a floor drawn from them skipped the mail between. The
+    /// clamp can only move a floor earlier. Callers pass `now` from their
+    /// `ServerTimeSource`, the earlier of the device's time and Gmail's; a clamp to the
+    /// device's own time alone helps nothing while the device is still ahead.
+    ///
     /// - Parameters:
     ///   - config: Configuration determining which timestamps to check and buffers to apply
     ///   - installTimestamp: Optional explicit install timestamp (defaults to UserDefaults value)
@@ -98,11 +105,17 @@ struct SyncTimeCalculator {
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let now = now ?? Date().timeIntervalSince1970
-        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
+        let install = clampedToNow(
+            installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            now: now
+        )
 
         // Try last successful sync first (if configured)
         if config.useLastSyncAsPrimary {
-            let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            let lastSuccessfulSync = clampedToNow(
+                defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey),
+                now: now
+            )
             if lastSuccessfulSync > 0 {
                 var startTime = lastSuccessfulSync - config.primaryBuffer
 
@@ -145,10 +158,21 @@ struct SyncTimeCalculator {
     static func calculateStartDate(
         config: Config,
         installTimestamp: TimeInterval? = nil,
+        now: TimeInterval? = nil,
         defaults: UserDefaults = .standard
     ) -> Date {
-        let timestamp = calculateStartTime(config: config, installTimestamp: installTimestamp, defaults: defaults)
+        let timestamp = calculateStartTime(
+            config: config,
+            installTimestamp: installTimestamp,
+            now: now,
+            defaults: defaults
+        )
         return Date(timeIntervalSince1970: timestamp)
+    }
+
+    /// A stored time read as no later than `now`; zero (unset) stays zero.
+    static func clampedToNow(_ stored: TimeInterval, now: TimeInterval) -> TimeInterval {
+        stored > 0 ? min(stored, now) : stored
     }
 
     /// Lower bound for a history recovery that has no `lastSuccessfulSyncTime`
@@ -170,8 +194,11 @@ struct SyncTimeCalculator {
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let config = Config.historyRecovery
-        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
         let now = now ?? Date().timeIntervalSince1970
+        let install = clampedToNow(
+            installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            now: now
+        )
         guard let newestReceivedInternalDate else {
             if install > 0 {
                 return install - config.installBuffer

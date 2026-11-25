@@ -31,16 +31,22 @@ actor SyncFailureTracker {
     private let defaults: UserDefaults
     private let coreDataStack: CoreDataStack
     private let clock: any SyncClock
+    /// Stamps `lastSuccessfulSyncTime`, which history recovery and reconciliation draw
+    /// their `after:` floors from. The orchestrator and reconciliation must read the same
+    /// source (`ServerTimeSource`).
+    private let serverTime: any ServerTimeSource
     private let log = LogCategory.sync.logger
 
     init(
         defaults: UserDefaults = .standard,
         coreDataStack: CoreDataStack = .shared,
-        clock: any SyncClock = SystemSyncClock()
+        clock: any SyncClock = SystemSyncClock(),
+        serverTime: any ServerTimeSource = ServerClockEstimate.shared
     ) {
         self.defaults = defaults
         self.coreDataStack = coreDataStack
         self.clock = clock
+        self.serverTime = serverTime
     }
 
     /// Latched when `recordFailure` could not stage the current failing set
@@ -318,7 +324,13 @@ actor SyncFailureTracker {
         defaults.set(0, forKey: SyncConfig.consecutiveFailuresKey)
         defaults.removeObject(forKey: SyncConfig.persistentFailedIdsKey)
         if recordsSuccessfulSync {
-            defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            // The earlier of the device's time and Gmail's: a device clock set ahead
+            // stamped a time Gmail had not reached, and the next history recovery,
+            // listing `after:` it, skipped the mail between for good.
+            defaults.set(
+                serverTime.conservativeNow().timeIntervalSince1970,
+                forKey: SyncConfig.lastSuccessfulSyncTimeKey
+            )
             log.debug("Sync success - reset failure tracking")
         } else {
             log.debug("History slice committed - reset failure tracking without recording terminal success")

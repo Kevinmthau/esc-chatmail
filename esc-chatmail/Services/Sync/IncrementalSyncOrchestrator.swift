@@ -58,6 +58,9 @@ final class IncrementalSyncOrchestrator {
     /// `UserDefaults.standard`, which in a Mac test host is the preferences of
     /// the Mac app the user runs.
     private let defaults: UserDefaults
+    /// The "now" recovery's window is measured against: the earlier of the device's time
+    /// and Gmail's. It must be the source `failureTracker` stamps the last-sync time with.
+    private let serverTime: any ServerTimeSource
     private let historyPageLimit: Int
     private let historyPageSize: Int
     /// Production supplies AuthSession's current-or-persisted email. Keeping
@@ -112,6 +115,7 @@ final class IncrementalSyncOrchestrator {
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         defaults: UserDefaults = .standard,
+        serverTime: any ServerTimeSource = ServerClockEstimate.shared,
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
         historyPageSize: Int = SyncConfig.maxHistoryResultsPerRequest,
         authenticatedAccountEmail: (() -> String?)? = nil,
@@ -131,6 +135,7 @@ final class IncrementalSyncOrchestrator {
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
         self.defaults = defaults
+        self.serverTime = serverTime
         self.historyPageLimit = historyPageLimit
         self.historyPageSize = historyPageSize
         self.authenticatedAccountEmail = authenticatedAccountEmail
@@ -931,15 +936,24 @@ final class IncrementalSyncOrchestrator {
             return SyncTimeCalculator.buildSyncQuery(startTime: frozen.windowStart)
         }
 
+        // Gmail's time where the device's is ahead of it: the stored times are read as no
+        // later than this, which can only move the window's start earlier. Never a cap:
+        // recovery stays uncapped (`SyncTimeCalculator.Config.historyRecovery`).
+        let now = serverTime.conservativeNow().timeIntervalSince1970
         let windowStart: TimeInterval
         if defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey) > 0 {
-            windowStart = SyncTimeCalculator.calculateStartTime(config: .historyRecovery, defaults: defaults)
+            windowStart = SyncTimeCalculator.calculateStartTime(
+                config: .historyRecovery,
+                now: now,
+                defaults: defaults
+            )
         } else {
             // A failed read throws and holds the run: falling back to the
             // unbounded install branch is the whole-mailbox re-list this bounds.
-            let newestReceived = try await Self.newestReceivedInternalDate(in: context)
+            let newestReceived = try await Self.newestReceivedInternalDate(in: context, now: now)
             windowStart = SyncTimeCalculator.historyRecoveryInstallBranchStartTime(
                 newestReceivedInternalDate: newestReceived,
+                now: now,
                 defaults: defaults
             )
         }
@@ -955,15 +969,17 @@ final class IncrementalSyncOrchestrator {
     }
 
     nonisolated private static func newestReceivedInternalDate(
-        in context: NSManagedObjectContext
+        in context: NSManagedObjectContext,
+        now: TimeInterval
     ) async throws -> TimeInterval? {
         try await context.perform {
             let request = NSFetchRequest<NSDictionary>(entityName: "Message")
             // A future-dated row (skewed sender clock, imported mail) would
-            // anchor the window at now and skip the whole gap.
+            // anchor the window at now and skip the whole gap. `now` is the
+            // conservative one: internal dates are Gmail's times.
             request.predicate = NSPredicate(
                 format: "isFromMe == NO AND internalDate <= %@",
-                Date() as NSDate
+                Date(timeIntervalSince1970: now) as NSDate
             )
             request.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
             request.fetchLimit = 1

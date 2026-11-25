@@ -17,6 +17,8 @@ final class IncrementalSyncCursorTests: XCTestCase {
     private var coreDataStack: CoreDataStack!
     private var apiClient: MockGmailAPIClient!
     private var failureTracker: SyncFailureTracker!
+    /// Gmail's time as the run sees it; the same device time unless a test moves it.
+    private var serverTime: FakeServerTimeSource!
 
     private static let myEmail = "me@example.com"
     private static let startingHistoryId = "1000"
@@ -34,7 +36,8 @@ final class IncrementalSyncCursorTests: XCTestCase {
         testStack = TestCoreDataStack(storeKind: .sqlite)
         coreDataStack = CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         apiClient = MockGmailAPIClient()
-        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack)
+        serverTime = FakeServerTimeSource(serverOffsetFromDevice: 0)
+        failureTracker = SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack, serverTime: serverTime)
         await ModificationTracker.shared.reset()
         try await seedAccount()
     }
@@ -45,6 +48,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         defaults = nil
         suiteName = nil
         failureTracker = nil
+        serverTime = nil
         apiClient = nil
         coreDataStack = nil
         testStack = nil
@@ -1988,6 +1992,58 @@ final class IncrementalSyncCursorTests: XCTestCase {
         }
     }
 
+    /// A device clock set two hours ahead of Gmail's at a clean run, then a history expiry:
+    /// recovery must list from Gmail's time of that run, less its buffer. Stamped with the
+    /// device's time, the window started two hours past the last sync, and the mail Gmail
+    /// received in those two hours was skipped for good once the recovered cursor
+    /// committed (architecture review, gap-wall-clock-time#1).
+    ///
+    /// Revert-check: stamp `Date()` again in `SyncFailureTracker.recordResolvedProgress`
+    /// in place of `serverTime.conservativeNow()`; the read-time clamp alone does not
+    /// catch it, because the stamp is still behind the device's own time.
+    @MainActor
+    func testRecoveryAfterACleanRunWithTheDeviceClockAhead_listsFromGmailsTimeOfThatRun() async throws {
+        serverTime.serverOffsetFromDevice = -2 * 3600
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(history: nil, nextPageToken: nil, historyId: "2000")
+            )
+        ])
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let gmailTimeAfterTheRun = Date().timeIntervalSince1970 - 2 * 3600
+        XCTAssertLessThanOrEqual(
+            defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey),
+            gmailTimeAfterTheRun
+        )
+
+        configureCleanRecoveryListing()
+        apiClient.listMessagesQueries = []
+        await ModificationTracker.shared.reset()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let query = try XCTUnwrap(apiClient.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(Self.afterFloor(of: query), query)
+        XCTAssertLessThanOrEqual(
+            TimeInterval(floor),
+            gmailTimeAfterTheRun - SyncConfig.recoveryBufferSeconds,
+            "Recovery must list from Gmail's time of the last sync; got \(query)"
+        )
+    }
+
+    /// The `after:` seconds of a Gmail query.
+    private static func afterFloor(of query: String) -> Int? {
+        guard let range = query.range(of: "after:") else { return nil }
+        return Int(query[range.upperBound...].prefix { $0.isNumber })
+    }
+
     /// Runs `body` with a 400-day-old install time, no
     /// `lastSuccessfulSyncTime`, and one stored received row
     /// `newestReceivedAgo` seconds old, in the suite's own defaults.
@@ -2166,12 +2222,14 @@ final class IncrementalSyncCursorTests: XCTestCase {
             reconciliation: SyncReconciliation(
                 messageFetcher: messageFetcher,
                 failureTracker: failureTracker,
-                defaults: defaults
+                defaults: defaults,
+                serverTime: serverTime
             ),
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             aliasRefreshPolicy: SendAsAliasRefreshPolicy(userDefaults: defaults),
             defaults: defaults,
+            serverTime: serverTime,
             historyPageLimit: historyPageLimit,
             authenticatedAccountEmail: authenticatedAccountEmail,
             makeSyncContext: makeSyncContext
