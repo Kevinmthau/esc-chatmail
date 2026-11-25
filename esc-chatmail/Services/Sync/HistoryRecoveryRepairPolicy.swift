@@ -74,6 +74,39 @@ enum HistoryRecoveryRepairPolicy {
         return .advances(to: min(max(bound, newestSkipped.addingTimeInterval(0.001)), owedUpperBound))
     }
 
+    /// Runs in a row that may leave the bound where it was before the repair steps past
+    /// what holds it.
+    static let maximumRunsWithoutProgress = 5
+
+    /// The progress to stage, and the count to keep, given how many runs in a row before
+    /// this one left the bound where it was. A row Gmail fails on every time, a pending
+    /// action that never ends, or a listing that keeps failing would otherwise stop the
+    /// repair for good, and every older row with it. After
+    /// `maximumRunsWithoutProgress` such runs the bound steps to `escapeBound`: just
+    /// below the one row that holds it (that row is given up on), or a failed batch's
+    /// oldest row (that batch is given up on).
+    static func progressAfterStall(
+        _ progress: HistoryRecoveryRepair.Progress,
+        owedUpperBound: Date,
+        runsWithoutProgressBefore: Int,
+        escapeBound: Date?
+    ) -> (progress: HistoryRecoveryRepair.Progress, runsWithoutProgress: Int) {
+        switch progress {
+        case .finished:
+            return (.finished, 0)
+        case .advances(let bound) where bound < owedUpperBound:
+            return (progress, 0)
+        case .advances, .holds:
+            let runs = runsWithoutProgressBefore + 1
+            guard runs >= maximumRunsWithoutProgress,
+                  let escapeBound,
+                  escapeBound < owedUpperBound else {
+                return (progress, runs)
+            }
+            return (.advances(to: escapeBound), 0)
+        }
+    }
+
     /// What Gmail's labels for a row say.
     static func verdict(forLabelIds labelIds: [String]?) -> Verdict {
         let labels = Set(labelIds ?? [])

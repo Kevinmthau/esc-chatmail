@@ -119,4 +119,41 @@ final class HistoryRecoveryRepairPolicyTests: XCTestCase {
             .advances(to: Self.at(100))
         )
     }
+
+    /// Runs that leave the bound in place are counted; after the limit the bound steps to
+    /// the escape bound, and any progress resets the count.
+    ///
+    /// Revert-check: return `(progress, runs)` unconditionally from the no-progress case
+    /// of `HistoryRecoveryRepairPolicy.progressAfterStall`.
+    func testProgressAfterStall_stepsPastWhatHoldsTheBoundAfterTheLimit() {
+        let owed = Self.at(100)
+        let limit = HistoryRecoveryRepairPolicy.maximumRunsWithoutProgress
+
+        let early = HistoryRecoveryRepairPolicy.progressAfterStall(
+            .advances(to: owed),
+            owedUpperBound: owed,
+            runsWithoutProgressBefore: limit - 2,
+            escapeBound: Self.at(80)
+        )
+        XCTAssertEqual(early.progress, .advances(to: owed))
+        XCTAssertEqual(early.runsWithoutProgress, limit - 1)
+
+        let stepped = HistoryRecoveryRepairPolicy.progressAfterStall(
+            .holds,
+            owedUpperBound: owed,
+            runsWithoutProgressBefore: limit - 1,
+            escapeBound: Self.at(80)
+        )
+        XCTAssertEqual(stepped.progress, .advances(to: Self.at(80)))
+        XCTAssertEqual(stepped.runsWithoutProgress, 0)
+
+        let moved = HistoryRecoveryRepairPolicy.progressAfterStall(
+            .advances(to: Self.at(50)),
+            owedUpperBound: owed,
+            runsWithoutProgressBefore: limit - 1,
+            escapeBound: nil
+        )
+        XCTAssertEqual(moved.progress, .advances(to: Self.at(50)))
+        XCTAssertEqual(moved.runsWithoutProgress, 0)
+    }
 }

@@ -2376,6 +2376,51 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(owed.upperBound.timeIntervalSince(firstUnasked), 0.001, accuracy: 0.0005)
     }
 
+    /// A row Gmail fails on every time holds the bound only for a few runs; then the repair
+    /// steps past it, so it cannot stop the repair, and every older row, for good.
+    ///
+    /// Revert-check: the `progressAfterStall` call in
+    /// `IncrementalSyncOrchestrator.applyHistoryRecoveryRepair` (stage the applied
+    /// progress as it is).
+    @MainActor
+    func testOwedRepair_rowGmailAlwaysFailsOn_isSteppedPastAfterTheLimit() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        let failingDate = base.addingTimeInterval(50)
+        try await seedRepairRow(id: "failing", date: failingDate, inbox: true, unread: false)
+        try await seedRepairRow(id: "older", date: base.addingTimeInterval(10), inbox: false, unread: false)
+        try await seedOwedRepair(upperBound: Date())
+        apiClient.listMessagesResponder = { query in
+            guard query.hasPrefix("-in:spam -in:trash after:") else { return nil }
+            return MessagesListResponse(
+                messages: [MessageListItem(id: "older", threadId: "t-older")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            )
+        }
+        apiClient.getMessageOperation = { _, _ in throw APIError.serverError(503) }
+
+        // The first run moves the bound to just above the failing row; the next
+        // `maximumRunsWithoutProgress` leave it there, and the last of them steps past it.
+        let lastRun = HistoryRecoveryRepairPolicy.maximumRunsWithoutProgress + 1
+        for run in 1...lastRun {
+            await ModificationTracker.shared.reset()
+            configureQuietHistory()
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            let owedNow = try await fetchOwedRepair()
+            let owed = try XCTUnwrap(owedNow, "run \(run)")
+            if run < lastRun {
+                XCTAssertEqual(owed.upperBound.timeIntervalSince(failingDate), 0.001, accuracy: 0.0005, "run \(run)")
+            } else {
+                XCTAssertEqual(owed.upperBound, failingDate, "The bound steps past the failing row")
+            }
+        }
+        let failingExists = await messageExists(id: "failing")
+        XCTAssertTrue(failingExists, "A row given up on is left as it is")
+    }
+
     /// An account-scoped failure ends the run, and nothing of the repair commits.
     ///
     /// Revert-check: the `rethrowIfRunAborting` call in `HistoryRecoveryRepair.askGmail`.

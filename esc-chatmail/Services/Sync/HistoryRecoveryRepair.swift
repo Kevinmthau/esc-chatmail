@@ -30,8 +30,9 @@ import Foundation
 ///   otherwise stop the repair for good. A row Gmail does not answer for, and the rows
 ///   past one run's budget, stay owed with everything older than them; what was answered
 ///   is applied (`HistoryRecoveryRepairPolicy.nextUpperBound`). A row whose answer cannot
-///   be read (`decodingError`, `invalidData`) is left as it is: asking again gets the
-///   same answer.
+///   be read (`decodingError`) is left as it is: asking again gets the same answer. After
+///   `maximumRunsWithoutProgress` runs in a row that leave the bound in place, it steps
+///   past what holds it (`progressAfterStall`), so no row stops the repair for good.
 /// - The plan is applied inside the run's final `ConversationRollupMutationSerializer`
 ///   block, keyed on its conversations, and saved with the checkpoint's progress, so the
 ///   changes and the record of them commit or die together.
@@ -54,6 +55,10 @@ struct HistoryRecoveryRepair {
         /// The conversations of every row the plan may change.
         var conversationObjectIDs: Set<NSManagedObjectID> = []
         var progress: Progress = .holds
+        /// Where the bound steps once runs have left it in place for too long
+        /// (`HistoryRecoveryRepairPolicy.progressAfterStall`): the date of the row that
+        /// holds it, or a failed batch's oldest row.
+        var escapeBound: Date?
 
         var isEmpty: Bool { removals.isEmpty && states.isEmpty }
     }
@@ -93,9 +98,11 @@ struct HistoryRecoveryRepair {
         let inInbox: Set<String>
         let unread: Set<String>
         do {
-            listed = try await listAll(HistoryRecoveryRepairPolicy.query("-in:spam -in:trash", from: lowerBound, before: upperBound))
-            inInbox = try await listAll(HistoryRecoveryRepairPolicy.query("in:inbox", from: lowerBound, before: upperBound))
-            unread = try await listAll(HistoryRecoveryRepairPolicy.query("is:unread", from: lowerBound, before: upperBound))
+            // The batch's own span: the owed bound can be far past its newest row.
+            let spanEnd = batch.upperDate ?? upperBound
+            listed = try await listAll(HistoryRecoveryRepairPolicy.query("-in:spam -in:trash", from: lowerBound, before: spanEnd))
+            inInbox = try await listAll(HistoryRecoveryRepairPolicy.query("in:inbox", from: lowerBound, before: spanEnd))
+            unread = try await listAll(HistoryRecoveryRepairPolicy.query("is:unread", from: lowerBound, before: spanEnd))
         } catch is ListingTooLong {
             // A span Gmail lists far more densely than the store holds it cannot be
             // compared within a run's pages; held, it would stop the repair for good.
@@ -106,7 +113,9 @@ struct HistoryRecoveryRepair {
         } catch {
             try Self.rethrowIfRunAborting(error)
             log.warning("History-recovery repair could not list its batch; it stays owed")
-            return Plan()
+            var plan = Plan()
+            plan.escapeBound = lowerBound
+            return plan
         }
 
         let candidates = HistoryRecoveryRepairPolicy.candidates(
@@ -118,7 +127,7 @@ struct HistoryRecoveryRepair {
         let asked = Array(candidates.prefix(Self.metadataRequestBudget))
         var plan = Plan()
         var answered = Set<String>()
-        let storedById = Dictionary(uniqueKeysWithValues: batch.rows.map { ($0.messageId, $0) })
+        let storedById = Dictionary(batch.rows.map { ($0.messageId, $0) }, uniquingKeysWith: { first, _ in first })
 
         for chunk in asked.map(\.messageId).chunked(into: Self.concurrentMetadataRequests) {
             try Task.checkCancellation()
@@ -154,6 +163,7 @@ struct HistoryRecoveryRepair {
             candidatesNewestFirst: owedNewestFirst,
             answered: answered
         ))
+        plan.escapeBound = owedNewestFirst.first { !answered.contains($0.messageId) }?.internalDate
         log.info(
             "History-recovery repair: compared \(batch.rows.count), deferred \(batch.deferredRows.count), asked \(asked.count), removing \(plan.removals.count), updating \(plan.states.count), progress \(plan.progress)"
         )
@@ -198,9 +208,12 @@ struct HistoryRecoveryRepair {
                 switch error {
                 case APIError.notFound:
                     answers.append((messageId, .verdict(.remove)))
-                case APIError.decodingError, APIError.invalidData:
-                    // Asking again gets the same answer: leave the row as it is rather
-                    // than hold the repair at it for good.
+                case APIError.decodingError:
+                    // A 2xx whose body cannot be read: asking again gets the same answer.
+                    // Left as it is rather than holding the repair at it. Not
+                    // `invalidData`, which every 4xx but 403 and 404 maps to, transient
+                    // ones included; a row that keeps failing that way is given up on
+                    // only after `maximumRunsWithoutProgress`.
                     answers.append((messageId, .unreadable))
                 default:
                     answers.append((messageId, .unanswered))
@@ -245,6 +258,8 @@ struct HistoryRecoveryRepair {
         var conversationByMessageId: [String: NSManagedObjectID] = [:]
         /// The oldest internal date in the batch; nil when no row is left.
         var lowerBound: Date?
+        /// The newest internal date in the batch, for the listings' span.
+        var upperDate: Date?
     }
 
     /// The newest `batchRowLimit` rows before `upperBound`, and every other row of the
@@ -283,7 +298,7 @@ struct HistoryRecoveryRepair {
             }
 
             let exclusions = try Exclusions(among: messages, in: context)
-            var batch = StoredBatch(lowerBound: oldest)
+            var batch = StoredBatch(lowerBound: oldest, upperDate: messages.first?.internalDate)
             for message in messages where !exclusions.skipped.contains(message.id) {
                 let row = HistoryRecoveryRepairPolicy.StoredRow(
                     messageId: message.id,

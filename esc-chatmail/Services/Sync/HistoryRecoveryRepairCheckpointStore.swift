@@ -13,6 +13,9 @@ struct HistoryRecoveryRepairCheckpoint: Equatable, Sendable {
     /// back can come out a hair later, and a bound that does so takes the row it was cut
     /// at into the next batch again, for ever.
     let upperBound: Date
+    /// Consecutive runs that left `upperBound` where it was
+    /// (`HistoryRecoveryRepairPolicy.progressAfterStall`).
+    var runsWithoutProgress: Int = 0
 }
 
 /// Reads and stages the model-v3 `SyncCheckpoint` row that records a history
@@ -32,6 +35,7 @@ struct HistoryRecoveryRepairCheckpointStore {
         let version: Int
         /// Seconds since the reference date, the representation Core Data stores.
         let upperBoundSinceReferenceDate: TimeInterval
+        let runsWithoutProgress: Int?
     }
 
     init() {}
@@ -47,12 +51,13 @@ struct HistoryRecoveryRepairCheckpointStore {
                 guard row.accountEmail.caseInsensitiveCompare(accountEmail) == .orderedSame,
                       row.startHistoryId == nil,
                       row.pageToken == nil,
-                      let upperBound = Self.decodeUpperBound(from: row) else {
+                      let payload = Self.decodePayload(from: row) else {
                     continue
                 }
                 return HistoryRecoveryRepairCheckpoint(
                     accountEmail: row.accountEmail,
-                    upperBound: Date(timeIntervalSinceReferenceDate: upperBound)
+                    upperBound: Date(timeIntervalSinceReferenceDate: payload.upperBoundSinceReferenceDate),
+                    runsWithoutProgress: max(0, payload.runsWithoutProgress ?? 0)
                 )
             }
             return nil
@@ -62,13 +67,15 @@ struct HistoryRecoveryRepairCheckpointStore {
     /// Stages exactly one row owing a repair of every row older than `upperBound`.
     func stageOwed(
         upperBound: Date,
+        runsWithoutProgress: Int = 0,
         accountEmail: String,
         in context: NSManagedObjectContext
     ) async throws {
         let payloadData = try JSONEncoder().encode(
             Payload(
                 version: Payload.currentVersion,
-                upperBoundSinceReferenceDate: upperBound.timeIntervalSinceReferenceDate
+                upperBoundSinceReferenceDate: upperBound.timeIntervalSinceReferenceDate,
+                runsWithoutProgress: runsWithoutProgress
             )
         )
         guard let payloadJSON = String(data: payloadData, encoding: .utf8) else {
@@ -103,7 +110,7 @@ struct HistoryRecoveryRepairCheckpointStore {
         }
     }
 
-    private static func decodeUpperBound(from row: SyncCheckpoint) -> TimeInterval? {
+    private static func decodePayload(from row: SyncCheckpoint) -> Payload? {
         guard let payloadJSON = row.pendingMessageIdsJSON,
               let payloadData = payloadJSON.data(using: .utf8),
               let payload = try? JSONDecoder().decode(Payload.self, from: payloadData),
@@ -111,7 +118,7 @@ struct HistoryRecoveryRepairCheckpointStore {
               payload.upperBoundSinceReferenceDate.isFinite else {
             return nil
         }
-        return payload.upperBoundSinceReferenceDate
+        return payload
     }
 
     private static func fetchRows(in context: NSManagedObjectContext) throws -> [SyncCheckpoint] {

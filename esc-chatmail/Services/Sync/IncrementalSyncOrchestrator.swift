@@ -891,10 +891,11 @@ final class IncrementalSyncOrchestrator {
                 try await recoveryWindowCheckpointStore.stageClear(in: context)
                 // The rows stored before the window were not visited: whatever happened
                 // to them during the gap is in no history the new cursor returns. Owed
-                // from now, so a repair a recovery before this one left unfinished starts
-                // over: this gap's changes can be on rows it had already compared.
+                // from the end of time, never the device's clock, which can be behind
+                // the rows; a repair a recovery before this one left unfinished starts
+                // over, since this gap's changes can be on rows it had already compared.
                 try await recoveryRepairStore.stageOwed(
-                    upperBound: Date(),
+                    upperBound: .distantFuture,
                     accountEmail: accountEmail,
                     in: context
                 )
@@ -985,22 +986,35 @@ final class IncrementalSyncOrchestrator {
         in context: NSManagedObjectContext
     ) async throws {
         let skippedDates = try await HistoryRecoveryRepair.apply(step.plan, in: context)
-        let progress = HistoryRecoveryRepairPolicy.progressAfterApply(
+        let applied = HistoryRecoveryRepairPolicy.progressAfterApply(
             planned: step.plan.progress,
             owedUpperBound: step.owed.upperBound,
             skippedDates: skippedDates
         )
+        let (progress, runsWithoutProgress) = HistoryRecoveryRepairPolicy.progressAfterStall(
+            applied,
+            owedUpperBound: step.owed.upperBound,
+            runsWithoutProgressBefore: step.owed.runsWithoutProgress,
+            escapeBound: step.plan.escapeBound
+        )
         switch progress {
         case .holds:
-            break
+            try await recoveryRepairStore.stageOwed(
+                upperBound: step.owed.upperBound,
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
         case .advances(let upperBound):
-            if upperBound < step.owed.upperBound {
-                try await recoveryRepairStore.stageOwed(
-                    upperBound: upperBound,
-                    accountEmail: step.owed.accountEmail,
-                    in: context
-                )
+            if case .advances(let planned) = applied, planned >= step.owed.upperBound, upperBound < step.owed.upperBound {
+                log.warning("History-recovery repair stepped past a row that held it for \(HistoryRecoveryRepairPolicy.maximumRunsWithoutProgress) runs")
             }
+            try await recoveryRepairStore.stageOwed(
+                upperBound: min(upperBound, step.owed.upperBound),
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
         case .finished:
             log.info("History-recovery repair finished")
             try await recoveryRepairStore.stageClear(in: context)
