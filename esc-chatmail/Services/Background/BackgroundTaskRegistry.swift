@@ -249,6 +249,7 @@ final class BackgroundTaskRegistry {
         let startedAt = now()
         let journal = runJournal
         let now = self.now
+        journal.recordStart(task: Self.journalName(for: identifier), startedAt: startedAt)
 
         // Installed before the worker exists. The cancellation latch
         // remembers an expiration that arrives first.

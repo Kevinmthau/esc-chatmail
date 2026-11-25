@@ -228,6 +228,7 @@ final class BackgroundSyncManager {
         let startedAt = now()
         let journal = runJournal
         let now = self.now
+        journal.recordStart(task: journalName, startedAt: startedAt)
         let lifecycleState = BackgroundTaskLifecycleState()
         let latch = BackgroundTaskCompletionLatch(
             lifecycleState: lifecycleState,

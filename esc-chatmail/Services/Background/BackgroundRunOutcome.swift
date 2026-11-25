@@ -18,11 +18,14 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
     case deferredForInsufficientStorage
     /// The account was signed out for good: a successful no-op (and the cadence was swept).
     case signedOut
-    /// No session, though the account may still be held: the launch restore failed with
-    /// the credentials kept (offline, Google unreachable). Reported as success, as it
-    /// always was, so the cadence lives on; worth a warning, since every run like it is a
-    /// mailbox that did not sync.
+    /// No usable session, though the account is not signed out: the launch restore
+    /// failed with the account held (offline, Google unreachable), or the session needs a
+    /// new sign-in (a revoked token). Reported as success, as it always was, so the cadence
+    /// lives on; worth a warning, since every run like it is a mailbox that did not sync.
     case noSessionYet
+    /// Written when the task fires and replaced when it completes. One that is still there
+    /// is a run the process did not live to complete (killed by the watchdog or jetsam).
+    case started
     /// The launch's persistence or auth restore did not get ready.
     case notReady
     /// The run was cancelled, by expiration or before it began.
@@ -37,7 +40,7 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
         case .completed, .blockedNoRetry, .signedOut, .noSessionYet, .maintenanceSucceeded:
             return true
         case .needsFollowUp, .blockedRetrying, .failed, .deferredForInsufficientStorage,
-             .notReady, .cancelled, .maintenanceFailed:
+             .notReady, .cancelled, .maintenanceFailed, .started:
             return false
         }
     }

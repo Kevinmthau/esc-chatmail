@@ -7,7 +7,8 @@ import Foundation
 /// completed, expired, was blocked or skipped while offline.
 ///
 /// - Each entry is the task, its start and end, its outcome, whether it expired and what
-///   iOS was told. No mailbox data, so it is not account data and a sign-out leaves it.
+///   iOS was told. A `started` entry is written when the task fires and replaced when it
+///   completes, so a run the process did not live to complete still shows. No mailbox data, so it is not account data and a sign-out leaves it.
 /// - It is written before the task's `setTaskCompleted` (`BackgroundTaskCompletionLatch`'s
 ///   `beforeReporting`): iOS may suspend the process as soon as that call returns.
 /// - At most `capacity` entries; the oldest go first.
@@ -54,6 +55,12 @@ final class BackgroundRunJournal: @unchecked Sendable {
     func append(_ entry: Entry) {
         lock.withLock {
             var stored = entriesLocked()
+            if let index = stored.lastIndex(where: {
+                $0.outcome == .started && $0.task == entry.task && $0.startedAt == entry.startedAt
+            }) {
+                // The run's own `started` entry: it ended, so it takes that entry's place.
+                stored.remove(at: index)
+            }
             stored.append(entry)
             if stored.count > capacity {
                 stored.removeFirst(stored.count - capacity)
@@ -72,6 +79,18 @@ final class BackgroundRunJournal: @unchecked Sendable {
     private func entriesLocked() -> [Entry] {
         guard let data = defaults.data(forKey: Self.defaultsKey) else { return [] }
         return (try? JSONDecoder().decode([Entry].self, from: data)) ?? []
+    }
+
+    /// Records that a task fired. Its completion replaces this entry (`append`).
+    func recordStart(task: String, startedAt: Date) {
+        append(Entry(
+            task: task,
+            startedAt: startedAt,
+            endedAt: startedAt,
+            outcome: .started,
+            expired: false,
+            reportedSuccess: false
+        ))
     }
 
     /// Records a run and, for an expired or abnormal one, logs one warning line (which a

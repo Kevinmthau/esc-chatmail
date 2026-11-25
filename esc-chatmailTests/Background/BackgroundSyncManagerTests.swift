@@ -962,6 +962,30 @@ final class BackgroundSyncManagerTests: XCTestCase {
         }
     }
 
+    // Revert-check: fails if any executor result maps to another outcome, even one with
+    // the same reported Bool (the journal and its warning line would then be wrong).
+    func testOutcome_eachExecutorResult_mapsToItsOwnOutcome() async {
+        let cases: [(BackgroundMailboxSyncExecutionResult, BackgroundRunOutcome)] = [
+            (.completed, .completed),
+            (.needsFollowUp, .needsFollowUp),
+            (.failed, .failed),
+            (.deferredForInsufficientStorage, .deferredForInsufficientStorage),
+            (.blocked(by: nil), .blockedRetrying),
+            (.blocked(by: .foregroundIncremental), .blockedNoRetry)
+        ]
+        for (result, expected) in cases {
+            let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: result) }
+            let manager = makeManager(authoritativeSyncExecutor: executor)
+
+            let outcome = await manager.performAuthoritativeSyncOutcome(budget: .processing)
+
+            XCTAssertEqual(outcome, expected, "\(result)")
+        }
+        let notReady = makeManager(authoritativeSyncReadiness: { false })
+        let notReadyOutcome = await notReady.performAuthoritativeSyncOutcome()
+        XCTAssertEqual(notReadyOutcome, .notReady)
+    }
+
     func testTaskRunner_completedRun_isJournaledWithItsOutcome() async {
         let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: .completed) }
         let journal = BackgroundRunJournal(

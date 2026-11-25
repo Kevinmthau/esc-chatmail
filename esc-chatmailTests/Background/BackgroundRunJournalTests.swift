@@ -46,8 +46,8 @@ final class BackgroundRunJournalTests: XCTestCase {
         XCTAssertEqual(journal.entries(), [entry(7)])
     }
 
-    /// The outcomes reported as success. That each path maps to the right outcome is pinned
-    /// by `BackgroundSyncManagerTests`' existing `performAuthoritativeSync` Bool tests.
+    /// The outcomes reported as success. Which outcome each path returns is pinned in
+    /// `BackgroundSyncManagerTests` (`testOutcome_eachExecutorResult_mapsToItsOwnOutcome`).
     func testOutcomes_reportedAsSuccess() {
         let succeeding: Set<BackgroundRunOutcome> = [
             .completed, .blockedNoRetry, .signedOut, .noSessionYet, .maintenanceSucceeded
@@ -55,6 +55,27 @@ final class BackgroundRunJournalTests: XCTestCase {
         for outcome in BackgroundRunOutcome.allCases {
             XCTAssertEqual(outcome.reportsSuccess, succeeding.contains(outcome), outcome.rawValue)
         }
+    }
+
+    // Revert-check: fails if `append` stops replacing the run's own `started` entry: every
+    // run would then appear twice, once as never completed.
+    func testStartedEntry_isReplacedByItsCompletion_andStaysForARunThatNeverCompleted() {
+        let journal = BackgroundRunJournal(defaults: makeDefaults())
+        let start = Date(timeIntervalSince1970: 100)
+
+        journal.recordStart(task: "processing", startedAt: start)
+        journal.recordStart(task: "appRefresh", startedAt: start)
+        journal.record(
+            task: "processing",
+            startedAt: start,
+            endedAt: start.addingTimeInterval(5),
+            outcome: .completed,
+            reported: true,
+            expired: false
+        )
+
+        XCTAssertEqual(journal.entries().map(\.task), ["appRefresh", "processing"])
+        XCTAssertEqual(journal.entries().map(\.outcome), [.started, .completed])
     }
 
     func testReport_carriesTheJournal() throws {
