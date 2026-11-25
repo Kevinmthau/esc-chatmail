@@ -123,8 +123,7 @@ final class MessageProcessorLargeBodyFetchTests: XCTestCase {
         XCTAssertEqual(processed?.hasAttachments, true)
     }
 
-    /// A large text part the walk did not take for the body (the HTML
-    /// alternative's text one) is not a file either.
+    /// Large bodies of both kinds, both taken by the walk, are not files.
     func testLargeBodyPartsOfBothKinds_areNotAttachments() async throws {
         let message = GmailMessage(
             id: "m-large-alternative",
@@ -169,6 +168,59 @@ final class MessageProcessorLargeBodyFetchTests: XCTestCase {
 
         let processed = try await processor.processGmailMessage(message, myAliases: [])
 
+        XCTAssertEqual(processed?.attachmentInfo.map(\.id), [])
+        XCTAssertEqual(processed?.hasAttachments, true)
+    }
+
+    /// A large nameless text part the walk did not take for the body (a
+    /// second one beside the body, not after an inline file) is not a file
+    /// either: it is left out, as web leaves it out.
+    func testLargeTextPartTheWalkDidNotTake_isNotAnAttachment() async throws {
+        let message = GmailMessage(
+            id: "m-large-untaken",
+            threadId: "t-m-large-untaken",
+            labelIds: ["INBOX"],
+            snippet: "Snippet",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 11, data: Data("<p>Body</p>".utf8).base64EncodedString(), attachmentId: nil),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "1",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 40_000, data: nil, attachmentId: "att-untaken"),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: 40_011
+        )
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in
+            XCTFail("A text part the walk does not take is not fetched")
+            return Data()
+        })
+
+        let processed = try await processor.processGmailMessage(message, myAliases: [])
+
+        XCTAssertEqual(processed?.storedHTML, "<p>Body</p>")
         XCTAssertEqual(processed?.attachmentInfo.map(\.id), [])
         XCTAssertEqual(processed?.hasAttachments, true)
     }

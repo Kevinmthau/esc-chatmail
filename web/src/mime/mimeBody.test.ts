@@ -315,6 +315,32 @@ describe('continuation bounds and kinds', () => {
     expect(fetches).toBe(MAXIMUM_CONTINUATIONS_PER_KIND)
   })
 
+  // Revert-check: counting readBytes only for a joined continuation.
+  it('spends the byte bound on refused continuations too', async () => {
+    const hidden = `<html><body><div hidden>${'x'.repeat(1_500_000)}</div></body></html>`
+    let fetches = 0
+    const parsed = await parseGmailMessage(
+      message([
+        textPart('0', 'text/html', fragmentA),
+        inlinePhoto('i1'),
+        largeTextPart('h1', 'text/html', 'hidden-1', 10),
+        inlinePhoto('i2'),
+        largeTextPart('h2', 'text/html', 'hidden-2', 10),
+        inlinePhoto('i3'),
+        largeTextPart('h3', 'text/html', 'hidden-3', 1024 * 1024),
+      ]),
+      {
+        fetchLargeBody: () => {
+          fetches += 1
+          return Promise.resolve(b64url(hidden))
+        },
+      },
+    )
+
+    expect(parsed!.html).toBe(fragmentA)
+    expect(fetches).toBe(2)
+  })
+
   // Revert-check: passing `kinds` rather than `missingKinds` to the child's walk.
   it('fetches no HTML continuation in a container walked for plain text', async () => {
     const parsed = await parseGmailMessage(

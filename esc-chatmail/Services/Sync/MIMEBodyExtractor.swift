@@ -72,17 +72,20 @@ enum MIMEBodyExtractor {
     /// whether or not each was joined.
     static let maximumContinuationsPerKind = 15
 
-    /// Bytes of continuation joined to a body of one kind, at most, in one
-    /// message. A continuation whose declared size or decoded text would pass
-    /// it is left out, unfetched where its size is declared.
+    /// Bytes of continuation read for a body of one kind, at most, in one
+    /// message, whether or not each was joined: a refused fragment has still
+    /// been fetched and checked for visible content (on web by regular
+    /// expressions that are quadratic in it). A continuation whose declared
+    /// size or decoded text would pass it is left out, unfetched where its
+    /// size is declared.
     static let maximumContinuationUTF8Bytes = 2 * 1024 * 1024
 
     private struct ContinuationBudget {
         var readCount: [Kind: Int] = [:]
-        var joinedBytes: [Kind: Int] = [:]
+        var readBytes: [Kind: Int] = [:]
 
         func remainingBytes(for kind: Kind) -> Int {
-            MIMEBodyExtractor.maximumContinuationUTF8Bytes - joinedBytes[kind, default: 0]
+            MIMEBodyExtractor.maximumContinuationUTF8Bytes - readBytes[kind, default: 0]
         }
 
         func admitsAnother(_ kind: Kind) -> Bool {
@@ -194,6 +197,7 @@ enum MIMEBodyExtractor {
         }
         let fragmentBytes = fragment.utf8.count
         guard fragmentBytes <= remaining else { return base }
+        budget.readBytes[kind, default: 0] += fragmentBytes
 
         let joined: String
         switch kind {
@@ -205,7 +209,6 @@ enum MIMEBodyExtractor {
             }
             joined = joinedHTML(base, appending: fragment)
         }
-        budget.joinedBytes[kind, default: 0] += fragmentBytes
         return joined
     }
 

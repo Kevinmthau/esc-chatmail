@@ -27,16 +27,16 @@ export interface MimeBody {
 /** Continuations read for a body of one kind, at most, joined or not. */
 export const MAXIMUM_CONTINUATIONS_PER_KIND = 15
 
-/** UTF-8 bytes of continuation joined to a body of one kind, at most. */
+/** UTF-8 bytes of continuation read for a body of one kind, at most, joined or not. */
 export const MAXIMUM_CONTINUATION_UTF8_BYTES = 2 * 1024 * 1024
 
 interface ContinuationBudget {
   readCount: Record<BodyKind, number>
-  joinedBytes: Record<BodyKind, number>
+  readBytes: Record<BodyKind, number>
 }
 
 function remainingBytes(budget: ContinuationBudget, kind: BodyKind): number {
-  return MAXIMUM_CONTINUATION_UTF8_BYTES - budget.joinedBytes[kind]
+  return MAXIMUM_CONTINUATION_UTF8_BYTES - budget.readBytes[kind]
 }
 
 function admitsAnother(budget: ContinuationBudget, kind: BodyKind): boolean {
@@ -57,7 +57,7 @@ export async function extractMimeBody(
 ): Promise<MimeBody> {
   const budget: ContinuationBudget = {
     readCount: { html: 0, plainText: 0 },
-    joinedBytes: { html: 0, plainText: 0 },
+    readBytes: { html: 0, plainText: 0 },
   }
   return walk(part, kinds, budget, decodedBody)
 }
@@ -151,6 +151,9 @@ async function joiningContinuation(
   if (fragment === null) return base
   const fragmentBytes = utf8Length(fragment)
   if (fragmentBytes > remaining) return base
+  // Counted once read, joined or not: a refused fragment was still fetched
+  // and checked by hasMeaningfulContent, whose regexes are quadratic in it.
+  budget.readBytes[kind] += fragmentBytes
 
   let joined: string
   if (kind === 'plainText') {
@@ -159,7 +162,6 @@ async function joiningContinuation(
     if (!hasMeaningfulContent(fragment)) return base
     joined = joinedHtml(base, fragment)
   }
-  budget.joinedBytes[kind] += fragmentBytes
   return joined
 }
 

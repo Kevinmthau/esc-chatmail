@@ -1084,12 +1084,6 @@ class MessageProcessor: @unchecked Sendable {
 
         traverse(part)
 
-        #if DEBUG
-        if attachments.isEmpty && checkForAttachments(in: part) {
-            Log.debug("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
-        }
-        #endif
-
         return attachments
     }
 

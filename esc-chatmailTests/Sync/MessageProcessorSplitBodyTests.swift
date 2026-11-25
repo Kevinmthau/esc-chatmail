@@ -303,6 +303,46 @@ final class MessageProcessorSplitBodyTests: XCTestCase {
         XCTAssertEqual(fetches.count, MIMEBodyExtractor.maximumContinuationsPerKind)
     }
 
+    /// A refused continuation spends its bytes too: it was fetched and
+    /// checked for visible content, which on web is quadratic in it.
+    /// Two 1.5 MiB invisible fragments leave less than the third's declared
+    /// 1 MiB, so the third is not fetched.
+    ///
+    /// Revert-check: counting `readBytes` only for a joined continuation in
+    /// `MIMEBodyExtractor.joiningContinuation`.
+    func testRefusedContinuations_spendTheByteBound() async throws {
+        let hidden = "<html><body><div hidden>" + String(repeating: "x", count: 1_500_000) + "</div></body></html>"
+        func continuation(_ index: Int, declaredSize: Int) -> MessagePart {
+            MessagePart(
+                partId: "h\(index)",
+                mimeType: "text/html",
+                filename: nil,
+                headers: nil,
+                body: MessageBody(size: declaredSize, data: nil, attachmentId: "hidden-\(index)"),
+                parts: nil
+            )
+        }
+        let message = makeMessage(parts: [
+            textPart("0", "text/html", Self.fragmentA),
+            inlinePhoto("i1"),
+            continuation(1, declaredSize: 10),
+            inlinePhoto("i2"),
+            continuation(2, declaredSize: 10),
+            inlinePhoto("i3"),
+            continuation(3, declaredSize: 1024 * 1024)
+        ])
+        let fetches = FetchCounter()
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in
+            fetches.increment()
+            return Data(hidden.utf8)
+        })
+
+        let processed = try await XCTUnwrapAsync(await processor.processGmailMessage(message, myAliases: []))
+
+        XCTAssertEqual(processed.storedHTML, Self.fragmentA)
+        XCTAssertEqual(fetches.count, 2)
+    }
+
     /// A container walked only for the kind still missing is not asked for
     /// the other: its HTML would be dropped, so its continuations were
     /// fetched for nothing, and they spent the bound that a later
