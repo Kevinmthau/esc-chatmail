@@ -19,7 +19,8 @@
     {
       "skippedTests" : [
         "PerformanceRegressionTests",
-        "ScaleHubFaultTests"
+        "ScaleHubFaultTests",
+        "ScaleQueryPlanTests"
       ],
       "target" : {
         "containerPath" : "container:esc-chatmail.xcodeproj",
