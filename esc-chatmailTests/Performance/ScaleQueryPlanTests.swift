@@ -525,4 +525,32 @@ final class ScaleQueryPlanTests: XCTestCase {
             XCTAssertFalse(plan.indexes(on: "ZMESSAGE").isEmpty, "\(statistics): \(plan)")
         }
     }
+
+    // MARK: - History-recovery repair
+
+    /// The repair a history recovery owes reads one batch of stored rows per run, newest
+    /// first, before a date (`HistoryRecoveryRepair.storedBatch`): 250 rows, then every row
+    /// of the second the batch is cut at. Both must be a walk of the index on
+    /// `internalDate`, never of ZMESSAGE.
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this. It fails if either fetch
+    /// stops being a range over `internalDate`, or a model version drops that index.
+    func testHistoryRecoveryRepairBatch_walksTheInternalDateIndex() async throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.newBackgroundContext()
+
+            var rowCount = 0
+            let plans = try await SQLiteQueryPlanRecorder.record {
+                rowCount = try await HistoryRecoveryRepair.storedBatch(before: Date(), in: context).rows.count
+            }
+
+            XCTAssertGreaterThanOrEqual(rowCount, HistoryRecoveryRepair.batchRowLimit, "\(statistics)")
+            let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
+            XCTAssertFalse(messagePlans.isEmpty, "\(statistics):\n\(plans)")
+            for plan in messagePlans {
+                XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)")
+            }
+        }
+    }
 }
