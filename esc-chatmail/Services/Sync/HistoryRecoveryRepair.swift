@@ -15,19 +15,23 @@ import Foundation
 ///
 /// Four things keep it from changing what it must not:
 /// - Rows of the user's own unsent mail (an optimistic or retained Not-sent row, whose ID
-///   is the app's), rows the failure ledger owns, rows with a local change Gmail has not
-///   had yet (`HistoryProcessor.hasPendingLocalModification`) and rows a pending action
-///   names, by message or by conversation, are never asked about. A week offline leaves a
-///   queued archive's `localModifiedAt` stale, and the pending action is what is left of
-///   it. The same is asked again when the plan is applied.
+///   is the app's) and rows the failure ledger owns are never asked about. Rows with a
+///   local change Gmail has not had yet, and every message a live pending action still
+///   has to change, wait: they are not asked about this run and the bound stays above
+///   them (`Exclusions`). A week offline leaves a queued archive's `localModifiedAt`
+///   stale, and the pending action is what is left of it. Both are asked again when the
+///   plan is applied.
 /// - A row changes only on Gmail's own answer for it (`format=metadata`), never because a
 ///   listing left it out: see `HistoryRecoveryRepairPolicy`. Metadata is never persisted
 ///   as a message.
 /// - Cancellation and account-scoped failures (`APIError.isAccountScopedSyncAbort`) are
 ///   rethrown and end the run, which commits nothing. A listing that fails keeps the
-///   batch owed. A row Gmail does not answer for, and the rows past one run's budget, stay
-///   owed with everything older than them; what was answered is applied
-///   (`HistoryRecoveryRepairPolicy.nextUpperBound`).
+///   batch owed; one too long to read in `maxListingPages` skips the batch, which would
+///   otherwise stop the repair for good. A row Gmail does not answer for, and the rows
+///   past one run's budget, stay owed with everything older than them; what was answered
+///   is applied (`HistoryRecoveryRepairPolicy.nextUpperBound`). A row whose answer cannot
+///   be read (`decodingError`, `invalidData`) is left as it is: asking again gets the
+///   same answer.
 /// - The plan is applied inside the run's final `ConversationRollupMutationSerializer`
 ///   block, keyed on its conversations, and saved with the checkpoint's progress, so the
 ///   changes and the record of them commit or die together.
@@ -92,6 +96,13 @@ struct HistoryRecoveryRepair {
             listed = try await listAll(HistoryRecoveryRepairPolicy.query("-in:spam -in:trash", from: lowerBound, before: upperBound))
             inInbox = try await listAll(HistoryRecoveryRepairPolicy.query("in:inbox", from: lowerBound, before: upperBound))
             unread = try await listAll(HistoryRecoveryRepairPolicy.query("is:unread", from: lowerBound, before: upperBound))
+        } catch is ListingTooLong {
+            // A span Gmail lists far more densely than the store holds it cannot be
+            // compared within a run's pages; held, it would stop the repair for good.
+            log.warning("History-recovery repair skipped a batch Gmail lists too densely")
+            var plan = Plan()
+            plan.progress = .advances(to: lowerBound)
+            return plan
         } catch {
             try Self.rethrowIfRunAborting(error)
             log.warning("History-recovery repair could not list its batch; it stays owed")
@@ -122,6 +133,8 @@ struct HistoryRecoveryRepair {
                        stored.hasInbox != hasInbox || stored.isUnread != isUnread {
                         plan.states[messageId] = (hasInbox, isUnread)
                     }
+                case .unreadable:
+                    answered.insert(messageId)
                 case .unanswered:
                     break
                 }
@@ -130,20 +143,29 @@ struct HistoryRecoveryRepair {
 
         let changing = plan.removals.union(plan.states.keys)
         plan.conversationObjectIDs = Set(changing.compactMap { batch.conversationByMessageId[$0] })
+        // A row deferred for a change of the user's still on its way to Gmail is owed
+        // like a row Gmail did not answer for: the bound stays above it until it can be
+        // compared, or this gap's change to it would never be applied.
+        let owedNewestFirst = (candidates + batch.deferredRows)
+            .sorted { $0.internalDate > $1.internalDate }
         plan.progress = .advances(to: HistoryRecoveryRepairPolicy.nextUpperBound(
             lowerBound: lowerBound,
             upperBound: upperBound,
-            candidatesNewestFirst: candidates,
+            candidatesNewestFirst: owedNewestFirst,
             answered: answered
         ))
         log.info(
-            "History-recovery repair: compared \(batch.rows.count), asked \(asked.count), removing \(plan.removals.count), updating \(plan.states.count), progress \(plan.progress)"
+            "History-recovery repair: compared \(batch.rows.count), deferred \(batch.deferredRows.count), asked \(asked.count), removing \(plan.removals.count), updating \(plan.states.count), progress \(plan.progress)"
         )
         return plan
     }
 
     private enum Answer {
         case verdict(HistoryRecoveryRepairPolicy.Verdict)
+        /// Gmail's answer could not be read, and will not be on a retry: the row is
+        /// left as it is and counted as done.
+        case unreadable
+        /// A failure that may pass: the row stays owed.
         case unanswered
     }
 
@@ -173,9 +195,14 @@ struct HistoryRecoveryRepair {
                 answers.append((messageId, .verdict(HistoryRecoveryRepairPolicy.verdict(forLabelIds: message.labelIds))))
             case .failure(let error):
                 try Self.rethrowIfRunAborting(error)
-                if case APIError.notFound = error {
+                switch error {
+                case APIError.notFound:
                     answers.append((messageId, .verdict(.remove)))
-                } else {
+                case APIError.decodingError, APIError.invalidData:
+                    // Asking again gets the same answer: leave the row as it is rather
+                    // than hold the repair at it for good.
+                    answers.append((messageId, .unreadable))
+                default:
                     answers.append((messageId, .unanswered))
                 }
             }
@@ -212,6 +239,9 @@ struct HistoryRecoveryRepair {
 
     struct StoredBatch {
         var rows: [HistoryRecoveryRepairPolicy.StoredRow] = []
+        /// Rows left out this run for a change of the user's still on its way to Gmail
+        /// (`Exclusions.deferred`); they hold the bound.
+        var deferredRows: [HistoryRecoveryRepairPolicy.StoredRow] = []
         var conversationByMessageId: [String: NSManagedObjectID] = [:]
         /// The oldest internal date in the batch; nil when no row is left.
         var lowerBound: Date?
@@ -249,15 +279,20 @@ struct HistoryRecoveryRepair {
                 messages = try context.fetch(ties)
             }
 
-            let excluded = try excludedMessageIds(among: messages, in: context)
+            let exclusions = try Exclusions(among: messages, in: context)
             var batch = StoredBatch(lowerBound: oldest)
-            for message in messages where !excluded.contains(message.id) {
-                batch.rows.append(HistoryRecoveryRepairPolicy.StoredRow(
+            for message in messages where !exclusions.skipped.contains(message.id) {
+                let row = HistoryRecoveryRepairPolicy.StoredRow(
                     messageId: message.id,
                     internalDate: message.internalDate,
                     hasInbox: message.labels?.contains { $0.id == "INBOX" } ?? false,
                     isUnread: message.isUnread
-                ))
+                )
+                if exclusions.deferred.contains(message.id) {
+                    batch.deferredRows.append(row)
+                    continue
+                }
+                batch.rows.append(row)
                 if let conversation = message.conversation {
                     batch.conversationByMessageId[message.id] = conversation.objectID
                 }
@@ -266,51 +301,50 @@ struct HistoryRecoveryRepair {
         }
     }
 
-    /// The rows the repair never changes: the user's own unsent mail, rows the failure
-    /// ledger owns, rows with a local change Gmail has not had, and rows a pending action
-    /// names by message or by conversation. Call inside `context.perform`.
-    static func excludedMessageIds(
-        among messages: [Message],
-        in context: NSManagedObjectContext
-    ) throws -> Set<String> {
-        guard !messages.isEmpty else { return [] }
-        var excluded = Set<String>()
-        for message in messages
-        where OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil
-            || HistoryProcessor.hasPendingLocalModification(message: message) {
-            excluded.insert(message.id)
-        }
+    /// The rows the repair does not change, and why. Call inside `context.perform`.
+    struct Exclusions {
+        /// Never compared, and passed by the bound: the user's own unsent mail (its ID is
+        /// the app's, and Gmail's 404 for it would remove it) and rows the failure ledger
+        /// owns (its re-scan and drain own them).
+        var skipped = Set<String>()
+        /// Not compared this run, and holding the bound: a row with a local change Gmail
+        /// has not had yet (`localModifiedAt` within
+        /// `HistoryProcessor.maxLocalModificationAge`), and every message a live pending
+        /// action still has to change (`PendingActionTargets.liveTargetMessageIDs`, which
+        /// reads a conversation action's own message list). Gmail's state for them is the
+        /// state before the user's change.
+        var deferred = Set<String>()
 
-        let ids = messages.map(\.id)
-        let ledger = NSFetchRequest<NSDictionary>(entityName: "AbandonedSyncMessage")
-        ledger.predicate = NSPredicate(format: "gmailMessageId IN %@", ids)
-        ledger.resultType = .dictionaryResultType
-        ledger.propertiesToFetch = ["gmailMessageId"]
-        for row in try context.fetch(ledger) {
-            if let id = row["gmailMessageId"] as? String { excluded.insert(id) }
-        }
+        var all: Set<String> { skipped.union(deferred) }
 
-        let conversationIds = Set(messages.compactMap { $0.conversation?.id })
-        let actions = PendingAction.fetchRequest()
-        actions.predicate = NSPredicate(
-            format: "status IN %@ AND (messageId IN %@ OR conversationId IN %@)",
-            nonTerminalPendingActionStatuses,
-            ids,
-            Array(conversationIds)
-        )
-        let pending = try context.fetch(actions)
-        let pendingMessageIds = Set(pending.compactMap(\.messageId))
-        let pendingConversationIds = Set(pending.compactMap(\.conversationId))
-        for message in messages
-        where pendingMessageIds.contains(message.id)
-            || message.conversation.map({ pendingConversationIds.contains($0.id) }) == true {
-            excluded.insert(message.id)
+        init(among messages: [Message], in context: NSManagedObjectContext) throws {
+            guard !messages.isEmpty else { return }
+            let now = Date()
+            for message in messages {
+                if OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil {
+                    skipped.insert(message.id)
+                } else if let modifiedAt = message.localModifiedAtValue,
+                          now.timeIntervalSince(modifiedAt) <= HistoryProcessor.maxLocalModificationAge {
+                    // Asked without `hasPendingLocalModification`, which logs a warning
+                    // for every row whose marker is stale: up to a whole batch a run.
+                    deferred.insert(message.id)
+                }
+            }
+
+            let ids = messages.map(\.id)
+            let ledger = NSFetchRequest<NSDictionary>(entityName: "AbandonedSyncMessage")
+            ledger.predicate = NSPredicate(format: "gmailMessageId IN %@", ids)
+            ledger.resultType = .dictionaryResultType
+            ledger.propertiesToFetch = ["gmailMessageId"]
+            for row in try context.fetch(ledger) {
+                if let id = row["gmailMessageId"] as? String { skipped.insert(id) }
+            }
+
+            let liveTargets = try PendingActionTargets.liveTargetMessageIDs(in: context)
+            deferred.formUnion(Set(ids).intersection(liveTargets))
+            deferred.subtract(skipped)
         }
-        return excluded
     }
-
-    /// A pending action in one of these may still be sent to Gmail (`PendingActionProcessor`).
-    static let nonTerminalPendingActionStatuses = ["pending", "processing", "failed"]
 
     // MARK: - Apply
 
@@ -328,7 +362,7 @@ struct HistoryRecoveryRepair {
             request.predicate = NSPredicate(format: "id IN %@", ids)
             request.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
             let messages = try context.fetch(request)
-            let excluded = try excludedMessageIds(among: messages, in: context)
+            let excluded = try Exclusions(among: messages, in: context).all
 
             let inboxRequest = Label.fetchRequest()
             inboxRequest.predicate = NSPredicate(format: "id == %@", "INBOX")

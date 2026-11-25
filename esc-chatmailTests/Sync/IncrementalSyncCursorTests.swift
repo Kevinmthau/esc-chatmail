@@ -2137,14 +2137,18 @@ final class IncrementalSyncCursorTests: XCTestCase {
 
     /// The run after a recovery repairs the rows stored before its window: archived and
     /// read elsewhere, deleted, trashed. It never asks about, or changes, the user's own
-    /// unsent row or a row a pending action names, and a row the listings agree with is
-    /// not asked about. The next run finds nothing left and clears the record.
+    /// unsent row, and a row the listings agree with is not asked about. A row a queued
+    /// conversation archive names in its payload waits: it is not asked about while the
+    /// action is live, and the bound stays above it, so once the action has gone the next
+    /// run repairs it. The run after that finds nothing left and clears the record.
     ///
     /// Revert-check: the `HistoryRecoveryRepair.apply` call in the final save's rollup
     /// block of `IncrementalSyncOrchestrator.performSync` (nothing changes); the
-    /// `localOptimisticMessageID` term of `HistoryRecoveryRepair.excludedMessageIds` (the
-    /// unsent row is asked about and removed); its `pendingMessageIds` (the queued
-    /// archive is asked about and changed). The first run's bound and the second run's
+    /// `localOptimisticMessageID` term of `HistoryRecoveryRepair.Exclusions` (the unsent
+    /// row is asked about and removed); its `liveTargetMessageIDs` term (the queued
+    /// archive is asked about and changed); the `batch.deferredRows` term of
+    /// `planNextBatch`'s bound (the first run's bound passes the queued row, which is then
+    /// never repaired). The first run's bound and the second run's
     /// clear also pin the batch bound kept as a `Date`: as seconds since 1970 it came back
     /// a hair later and the second run compared the cut row again for ever.
     @MainActor
@@ -2163,7 +2167,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
             unread: false,
             optimistic: true
         )
-        try await seedPendingAction(messageId: "queued-archive")
+        try await seedConversationArchive(naming: ["queued-archive"])
         try await seedOwedRepair(upperBound: Date())
         configureQuietHistory()
         apiClient.listMessagesResponder = { query in
@@ -2214,7 +2218,27 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(optimisticExists, "The user's own unsent row is never removed")
         let owedNow = try await fetchOwedRepair()
         let owed = try XCTUnwrap(owedNow)
-        XCTAssertLessThanOrEqual(owed.upperBound, base.addingTimeInterval(10))
+        XCTAssertEqual(
+            owed.upperBound.timeIntervalSince(base.addingTimeInterval(20)),
+            0.001,
+            accuracy: 0.0005,
+            "The bound stays just above the row that waits"
+        )
+
+        try await completePendingActions()
+        apiClient.getMessageOperation = { id, format in
+            asked.insert(id, format: format)
+            guard id == "queued-archive" else { throw APIError.notFound(id) }
+            return GmailMessage(id: id, threadId: "t-\(id)", labelIds: [], snippet: nil, historyId: nil, internalDate: nil, payload: nil, sizeEstimate: nil)
+        }
+        await ModificationTracker.shared.reset()
+        configureQuietHistory()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let queuedAfter = try await fetchRepairRowState(id: "queued-archive")
+        XCTAssertEqual(queuedAfter?.inbox, false, "Once its action has gone, the waiting row is repaired")
 
         await ModificationTracker.shared.reset()
         configureQuietHistory()
@@ -2224,6 +2248,43 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
         let afterSecondRun = try await fetchOwedRepair()
         XCTAssertNil(afterSecondRun, "No stored row is left to compare")
+    }
+
+    /// A row whose answer cannot be read gets the same answer on every retry: it is left
+    /// as it is and the repair moves past it, never held at it for good.
+    ///
+    /// Revert-check: the `APIError.decodingError, APIError.invalidData` case in
+    /// `HistoryRecoveryRepair.askGmail` (the row is then unanswered and the bound stays
+    /// just above it).
+    @MainActor
+    func testOwedRepair_unreadableAnswer_movesPastTheRow() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        try await seedRepairRow(id: "unreadable", date: base.addingTimeInterval(50), inbox: true, unread: false)
+        try await seedRepairRow(id: "older", date: base.addingTimeInterval(10), inbox: false, unread: false)
+        try await seedOwedRepair(upperBound: Date())
+        configureQuietHistory()
+        apiClient.listMessagesResponder = { query in
+            guard query.hasPrefix("-in:spam -in:trash after:") else { return nil }
+            return MessagesListResponse(
+                messages: [MessageListItem(id: "older", threadId: "t-older")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            )
+        }
+        apiClient.getMessageOperation = { id, _ in
+            throw APIError.decodingError(CocoaError(.coderReadCorrupt))
+        }
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let unreadableExists = await messageExists(id: "unreadable")
+        XCTAssertTrue(unreadableExists)
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        XCTAssertEqual(owed.upperBound, base.addingTimeInterval(10), "The bound moves to the batch's oldest row")
     }
 
     /// An account-scoped failure ends the run, and nothing of the repair commits.
@@ -2329,10 +2390,27 @@ final class IncrementalSyncCursorTests: XCTestCase {
         try await coreDataStack.saveAsync(context: context)
     }
 
-    private func seedPendingAction(messageId: String) async throws {
+    /// A queued conversation archive that names its messages in its payload, as
+    /// `PendingActionsManager` writes one, under a conversation none of them is in.
+    private func seedConversationArchive(naming messageIds: [String]) async throws {
         let context = coreDataStack.newBackgroundContext()
         await context.perform {
-            _ = PendingActionBuilder().archive().forMessage(messageId).pending().build(in: context)
+            _ = PendingActionBuilder()
+                .withActionType(PendingAction.ActionType.archiveConversation.rawValue)
+                .forConversation(UUID())
+                .withPayload(["messageIds": messageIds])
+                .pending()
+                .build(in: context)
+        }
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func completePendingActions() async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            for action in try context.fetch(PendingAction.fetchRequest()) {
+                action.setValue("completed", forKey: "status")
+            }
         }
         try await coreDataStack.saveAsync(context: context)
     }
