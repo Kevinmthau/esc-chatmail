@@ -8,7 +8,7 @@ private enum PendingActionProcessingOutcome: Equatable {
     case authenticationError
     case credentialsRevoked
     case quotaExhausted
-    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool)
+    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool, rowID: NSManagedObjectID)
     case offline
     case cancelled
     case skipped
@@ -86,6 +86,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private var transientRetryTask: Task<Void, Never>?
     private var transientRetryTaskID: UUID?
     private var transientRetryAttempt = 0
+    /// The row whose failures `transientRetryAttempt` counts.
+    private var transientRetryRowID: NSManagedObjectID?
+    /// When the armed transient wait is over by the wall clock. The sleep
+    /// behind the timer may not advance while the device sleeps, so a gate
+    /// whose deadline has passed opens without waiting for it
+    /// (`transientRetryGateIsClosed`).
+    private var transientRetryDeadline: Date?
     private var activeProcessingOutcome: PendingActionProcessingOutcome = .completed
     private var processingWasRequested = false
     /// Parked-queue latch for revoked credentials. Released ONLY by
@@ -231,7 +238,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         // A transient failure's wait is the queue head's backoff. An enqueue
         // or a connectivity edge during it is remembered, not run: the head
         // goes first (strict FIFO) and would only spend its budget faster.
-        guard transientRetryTask == nil else {
+        guard !transientRetryGateIsClosed() else {
             processingWasRequested = true
             return
         }
@@ -281,9 +288,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             resetTransientRetryBackoff()
             scheduleQuotaRetry()
             return
-        case .transientFailure(let retryAfter, let abandonedHead):
+        case .transientFailure(let retryAfter, let abandonedHead, let rowID):
             pendingProcessTask = nil
-            scheduleTransientRetry(retryAfter: retryAfter, restartingBackoff: abandonedHead)
+            scheduleTransientRetry(retryAfter: retryAfter, abandonedHead: abandonedHead, rowID: rowID)
             return
         case .offline:
             // The next connectivity edge resumes the queue; an enqueue or a
@@ -420,13 +427,20 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     /// Arms the queue head's backoff after a transient failure: the base delay
     /// doubling per consecutive transient run, at least Gmail's Retry-After.
-    /// A run that abandoned the head restarts the doubling: the next row is
-    /// a new head and owes nothing to the old one's failures.
-    private func scheduleTransientRetry(retryAfter: TimeInterval?, restartingBackoff: Bool) {
+    /// The doubling belongs to one row: it restarts when this run abandoned
+    /// the head, or when the row that failed is not the one that failed last
+    /// (the head before it succeeded or was abandoned), so a new head owes
+    /// nothing to the old one's failures.
+    private func scheduleTransientRetry(
+        retryAfter: TimeInterval?,
+        abandonedHead: Bool,
+        rowID: NSManagedObjectID
+    ) {
         guard transientRetryTask == nil else { return }
-        if restartingBackoff {
+        if abandonedHead || rowID != transientRetryRowID {
             transientRetryAttempt = 0
         }
+        transientRetryRowID = abandonedHead ? nil : rowID
 
         let backoff = Self.transientRetryDelay(
             forAttempt: transientRetryAttempt,
@@ -439,6 +453,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         let taskID = UUID()
         let sleeper = transientRetrySleeper
         transientRetryTaskID = taskID
+        transientRetryDeadline = Date().addingTimeInterval(delay)
         transientRetryTask = Task { [weak self] in
             guard await sleeper(delay) else { return }
             await self?.transientRetryDelayElapsed(taskID: taskID)
@@ -451,6 +466,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         guard transientRetryTaskID == taskID else { return }
         transientRetryTask = nil
         transientRetryTaskID = nil
+        transientRetryDeadline = nil
         // Offline at expiry: the next connectivity edge resumes the queue.
         guard networkMonitor.isConnected else { return }
         scheduleProcessing()
@@ -460,6 +476,19 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         transientRetryTask?.cancel()
         transientRetryTask = nil
         transientRetryTaskID = nil
+        transientRetryDeadline = nil
+    }
+
+    /// Whether the transient wait still holds the queue. A wait whose
+    /// wall-clock deadline has passed is over even if its sleep has not
+    /// returned (the device slept), and is cancelled here.
+    private func transientRetryGateIsClosed(now: Date = Date()) -> Bool {
+        guard transientRetryTask != nil else { return false }
+        if let deadline = transientRetryDeadline, now >= deadline {
+            cancelTransientRetryTask()
+            return false
+        }
+        return true
     }
 
     /// Also the banner's Retry (`retryAbandonedAction`, `retryAllAbandonedActions`):
@@ -467,6 +496,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     func resetTransientRetryBackoff() {
         cancelTransientRetryTask()
         transientRetryAttempt = 0
+        transientRetryRowID = nil
     }
 
     /// Retires delayed retries owned by the account being torn down. The
@@ -899,7 +929,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
         // The head's transient backoff gates a direct request too (every
         // foreground start makes one), or it would bypass the wait.
-        guard transientRetryTask == nil else {
+        guard !transientRetryGateIsClosed() else {
             processingWasRequested = true
             return
         }
@@ -924,10 +954,12 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             resetAuthenticationRetryBackoff()
             resetTransientRetryBackoff()
             scheduleQuotaRetry()
-        case .transientFailure(let retryAfter, let abandonedHead):
-            scheduleTransientRetry(retryAfter: retryAfter, restartingBackoff: abandonedHead)
+        case .transientFailure(let retryAfter, let abandonedHead, let rowID):
+            scheduleTransientRetry(retryAfter: retryAfter, abandonedHead: abandonedHead, rowID: rowID)
         case .offline:
-            break
+            // A reconnect that landed during the run was refused by
+            // `isProcessing` and only left the request flag.
+            _ = scheduleRequestedFollowUpIfNeeded()
         case .completed:
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
@@ -1034,8 +1066,12 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 activeProcessingOutcome = .quotaExhausted
             case .stopRun(.cancelled):
                 activeProcessingOutcome = .cancelled
-            case .stopRun(.transientFailure(let retryAfter, let abandonedHead)):
-                activeProcessingOutcome = .transientFailure(retryAfter: retryAfter, abandonedHead: abandonedHead)
+            case .stopRun(.transientFailure(let retryAfter, let abandonedHead, let rowID)):
+                activeProcessingOutcome = .transientFailure(
+                    retryAfter: retryAfter,
+                    abandonedHead: abandonedHead,
+                    rowID: rowID
+                )
             case .stopRun(.offline):
                 activeProcessingOutcome = .offline
             }

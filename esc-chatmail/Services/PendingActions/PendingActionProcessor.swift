@@ -26,8 +26,10 @@ enum PendingActionRunStopReason {
     /// the head's whole budget and abandoned it, then each row behind it,
     /// while foreground sync waited for the run. `retryAfter` is Gmail's
     /// Retry-After, when it gave one. `abandonedHead` is true when that unit
-    /// was the head's last: the next row starts its own backoff from the base.
-    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool)
+    /// was the head's last; `rowID` is the row that failed. The doubling
+    /// belongs to one row: it restarts when the head was abandoned or when a
+    /// different row fails (the head before it succeeded or was abandoned).
+    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool, rowID: NSManagedObjectID)
     /// The path went away under the request: the head was requeued with its
     /// budget untouched and the run ends. No timer: the next connectivity
     /// edge resumes the queue, as it does for a run that starts offline.
@@ -281,7 +283,8 @@ extension PendingActionsManager {
             // so a later markUnread never overtakes an earlier markRead.
             return .stopRun(.transientFailure(
                 retryAfter: Self.retryAfter(of: error),
-                abandonedHead: abandonedHead
+                abandonedHead: abandonedHead,
+                rowID: objectID
             ))
         }
     }

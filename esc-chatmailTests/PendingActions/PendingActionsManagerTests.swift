@@ -1636,6 +1636,93 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertEqual(delays, [60, 60], "The second run abandoned the head; the next row starts at the base")
     }
 
+    // Revert-check: fails if `scheduleTransientRetry` stops restarting the
+    // doubling when a different row fails: after the head succeeds, the next
+    // row would inherit its 120 s (up to 15 minutes) instead of 60 s.
+    func testTransientFailure_newHeadAfterASuccessStartsItsOwnBackoff() async throws {
+        let sleeper = ControlledRetrySleeper()
+        let executor = ScriptedTransientActionExecutor(failuresByMessageID: ["a": 1, "b": 1])
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetrySleeper: { delay in await sleeper.sleep(for: delay) }
+        )
+        _ = PendingActionBuilder().markAsRead().forMessage("a").pending().createdMinutesAgo(2).build(in: context)
+        _ = PendingActionBuilder().markAsRead().forMessage("b").pending().createdMinutesAgo(1).build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        var deadline = Date().addingTimeInterval(2)
+        while await sleeper.scheduledDelays.isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await sleeper.resume()
+        deadline = Date().addingTimeInterval(2)
+        while await sleeper.scheduledDelays.count < 2, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertEqual(executor.executedMessageIds, ["a", "a", "b"])
+        let delays = await sleeper.scheduledDelays
+        XCTAssertEqual(delays, [60, 60], "b is a new head; it owes nothing to a's failure")
+    }
+
+    // Revert-check: fails if `transientRetryGateIsClosed` stops opening a gate
+    // whose wall-clock deadline has passed: a wait armed before the device
+    // slept would still hold the next foreground start.
+    func testTransientRetryWait_pastItsWallClockDeadline_noLongerGatesAForegroundStart() async throws {
+        let executor = TransientFailureActionExecutor(error: APIError.serverError(503), failures: 1)
+        let recorder = TransientRetryRecorder(blocks: true)
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetryBaseDelay: 0.05,
+            transientRetrySleeper: { delay in await recorder.record(delay: delay) }
+        )
+        _ = PendingActionBuilder().markAsRead().forMessage("slept-through").pending().build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await recorder.waitUntilScheduled(count: 1)
+        try await Task.sleep(nanoseconds: 150_000_000)
+        await manager.processAllPendingActions()
+
+        XCTAssertEqual(executor.executedMessageIds, ["slept-through", "slept-through"])
+        await recorder.releaseAll()
+    }
+
+    // Revert-check: fails if `processAllPendingActions`' `.offline` arm stops
+    // scheduling the requested follow-up: a reconnect refused during the run
+    // would be lost until the next edge or foreground start.
+    func testDirectRequest_offlineOutcome_followsUpAReconnectThatLandedDuringTheRun() async throws {
+        let monitor = FlappingNetworkMonitor()
+        let executor = TransientFailureActionExecutor(
+            error: URLError(.networkConnectionLost),
+            failures: 1,
+            beforeThrowing: { monitor.reportOfflineOnceThenReconnect() }
+        )
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: monitor,
+            syncRunCoordinator: SyncRunCoordinator()
+        )
+        _ = PendingActionBuilder().markAsRead().forMessage("flap").pending().build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await waitUntil { executor.executedMessageIds.count >= 2 }
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(executor.executedMessageIds, ["flap", "flap"])
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
     // Revert-check: fails if `retryAllAbandonedActions` stops resetting the
     // transient backoff: the banner's Retry would hide the banner and send
     // nothing until the timer ran out.
@@ -2799,6 +2886,72 @@ private final class AlwaysConnectedNetworkMonitor: NetworkMonitorProtocol {
     var onConnectivityChange: ((Bool) -> Void)?
     func start() {}
     func stop() {}
+}
+
+/// Fails the listed messages that many times each, then succeeds; records
+/// each execution's message ID.
+/// `@unchecked Sendable`: `lock` guards both mutable properties.
+private final class ScriptedTransientActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var remainingFailures: [String: Int]
+    private var _executedMessageIds: [String] = []
+
+    init(failuresByMessageID: [String: Int]) {
+        remainingFailures = failuresByMessageID
+    }
+
+    var executedMessageIds: [String] {
+        lock.withLock { _executedMessageIds }
+    }
+
+    func execute(
+        type: PendingAction.ActionType,
+        messageId: String?,
+        sourceConversationId: UUID?,
+        payload: [String: Any]?
+    ) async throws {
+        let id = messageId ?? ""
+        let fails = lock.withLock { () -> Bool in
+            _executedMessageIds.append(id)
+            guard let left = remainingFailures[id], left > 0 else { return false }
+            remainingFailures[id] = left - 1
+            return true
+        }
+        if fails { throw APIError.serverError(503) }
+    }
+}
+
+/// Connected, except that after `reportOfflineOnceThenReconnect` the next
+/// read of `isConnected` answers false and then reports the path back
+/// through the connectivity handler, as a flap during a request does.
+/// `@unchecked Sendable`: `lock` guards both mutable properties.
+private final class FlappingNetworkMonitor: NetworkMonitorProtocol, @unchecked Sendable {
+    private let lock = NSLock()
+    private var offlineReadPending = false
+    private var handler: ((Bool) -> Void)?
+
+    var isConnected: Bool {
+        let (wasPending, handler) = lock.withLock { () -> (Bool, ((Bool) -> Void)?) in
+            let wasPending = offlineReadPending
+            offlineReadPending = false
+            return (wasPending, self.handler)
+        }
+        guard wasPending else { return true }
+        handler?(true)
+        return false
+    }
+
+    var onConnectivityChange: ((Bool) -> Void)? {
+        get { lock.withLock { handler } }
+        set { lock.withLock { handler = newValue } }
+    }
+
+    func start() {}
+    func stop() {}
+
+    func reportOfflineOnceThenReconnect() {
+        lock.withLock { offlineReadPending = true }
+    }
 }
 
 private final class NeverConnectedNetworkMonitor: NetworkMonitorProtocol {
