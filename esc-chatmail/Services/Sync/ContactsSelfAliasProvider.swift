@@ -65,7 +65,8 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
     }
 
     func aliases(knownEmails: [String]) async -> Set<String> {
-        guard Self.canReadContacts(status: authorizationStatusProvider()) else {
+        let status = authorizationStatusProvider()
+        guard Self.canReadContacts(status: status) else {
             return []
         }
 
@@ -75,20 +76,26 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
         }
 
         let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
-        var aliases = Set<String>()
-        let gmailTargets = Set(
+        // The Mac's "me" card is the user's own word for who they are, so it
+        // counts whatever else it lists, and its addresses are trusted when
+        // other cards are judged: otherwise the me card, naming none of the
+        // account's addresses, would read as someone else's card and
+        // disqualify the user's own card that shares an address with it.
+        // They are not known addresses: a card counts only for listing an
+        // account address, so a me card that lists someone else does not
+        // make that person's own card the user's.
+        let meAddresses = meCardAddresses(keysToFetch: keysToFetch)
+        let knownAddresses = Set(
             searchEmails
-                .filter(EmailNormalizer.isGmailAddress)
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty }
         )
+        var aliases = meAddresses
 
-        #if os(macOS)
-        if let contact = try? contactStore.unifiedMeContact(withKeysToFetch: keysToFetch) {
-            aliases.formUnion(Self.normalizedEmails(from: contact))
-        }
-        #endif
-
+        // The cards that list one of the user's addresses as stored. Only
+        // their addresses beyond the known ones need a decision, and only a
+        // walk of the whole address book can make it.
+        var matchedCards: [Set<String>] = []
         for email in searchEmails {
             let predicate = CNContact.predicateForContacts(matchingEmailAddress: email)
             guard let contacts = try? contactStore.unifiedContacts(
@@ -97,43 +104,76 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
             ) else {
                 continue
             }
-
-            for contact in contacts {
-                aliases.formUnion(Self.normalizedEmails(from: contact))
-            }
+            matchedCards.append(contentsOf: contacts.map(Self.normalizedEmails(from:)))
         }
 
-        let unresolvedGmailTargets = gmailTargets.subtracting(aliases)
-        if !unresolvedGmailTargets.isEmpty {
-            aliases.formUnion(
-                aliasesByEnumeratingContacts(
-                    matchingNormalizedEmails: unresolvedGmailTargets,
-                    keysToFetch: keysToFetch
-                )
+        let matchedAddresses = matchedCards.reduce(into: Set<String>()) { $0.formUnion($1) }
+        let gmailTargets = Set(
+            searchEmails
+                .filter(EmailNormalizer.isGmailAddress)
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty }
+        )
+        let hasUnresolvedGmailTarget = !gmailTargets.subtracting(matchedAddresses).isEmpty
+        let listsOtherAddresses = matchedCards.contains {
+            !$0.subtracting(knownAddresses).subtracting(meAddresses).isEmpty
+        }
+        guard hasUnresolvedGmailTarget || listsOtherAddresses else {
+            // Every card found lists the user's own addresses and nothing
+            // else: nothing to decide, and no walk.
+            return aliases.union(matchedAddresses)
+        }
+
+        // A card that lists the user's address beside another counts only
+        // when no card of someone else's lists that other address
+        // (`SelfContactCards`), which needs every card. A walk that fails
+        // admits no such card: someone else's mail drawn as the user's own,
+        // and their chats merged into note-to-self, is worse than an alias
+        // missed for one run. Limited access is the same: the walk sees only
+        // the cards the user shared, so the partner's card that would
+        // disqualify a household card may be missing from it.
+        guard !status.isLimitedAccess,
+              let allCards = allContactAddressLists(keysToFetch: keysToFetch) else {
+            return aliases
+        }
+        aliases.formUnion(
+            SelfContactCards.selfAddresses(
+                contactAddressLists: allCards,
+                knownAddresses: knownAddresses,
+                trustedAddresses: meAddresses
             )
-        }
-
+        )
         return aliases
     }
 
-    private func aliasesByEnumeratingContacts(
-        matchingNormalizedEmails normalizedEmails: Set<String>,
-        keysToFetch: [CNKeyDescriptor]
-    ) -> Set<String> {
+    /// The normalized addresses of the Mac's "me" card; none on iOS, which has
+    /// no "me" card.
+    private func meCardAddresses(keysToFetch: [CNKeyDescriptor]) -> Set<String> {
+        #if os(macOS)
+        if let contact = try? contactStore.unifiedMeContact(withKeysToFetch: keysToFetch) {
+            return Self.normalizedEmails(from: contact)
+        }
+        #endif
+        return []
+    }
+
+    /// The addresses of every contact card, or nil when the walk failed.
+    private func allContactAddressLists(keysToFetch: [CNKeyDescriptor]) -> [[String]]? {
         let request = CNContactFetchRequest(keysToFetch: keysToFetch)
-        var aliases = Set<String>()
+        var cards: [[String]] = []
 
         do {
             try contactStore.enumerateContacts(with: request) { contact, _ in
-                let contactAliases = Self.normalizedEmails(from: contact)
-                guard !contactAliases.isDisjoint(with: normalizedEmails) else { return }
-                aliases.formUnion(contactAliases)
+                let addresses = contact.emailAddresses.map { String($0.value) }
+                guard !addresses.isEmpty else { return }
+                cards.append(addresses)
             }
         } catch {
             Log.error("Contact enumeration failed for self aliases", category: .general, error: error)
+            return nil
         }
 
-        return aliases
+        return cards
     }
 
     private static func canReadContacts(status: CNAuthorizationStatus) -> Bool {
