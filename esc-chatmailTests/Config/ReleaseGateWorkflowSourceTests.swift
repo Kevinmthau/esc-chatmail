@@ -11,13 +11,19 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         let job = try jobBlock(named: "ship-gate")
 
         XCTAssertTrue(job.contains("needs: [test, build-macos, build-release-ios]"))
-        XCTAssertTrue(job.contains("if: github.event_name == 'push' && github.ref == 'refs/heads/main'"))
+        let condition = job.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("if:") }
+        XCTAssertEqual(condition, ["if: github.event_name == 'push' && github.ref == 'refs/heads/main'"])
         XCTAssertTrue(job.contains("contents: write"))
-        // Exactly one push, and it is this line: no flag, no `+` refspec, no other ref.
+        // Every push is this refspec: no flag, no `+` refspec, no other ref.
         let pushLines = job.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.contains("git push") }
-        XCTAssertEqual(pushLines, ["if git push origin \"${GITHUB_SHA}:refs/heads/testflight\"; then"])
+        XCTAssertEqual(pushLines, [
+            "if git push origin \"${GITHUB_SHA}:refs/heads/testflight\"; then",
+            "&& git push origin \"${GITHUB_SHA}:refs/heads/testflight\"; then"
+        ])
         XCTAssertFalse(job.contains("--force"))
         XCTAssertFalse(job.contains("--mirror"))
     }

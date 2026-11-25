@@ -20,7 +20,8 @@ concurrency:
   group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
   cancel-in-progress: true
 
-# Read-only by default. Only `ship-gate` writes, and only the `testflight` branch.
+# Read-only by default. Only `ship-gate` has write access (to the repository's contents;
+# its script is what limits it to the `testflight` branch).
 permissions:
   contents: read
 
@@ -135,7 +136,7 @@ jobs:
   # The gate between a merge and TestFlight (architecture review 2026-11,
   # testing-ci-release#1). Xcode Cloud's workflow is configured in App Store Connect,
   # not here; once its start condition is the `testflight` branch instead of `main`,
-  # only a commit whose every job below passed is archived.
+  # only a commit whose every build and test job above passed is archived.
   #
   # - Runs only for a push to main, after every build and test job succeeded
   #   (`needs` skips it otherwise).
@@ -164,7 +165,7 @@ jobs:
           # read it is not "absent": it stops the job, so nothing is pushed on a guess.
           already_shipped() {
             local status=0
-            git ls-remote --exit-code --heads origin testflight >/dev/null || status=$?
+            git ls-remote --exit-code origin refs/heads/testflight >/dev/null || status=$?
             if [ "${status}" -eq 2 ]; then
               return 1
             elif [ "${status}" -ne 0 ]; then
@@ -184,9 +185,14 @@ jobs:
           if git push origin "${GITHUB_SHA}:refs/heads/testflight"; then
             exit 0
           fi
-          # A newer run's push can land between the check and this push.
+          # Another run's push can land between the check and this push: a newer one
+          # (nothing left to do) or an older one (push again, once, on top of it).
           if already_shipped; then
             echo "testflight moved past ${GITHUB_SHA} meanwhile; nothing to push"
+            exit 0
+          fi
+          if git merge-base --is-ancestor refs/remotes/origin/testflight "${GITHUB_SHA}" \
+            && git push origin "${GITHUB_SHA}:refs/heads/testflight"; then
             exit 0
           fi
           echo "::error::testflight has diverged from main (moved by hand?): it does not contain ${GITHUB_SHA} and cannot be fast-forwarded to it. Point it by hand at the newest main commit whose CI passed, never an older one; this job never forces it."
