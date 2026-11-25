@@ -158,12 +158,24 @@ jobs:
 
       - name: Fast-forward testflight to this commit
         run: |
-          if git fetch --quiet origin refs/heads/testflight:refs/remotes/origin/testflight 2>/dev/null \
-            && git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/testflight; then
+          already_shipped() {
+            git fetch --quiet origin +refs/heads/testflight:refs/remotes/origin/testflight 2>/dev/null \
+              && git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/testflight
+          }
+          if already_shipped; then
             echo "testflight already contains ${GITHUB_SHA}; nothing to push"
             exit 0
           fi
-          git push origin "${GITHUB_SHA}:refs/heads/testflight"
+          if git push origin "${GITHUB_SHA}:refs/heads/testflight"; then
+            exit 0
+          fi
+          # A newer run's push can land between the check and this push.
+          if already_shipped; then
+            echo "testflight moved past ${GITHUB_SHA} meanwhile; nothing to push"
+            exit 0
+          fi
+          echo "::error::testflight has diverged from main (moved by hand?): it does not contain ${GITHUB_SHA} and cannot be fast-forwarded to it. Reset it to a main commit by hand; this job never forces it."
+          exit 1
 
   lint:
     name: SwiftLint (advisory)

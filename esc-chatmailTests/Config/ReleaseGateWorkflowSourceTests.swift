@@ -17,17 +17,40 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         let pushLines = job.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.contains("git push") }
-        XCTAssertEqual(pushLines, ["git push origin \"${GITHUB_SHA}:refs/heads/testflight\""])
-        for forbidden in ["--force", "--mirror", "+refs/", "+${"] {
-            XCTAssertFalse(job.contains(forbidden), forbidden)
-        }
+        XCTAssertEqual(pushLines, ["if git push origin \"${GITHUB_SHA}:refs/heads/testflight\"; then"])
+        XCTAssertFalse(job.contains("--force"))
+        XCTAssertFalse(job.contains("--mirror"))
     }
 
-    /// Only `ship-gate` may write.
+    /// Only `ship-gate` may write, and only contents.
+    // Revert-check: fails if the top-level `permissions: contents: read` is removed, or
+    // another job (or the workflow) is given any write permission.
     func testWorkflow_isReadOnlyByDefault() throws {
         let workflow = try repositorySource(".github/workflows/ci.yml")
         XCTAssertTrue(workflow.contains("permissions:\n  contents: read\n"))
-        XCTAssertEqual(workflow.components(separatedBy: "contents: write").count - 1, 1)
+        XCTAssertEqual(workflow.components(separatedBy: ": write").count - 1, 1)
+        XCTAssertFalse(workflow.contains("write-all"))
+        XCTAssertTrue(try jobBlock(named: "ship-gate").contains("contents: write"))
+    }
+
+    // Revert-check: fails if pushes to main share one concurrency group again (a re-run of
+    // an older main run would cancel the newest one, which then never ships), or if the
+    // ship-gate loses its no-op for a commit `testflight` already contains (an older run
+    // finishing last would fail on every pair of close merges).
+    func testMainRunsAreNotCancelled_andAnOlderRunFinishingLastIsANoOp() throws {
+        let workflow = try repositorySource(".github/workflows/ci.yml")
+        XCTAssertTrue(workflow.contains(
+            "group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}"
+        ))
+        let job = try jobBlock(named: "ship-gate")
+        XCTAssertTrue(job.contains("git merge-base --is-ancestor \"${GITHUB_SHA}\" refs/remotes/origin/testflight"))
+        // Checked before the push (the older run finishing last) and again after a
+        // rejected push (a newer run's push landing in between).
+        let push = try XCTUnwrap(job.range(of: "git push origin"))
+        let checkBefore = try XCTUnwrap(job.range(of: "if already_shipped; then"))
+        XCTAssertLessThan(checkBefore.lowerBound, push.lowerBound)
+        let checkAfter = try XCTUnwrap(job.range(of: "if already_shipped; then", range: push.upperBound..<job.endIndex))
+        XCTAssertGreaterThan(checkAfter.lowerBound, push.upperBound)
     }
 
     // Revert-check: fails if the Release job stops building Release or stops checking the
