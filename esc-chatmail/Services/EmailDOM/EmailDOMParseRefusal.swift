@@ -13,16 +13,9 @@ enum EmailDOMParseRefusal: LocalizedError, Equatable {
     /// every input (`EmailDOMParseAdmission.ParseCost`); the body may be
     /// shallow.
     case tooCostlyToParse(work: Int, limit: Int)
-    /// The body ends inside a run of letters that SwiftSoup 2.13.5's
-    /// tokenizer reads past the end of its input, trapping the app
-    /// (`EmailDOMParseAdmission.endsWhereTheTokenizerOverreads`), so it was
-    /// not parsed.
-    case endsWhereTheParserOverreads
 
     var errorDescription: String? {
         switch self {
-        case .endsWhereTheParserOverreads:
-            "HTML ends where the parser would read past its input."
         case let .nestingTooDeep(depth, limit):
             "HTML nesting depth \(depth) exceeds the parse limit \(limit)."
         case let .tooCostlyToParse(work, limit):

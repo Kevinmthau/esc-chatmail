@@ -443,10 +443,11 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
 
     // MARK: - SwiftSoup's tokenizer overread
 
-    /// Bodies ending in a run of letters SwiftSoup 2.13.5 reads past the end
-    /// of (a stale UTF-8 decoder in `consumeLetterSequenceSlice`), each of
+    /// Bodies ending where SwiftSoup 2.13.5 reads past the end of its input
+    /// (a stale UTF-8 decoder in `consumeLetterSequenceSlice`), each of
     /// which trapped the parse (measured): an end tag name in raw text or
-    /// script data, a script's double escape, a trailing space read over.
+    /// script data, after text outside ASCII too, a script's double escape,
+    /// a doctype's name, and a trailing space read over.
     private static let overreadingBodies = [
         "<style></a\u{E9}x\u{E9}",
         "<script><!--<script\u{E9}x\u{E9}",
@@ -454,48 +455,45 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         "<script></ax\u{3A9}\u{3A9}\u{65E5} ",
         "<style>a</a\u{436}a\u{E9}",
         "<p>Hello</p><title><!--</script\u{E9}x\u{E9}",
+        "<style>\u{E9}</a\u{E9}x\u{E9}",
+        "<script>\"\u{E9}\"</a\u{E9}x\u{E9}",
+        "<!DOCTYPE a\u{E9}a\u{E9}",
+        "<p>Hello</p><!DOCTYPE html\u{E9}x\u{E9}",
     ]
 
-    /// Revert-check: the `endsWhereTheTokenizerOverreads` refusal in
-    /// `EmailDOMParseAdmission.admittedParse` (without it each of these
-    /// crashes the test host).
-    func testParse_bodyEndingWhereTheTokenizerOverreads_isRefusedUnparsed() throws {
+    /// Revert-check: `paddedAgainstTheTokenizerOverread` in the three parse
+    /// entry points (without it each of these crashes the test host).
+    func testParse_bodyEndingWhereTheTokenizerOverreads_parsesWithoutTrapping() throws {
         let context = try Element(Tag.valueOf("tr"), "")
         for html in Self.overreadingBodies {
-            XCTAssertTrue(EmailDOMParseAdmission.endsWhereTheTokenizerOverreads(html), html.debugDescription)
-            for parse in [
-                { _ = try EmailDOMParseAdmission.parseDocument(html) },
-                { _ = try EmailDOMParseAdmission.parseBodyFragment(html) },
-                { _ = try EmailDOMParseAdmission.parseFragment(html, context: context) },
-            ] as [() throws -> Void] {
-                XCTAssertThrowsError(try parse(), html.debugDescription) { error in
-                    XCTAssertEqual(error as? EmailDOMParseRefusal, .endsWhereTheParserOverreads)
-                }
-            }
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), html.debugDescription)
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseBodyFragment(html), html.debugDescription)
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseFragment(html, context: context), html.debugDescription)
         }
     }
 
-    /// Text and markup ending in letters outside ASCII, in a tag, a quote
-    /// or plain text, is ordinary and parsed as before.
-    func testParse_ordinaryBodiesEndingInNonASCIIText_areAdmitted() {
+    /// Only a body whose last four bytes hold one outside ASCII is padded,
+    /// and the padding changes no text a reader sees.
+    func testPadding_bodiesEndingInTextOutsideASCII_readTheSame() throws {
+        XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("<p>Caf\u{E9}</p>"), "<p>Caf\u{E9}</p>")
+        XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("plain"), "plain")
         let bodies = [
-            "<p>Caf\u{E9}</p>",
             "Merci, \u{E0} bient\u{F4}t \u{E9}t\u{E9}",
-            "<p>a<b>\u{E9}t\u{E9}</b>",
-            "<style>p { content: \"\u{E9}\" }</style>",
-            "1 < \u{E9}t\u{E9}",
+            "<p>a<b>\u{E9}t\u{E9}",
             "<div title=\"\u{E9}x\u{E9}\">\u{65E5}\u{672C}",
+            "<p>\u{65E5}\u{672C}\u{8A9E}",
         ]
         for html in bodies {
-            XCTAssertFalse(EmailDOMParseAdmission.endsWhereTheTokenizerOverreads(html), html.debugDescription)
-            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), html.debugDescription)
+            XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread(html), html + "    ")
+            let padded = try EmailDOMParseAdmission.parseDocument(html)
+            let plain = try SwiftSoup.parse(html)
+            XCTAssertEqual(try padded.text(), try plain.text(), html.debugDescription)
         }
     }
 
-    /// The refusal runs each caller's existing failure branch and never
-    /// becomes a throw out of `processGmailMessage`: the message is kept
-    /// with its body, which every later parse refuses the same way.
-    /// HONEST SCOPE: without the guard this test crashes rather than fails.
+    /// A message whose body ends this way is processed and kept with its
+    /// body and its text.
+    /// HONEST SCOPE: without the padding this test crashes rather than fails.
     func testProcessGmailMessage_bodyEndingWhereTheTokenizerOverreads_persistsTheBody() async throws {
         let html = "<p>Hello there</p><style></a\u{E9}x\u{E9}"
         let message = GmailMessage(
@@ -526,6 +524,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         let result = try await MessageProcessor().processGmailMessage(message, myAliases: [])
         let processed = try XCTUnwrap(result)
         XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.chatPreviewText.map { $0.contains("Hello there") }, true)
     }
 
     // MARK: - Ordinary mail is admitted
