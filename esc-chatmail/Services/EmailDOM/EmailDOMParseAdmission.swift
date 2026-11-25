@@ -140,6 +140,10 @@ enum EmailDOMParseAdmission {
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
+        if endsWhereTheTokenizerOverreads(html) {
+            Log.warning("Declined to parse HTML ending where the parser reads past its input", category: .message)
+            throw EmailDOMParseRefusal.endsWhereTheParserOverreads
+        }
         let cost = estimatedCost(
             of: html,
             limit: maximumBoundForMeasuredParse,
@@ -227,6 +231,68 @@ enum EmailDOMParseAdmission {
             category: .message
         )
         return .nestingTooDeep(depth: depth, limit: maximumDepth)
+    }
+
+    /// Whether SwiftSoup 2.13.5 may read past the end of `html` and trap.
+    ///
+    /// Its letter-sequence readers (`CharacterReader
+    /// .consumeLetterSequenceSlice`, used for the end tag names of raw text
+    /// and script data and for script data's double escapes) keep one UTF-8
+    /// decoder across characters, and the decoder keeps bytes it read ahead
+    /// for the next one. After a character of two bytes or more, the next
+    /// non-ASCII one is decoded from stale bytes, the read position moves by
+    /// that wrong character's width, and near the end of the input it moves
+    /// past it: `<style></aéxé` (13 bytes) trapped the app at every parse of
+    /// such a message, a crash loop at sync. Fixed upstream in 2.14.0
+    /// ("repair unicode cursors"), whose other changes the scans here would
+    /// have to be checked against first.
+    ///
+    /// A wrong move starts at a byte of 0x80 or more and is at most four
+    /// bytes, so it reaches the end only from a run that starts right after
+    /// a `<` or `</`, holds letters and bytes of 0x80 or more (any non-ASCII
+    /// character is taken as a possible letter), and runs to within four
+    /// bytes of the end, where it may also be read over up to three bytes
+    /// of anything after a byte of 0x80 or more (a trailing space or digit
+    /// did not stop it). Measured against SwiftSoup over about 7,000
+    /// generated tails, about 50 of which trapped: every trap was such a
+    /// run, and none took more than one byte of anything after the run.
+    /// Ordinary mail does not end inside a tag name, so the rule may say yes
+    /// where nothing would trap. Linear: it reads back from the end only
+    /// over the run.
+    static func endsWhereTheTokenizerOverreads(_ html: String) -> Bool {
+        let utf8 = html.utf8
+        if let answer = utf8.withContiguousStorageIfAvailable({ endsWhereTheTokenizerOverreads($0) }) {
+            return answer
+        }
+        return Array(utf8).withUnsafeBufferPointer { endsWhereTheTokenizerOverreads($0) }
+    }
+
+    private static func endsWhereTheTokenizerOverreads(_ bytes: UnsafeBufferPointer<UInt8>) -> Bool {
+        let count = bytes.count
+        let tail = max(0, count - 4)..<count
+        guard tail.contains(where: { bytes[$0] >= 0x80 }) else {
+            return false
+        }
+        func isHigh(_ index: Int) -> Bool {
+            bytes[index] >= 0x80
+        }
+        var index = count - 1
+        while index >= 0 {
+            let byte = bytes[index]
+            let isLetter = (byte >= 0x41 && byte <= 0x5A) || (byte >= 0x61 && byte <= 0x7A)
+            if isLetter || isHigh(index) || (max(0, index - 3)..<index).contains(where: isHigh) {
+                index -= 1
+                continue
+            }
+            break
+        }
+        guard index >= 0 else {
+            return false
+        }
+        if bytes[index] == 0x3C {
+            return true
+        }
+        return bytes[index] == 0x2F && index > 0 && bytes[index - 1] == 0x3C
     }
 
     /// Nodes on the longest path below `roots`, each root counting as

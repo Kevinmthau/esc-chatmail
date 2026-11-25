@@ -441,6 +441,93 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(processed.cleanedSnippet.map { $0.contains(Self.sentinel) }, true)
     }
 
+    // MARK: - SwiftSoup's tokenizer overread
+
+    /// Bodies ending in a run of letters SwiftSoup 2.13.5 reads past the end
+    /// of (a stale UTF-8 decoder in `consumeLetterSequenceSlice`), each of
+    /// which trapped the parse (measured): an end tag name in raw text or
+    /// script data, a script's double escape, a trailing space read over.
+    private static let overreadingBodies = [
+        "<style></a\u{E9}x\u{E9}",
+        "<script><!--<script\u{E9}x\u{E9}",
+        "<noframes></xx\u{E9}x\u{E9}",
+        "<script></ax\u{3A9}\u{3A9}\u{65E5} ",
+        "<style>a</a\u{436}a\u{E9}",
+        "<p>Hello</p><title><!--</script\u{E9}x\u{E9}",
+    ]
+
+    /// Revert-check: the `endsWhereTheTokenizerOverreads` refusal in
+    /// `EmailDOMParseAdmission.admittedParse` (without it each of these
+    /// crashes the test host).
+    func testParse_bodyEndingWhereTheTokenizerOverreads_isRefusedUnparsed() throws {
+        let context = try Element(Tag.valueOf("tr"), "")
+        for html in Self.overreadingBodies {
+            XCTAssertTrue(EmailDOMParseAdmission.endsWhereTheTokenizerOverreads(html), html.debugDescription)
+            for parse in [
+                { _ = try EmailDOMParseAdmission.parseDocument(html) },
+                { _ = try EmailDOMParseAdmission.parseBodyFragment(html) },
+                { _ = try EmailDOMParseAdmission.parseFragment(html, context: context) },
+            ] as [() throws -> Void] {
+                XCTAssertThrowsError(try parse(), html.debugDescription) { error in
+                    XCTAssertEqual(error as? EmailDOMParseRefusal, .endsWhereTheParserOverreads)
+                }
+            }
+        }
+    }
+
+    /// Text and markup ending in letters outside ASCII, in a tag, a quote
+    /// or plain text, is ordinary and parsed as before.
+    func testParse_ordinaryBodiesEndingInNonASCIIText_areAdmitted() {
+        let bodies = [
+            "<p>Caf\u{E9}</p>",
+            "Merci, \u{E0} bient\u{F4}t \u{E9}t\u{E9}",
+            "<p>a<b>\u{E9}t\u{E9}</b>",
+            "<style>p { content: \"\u{E9}\" }</style>",
+            "1 < \u{E9}t\u{E9}",
+            "<div title=\"\u{E9}x\u{E9}\">\u{65E5}\u{672C}",
+        ]
+        for html in bodies {
+            XCTAssertFalse(EmailDOMParseAdmission.endsWhereTheTokenizerOverreads(html), html.debugDescription)
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), html.debugDescription)
+        }
+    }
+
+    /// The refusal runs each caller's existing failure branch and never
+    /// becomes a throw out of `processGmailMessage`: the message is kept
+    /// with its body, which every later parse refuses the same way.
+    /// HONEST SCOPE: without the guard this test crashes rather than fails.
+    func testProcessGmailMessage_bodyEndingWhereTheTokenizerOverreads_persistsTheBody() async throws {
+        let html = "<p>Hello there</p><style></a\u{E9}x\u{E9}"
+        let message = GmailMessage(
+            id: "overread-html",
+            threadId: "overread-html-thread",
+            labelIds: ["INBOX"],
+            snippet: "Hello there",
+            historyId: "1",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/html",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Sender <sender@example.com>"),
+                    MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8"),
+                ],
+                body: MessageBody(
+                    size: html.utf8.count,
+                    data: Data(html.utf8).base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: html.utf8.count
+        )
+
+        let result = try await MessageProcessor().processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(result)
+        XCTAssertEqual(processed.htmlBody, html)
+    }
+
     // MARK: - Ordinary mail is admitted
 
     /// No golden-corpus output may change, and web replays the corpus: every
