@@ -12,7 +12,15 @@ final class GmailAPIClientServerDateTests: XCTestCase {
         #"{"emailAddress":"me@example.com","messagesTotal":1,"threadsTotal":1,"historyId":"42"}"#.utf8
     )
     private static let sendBody = Data(#"{"id":"sent-1","threadId":"thread-1"}"#.utf8)
-    private static let serverDateHeader = "Fri, 15 Jan 2027 06:00:00 GMT"
+
+    /// A date near the device's: one farther than `maximumPlausibleSkew` is not recorded.
+    private static let serverDateHeader: String = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(identifier: "GMT")
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss 'GMT'"
+        return formatter.string(from: Date().addingTimeInterval(-3600))
+    }()
 
     override func setUp() {
         super.setUp()
@@ -63,7 +71,10 @@ final class GmailAPIClientServerDateTests: XCTestCase {
     /// and a malformed one changes nothing about its outcome.
     ///
     /// Revert-check: the `behavior.allowsRetransmission` condition in front of
-    /// `serverClock.recordResponseDate` (the valid header is then recorded).
+    /// `serverClock.recordResponseDate`: the valid header is then recorded.
+    /// HONEST SCOPE: only that pass of the loop fails on the revert; the malformed and empty
+    /// ones pin that a send's outcome does not depend on the header, and would pass either
+    /// way.
     func testSend_dateHeaderValidOrMalformed_recordsNothingAndSucceeds() async throws {
         for header in [Self.serverDateHeader, "not a date", ""] {
             StubURLProtocol.reset()

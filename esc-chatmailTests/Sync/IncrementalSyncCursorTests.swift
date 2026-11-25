@@ -2038,6 +2038,63 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
     }
 
+    /// A last-sync time an earlier build stamped with a device clock that is still two
+    /// hours ahead: recovery, days later, must list from two hours before it. A clamp to
+    /// now does not reach a stamp now has passed.
+    ///
+    /// Revert-check: pass no `deviceClockLead` from
+    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryQuery`.
+    @MainActor
+    func testRecoveryOverAStampTheDeviceClockWroteAhead_listsTheLeadEarlier() async throws {
+        serverTime.serverOffsetFromDevice = -2 * 3600
+        let legacyStamp = TimeInterval(Int(Date().timeIntervalSince1970 - 10 * 86_400))
+        defaults.set(legacyStamp, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        configureCleanRecoveryListing()
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let query = try XCTUnwrap(apiClient.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(Self.afterFloor(of: query), query)
+        XCTAssertLessThanOrEqual(
+            TimeInterval(floor),
+            legacyStamp - 2 * 3600 - SyncConfig.recoveryBufferSeconds,
+            query
+        )
+    }
+
+    /// With no last-sync time, recovery starts at the newest received row no later than
+    /// Gmail's now. A row dated between Gmail's now and the device's (a sender's clock
+    /// ahead) must not be that anchor while the device clock is ahead too.
+    ///
+    /// Revert-check: pass the device's `Date()` again to the `internalDate <= %@` predicate
+    /// of `IncrementalSyncOrchestrator.newestReceivedInternalDate`.
+    @MainActor
+    func testRecoveryInstallBranch_withTheDeviceClockAhead_skipsARowAheadOfGmail() async throws {
+        serverTime.serverOffsetFromDevice = -2 * 3600
+        let now = Date().timeIntervalSince1970
+        let olderRow = TimeInterval(Int(now - 5 * 3600))
+        try await withRecoveryInstallBranch(newestReceivedAgo: now - olderRow) {
+            try await seedStoredMessage(
+                id: "future-dated",
+                internalDate: Date(timeIntervalSince1970: now - 3600),
+                isFromMe: false
+            )
+            configureCleanRecoveryListing()
+
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+
+            let query = try XCTUnwrap(apiClient.listMessagesQueries.first ?? nil)
+            let floor = try XCTUnwrap(Self.afterFloor(of: query), query)
+            XCTAssertLessThanOrEqual(TimeInterval(floor), olderRow - SyncConfig.recoveryBufferSeconds + 1, query)
+        }
+    }
+
     /// The `after:` seconds of a Gmail query.
     private static func afterFloor(of query: String) -> Int? {
         guard let range = query.range(of: "after:") else { return nil }

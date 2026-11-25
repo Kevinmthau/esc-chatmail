@@ -17,4 +17,10 @@ import Foundation
 protocol ServerTimeSource: Sendable {
     /// The earlier of the device's time and the estimate of Gmail's.
     func conservativeNow() -> Date
+
+    /// How far the device's clock is ahead of Gmail's now, in seconds; zero when it is
+    /// not ahead or Gmail's time is not known. Subtracted from a stored last-sync time
+    /// that an earlier build stamped with the device's clock
+    /// (`SyncTimeCalculator.calculateStartTime`).
+    func deviceClockLead() -> TimeInterval
 }

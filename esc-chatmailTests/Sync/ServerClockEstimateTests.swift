@@ -60,6 +60,33 @@ final class ServerClockEstimateTests: XCTestCase {
         XCTAssertEqual(estimate.conservativeNow(), serverDate)
     }
 
+    /// One broken `Date` header must not move every floor arbitrarily far back.
+    ///
+    /// Revert-check: the `maximumPlausibleSkew` guard in `ServerClockEstimate.record`.
+    func testRecord_dateFartherFromTheDeviceThanPlausible_isNotRecorded() {
+        let clocks = Clocks()
+        let estimate = makeEstimate(clocks)
+
+        estimate.record(serverDate: clocks.device.addingTimeInterval(-ServerClockEstimate.maximumPlausibleSkew - 1))
+        estimate.record(serverDate: Date(timeIntervalSince1970: 0))
+
+        XCTAssertNil(estimate.estimatedServerNow)
+        XCTAssertEqual(estimate.conservativeNow(), clocks.device)
+        XCTAssertEqual(estimate.deviceClockLead(), 0)
+    }
+
+    func testDeviceClockLead_isHowFarTheDeviceIsAhead_andNeverNegative() {
+        let clocks = Clocks()
+        let estimate = makeEstimate(clocks)
+        XCTAssertEqual(estimate.deviceClockLead(), 0)
+
+        estimate.record(serverDate: clocks.device.addingTimeInterval(-7200))
+        XCTAssertEqual(estimate.deviceClockLead(), 7200, accuracy: 0.001)
+
+        estimate.record(serverDate: clocks.device.addingTimeInterval(600))
+        XCTAssertEqual(estimate.deviceClockLead(), 0)
+    }
+
     func testRecordResponseDate_missingOrMalformedHeader_recordsNothing() {
         let clocks = Clocks()
         let estimate = makeEstimate(clocks)

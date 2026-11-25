@@ -92,16 +92,30 @@ struct SyncTimeCalculator {
     /// `ServerTimeSource`, the earlier of the device's time and Gmail's; a clamp to the
     /// device's own time alone helps nothing while the device is still ahead.
     ///
+    /// Two more corrections, for times written before Gmail's time was known, which a
+    /// clamp to now does not reach once now has passed them (a history expiry takes days):
+    /// - The last-sync time is read `deviceClockLead` earlier: an earlier build stamped it
+    ///   with the device's clock, which was then ahead by about as much as it is now. A
+    ///   stamp this build wrote from Gmail's time is moved that much earlier too, which
+    ///   costs a few more minutes of listing and skips nothing.
+    /// - The mailbox start is read as no later than the last-sync time where both are
+    ///   set. A sync always follows the move of the start (the sign-out that moves it
+    ///   also clears the last-sync time), so a start after the last sync was written by a
+    ///   device clock that was ahead, and its floor would skip the mail between.
+    ///
     /// - Parameters:
     ///   - config: Configuration determining which timestamps to check and buffers to apply
     ///   - installTimestamp: Optional explicit install timestamp (defaults to UserDefaults value)
     ///   - now: Optional explicit current time (defaults to the system clock)
+    ///   - deviceClockLead: How far the device's clock is ahead of Gmail's now
+    ///     (`ServerTimeSource.deviceClockLead()`); never negative
     ///   - defaults: Where `lastSuccessfulSyncTime` and `installTimestamp` are read from
     /// - Returns: The calculated start timestamp as TimeInterval since 1970
     static func calculateStartTime(
         config: Config,
         installTimestamp: TimeInterval? = nil,
         now: TimeInterval? = nil,
+        deviceClockLead: TimeInterval = 0,
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let now = now ?? Date().timeIntervalSince1970
@@ -117,7 +131,7 @@ struct SyncTimeCalculator {
                 now: now
             )
             if lastSuccessfulSync > 0 {
-                var startTime = lastSuccessfulSync - config.primaryBuffer
+                var startTime = lastSuccessfulSync - max(0, deviceClockLead) - config.primaryBuffer
 
                 // Apply max window cap if specified
                 if let maxWindow = config.maxWindow {
@@ -125,9 +139,9 @@ struct SyncTimeCalculator {
                     startTime = max(startTime, minAllowedTime)
                 }
 
-                // Never go before install cutoff
+                // Never go before install cutoff, read as no later than the last sync.
                 if install > 0 {
-                    let installCutoff = install - config.installBuffer
+                    let installCutoff = min(install, lastSuccessfulSync) - config.installBuffer
                     startTime = max(startTime, installCutoff)
                 }
 
@@ -159,12 +173,14 @@ struct SyncTimeCalculator {
         config: Config,
         installTimestamp: TimeInterval? = nil,
         now: TimeInterval? = nil,
+        deviceClockLead: TimeInterval = 0,
         defaults: UserDefaults = .standard
     ) -> Date {
         let timestamp = calculateStartTime(
             config: config,
             installTimestamp: installTimestamp,
             now: now,
+            deviceClockLead: deviceClockLead,
             defaults: defaults
         )
         return Date(timeIntervalSince1970: timestamp)

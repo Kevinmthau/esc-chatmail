@@ -15,10 +15,20 @@ import Foundation
 /// The header has one-second resolution and is stamped before the response travels, so the
 /// estimate runs a little behind Gmail's true time. That direction is the safe one: an
 /// `after:` floor drawn from it is earlier, never later.
+///
+/// A date more than `maximumPlausibleSkew` from the device's is not recorded: "earlier"
+/// alone puts no limit on how much earlier, and one response with a broken `Date` (a
+/// proxy with a wrong clock) would otherwise move every floor, and the stamp written from
+/// it, arbitrarily far back. HONEST SCOPE: a device clock set more than that far ahead
+/// gets no correction, as before this existed.
+///
+/// `@unchecked Sendable`: `anchor` is read and written only under `lock`; the other
+/// stored properties are immutable `@Sendable` closures.
 final class ServerClockEstimate: ServerTimeSource, @unchecked Sendable {
-    /// `@unchecked Sendable`: `anchor` is read and written only under `lock`; the other
-    /// stored properties are immutable `@Sendable` closures.
     static let shared = ServerClockEstimate()
+
+    /// The largest difference between Gmail's time and the device's that is believed.
+    static let maximumPlausibleSkew: TimeInterval = 30 * 86_400
 
     private struct Anchor {
         let serverDate: Date
@@ -53,6 +63,9 @@ final class ServerClockEstimate: ServerTimeSource, @unchecked Sendable {
     }
 
     func record(serverDate: Date) {
+        guard abs(serverDate.timeIntervalSince(deviceNow())) <= Self.maximumPlausibleSkew else {
+            return
+        }
         let reading = elapsed()
         lock.lock()
         anchor = Anchor(serverDate: serverDate, elapsedAtRecord: reading)
@@ -73,6 +86,11 @@ final class ServerClockEstimate: ServerTimeSource, @unchecked Sendable {
         let device = deviceNow()
         guard let server = estimatedServerNow else { return device }
         return min(device, server)
+    }
+
+    func deviceClockLead() -> TimeInterval {
+        guard let server = estimatedServerNow else { return 0 }
+        return max(0, deviceNow().timeIntervalSince(server))
     }
 
     /// RFC 9110's IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`), which Google's servers send.

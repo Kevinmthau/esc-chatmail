@@ -17,6 +17,10 @@ final class FakeServerTimeSource: ServerTimeSource, @unchecked Sendable {
         set { lock.withLock { _offset = newValue } }
     }
 
+    func deviceClockLead() -> TimeInterval {
+        max(0, -serverOffsetFromDevice)
+    }
+
     func conservativeNow() -> Date {
         let device = Date()
         return min(device, device.addingTimeInterval(serverOffsetFromDevice))

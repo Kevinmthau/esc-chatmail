@@ -945,6 +945,7 @@ final class IncrementalSyncOrchestrator {
             windowStart = SyncTimeCalculator.calculateStartTime(
                 config: .historyRecovery,
                 now: now,
+                deviceClockLead: serverTime.deviceClockLead(),
                 defaults: defaults
             )
         } else {

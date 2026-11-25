@@ -518,6 +518,7 @@ final class SyncReconciliation: Sendable {
             config: .reconciliation,
             installTimestamp: installTimestamp,
             now: now.timeIntervalSince1970,
+            deviceClockLead: serverTime.deviceClockLead(),
             defaults: defaults
         )
     }
