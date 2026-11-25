@@ -31,6 +31,11 @@ struct ChatMessagingDependencies {
     let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     let outboundReplyContextBuilder: OutboundReplyContextBuilder
     let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
+    /// Downloads an attachment a forward is about to copy when it has no file yet
+    /// (`ForwardAttachmentDownloadPolicy`); `makeChatDependencies` hands it the
+    /// app's `AttachmentDownloader`. The default does nothing, for tests that
+    /// build these by hand and forward nothing.
+    var downloadAttachmentForForwarding: @MainActor (Attachment) async -> Void = { _ in }
 }
 
 struct ChatContactDependencies {

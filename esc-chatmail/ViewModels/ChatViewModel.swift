@@ -221,6 +221,10 @@ final class ChatViewModel: ObservableObject {
     private let outboundAttachmentContextBuilder: OutboundAttachmentContextBuilder
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
+    private let downloadAttachmentForForwarding: @MainActor (Attachment) async -> Void
+    /// A forward waiting for its message's attachments to download before its draft opens
+    /// (`setMessageToForward`). Internal for tests, which await it.
+    private(set) var forwardPreparationTask: Task<Void, Never>?
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
@@ -338,6 +342,7 @@ final class ChatViewModel: ObservableObject {
         self.outboundAttachmentContextBuilder = chatDependencies.messaging.outboundAttachmentContextBuilder
         self.outboundReplyContextBuilder = chatDependencies.messaging.outboundReplyContextBuilder
         self.composeForwardModeContextBuilder = chatDependencies.messaging.composeForwardModeContextBuilder
+        self.downloadAttachmentForForwarding = chatDependencies.messaging.downloadAttachmentForForwarding
         self.contactManager = chatDependencies.contacts.makeChatContactManager()
 
         // Forward child observable changes to trigger view updates
@@ -854,7 +859,40 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    /// Opens the forward's draft. Attachments download only when asked for
+    /// (`AttachmentDownloader`), so the message's attachments that have no file yet are
+    /// downloaded first and the draft opens once they are done, whatever the outcome: one
+    /// that still has no file is left out, or refuses the forward if it is inline, as before
+    /// (`ForwardAttachmentDownloadPolicy`). Meanwhile each attachment shows its own progress
+    /// in the bubble, and a second Forward is ignored until the draft opens.
     func setMessageToForward(_ message: Message) {
+        guard forwardPreparationTask == nil else { return }
+        let missingFiles = message.attachmentsForForwarding.filter(
+            ForwardAttachmentDownloadPolicy.needsDownload
+        )
+        guard !missingFiles.isEmpty else {
+            openForwardCompose(for: message)
+            return
+        }
+        let messageObjectID = message.objectID
+        let download = downloadAttachmentForForwarding
+        forwardPreparationTask = Task { [weak self] in
+            for attachment in missingFiles where !attachment.isDeleted {
+                await download(attachment)
+            }
+            guard let self else { return }
+            self.forwardPreparationTask = nil
+            guard let message = self.resolveMessage(with: messageObjectID) else { return }
+            // The downloads saved on background contexts; read what they stored now
+            // rather than wait for the merge into this context.
+            for attachment in message.attachmentsArray where !attachment.isDeleted {
+                self.viewContext.refresh(attachment, mergeChanges: true)
+            }
+            self.openForwardCompose(for: message)
+        }
+    }
+
+    private func openForwardCompose(for message: Message) {
         do {
             let context = try composeForwardModeContextBuilder.build(
                 input: makeForwardModeInput(message)

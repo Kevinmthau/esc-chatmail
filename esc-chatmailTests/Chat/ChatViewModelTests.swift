@@ -1322,7 +1322,7 @@ final class ChatViewModelTests: XCTestCase {
                        Set([firstRegularPath, secondRegularPath]))
     }
 
-    func testSetMessageToForward_rejectsUnreadableInlineAttachmentWithVisibleError() {
+    func testSetMessageToForward_rejectsUnreadableInlineAttachmentWithVisibleError() async throws {
         let deps = makeDependencies(
             authSession: makeTestAuthSession(userEmail: "me@example.com")
         )
@@ -1350,19 +1350,143 @@ final class ChatViewModelTests: XCTestCase {
             .downloaded()
             .forMessage(message)
             .build(in: context)
+        let downloadRequests = ForwardDownloadRequests()
         let viewModel = ChatViewModel(
             conversation: conversation,
-            chatDependencies: deps.makeChatDependencies()
+            chatDependencies: deps.makeChatDependencies(
+                // The download fails: the row still has no file of this message's.
+                downloadAttachmentForForwarding: { attachment in
+                    downloadRequests.ids.append(attachment.id ?? "")
+                }
+            )
         )
 
         viewModel.setMessageToForward(message)
+        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        await preparation.value
 
+        XCTAssertEqual(downloadRequests.ids, [attachmentID])
         XCTAssertNil(viewModel.destination)
         XCTAssertEqual(viewModel.sendErrorAlert?.title, "Couldn’t Forward Message")
         XCTAssertEqual(
             viewModel.sendErrorAlert?.message,
             "inline.png is still being prepared. Wait for it to finish before sending."
         )
+    }
+
+    /// Attachments download only when asked for, so a forward of a message the chat never
+    /// drew is the first to ask: it downloads what has no file, then opens the draft with it.
+    ///
+    /// Revert-check: making `setMessageToForward` open the draft at once makes this fail:
+    /// the draft opens with the attachment skipped and no download asked for.
+    func testSetMessageToForward_downloadsAttachmentWithoutFileFirst_thenOpensDraftWithIt() async throws {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        AttachmentPaths.setupDirectories()
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-forward-on-demand")
+            .withSubject("Forward Me")
+            .withAttachments()
+            .inConversation(conversation)
+            .build(in: context)
+        let attachmentID = "attachment-never-shown"
+        let downloadedPath = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "pdf"
+        )
+        defer { AttachmentPaths.deleteFile(at: downloadedPath) }
+        let attachment = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("report.pdf")
+            .withMimeType("application/pdf")
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        let downloadRequests = ForwardDownloadRequests()
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies(
+                downloadAttachmentForForwarding: { requested in
+                    downloadRequests.ids.append(requested.id ?? "")
+                    XCTAssertTrue(AttachmentPaths.saveData(Data("report".utf8), to: downloadedPath))
+                    requested.localURL = downloadedPath
+                    requested.state = .downloaded
+                }
+            )
+        )
+
+        viewModel.setMessageToForward(message)
+        XCTAssertNil(viewModel.destination, "The draft waits for the download")
+        let preparation = try XCTUnwrap(viewModel.forwardPreparationTask)
+        viewModel.setMessageToForward(message)
+        await preparation.value
+
+        XCTAssertEqual(downloadRequests.ids, [attachmentID], "A second Forward while one waits asks for nothing more")
+        XCTAssertNil(viewModel.forwardPreparationTask)
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertEqual(forwardContext.forwardedRegularAttachments.compactMap(\.localURL), [downloadedPath])
+        XCTAssertEqual(attachment.state, .downloaded)
+    }
+
+    /// A message whose attachments all have their files opens the draft in the same turn,
+    /// as before, and asks for no download.
+    func testSetMessageToForward_attachmentsWithFiles_opensDraftAtOnceWithoutDownloading() {
+        let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
+        let context = deps.viewContext
+        AttachmentPaths.setupDirectories()
+        let conversation = ConversationBuilder()
+            .withDisplayName("Test Chat")
+            .visible()
+            .recentlyActive()
+            .build(in: context)
+        let message = MessageBuilder()
+            .withId("message-forward-downloaded")
+            .withSubject("Forward Me")
+            .withAttachments()
+            .inConversation(conversation)
+            .build(in: context)
+        let attachmentID = "attachment-already-shown"
+        let path = AttachmentPaths.originalPath(
+            messageId: message.id,
+            attachmentId: attachmentID,
+            ext: "pdf"
+        )
+        XCTAssertTrue(AttachmentPaths.saveData(Data("report".utf8), to: path))
+        defer { AttachmentPaths.deleteFile(at: path) }
+        _ = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("report.pdf")
+            .withMimeType("application/pdf")
+            .withLocalURL(path)
+            .downloaded()
+            .forMessage(message)
+            .build(in: context)
+        let downloadRequests = ForwardDownloadRequests()
+        let viewModel = ChatViewModel(
+            conversation: conversation,
+            chatDependencies: deps.makeChatDependencies(
+                downloadAttachmentForForwarding: { requested in
+                    downloadRequests.ids.append(requested.id ?? "")
+                }
+            )
+        )
+
+        viewModel.setMessageToForward(message)
+
+        XCTAssertNil(viewModel.forwardPreparationTask)
+        XCTAssertTrue(downloadRequests.ids.isEmpty)
+        guard case .forwardCompose(let forwardContext) = viewModel.destination else {
+            return XCTFail("Expected forward compose destination")
+        }
+        XCTAssertEqual(forwardContext.forwardedRegularAttachments.compactMap(\.localURL), [path])
     }
 
     func testSendReply_buildsStableReplyRequestAtViewModelEdge() async {
@@ -3438,4 +3562,10 @@ private final class MockChatOutboundMessageCoordinator: OutboundMessageCoordinat
 
 private enum MockChatSendError: Error {
     case preflightFailed
+}
+
+/// What a forward asked to download, in order.
+@MainActor
+private final class ForwardDownloadRequests {
+    var ids: [String] = []
 }

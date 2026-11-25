@@ -16,7 +16,7 @@ import UniformTypeIdentifiers
 /// never `testStack.viewContext`, which is private-queue. The class is not
 /// `@MainActor`, but every test here runs on the main thread: XCTest invokes
 /// the synchronous ones there, and every async one is `@MainActor` — including
-/// testPendingSweepRecoversLegacySynthesizedInlineStorageForForwarding, which
+/// testOnDemandDownloadRecoversLegacySynthesizedInlineStorageForForwarding, which
 /// hands this context to `OutboundAttachmentContextBuilder`, a `@MainActor`
 /// type that fetches it directly. On a private-queue context all of that is
 /// off-queue; see that helper for what it races. A future async test that is
@@ -200,13 +200,13 @@ final class AttachmentDownloaderTests: XCTestCase {
     }
 
     @MainActor
-    func testCancelAndAwaitAllDownloadsWaitsForSuspendedAutomaticRequestAndPreventsSuccessWrite() async throws {
+    func testCancelAndAwaitAllDownloadsWaitsForSuspendedOnDemandRequestAndPreventsSuccessWrite() async throws {
         let message = MessageBuilder()
-            .withId("message-cancelled-automatic-download")
+            .withId("message-cancelled-on-demand-download")
             .withAttachments()
             .build(in: viewContext)
         let attachment = AttachmentBuilder()
-            .withId("att-cancelled-automatic-download")
+            .withId("att-cancelled-on-demand-download")
             .withFilename("cancelled.txt")
             .withMimeType("text/plain")
             .queued()
@@ -224,7 +224,10 @@ final class AttachmentDownloaderTests: XCTestCase {
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         )
 
-        downloader.schedulePendingAttachmentDownloads()
+        // What a chat's attachment view starts when it appears.
+        let onDemandDownloadTask = Task { @MainActor in
+            await downloader.downloadAttachmentIfNeeded(for: attachment)
+        }
         await request.waitUntilStarted()
         XCTAssertTrue(
             downloader.isDownloading(
@@ -255,6 +258,7 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         await request.release()
         await cleanupTask.value
+        await onDemandDownloadTask.value
 
         let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
         XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1)
@@ -549,7 +553,7 @@ final class AttachmentDownloaderTests: XCTestCase {
     }
 
     @MainActor
-    func testPendingSweepRecoversLegacySynthesizedInlineStorageForForwarding() async throws {
+    func testOnDemandDownloadRecoversLegacySynthesizedInlineStorageForForwarding() async throws {
         AttachmentPaths.setupDirectories()
         let messageID = "message-legacy-inline-forwarding"
         let authoritativeData = Data("authoritative inline forwarding bytes".utf8)
@@ -592,7 +596,10 @@ final class AttachmentDownloaderTests: XCTestCase {
             )
         )
 
-        await downloader.enqueueAllPendingAttachments()
+        // The legacy row is "downloaded" at a path that is not this message's,
+        // so the view that shows it asks for it again (`needsRedownload`).
+        XCTAssertTrue(attachment.needsRedownload)
+        await downloader.downloadAttachmentIfNeeded(for: attachment)
 
         let persistedState = try await fetchAttachmentState(
             objectID: attachment.objectID
@@ -1245,7 +1252,7 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         try saveViewContext()
 
-        // Fetch queued only (like AttachmentDownloader.enqueueAllPendingAttachments)
+        // Fetch queued only
         let request = Attachment.fetchRequest()
         request.predicate = NSPredicate(format: "stateRaw == %@", "queued")
 

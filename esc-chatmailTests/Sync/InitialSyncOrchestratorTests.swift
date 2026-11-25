@@ -204,7 +204,6 @@ final class InitialSyncOrchestratorPageDurabilityTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(Self.myEmail)] }
             ),
-            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
             coreDataStack: coreDataStack,
             failureTracker: SyncFailureTracker(defaults: defaults, coreDataStack: coreDataStack),
             performanceLogger: .shared
@@ -293,7 +292,6 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
-            attachmentDownloader: AttachmentDownloader.shared,
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             performanceLogger: .shared
@@ -368,7 +366,6 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
-            attachmentDownloader: AttachmentDownloader.shared,
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             performanceLogger: .shared
@@ -485,7 +482,6 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
-            attachmentDownloader: AttachmentDownloader.shared,
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             performanceLogger: .shared
@@ -676,7 +672,6 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
-            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
             coreDataStack: coreDataStack,
             failureTracker: SyncFailureTracker(defaults: self.defaults, coreDataStack: coreDataStack),
             performanceLogger: .shared
@@ -769,7 +764,6 @@ final class InitialSyncOrchestratorFailureTrackerTests: XCTestCase {
                 migrationFlags: InMemoryMigrationFlagStore(),
                 identityAliasProvider: { _ in [normalizedEmail(profile.emailAddress)] }
             ),
-            attachmentDownloader: AttachmentDownloader(apiClient: apiClient),
             coreDataStack: coreDataStack,
             failureTracker: failureTracker,
             performanceLogger: .shared
