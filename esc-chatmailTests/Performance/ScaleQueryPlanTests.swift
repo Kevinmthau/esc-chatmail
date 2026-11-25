@@ -104,10 +104,12 @@ final class ScaleQueryPlanTests: XCTestCase {
     }
 
     /// The indexes that find a conversation's messages: the relationship's
-    /// own and the model's (conversation, date) fetch index.
+    /// own and the model's (conversation, date) and, from model 8,
+    /// (conversation, isUnread) fetch indexes.
     private static let conversationIndexes: Set<String> = [
         "ZMESSAGE_ZCONVERSATION_INDEX",
-        "Z_Message_byConversationAndDateIndex"
+        "Z_Message_byConversationAndDateIndex",
+        "Z_Message_byConversationAndUnreadIndex"
     ]
 
     /// Whether the plan reaches ZMESSAGE through an index on the
@@ -126,9 +128,10 @@ final class ScaleQueryPlanTests: XCTestCase {
     /// (26,408 in this store) to find the one in this chat. It is now driven
     /// by the conversation.
     ///
-    /// Revert-check: `isUnread == YES` in place of `isUnread != NO` in
-    /// `MessagePredicates.unreadInInbox` brings
-    /// `SEARCH t0 USING INDEX Z_Message_byIsUnreadIndex` back.
+    /// Revert-check: model 8 dropped `byIsUnreadIndex`, so the predicate's
+    /// spelling no longer reverts this. Putting that index back into the
+    /// current model version and spelling the predicate `isUnread == YES`
+    /// brings `SEARCH t0 USING INDEX Z_Message_byIsUnreadIndex` back.
     @MainActor
     func testUnreadSnapshot_isNotDrivenByTheMailboxWideUnreadIndex() async throws {
         for statistics in Self.bothStatistics {
@@ -266,8 +269,9 @@ final class ScaleQueryPlanTests: XCTestCase {
     /// answers the INBOX count from the label (`SCAN t3`, then every INBOX
     /// membership in the mailbox) and the newest-INBOX fetch from a walk of
     /// the whole label join table (`SCAN t2`), reaching each message by its
-    /// primary key. `isUnread == YES` in `MessagePredicates.unreadInInbox`
-    /// drives the unread count from `Z_Message_byIsUnreadIndex`.
+    /// primary key. Under model 7, `isUnread == YES` in
+    /// `MessagePredicates.unreadInInbox` drove the unread count from
+    /// `Z_Message_byIsUnreadIndex`, which model 8 drops.
     @MainActor
     func testSingleMessageArchive_rollupCountsAndNewestInboxFetch_areDrivenByTheConversation() async throws {
         for statistics in Self.bothStatistics {
@@ -462,10 +466,10 @@ final class ScaleQueryPlanTests: XCTestCase {
     // MARK: - Message by Gmail ID
 
     /// Every message a sync persists is first looked up by its Gmail ID, and
-    /// that lookup is a search of an index on `id`. The model has two such
-    /// indexes today, the uniqueness constraint's and the duplicate
-    /// `byIdIndex` the review wants dropped; this is the test that must stay
-    /// green when one of them goes.
+    /// that lookup is a search of an index on `id`. Model 7 had two such
+    /// indexes, the uniqueness constraint's and the duplicate `byIdIndex`;
+    /// model 8 dropped the duplicate, and this is the test that must stay
+    /// green for it.
     ///
     /// HONEST SCOPE: no one line of production code reverts this. It fails if
     /// a model version leaves `Message.id` with no index at all.
@@ -502,9 +506,9 @@ final class ScaleQueryPlanTests: XCTestCase {
     ///
     /// HONEST SCOPE: no one line of production code reverts this. It fails if the fetch
     /// stops being an `IN` over `id`, or if a model version leaves `Message.id` with no
-    /// index. The matching check for attachment files has no test here: `Attachment` has
-    /// no index on its two path columns, so it reads ZATTACHMENT from one end, and this
-    /// store has no attachments to make that visible.
+    /// index. The matching check for attachment files has no test here, because this
+    /// store has no attachments: since model 8 it searches the two path indexes, which
+    /// `ModelV8IndexPlanTests` pins on a small store.
     func testStoredRowCheckForDeletedBodies_searchesTheIndexOnTheMessageID() throws {
         for statistics in Self.bothStatistics {
             let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)

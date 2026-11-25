@@ -259,14 +259,17 @@ enum MessagePredicates {
     /// The unread INBOX messages of one conversation, which is what opening a
     /// chat marks read and what the conversation's unread count counts.
     ///
-    /// `isUnread != NO`, not `isUnread == YES`, is deliberate. With the
-    /// equality SQLite drives the fetch from the store-wide
-    /// `byIsUnreadIndex`, with or without statistics: it visits every unread
+    /// `isUnread != NO`, not `isUnread == YES`, was deliberate while model 7
+    /// had the store-wide `byIsUnreadIndex`: with the equality SQLite drove
+    /// the fetch from it, with or without statistics, visiting every unread
     /// message in the mailbox to find the few in this conversation
     /// (`docs/scalability-review.md`, `chat-open-unread-snapshot`). SQLite
-    /// never drives a search from an inequality, so this spelling leaves it
-    /// the conversation's own index. `isUnread` is not optional, so the two
-    /// select the same rows. `ScaleQueryPlanTests` pins the plan.
+    /// never drives a search from an inequality, so this spelling left it the
+    /// conversation's own index. Model 8 drops that index and adds
+    /// (conversation, isUnread), so either spelling is now driven by the
+    /// conversation; this one stays because it is the one the plan tests have
+    /// measured. `isUnread` is not optional, so the two select the same rows.
+    /// `ScaleQueryPlanTests` pins the plan.
     static func unreadInInbox(conversationObjectID: NSManagedObjectID) -> NSPredicate {
         NSPredicate(
             format: "conversation == %@ AND isUnread != NO AND ANY labels.id == %@",
