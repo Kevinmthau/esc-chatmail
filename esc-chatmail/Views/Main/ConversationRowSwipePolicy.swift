@@ -88,7 +88,7 @@ enum ConversationRowSwipePolicy {
     static let questionNameLimit = 60
 
     /// The question's title, naming the conversation. Once the swipe has closed nothing else on
-    /// screen says which row asked (on the iPad the question is a popover over the whole list),
+    /// screen says which row asked,
     /// and a wrong row is exactly what the question is there to catch.
     static func questionTitle(for request: SpamReportRequest?) -> String {
         guard let name = request?.conversationName else {
