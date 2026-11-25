@@ -455,9 +455,10 @@ enum EmailDOMParseAdmission {
     /// eight hundred million a second, for short names and for names of
     /// 2 KB alike).
     static let maximumAttributeDedupWork = 400_000_000
-    /// About half a second of index rebuilds (measured at about 14 ns a
-    /// unit, for `html` and `body` alike).
-    static let maximumRootAttributeMergeWork = 35_000_000
+    /// About half a second of index rebuilds (measured at 14 to 25 ns a
+    /// unit, for `html` and `body` alike, short names the dearest: a name's
+    /// rebuild costs about 68 ns whatever its length).
+    static let maximumRootAttributeMergeWork = 20_000_000
     /// About a second of walks up the ancestors of attribute-holding
     /// elements, in names times levels (measured at about 275 ns each to
     /// make a name and remove it, half that to make it alone).
