@@ -1649,6 +1649,42 @@ final class PendingActionsManagerTests: XCTestCase {
         await recorder.releaseAll()
     }
 
+    // Through the real client: a 503 is the client's own three attempts
+    // (its retry engine), then one unit of the action's budget and the end of
+    // the run. Before, the processor went round again at once, five times.
+    // Revert-check: fails if `processAction` continues the run after a
+    // transient failure: the client would see fifteen requests, not three.
+    func testRealClient_serverErrorIsOneClientRetryCycleAndOneBudgetUnit() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.status(503)]
+        let client = GmailAPIClient(
+            tokenManager: MockTokenManager(),
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 1, maxDelay: 2),
+            session: StubURLProtocol.makeSession(),
+            retryClock: FakeSyncClock()
+        )
+        let recorder = TransientRetryRecorder()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: GmailActionExecutor(apiClientProvider: { client }),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetrySleeper: { delay in await recorder.record(delay: delay) }
+        )
+        _ = PendingActionBuilder().markAsUnread().forMessage("real-client").pending().build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await recorder.waitUntilScheduled(count: 1)
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 3, "The client's own retries, once")
+        context.refreshAllObjects()
+        let action = try XCTUnwrap(context.fetch(PendingAction.fetchRequest()).first)
+        XCTAssertEqual(action.status, "failed")
+        XCTAssertEqual(action.retryCount, 1)
+    }
+
     func testTransientRetryDelay_doublesFromOneMinuteToFifteen() {
         let delays = (0..<6).map {
             PendingActionsManager.transientRetryDelay(
