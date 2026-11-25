@@ -198,10 +198,14 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
 
     /// Each formatting start tag is compared, attribute by attribute, with
     /// the active formatting elements (6,000 `<b>`s of 100 attributes took
-    /// 50 s). Revert-check: `formattingCompareWork` in `ParseCost.excessWork`.
+    /// 50 s). The tags hold few names with long values, because many names
+    /// this deep are refused by `treeWork` first (each name's walk up its
+    /// ancestors). Revert-check: `formattingCompareWork` in
+    /// `ParseCost.excessWork`.
     func testParseDocument_manyAttributeHeavyFormattingTags_isRefusedAsTooCostly() {
-        let attributes = (0..<100).map { " a\($0)=1" }.joined()
-        let html = String(repeating: "<b\(attributes)>", count: 1_500)
+        let value = String(repeating: "x", count: 1_000)
+        let attributes = (0..<10).map { " a\($0)=\"\(value)\"" }.joined()
+        let html = String(repeating: "<b\(attributes)>", count: 200)
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
         XCTAssertGreaterThan(cost.formattingCompareWork, EmailDOMParseAdmission.maximumFormattingCompareWork)
@@ -540,9 +544,9 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// first selector). These take about 1.5 s in a Release build. The
     /// second scan reads the first two; `<select>` makes the last two the
     /// byte bound's.
-    /// Revert-check: the `attributeDedupWork` addition in
-    /// `TokenizingScanner.readTag` (the first two are admitted), and
-    /// `AttributeDedupBound.work` (returning 0, the last two are).
+    /// Revert-check: the `dedupWork` addition in `AttributeWork.read` (all
+    /// four are admitted), and `AttributeWorkBound.work` (returning an empty
+    /// `AttributeWork`, the last two are).
     func testParseDocument_tagOfManyDistinctAttributeNames_isRefusedAsTooCostly() {
         let names = (0..<20_000).map { " a\($0)=1" }.joined()
         let eventNames = (0..<20_000).map { " on\($0)=1" }.joined()
@@ -577,8 +581,8 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// of SwiftSoup 2.13.5 that counts them was compared with this charge
     /// over a million attribute-heavy documents (tag soup, quotes, NUL,
     /// `<`, `/`, mode-dependent markup), off the suite, with none above it.
-    /// Revert-check: the NUL width in `TagAttributeReading.dedupWork`
-    /// (`withNul`), and its `startsAttribute` term (`plain`).
+    /// Revert-check: the NUL width in `AttributeWork.read` (`withNul`), and
+    /// the dedup's `startsAttribute` term there (`plain`).
     func testAttributeDedupWork_eachNameIsChargedForTheNamesBeforeIt() {
         func work(_ html: String) -> Int {
             EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork
@@ -622,6 +626,65 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start), 5)
     }
 
+    /// An `html` or `body` start tag gives the root element its names, and
+    /// each one added rebuilds the list's key indexes over every name the
+    /// root holds, so the cost grows with the square of the names all such
+    /// tags gave (4,000 `<html a b c d>`s: 10 s in a Release build, in the
+    /// parse; one `<html>` of 11,000 names: 5.3 s). The last is read by the
+    /// byte bound (`<select>`).
+    /// Revert-check: `mergesIntoRoot` in `TokenizingScanner.readTag`
+    /// (passing false, the first three are admitted), and the `html`/`body`
+    /// readings of `AttributeWorkBound.work` (the last is).
+    func testParseDocument_manyNamesGivenToTheRoot_isRefusedAsTooCostly() {
+        let tags = (0..<4_000).map { " a\($0) b\($0) c\($0) d\($0)>" }
+        let names = (0..<11_000).map { " n\($0)" }.joined()
+        let shapes = [
+            "<html><body>x" + tags.map { "<html" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<BODY" + $0 }.joined(),
+            "<html><body>x<html" + names + ">",
+            "<html><body>x" + tags.map { "<html" + $0 }.joined() + "<select>",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork, String(html.prefix(40)))
+            XCTAssertLessThanOrEqual(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork)
+            XCTAssertGreaterThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+                XCTAssertEqual(
+                    error as? EmailDOMParseRefusal,
+                    .tooCostlyToParse(
+                        work: cost.rootAttributeMergeWork,
+                        limit: EmailDOMParseAdmission.maximumRootAttributeMergeWork
+                    )
+                )
+            }
+        }
+    }
+
+    /// Each attribute name made into an element's list after the parse, or
+    /// removed from it by the sanitizer, marks the element's query indexes
+    /// stale up every ancestor, so names cost the depth each: 1,000 `<b>`s
+    /// of 100 names under 500 `div`s took 6.3 s to make and 7.5 s more to
+    /// remove the names, in a Release build (0.6 s under 5 `div`s). It is
+    /// counted in `treeWork`.
+    /// Revert-check: `attributeWalks` in `estimate(in:limit:…)` (adding 0,
+    /// the body is admitted).
+    func testParseDocument_manyNamesDeepInTheTree_isRefusedAsTooCostly() {
+        var html = String(repeating: "<div>", count: 500)
+        for tag in 0..<1_000 {
+            html += "<b" + (0..<100).map { " on\(tag)x\($0)=1" }.joined() + "></b>"
+        }
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: cost.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
+            )
+        }
+    }
+
     /// Attribute-heavy mail is charged far below the limit: a newsletter of
     /// 2,000 cells each with a dozen attributes, and the shapes item 2b
     /// measured (`<head`, `<br` and `<a` run together are one tag name each).
@@ -633,16 +696,18 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         newsletter += "</table></body></html>"
         let shapes = [
             newsletter,
+            "<html lang=\"en\" dir=\"ltr\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head>"
+                + "<body style=\"margin:0\" bgcolor=\"#ffffff\" class=\"body\" link=\"#000\" vlink=\"#000\">"
+                + newsletter,
             "<html><body>" + String(repeating: "<head", count: 8_000) + "</body></html>",
             String(repeating: "<br", count: 8_000),
             String(repeating: "<a", count: 8_000),
         ]
         for html in shapes {
-            XCTAssertLessThan(
-                EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork,
-                EmailDOMParseAdmission.maximumAttributeDedupWork / 100,
-                String(html.prefix(60))
-            )
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html)
+            XCTAssertLessThan(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork / 100, String(html.prefix(60)))
+            XCTAssertLessThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork / 100, String(html.prefix(60)))
+            XCTAssertLessThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork / 10, String(html.prefix(60)))
             XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(60)))
         }
     }
