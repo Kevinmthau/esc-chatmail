@@ -128,7 +128,12 @@ enum EmailDOMParseAdmission {
         let html = paddedAgainstTheTokenizerOverread(html)
         return try admittedParse(
             html,
-            kind: .fragment(context: context.tagName()),
+            // SwiftSoup also reads the context's document (quirks mode) and
+            // any form around it, so only a context that has neither is
+            // known by its name alone.
+            kind: context.parent() == nil && context.ownerDocument() == nil
+                ? .fragment(context: context.tagName())
+                : nil,
             isTableContextFragment: true,
             readsHead: false,
             rootDepth: enclosingNodeCount + 1,
@@ -140,7 +145,7 @@ enum EmailDOMParseAdmission {
 
     private static func admittedParse<Parsed>(
         _ html: String,
-        kind: RefusedParseMemo.ParseKind,
+        kind: RefusedParseMemo.ParseKind?,
         isTableContextFragment: Bool = false,
         readsHead: Bool = true,
         rootDepth: Int,
@@ -162,7 +167,7 @@ enum EmailDOMParseAdmission {
         }
         // A body only a parse can refuse, which the same message's next
         // cleanup stage would parse again, is refused once.
-        let memoKey = mayBeRefusedOnlyByItsParse(cost) ? RefusedParseMemo.Key(html, kind: kind) : nil
+        let memoKey = mayBeRefusedOnlyByItsParse(cost) ? kind.map { RefusedParseMemo.Key(html, kind: $0) } : nil
         if let memoKey, let earlier = RefusedParseMemo.shared.refusal(for: memoKey) {
             throw earlier
         }

@@ -17,7 +17,10 @@ import os
 /// says a parse may refuse are looked up (`EmailDOMParseAdmission`), so
 /// ordinary mail is never hashed.
 final class RefusedParseMemo: Sendable {
-    /// What a body is parsed as: a fragment's tree depends on its context.
+    /// What a body is parsed as: a fragment's tree depends on its context,
+    /// which is known by its tag name only where it has no parent and no
+    /// document (`EmailDOMParseAdmission.parseFragment` memoizes nothing
+    /// else).
     enum ParseKind: Hashable, Sendable {
         case document
         case bodyFragment
