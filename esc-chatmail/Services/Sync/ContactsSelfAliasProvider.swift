@@ -77,16 +77,19 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
 
         let keysToFetch = [CNContactEmailAddressesKey as CNKeyDescriptor]
         // The Mac's "me" card is the user's own word for who they are, so it
-        // counts whatever else it lists, and its addresses are known ones
-        // when other cards are judged: otherwise the me card, naming none of
-        // the account's addresses, would read as someone else's card and
+        // counts whatever else it lists, and its addresses are trusted when
+        // other cards are judged: otherwise the me card, naming none of the
+        // account's addresses, would read as someone else's card and
         // disqualify the user's own card that shares an address with it.
+        // They are not known addresses: a card counts only for listing an
+        // account address, so a me card that lists someone else does not
+        // make that person's own card the user's.
         let meAddresses = meCardAddresses(keysToFetch: keysToFetch)
         let knownAddresses = Set(
             searchEmails
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty }
-        ).union(meAddresses)
+        )
         var aliases = meAddresses
 
         // The cards that list one of the user's addresses as stored. Only
@@ -112,7 +115,9 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
                 .filter { !$0.isEmpty }
         )
         let hasUnresolvedGmailTarget = !gmailTargets.subtracting(matchedAddresses).isEmpty
-        let listsOtherAddresses = matchedCards.contains { !$0.subtracting(knownAddresses).isEmpty }
+        let listsOtherAddresses = matchedCards.contains {
+            !$0.subtracting(knownAddresses).subtracting(meAddresses).isEmpty
+        }
         guard hasUnresolvedGmailTarget || listsOtherAddresses else {
             // Every card found lists the user's own addresses and nothing
             // else: nothing to decide, and no walk.
@@ -134,7 +139,8 @@ actor ContactsSelfAliasProvider: SelfAliasProviding {
         aliases.formUnion(
             SelfContactCards.selfAddresses(
                 contactAddressLists: allCards,
-                knownAddresses: knownAddresses
+                knownAddresses: knownAddresses,
+                trustedAddresses: meAddresses
             )
         )
         return aliases

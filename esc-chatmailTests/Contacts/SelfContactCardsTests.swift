@@ -147,6 +147,53 @@ final class SelfContactCardsTests: XCTestCase {
         XCTAssertEqual(addresses, [])
     }
 
+    // Revert-check: leaving trusted-only cards out of `claimedByOthers` in
+    // `SelfContactCards.selfAddresses`. Without it the Mac's me card, which
+    // names no account address, takes out the user's own card that shares
+    // its iCloud address.
+    func testSelfAddresses_meCardSharingAnAddress_doesNotDisqualifyOwnCard() {
+        let addresses = SelfContactCards.selfAddresses(
+            contactAddressLists: [
+                [Self.account, "kevin@icloud.example", "kevin@work.example"],
+                ["kevin@icloud.example"]
+            ],
+            knownAddresses: [Self.account],
+            trustedAddresses: ["kevin@icloud.example"]
+        )
+
+        XCTAssertEqual(addresses, [Self.account, "kevin@icloud.example", "kevin@work.example"])
+    }
+
+    // Revert-check: passing the me card's addresses as known ones rather than
+    // trusted ones. A me card that lists Jane would then make Jane's own card
+    // count, and her work address the user's.
+    func testSelfAddresses_meCardListingSomeoneElse_doesNotMakeTheirCardCount() {
+        let addresses = SelfContactCards.selfAddresses(
+            contactAddressLists: [
+                ["jane@gmail.com", "jane@work.example"]
+            ],
+            knownAddresses: [Self.account],
+            trustedAddresses: ["jane@gmail.com"]
+        )
+
+        XCTAssertEqual(addresses, [])
+    }
+
+    /// HONEST SCOPE: a partner's card that lists the user's iCloud address
+    /// reads as someone else's, so the user's own card listing that address
+    /// drops out too.
+    func testSelfAddresses_partnerCardListingUsersOtherAddress_dropsOwnCard() {
+        let addresses = SelfContactCards.selfAddresses(
+            contactAddressLists: [
+                [Self.account, "kevin@icloud.example"],
+                ["jane@gmail.com", "kevin@icloud.example"]
+            ],
+            knownAddresses: [Self.account]
+        )
+
+        XCTAssertEqual(addresses, [])
+    }
+
     func testSelfAddresses_noKnownAddresses_countsNothing() {
         let addresses = SelfContactCards.selfAddresses(
             contactAddressLists: [[Self.account, "kevin@icloud.example"]],
