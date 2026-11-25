@@ -87,4 +87,36 @@ final class HistoryRecoveryRepairPolicyTests: XCTestCase {
             "in:inbox after:999 before:2002"
         )
     }
+
+    /// A row `apply` left alone because an action was queued meanwhile keeps the bound
+    /// above it; never above the bound the repair was owed at.
+    ///
+    /// Revert-check: return `planned` unconditionally from
+    /// `HistoryRecoveryRepairPolicy.progressAfterApply`.
+    func testProgressAfterApply_skippedRow_keepsTheBoundAboveIt() {
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.progressAfterApply(
+                planned: .advances(to: Self.at(10)),
+                owedUpperBound: Self.at(100),
+                skippedDates: [Self.at(40), Self.at(70)]
+            ),
+            .advances(to: Self.at(70).addingTimeInterval(0.001))
+        )
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.progressAfterApply(
+                planned: .advances(to: Self.at(10)),
+                owedUpperBound: Self.at(100),
+                skippedDates: []
+            ),
+            .advances(to: Self.at(10))
+        )
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.progressAfterApply(
+                planned: .advances(to: Self.at(10)),
+                owedUpperBound: Self.at(100),
+                skippedDates: [Self.at(100)]
+            ),
+            .advances(to: Self.at(100))
+        )
+    }
 }

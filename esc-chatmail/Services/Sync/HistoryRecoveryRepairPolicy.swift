@@ -59,6 +59,21 @@ enum HistoryRecoveryRepairPolicy {
         return min(firstUnanswered.internalDate.addingTimeInterval(0.001), upperBound)
     }
 
+    /// The progress to stage once the plan was applied: rows `apply` left alone because
+    /// they wait now (a user's action queued between the plan and its application) keep
+    /// the bound above them, as a row that waited at planning does, never below the bound
+    /// the repair was owed at.
+    static func progressAfterApply(
+        planned: HistoryRecoveryRepair.Progress,
+        owedUpperBound: Date,
+        skippedDates: [Date]
+    ) -> HistoryRecoveryRepair.Progress {
+        guard case .advances(let bound) = planned, let newestSkipped = skippedDates.max() else {
+            return planned
+        }
+        return .advances(to: min(max(bound, newestSkipped.addingTimeInterval(0.001)), owedUpperBound))
+    }
+
     /// What Gmail's labels for a row say.
     static func verdict(forLabelIds labelIds: [String]?) -> Verdict {
         let labels = Set(labelIds ?? [])

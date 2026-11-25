@@ -2287,6 +2287,95 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(owed.upperBound, base.addingTimeInterval(10), "The bound moves to the batch's oldest row")
     }
 
+    /// A user's action queued while the repair plans (here, while it asks Gmail) makes
+    /// `apply` leave that row alone; the bound must stay above it, or the gap's deletion
+    /// of it is never applied.
+    ///
+    /// Revert-check: pass `[]` as `skippedDates` to `progressAfterApply` in
+    /// `IncrementalSyncOrchestrator.applyHistoryRecoveryRepair`.
+    @MainActor
+    func testOwedRepair_actionQueuedWhileItPlans_keepsTheRowOwed() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        try await seedRepairRow(id: "deleted-elsewhere", date: base.addingTimeInterval(50), inbox: true, unread: true)
+        try await seedRepairRow(id: "older", date: base.addingTimeInterval(10), inbox: false, unread: false)
+        try await seedOwedRepair(upperBound: Date())
+        configureQuietHistory()
+        apiClient.listMessagesResponder = { query in
+            guard query.hasPrefix("-in:spam -in:trash after:") else { return nil }
+            return MessagesListResponse(
+                messages: [MessageListItem(id: "older", threadId: "t-older")],
+                nextPageToken: nil,
+                resultSizeEstimate: 1
+            )
+        }
+        let stack = coreDataStack!
+        apiClient.getMessageOperation = { id, _ in
+            let context = stack.newBackgroundContext()
+            await context.perform {
+                _ = PendingActionBuilder().markAsRead().forMessage(id).pending().build(in: context)
+            }
+            try await stack.saveAsync(context: context)
+            throw APIError.notFound(id)
+        }
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let stillThere = await messageExists(id: "deleted-elsewhere")
+        XCTAssertTrue(stillThere, "The row a queued action names is left alone")
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        XCTAssertEqual(
+            owed.upperBound.timeIntervalSince(base.addingTimeInterval(50)),
+            0.001,
+            accuracy: 0.0005,
+            "The bound stays just above the row left alone"
+        )
+    }
+
+    /// A full batch is compared newest first, so the request budget goes to its newest
+    /// candidates and the bound moves to just above the newest one not asked.
+    ///
+    /// Revert-check: the `sortDescriptors` of the tie fetch in
+    /// `HistoryRecoveryRepair.storedBatch`.
+    @MainActor
+    func testOwedRepair_fullBatch_asksTheNewestCandidatesFirst() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        let count = HistoryRecoveryRepair.batchRowLimit + 10
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            for index in 0..<count {
+                _ = MessageBuilder()
+                    .withId(String(format: "row-%04d", index))
+                    .withDate(base.addingTimeInterval(TimeInterval(index)))
+                    .read()
+                    .build(in: context)
+            }
+        }
+        try await coreDataStack.saveAsync(context: context)
+        try await seedOwedRepair(upperBound: Date())
+        configureQuietHistory()
+        let asked = AskedIds()
+        apiClient.getMessageOperation = { id, format in
+            asked.insert(id, format: format)
+            return GmailMessage(id: id, threadId: "t-\(id)", labelIds: [], snippet: nil, historyId: nil, internalDate: nil, payload: nil, sizeEstimate: nil)
+        }
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let newest = Set((count - HistoryRecoveryRepair.metadataRequestBudget..<count).map { String(format: "row-%04d", $0) })
+        XCTAssertEqual(asked.ids, newest)
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        let firstUnasked = base.addingTimeInterval(TimeInterval(count - HistoryRecoveryRepair.metadataRequestBudget - 1))
+        XCTAssertEqual(owed.upperBound.timeIntervalSince(firstUnasked), 0.001, accuracy: 0.0005)
+    }
+
     /// An account-scoped failure ends the run, and nothing of the repair commits.
     ///
     /// Revert-check: the `rethrowIfRunAborting` call in `HistoryRecoveryRepair.askGmail`.

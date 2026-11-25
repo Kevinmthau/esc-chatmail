@@ -275,7 +275,10 @@ struct HistoryRecoveryRepair {
                     oldest as NSDate,
                     upper as NSDate
                 )
+                ties.sortDescriptors = [NSSortDescriptor(key: "internalDate", ascending: false)]
                 ties.relationshipKeyPathsForPrefetching = ["labels", "conversation"]
+                // Newest first, as the first fetch: the request budget goes to the newest
+                // candidates, and the bound stays just above the newest one not asked.
                 messages = try context.fetch(ties)
             }
 
@@ -324,7 +327,10 @@ struct HistoryRecoveryRepair {
                 if OutboundSendDeliveryState.localOptimisticMessageID(for: message) != nil {
                     skipped.insert(message.id)
                 } else if let modifiedAt = message.localModifiedAtValue,
-                          now.timeIntervalSince(modifiedAt) <= HistoryProcessor.maxLocalModificationAge {
+                          abs(now.timeIntervalSince(modifiedAt)) <= HistoryProcessor.maxLocalModificationAge {
+                    // Within the window either side: a marker stamped while the clock was
+                    // ahead would otherwise defer its row, and with it every older row,
+                    // until the clock passed it.
                     // Asked without `hasPendingLocalModification`, which logs a warning
                     // for every row whose marker is stale: up to a whole batch a run.
                     deferred.insert(message.id)
@@ -348,11 +354,15 @@ struct HistoryRecoveryRepair {
 
     // MARK: - Apply
 
-    /// Applies `plan` in `context` and returns the conversations it changed. Only for the
-    /// run's final rollup-serializer block, keyed on `plan.conversationObjectIDs`; the
-    /// caller recomputes their rollups and saves. Every row is asked again whether the
-    /// repair may change it, since the plan was made outside the block.
-    static func apply(_ plan: Plan, in context: NSManagedObjectContext) async throws -> Set<NSManagedObjectID> {
+    /// Applies `plan` in `context`. Only for the run's final rollup-serializer block,
+    /// keyed on `plan.conversationObjectIDs`; the caller recomputes their rollups, stages
+    /// the progress (`HistoryRecoveryRepairPolicy.progressAfterApply`) and saves. Every row
+    /// is asked again whether the repair may change it, since the plan was made outside
+    /// the block and a user's action can be queued meanwhile.
+    /// The internal dates of the rows `apply` left alone because they now wait
+    /// (`Exclusions`): the bound must stay above them, or the plan's change to them, made
+    /// for this gap, is never applied.
+    static func apply(_ plan: Plan, in context: NSManagedObjectContext) async throws -> [Date] {
         guard !plan.isEmpty else { return [] }
         let removals = plan.removals
         let states = plan.states
@@ -369,31 +379,28 @@ struct HistoryRecoveryRepair {
             inboxRequest.fetchLimit = 1
             let inboxLabel = try context.fetch(inboxRequest).first
 
-            var changed = Set<NSManagedObjectID>()
-            for message in messages where !excluded.contains(message.id) {
-                let conversationID = message.conversation?.objectID
+            var skippedDates: [Date] = []
+            for message in messages {
+                guard !excluded.contains(message.id) else {
+                    skippedDates.append(message.internalDate)
+                    continue
+                }
                 if removals.contains(message.id) {
                     context.delete(message)
-                    if let conversationID { changed.insert(conversationID) }
                     continue
                 }
                 guard let state = states[message.id] else { continue }
-                var didChange = false
                 let existingInbox = message.labels?.first { $0.id == "INBOX" }
                 if state.hasInbox, existingInbox == nil, let inboxLabel {
                     message.addToLabels(inboxLabel)
-                    didChange = true
                 } else if !state.hasInbox, let existingInbox {
                     message.removeFromLabels(existingInbox)
-                    didChange = true
                 }
                 if message.isUnread != state.isUnread {
                     message.isUnread = state.isUnread
-                    didChange = true
                 }
-                if didChange, let conversationID { changed.insert(conversationID) }
             }
-            return changed
+            return skippedDates
         }
     }
 }
