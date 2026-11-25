@@ -421,11 +421,16 @@ final class IncrementalSyncOrchestrator {
 
             // One batch of the repair an earlier history recovery owes the rows it did
             // not visit. Planned here (network work, nothing written), applied in the
-            // final save's rollup block and saved with its progress.
+            // final save's rollup block and saved with its progress. Only after a
+            // terminal, clean slice, as the delivery-unknown probe: its requests come
+            // before the final save, and a slice still catching up, or one that will
+            // retry its failures, should commit its own mail first.
             let repairTimer = timing.start("historyRecoveryRepair")
             let recoveryRepairStep = try await planHistoryRecoveryRepair(
                 accountEmail: accountData.email,
-                allowsExpensiveWork: allowsExpensiveRecovery,
+                allowsExpensiveWork: allowsExpensiveRecovery
+                    && historyResult.nextPageToken == nil
+                    && !fetchResult.hasFailures,
                 in: context
             )
             timing.finish(repairTimer, detail: recoveryRepairStep.map { "\($0.plan.progress)" } ?? "none")

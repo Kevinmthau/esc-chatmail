@@ -2122,7 +2122,6 @@ final class IncrementalSyncCursorTests: XCTestCase {
         apiClient.getMessageErrors = [:]
         configureCleanRecoveryListing()
         await ModificationTracker.shared.reset()
-        let before = Date()
         _ = try await makeOrchestrator().performSync(
             progressHandler: { _, _ in },
             initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
@@ -2132,7 +2131,40 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertEqual(historyId, "7777")
         let owedAfterAdvance = try await fetchOwedRepair()
         let owed = try XCTUnwrap(owedAfterAdvance, "The advancing save must owe a repair")
-        XCTAssertGreaterThanOrEqual(owed.upperBound, before)
+        XCTAssertEqual(owed.upperBound, .distantFuture, "Owed from the end of time, never the device's clock")
+    }
+
+    /// A slice that has not reached history's last page plans no repair batch: the
+    /// batch's requests come before the final save, and the slice commits its own mail
+    /// first. The repair stays owed as it was.
+    ///
+    /// Revert-check: drop `historyResult.nextPageToken == nil` from the repair's gate in
+    /// `IncrementalSyncOrchestrator` and the run lists the repair's span.
+    @MainActor
+    func testOwedRepair_truncatedHistorySlice_plansNoBatch() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        try await seedRepairRow(id: "archived-elsewhere", date: base, inbox: true, unread: true)
+        let owedBound = Date()
+        try await seedOwedRepair(upperBound: owedBound)
+        apiClient.listHistoryError = nil
+        apiClient.setHistoryResponsesByPageToken([
+            (pageToken: nil, response: HistoryResponse(history: nil, nextPageToken: "p-next", historyId: "2000"))
+        ])
+        apiClient.listMessagesQueries = []
+
+        _ = try await makeOrchestrator().performSync(
+            historyPageLimit: 1,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertFalse(
+            apiClient.listMessagesQueries.contains { $0?.hasPrefix("-in:spam -in:trash after:") == true },
+            "A truncated slice must not list the repair's span"
+        )
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        XCTAssertEqual(owed.upperBound.timeIntervalSince(owedBound), 0, accuracy: 0.001)
     }
 
     /// The run after a recovery repairs the rows stored before its window: archived and
