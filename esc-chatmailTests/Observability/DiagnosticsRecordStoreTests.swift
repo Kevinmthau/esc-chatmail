@@ -68,6 +68,40 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
         XCTAssertEqual(store.recordURLs().count, 2)
     }
 
+    // Revert-check: fails if file names sort by time again: after the clock goes back each
+    // new record sorts before the old ones and is pruned by the next write.
+    func testRecords_afterTheClockWentBack_areKeptInTheOrderWritten() throws {
+        let clock = StoreTestClock()
+        let store = DiagnosticsRecordStore(directory: directory, maxRecords: 2, now: { clock.next() })
+        store.record(kind: .diagnostic, payloadJSON: hangPayload())
+        store.record(kind: .diagnostic, payloadJSON: hangPayload())
+        clock.setBack(by: 3600)
+
+        let first = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
+        let second = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
+
+        XCTAssertEqual(store.recordURLs(), [first, second])
+    }
+
+    func testWriteFile_leavesARecentReportAndRemovesAStaleOne() throws {
+        let temporary = directory.appendingPathComponent("tmp", isDirectory: true)
+        let store = DiagnosticsRecordStore(directory: directory.appendingPathComponent("records"))
+        store.record(kind: .diagnostic, payloadJSON: hangPayload())
+        let now = Date()
+
+        let earlier = try DiagnosticsReport.writeFile(store: store, temporaryDirectory: temporary, now: now)
+        let later = try DiagnosticsReport.writeFile(store: store, temporaryDirectory: temporary, now: now)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: earlier.path), "A report minutes old is kept")
+        XCTAssertNotEqual(earlier.deletingLastPathComponent(), later.deletingLastPathComponent())
+
+        _ = try DiagnosticsReport.writeFile(
+            store: store,
+            temporaryDirectory: temporary,
+            now: now.addingTimeInterval(DiagnosticsReport.staleReportAge + 60)
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: earlier.path), "A stale report is removed")
+    }
+
     func testRecord_largerThanTheByteCap_isNotWritten() {
         let store = DiagnosticsRecordStore(directory: directory, maxBytes: 10)
 

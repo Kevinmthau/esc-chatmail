@@ -70,7 +70,7 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
         return lock.withLock {
             do {
                 try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-                let url = directory.appendingPathComponent(fileName(for: kind))
+                let url = directory.appendingPathComponent(fileName(for: kind, sequence: nextSequenceLocked()))
                 try projected.write(to: url, options: [.atomic])
                 pruneLocked(keeping: url)
                 return url
@@ -98,13 +98,24 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
         }
     }
 
-    /// The file name sorts by time: milliseconds since 1970, zero-padded, then a random
-    /// suffix so two payloads in one millisecond cannot collide.
-    private func fileName(for kind: DiagnosticsPayloadProjection.Kind) -> String {
+    /// The file name sorts in the order the records were written: a zero-padded sequence
+    /// number, one past the highest the store holds, comes first. Then the kind, the
+    /// time for a reader, and a random suffix. Ordered by the time instead, a clock set
+    /// back made every new record sort before the old ones, and each was pruned by the
+    /// next write.
+    private func fileName(for kind: DiagnosticsPayloadProjection.Kind, sequence: Int) -> String {
         let milliseconds = Int64((now().timeIntervalSince1970 * 1000).rounded())
-        let stamp = String(format: "%015lld", milliseconds)
         let suffix = UUID().uuidString.prefix(8)
-        return "\(Self.filePrefix)\(stamp)-\(kind.rawValue)-\(suffix).\(Self.fileExtension)"
+        return String(format: "%@%010d-%@-%lld-%@.%@",
+                      Self.filePrefix, sequence, kind.rawValue, milliseconds, String(suffix), Self.fileExtension)
+    }
+
+    private func nextSequenceLocked() -> Int {
+        let highest = ownFilesLocked().compactMap { url -> Int? in
+            let name = url.lastPathComponent.dropFirst(Self.filePrefix.count)
+            return Int(name.prefix(10))
+        }.max() ?? 0
+        return highest + 1
     }
 
     private func ownFilesLocked() -> [URL] {
@@ -115,8 +126,7 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
             .map { directory.appendingPathComponent($0) }
     }
 
-    /// Removes the oldest files past the caps, never `written`: a clock set back makes the
-    /// newest record's name sort first, and pruning by name alone deleted it at once.
+    /// Removes the oldest files past the caps, never `written`, whatever its name sorts as.
     private func pruneLocked(keeping written: URL) {
         var files = ownFilesLocked().filter { $0 != written }.map { url -> (URL, Int) in
             let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0

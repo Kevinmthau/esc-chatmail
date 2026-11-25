@@ -14,8 +14,8 @@ import MetricKit
 /// iOS only for now: on the Mac the system's crash reports and the unified log already
 /// hold what this would, and the Mac app has no background tasks to be killed in.
 ///
-/// Registered once, in `App.init`, and never in the unit-test host (its container is the
-/// real app's on the Mac, and its tests must not write the app's files); the position is
+/// Registered once, in `App.init`, and never in the unit-test host (tests must not write
+/// the app's files or receive the app's payloads); the position is
 /// pinned from source (`MetricKitRegistrationSourceTests`).
 ///
 /// `@unchecked Sendable`: every stored property is immutable, and `DiagnosticsRecordStore`

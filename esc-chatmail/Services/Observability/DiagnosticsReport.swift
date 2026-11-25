@@ -39,8 +39,10 @@ enum DiagnosticsReport {
             ?? Data("{}".utf8)
     }
 
-    /// Writes the report into `temporaryDirectory/DiagnosticsReport`, emptied first, so
-    /// sharing again replaces the last report instead of leaving one behind each time.
+    /// Writes the report into a folder of its own under `temporaryDirectory/DiagnosticsReport`,
+    /// and removes the folders of earlier reports older than `staleReportAge`, so shares do
+    /// not pile up, while two at once (or a share sheet still reading the last file) keep
+    /// their own files.
     static func writeFile(
         store: DiagnosticsRecordStore,
         bundle: Bundle = .main,
@@ -54,8 +56,9 @@ enum DiagnosticsReport {
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             generatedAt: now
         )
-        let directory = temporaryDirectory.appendingPathComponent("DiagnosticsReport", isDirectory: true)
-        try? FileManager.default.removeItem(at: directory)
+        let parent = temporaryDirectory.appendingPathComponent("DiagnosticsReport", isDirectory: true)
+        removeStaleReports(in: parent, now: now)
+        let directory = parent.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -63,5 +66,24 @@ enum DiagnosticsReport {
         let url = directory.appendingPathComponent("MushMail Diagnostics \(formatter.string(from: now)).json")
         try data.write(to: url, options: [.atomic])
         return url
+    }
+
+    static let staleReportAge: TimeInterval = 10 * 60
+
+    /// Removes the report folders in `parent` made more than `staleReportAge` ago. Only
+    /// folders directly in `parent`, which this type alone writes.
+    static func removeStaleReports(in parent: URL, now: Date) {
+        let fileManager = FileManager.default
+        let folders = (try? fileManager.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: [.creationDateKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        for folder in folders {
+            let created = (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            if now.timeIntervalSince(created) > staleReportAge {
+                try? fileManager.removeItem(at: folder)
+            }
+        }
     }
 }
