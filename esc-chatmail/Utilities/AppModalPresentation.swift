@@ -20,10 +20,9 @@ enum AppModalPresentation {
         #if os(iOS)
         TopPresentableViewController.foregroundWindowHasPresentation()
         #elseif os(macOS)
+        // A sheet is the key window while it is up (`FocusedWindowSheet`).
         guard let app = NSApp else { return false }
-        if app.modalWindow != nil { return true }
-        guard let window = app.keyWindow ?? app.mainWindow else { return false }
-        return window.attachedSheet != nil
+        return app.modalWindow != nil || FocusedWindowSheet.isAttached
         #else
         false
         #endif

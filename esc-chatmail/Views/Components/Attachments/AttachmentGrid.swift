@@ -56,7 +56,7 @@ struct AttachmentGrid: View {
         }
         guard !overflow.isEmpty else { return }
         Task {
-            for attachment in overflow where !attachment.isDeleted {
+            for attachment in overflow where !attachment.isDeleted && attachment.managedObjectContext != nil {
                 await downloader.downloadAttachmentIfNeeded(for: attachment)
             }
         }
