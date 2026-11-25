@@ -222,9 +222,16 @@ final class ChatViewModel: ObservableObject {
     private let outboundReplyContextBuilder: OutboundReplyContextBuilder
     private let composeForwardModeContextBuilder: ComposeForwardModeContextBuilder
     private let downloadAttachmentForForwarding: @MainActor (Attachment) async -> Void
+    private struct ForwardPreparation {
+        let id: UUID
+        let messageObjectID: NSManagedObjectID
+        let task: Task<Void, Never>
+    }
     /// A forward waiting for its message's attachments to download before its draft opens
-    /// (`setMessageToForward`). Internal for tests, which await it.
-    private(set) var forwardPreparationTask: Task<Void, Never>?
+    /// (`setMessageToForward`).
+    private var forwardPreparation: ForwardPreparation?
+    /// Internal for tests, which await it.
+    var forwardPreparationTask: Task<Void, Never>? { forwardPreparation?.task }
 
     private let authSession: AuthSession
     private let htmlContentHandler: HTMLContentHandler
@@ -864,25 +871,36 @@ final class ChatViewModel: ObservableObject {
     /// downloaded first and the draft opens once they are done, whatever the outcome: one
     /// that still has no file is left out, or refuses the forward if it is inline, as before
     /// (`ForwardAttachmentDownloadPolicy`). Meanwhile each attachment shows its own progress
-    /// in the bubble, and a second Forward is ignored until the draft opens.
+    /// in the bubble. Forward on the same message again is the same request and is ignored;
+    /// Forward on another message replaces it. The draft does not open over anything the
+    /// user opened meanwhile, nor after the chat went away (`cancelPrefetch`).
     func setMessageToForward(_ message: Message) {
-        guard forwardPreparationTask == nil else { return }
-        let missingFiles = message.attachmentsForForwarding.filter(
-            ForwardAttachmentDownloadPolicy.needsDownload
-        )
-        guard !missingFiles.isEmpty else {
+        let messageObjectID = message.objectID
+        if forwardPreparation != nil {
+            guard forwardPreparation?.messageObjectID != messageObjectID else { return }
+            cancelForwardPreparation()
+        }
+        let missingFileIDs = message.attachmentsForForwarding
+            .filter(ForwardAttachmentDownloadPolicy.needsDownload)
+            .map(\.objectID)
+        guard !missingFileIDs.isEmpty else {
             openForwardCompose(for: message)
             return
         }
-        let messageObjectID = message.objectID
-        let download = downloadAttachmentForForwarding
-        forwardPreparationTask = Task { [weak self] in
-            for attachment in missingFiles where !attachment.isDeleted {
-                await download(attachment)
+        let preparationID = UUID()
+        let task = Task { [weak self] in
+            for attachmentID in missingFileIDs {
+                guard !Task.isCancelled, let self else { return }
+                // Asked again after every wait: a sync may have deleted the row meanwhile,
+                // which leaves this context an object with no properties to read.
+                guard let attachment = self.liveAttachment(with: attachmentID) else { continue }
+                await self.downloadAttachmentForForwarding(attachment)
             }
-            guard let self else { return }
-            self.forwardPreparationTask = nil
-            guard let message = self.resolveMessage(with: messageObjectID) else { return }
+            guard let self, self.forwardPreparation?.id == preparationID else { return }
+            self.forwardPreparation = nil
+            guard !Task.isCancelled,
+                  self.destination == nil,
+                  let message = self.resolveMessage(with: messageObjectID) else { return }
             // The downloads saved on background contexts; read what they stored now
             // rather than wait for the merge into this context.
             for attachment in message.attachmentsArray where !attachment.isDeleted {
@@ -890,6 +908,25 @@ final class ChatViewModel: ObservableObject {
             }
             self.openForwardCompose(for: message)
         }
+        forwardPreparation = ForwardPreparation(
+            id: preparationID,
+            messageObjectID: messageObjectID,
+            task: task
+        )
+    }
+
+    private func cancelForwardPreparation() {
+        forwardPreparation?.task.cancel()
+        forwardPreparation = nil
+    }
+
+    private func liveAttachment(with objectID: NSManagedObjectID) -> Attachment? {
+        guard let attachment = try? viewContext.existingObject(with: objectID) as? Attachment,
+              !attachment.isDeleted,
+              attachment.managedObjectContext != nil else {
+            return nil
+        }
+        return attachment
     }
 
     private func openForwardCompose(for message: Message) {
@@ -1737,9 +1774,12 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// Cancels all prefetch tasks. Call from ChatView.onDisappear.
+    /// Cancels all prefetch tasks, and a forward still waiting for its attachments, whose
+    /// draft would otherwise open over whatever replaced the chat. Call from
+    /// ChatView.onDisappear.
     func cancelPrefetch() {
         prefetchTaskManager.cancelAll()
+        cancelForwardPreparation()
     }
 
     // MARK: - Display Name Resolution

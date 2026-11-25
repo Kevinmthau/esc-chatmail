@@ -14,7 +14,7 @@ struct AttachmentGrid: View {
 
     var body: some View {
         LazyVGrid(columns: columns, spacing: 4) {
-            ForEach(attachments.prefix(6)) { attachment in
+            ForEach(attachments.prefix(Self.visibleCellCount)) { attachment in
                 AttachmentGridItem(
                     attachment: attachment,
                     downloader: downloader,
@@ -36,5 +36,22 @@ struct AttachmentGrid: View {
             }
         }
         .cornerRadius(14)
+        // The grid draws six cells and folds the rest into the sixth's "+N", which opens them
+        // in Quick Look (and on the Mac, Save All saves them). Attachments download only when
+        // asked for (`AttachmentDownloader`), and those past the sixth have no view of their
+        // own to ask when it appears, so the grid asks for them when it appears.
+        .task(id: overflowAttachmentIDs) {
+            for attachment in attachments.dropFirst(Self.visibleCellCount) {
+                guard !Task.isCancelled else { return }
+                guard !attachment.isDeleted, attachment.managedObjectContext != nil else { continue }
+                await downloader.downloadAttachmentIfNeeded(for: attachment)
+            }
+        }
+    }
+
+    static let visibleCellCount = 6
+
+    private var overflowAttachmentIDs: [NSManagedObjectID] {
+        attachments.dropFirst(Self.visibleCellCount).map(\.objectID)
     }
 }
