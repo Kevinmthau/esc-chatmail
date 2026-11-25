@@ -176,42 +176,12 @@ struct RecipientInputSection: View {
                         Button {
                             handleAutocompleteSelection(contact)
                         } label: {
-                            HStack(spacing: 12) {
-                                if let imageData = contact.imageData,
-                                   let image = PlatformImage(data: imageData) {
-                                    Image(platformImage: image)
-                                        .resizable()
-                                        .aspectRatio(contentMode: .fill)
-                                        .frame(width: 40, height: 40)
-                                        .clipShape(Circle())
-                                } else {
-                                    contactInitialsView(for: contact)
-                                }
-
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(contact.displayName)
-                                        .font(.system(size: 16))
-                                        .foregroundColor(.primary)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                    Text(contact.primaryEmail)
-                                        .font(.system(size: 13))
-                                        .foregroundColor(.secondary)
-                                        .lineLimit(1)
-                                        .truncationMode(.middle)
-                                }
-
-                                Spacer()
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                            .contentShape(Rectangle())
+                            AutocompleteContactRow(contact: contact)
                         }
                         .buttonStyle(.plain)
                         .background(Color.systemBackground)
 
-                        Divider()
-                            .padding(.leading, 68)
+                        AutocompleteContactRowDivider()
                     }
                 }
             }
@@ -219,17 +189,6 @@ struct RecipientInputSection: View {
         }
         .background(Color.systemBackground)
         .shadow(color: .black.opacity(0.1), radius: 4, y: 2)
-    }
-
-    private func contactInitialsView(for contact: ContactsService.ContactMatch) -> some View {
-        ZStack {
-            Circle()
-                .fill(Color.systemGray4)
-                .frame(width: 40, height: 40)
-            Text(contact.displayName.prefix(1).uppercased())
-                .font(.system(size: 16, weight: .medium))
-                .foregroundColor(.white)
-        }
     }
 
     private func handleAutocompleteSelection(_ contact: ContactsService.ContactMatch) {
@@ -241,5 +200,73 @@ struct RecipientInputSection: View {
         viewModel.addRecipient(email: contact.primaryEmail, displayName: contact.displayName)
         viewModel.recipientInput = ""
         viewModel.clearAutocomplete()
+    }
+}
+
+/// One contact in the To: field's suggestion list. Its own view, because the section is
+/// also reached as a plain value (`ComposeView` reads `autocompleteOverlay` off it), where
+/// a `@ScaledMetric` would never be installed and would keep its default size.
+/// Name and address follow Dynamic Type, the name a step above the address
+/// (Kevin, 2026-11-25: both read too small at 16 and 13 points).
+struct AutocompleteContactRow: View {
+    let contact: ContactsService.ContactMatch
+
+    @ScaledMetric(relativeTo: .title3) private var nameSize: CGFloat = 20
+    @ScaledMetric(relativeTo: .callout) private var emailSize: CGFloat = 16
+    @ScaledMetric(relativeTo: .title3) private var avatarSize: CGFloat = 44
+
+    var body: some View {
+        HStack(spacing: 12) {
+            avatar
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(contact.displayName)
+                    .font(.system(size: nameSize))
+                    .foregroundColor(.primary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Text(contact.primaryEmail)
+                    .font(.system(size: emailSize))
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
+        .contentShape(Rectangle())
+    }
+
+    @ViewBuilder
+    private var avatar: some View {
+        if let imageData = contact.imageData,
+           let image = PlatformImage(data: imageData) {
+            Image(platformImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(width: avatarSize, height: avatarSize)
+                .clipShape(Circle())
+        } else {
+            ZStack {
+                Circle()
+                    .fill(Color.systemGray4)
+                    .frame(width: avatarSize, height: avatarSize)
+                Text(contact.displayName.prefix(1).uppercased())
+                    .font(.system(size: avatarSize * 0.4, weight: .medium))
+                    .foregroundColor(.white)
+            }
+        }
+    }
+}
+
+/// The hairline under each suggestion, inset to start under the name, as before.
+private struct AutocompleteContactRowDivider: View {
+    @ScaledMetric(relativeTo: .title3) private var avatarSize: CGFloat = 44
+
+    var body: some View {
+        Divider()
+            .padding(.leading, 16 + avatarSize + 12)
     }
 }
