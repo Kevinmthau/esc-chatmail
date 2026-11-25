@@ -55,9 +55,11 @@ enum PendingActionTargets {
         return messageIDs(actionType: actionType, messageId: messageId, payload: payload)
     }
 
-    /// Every message a live action still has to change in Gmail. Call inside
-    /// the context's `perform`. A failed read throws: it is never "no live
-    /// actions", which would let reconciliation undo a change still queued.
+    /// Every message a live action still has to change in Gmail, in the
+    /// state label reconciliation repairs (INBOX and UNREAD): a star or unstar
+    /// changes neither, and is no reason to leave drift unrepaired. Call
+    /// inside the context's `perform`. A failed read throws: it is never "no
+    /// live actions", which would let reconciliation undo a change still queued.
     static func liveTargetMessageIDs(in context: NSManagedObjectContext) throws -> Set<String> {
         let request = NSFetchRequest<NSDictionary>(entityName: "PendingAction")
         request.resultType = .dictionaryResultType
@@ -65,8 +67,10 @@ enum PendingActionTargets {
         request.predicate = NSPredicate(format: "status IN %@", liveStatuses)
         var targets = Set<String>()
         for row in try context.fetch(request) {
+            let actionType = (row["actionType"] as? String).flatMap(PendingAction.ActionType.init(rawValue:))
+            if actionType == .star || actionType == .unstar { continue }
             targets.formUnion(messageIDs(
-                actionType: (row["actionType"] as? String).flatMap(PendingAction.ActionType.init(rawValue:)),
+                actionType: actionType,
                 messageId: row["messageId"] as? String,
                 payloadString: row["payload"] as? String
             ))

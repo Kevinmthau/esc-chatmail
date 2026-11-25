@@ -8,7 +8,8 @@ private enum PendingActionProcessingOutcome: Equatable {
     case authenticationError
     case credentialsRevoked
     case quotaExhausted
-    case transientFailure(retryAfter: TimeInterval?)
+    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool)
+    case offline
     case cancelled
     case skipped
 }
@@ -280,9 +281,15 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             resetTransientRetryBackoff()
             scheduleQuotaRetry()
             return
-        case .transientFailure(let retryAfter):
+        case .transientFailure(let retryAfter, let abandonedHead):
             pendingProcessTask = nil
-            scheduleTransientRetry(retryAfter: retryAfter)
+            scheduleTransientRetry(retryAfter: retryAfter, restartingBackoff: abandonedHead)
+            return
+        case .offline:
+            // The next connectivity edge resumes the queue; an enqueue or a
+            // foreground start meanwhile runs it if the path is back.
+            pendingProcessTask = nil
+            _ = scheduleRequestedFollowUpIfNeeded()
             return
         case .skipped:
             pendingProcessTask = nil
@@ -413,8 +420,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
 
     /// Arms the queue head's backoff after a transient failure: the base delay
     /// doubling per consecutive transient run, at least Gmail's Retry-After.
-    private func scheduleTransientRetry(retryAfter: TimeInterval?) {
+    /// A run that abandoned the head restarts the doubling: the next row is
+    /// a new head and owes nothing to the old one's failures.
+    private func scheduleTransientRetry(retryAfter: TimeInterval?, restartingBackoff: Bool) {
         guard transientRetryTask == nil else { return }
+        if restartingBackoff {
+            transientRetryAttempt = 0
+        }
 
         let backoff = Self.transientRetryDelay(
             forAttempt: transientRetryAttempt,
@@ -450,7 +462,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         transientRetryTaskID = nil
     }
 
-    private func resetTransientRetryBackoff() {
+    /// Also the banner's Retry (`retryAbandonedAction`, `retryAllAbandonedActions`):
+    /// the user asked for the queue now, so the head's backoff is not theirs.
+    func resetTransientRetryBackoff() {
         cancelTransientRetryTask()
         transientRetryAttempt = 0
     }
@@ -517,7 +531,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         switch result.outcome {
         case .authenticationError, .credentialsRevoked, .quotaExhausted, .transientFailure, .completed:
             return .skipped
-        case .cancelled, .skipped:
+        case .cancelled, .skipped, .offline:
             return result.outcome
         }
     }
@@ -910,8 +924,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             resetAuthenticationRetryBackoff()
             resetTransientRetryBackoff()
             scheduleQuotaRetry()
-        case .transientFailure(let retryAfter):
-            scheduleTransientRetry(retryAfter: retryAfter)
+        case .transientFailure(let retryAfter, let abandonedHead):
+            scheduleTransientRetry(retryAfter: retryAfter, restartingBackoff: abandonedHead)
+        case .offline:
+            break
         case .completed:
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
@@ -1018,8 +1034,10 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 activeProcessingOutcome = .quotaExhausted
             case .stopRun(.cancelled):
                 activeProcessingOutcome = .cancelled
-            case .stopRun(.transientFailure(let retryAfter)):
-                activeProcessingOutcome = .transientFailure(retryAfter: retryAfter)
+            case .stopRun(.transientFailure(let retryAfter, let abandonedHead)):
+                activeProcessingOutcome = .transientFailure(retryAfter: retryAfter, abandonedHead: abandonedHead)
+            case .stopRun(.offline):
+                activeProcessingOutcome = .offline
             }
             break
         }

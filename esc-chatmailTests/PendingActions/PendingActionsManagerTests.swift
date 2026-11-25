@@ -1560,15 +1560,18 @@ final class PendingActionsManagerTests: XCTestCase {
     }
 
     // Revert-check: fails if `processAction` spends budget when the monitor
-    // reads offline after the failure.
+    // reads offline after the failure, or if that requeue arms the transient
+    // timer, which held the queue for up to 15 minutes after the path came
+    // back, refusing the reconnect.
     // HONEST SCOPE: with the run made to continue after a transient failure
     // (the old shape, without its sleep) this requeue loops on the same row;
     // `testTransientFailure_lastUnitAbandonsTheHeadAndNotifies` and the
     // one-unit test catch that revert instead.
-    func testTransientFailureAfterThePathWentAway_spendsNoBudget() async throws {
+    func testTransientFailureAfterThePathWentAway_spendsNoBudgetAndResumesOnReconnect() async throws {
         let monitor = ControllableNetworkMonitor(isConnected: true)
         let executor = TransientFailureActionExecutor(
             error: URLError(.networkConnectionLost),
+            failures: 1,
             beforeThrowing: { monitor.setConnected(false) }
         )
         let recorder = TransientRetryRecorder()
@@ -1588,6 +1591,73 @@ final class PendingActionsManagerTests: XCTestCase {
         let action = try XCTUnwrap(context.fetch(PendingAction.fetchRequest()).first)
         XCTAssertEqual(action.status, "pending")
         XCTAssertEqual(action.retryCount, 0)
+        let delays = await recorder.scheduledDelays
+        XCTAssertTrue(delays.isEmpty, "No transient timer for a lost path")
+
+        monitor.setConnected(true)
+        try await waitUntil { executor.executedMessageIds.count >= 2 }
+        await manager.waitUntilScheduledProcessingIsIdle()
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty, "The reconnect resumed the queue")
+    }
+
+    // Revert-check: fails if `scheduleTransientRetry` stops restarting the
+    // doubling when the run abandoned the head: the next row would start at
+    // the old head's 120 s (up to 15 minutes), not 60 s.
+    func testTransientFailure_abandoningTheHeadRestartsTheBackoffForTheNextRow() async throws {
+        let sleeper = ControlledRetrySleeper()
+        let executor = TransientFailureActionExecutor(error: APIError.serverError(503))
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetrySleeper: { delay in await sleeper.sleep(for: delay) }
+        )
+        _ = PendingActionBuilder().markAsRead().forMessage("worn").withStatus("failed").withRetryCount(3).createdMinutesAgo(2).build(in: context)
+        _ = PendingActionBuilder().markAsRead().forMessage("next").pending().createdMinutesAgo(1).build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await waitUntil { executor.executedMessageIds.count >= 1 }
+        var deadline = Date().addingTimeInterval(2)
+        while await sleeper.scheduledDelays.isEmpty, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        await sleeper.resume()
+        try await waitUntil { executor.executedMessageIds.count >= 2 }
+        deadline = Date().addingTimeInterval(2)
+        while await sleeper.scheduledDelays.count < 2, Date() < deadline {
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        XCTAssertEqual(executor.executedMessageIds, ["worn", "worn"])
+        let delays = await sleeper.scheduledDelays
+        XCTAssertEqual(delays, [60, 60], "The second run abandoned the head; the next row starts at the base")
+    }
+
+    // Revert-check: fails if `retryAllAbandonedActions` stops resetting the
+    // transient backoff: the banner's Retry would hide the banner and send
+    // nothing until the timer ran out.
+    func testBannerRetry_runsAtOnceDespiteTheTransientBackoff() async throws {
+        let executor = TransientFailureActionExecutor(error: APIError.serverError(503))
+        let recorder = TransientRetryRecorder(blocks: true)
+        let coordinator = SyncRunCoordinator()
+        let manager = makeTransientManager(executor: executor, coordinator: coordinator, recorder: recorder)
+        _ = PendingActionBuilder().markAsRead().forMessage("worn").withStatus("failed").withRetryCount(4).build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await recorder.waitUntilScheduled(count: 1)
+        context.refreshAllObjects()
+        XCTAssertEqual(try context.fetch(PendingAction.fetchRequest()).first?.status, "abandoned")
+
+        let maybeRequest = await coordinator.makeAccountWorkRequest()
+        let request = try XCTUnwrap(maybeRequest)
+        await manager.retryAllAbandonedActions(accountWorkRequest: request)
+
+        XCTAssertEqual(executor.executedMessageIds, ["worn", "worn"], "The user's Retry ran now")
+        await recorder.releaseAll()
     }
 
     // Revert-check: fails if `scheduleTransientRetry` stops waiting at least
@@ -2374,6 +2444,8 @@ private actor QuotaOnceThenSuccessActionExecutor: ActionExecutorProtocol {
 
 /// Throws `error` for the first `failures` executions (every one when nil),
 /// then succeeds; records each execution's message ID.
+/// `@unchecked Sendable`: `lock` guards `_executedMessageIds`; the other
+/// stored properties are immutable.
 private final class TransientFailureActionExecutor: ActionExecutorProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private let error: Error
@@ -2412,6 +2484,7 @@ private final class TransientFailureActionExecutor: ActionExecutorProtocol, @unc
 /// are bounded by a deadline, so a revert that never schedules fails the test
 /// instead of hanging it.
 private actor TransientRetryRecorder {
+    // The actor serializes `scheduledDelays` and `held`.
     private(set) var scheduledDelays: [TimeInterval] = []
     private let blocks: Bool
     private var held: [CheckedContinuation<Bool, Never>] = []

@@ -25,8 +25,13 @@ enum PendingActionRunStopReason {
     /// 2 to 30 s inside the run and go again at once: a minute of 5xx spent
     /// the head's whole budget and abandoned it, then each row behind it,
     /// while foreground sync waited for the run. `retryAfter` is Gmail's
-    /// Retry-After, when it gave one.
-    case transientFailure(retryAfter: TimeInterval?)
+    /// Retry-After, when it gave one. `abandonedHead` is true when that unit
+    /// was the head's last: the next row starts its own backoff from the base.
+    case transientFailure(retryAfter: TimeInterval?, abandonedHead: Bool)
+    /// The path went away under the request: the head was requeued with its
+    /// budget untouched and the run ends. No timer: the next connectivity
+    /// edge resumes the queue, as it does for a run that starts offline.
+    case offline
 }
 
 /// The fields of a `PendingAction` that processing needs, read on the fetching
@@ -258,23 +263,26 @@ extension PendingActionsManager {
                 return .continueRun
             }
 
-            if networkMonitor.isConnected {
-                // One unit for this run's one attempt, never more: the next
-                // attempt waits for the manager's timer, out of the run.
-                await handleActionFailure(
-                    objectID: objectID,
-                    retryCount: retryCount,
-                    shouldRetry: true,
-                    context: context
-                )
-            } else {
+            guard networkMonitor.isConnected else {
                 // The path went away under the request: not a verdict on the
                 // action. Requeue it with its budget untouched.
                 await updateActionStatus(objectID: objectID, status: "pending", context: context)
+                return .stopRun(.offline)
             }
+            // One unit for this run's one attempt, never more: the next
+            // attempt waits for the manager's timer, out of the run.
+            let abandonedHead = await handleActionFailure(
+                objectID: objectID,
+                retryCount: retryCount,
+                shouldRetry: true,
+                context: context
+            )
             // Strictly oldest-first: the rows behind the head wait with it,
             // so a later markUnread never overtakes an earlier markRead.
-            return .stopRun(.transientFailure(retryAfter: Self.retryAfter(of: error)))
+            return .stopRun(.transientFailure(
+                retryAfter: Self.retryAfter(of: error),
+                abandonedHead: abandonedHead
+            ))
         }
     }
 
@@ -346,7 +354,9 @@ extension PendingActionsManager {
     /// Handles a failed action by incrementing retry count.
     /// - Parameters:
     ///   - shouldRetry: If false, immediately abandons the action without incrementing retry count
-    func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, shouldRetry: Bool, context: NSManagedObjectContext) async {
+    /// - Returns: Whether the action was abandoned.
+    @discardableResult
+    func handleActionFailure(objectID: NSManagedObjectID, retryCount: Int16, shouldRetry: Bool, context: NSManagedObjectContext) async -> Bool {
         let shouldNotify = await context.perform {
             do {
                 guard let action = try context.existingObject(with: objectID) as? PendingAction else {
@@ -390,6 +400,7 @@ extension PendingActionsManager {
                 NotificationCenter.default.post(name: .pendingActionFailed, object: nil)
             }
         }
+        return shouldNotify
     }
 
     /// Clears local modification flags after successful sync, unless another

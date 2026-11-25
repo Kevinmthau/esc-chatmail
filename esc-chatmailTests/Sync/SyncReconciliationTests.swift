@@ -457,8 +457,19 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertTrue(state.isUnread)
     }
 
+    // Revert-check: fails if `PendingActionTargets.liveTargetMessageIDs`
+    // stops leaving out star and unstar: a queued star would stop INBOX and
+    // UNREAD drift being repaired.
+    func testReconcileLabelStates_queuedStarDoesNotBlockInboxRepair() async throws {
+        let (state, _) = try await reconcileQueuedArchive(actionStatus: "pending", actionsAreStars: true)
+
+        XCTAssertTrue(state.labelIds.contains("INBOX"))
+        XCTAssertTrue(state.isUnread)
+    }
+
     private func reconcileQueuedArchive(
-        actionStatus: String
+        actionStatus: String,
+        actionsAreStars: Bool = false
     ) async throws -> (state: (isUnread: Bool, labelIds: Set<String>), outcome: LabelReconciliationOutcome) {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageList(["queued-archive"])
@@ -476,14 +487,12 @@ final class SyncReconciliationTests: XCTestCase {
             .inConversation(conversation)
             .build(in: seedContext)
         message.localModifiedAt = Date().addingTimeInterval(-2 * 60 * 60)
-        _ = PendingActionBuilder()
-            .archive()
+        _ = (actionsAreStars ? PendingActionBuilder().withActionType("star") : PendingActionBuilder().archive())
             .forMessage("queued-archive")
             .withStatus(actionStatus)
             .createdAt(Date().addingTimeInterval(-2 * 60 * 60))
             .build(in: seedContext)
-        _ = PendingActionBuilder()
-            .markAsRead()
+        _ = (actionsAreStars ? PendingActionBuilder().withActionType("unstar") : PendingActionBuilder().markAsRead())
             .forMessage("queued-archive")
             .withStatus(actionStatus)
             .createdAt(Date().addingTimeInterval(-2 * 60 * 60))
