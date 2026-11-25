@@ -198,14 +198,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
 
     /// Each formatting start tag is compared, attribute by attribute, with
     /// the active formatting elements (6,000 `<b>`s of 100 attributes took
-    /// 50 s). The tags hold few names with long values, because many names
-    /// this deep are refused by `treeWork` first (each name's walk up its
-    /// ancestors). Revert-check: `formattingCompareWork` in
-    /// `ParseCost.excessWork`.
+    /// 50 s). Revert-check: `formattingCompareWork` in `ParseCost.excessWork`.
     func testParseDocument_manyAttributeHeavyFormattingTags_isRefusedAsTooCostly() {
-        let value = String(repeating: "x", count: 1_000)
-        let attributes = (0..<10).map { " a\($0)=\"\(value)\"" }.joined()
-        let html = String(repeating: "<b\(attributes)>", count: 200)
+        let attributes = (0..<100).map { " a\($0)=1" }.joined()
+        let html = String(repeating: "<b\(attributes)>", count: 1_500)
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
         XCTAssertGreaterThan(cost.formattingCompareWork, EmailDOMParseAdmission.maximumFormattingCompareWork)
@@ -665,10 +661,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
     /// removed from it by the sanitizer, marks the element's query indexes
     /// stale up every ancestor, so names cost the depth each: 1,000 `<b>`s
     /// of 100 names under 500 `div`s took 6.3 s to make and 7.5 s more to
-    /// remove the names, in a Release build (0.6 s under 5 `div`s). It is
-    /// counted in `treeWork`.
-    /// Revert-check: `attributeWalks` in `estimate(in:limit:…)` (adding 0,
-    /// the body is admitted).
+    /// remove the names, in a Release build (0.6 s under 5 `div`s). The
+    /// tree's measured depth decides it, after the parse.
+    /// Revert-check: `attributeWalkRefusal` in `admittedParse` (the body is
+    /// admitted).
     func testParseDocument_manyNamesDeepInTheTree_isRefusedAsTooCostly() {
         var html = String(repeating: "<div>", count: 500)
         for tag in 0..<1_000 {
@@ -676,13 +672,50 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         }
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
-        XCTAssertGreaterThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertNil(cost.excessWork)
+        XCTAssertEqual(cost.attributeNames, 100_000)
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
-            XCTAssertEqual(
-                error as? EmailDOMParseRefusal,
-                .tooCostlyToParse(work: cost.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
-            )
+            guard case let .tooCostlyToParse(work, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+            XCTAssertGreaterThanOrEqual(work, 500 * 100_000)
         }
+    }
+
+    /// Where the scan's bound sends a body to the measuring thread, the
+    /// walks are checked against the depth measured there: refused where
+    /// the tree is deep, and admitted where only the bound is (here, forms
+    /// inside a form, which SwiftSoup ignores and the scan cannot be sure
+    /// of: 1,000 give a bound of 1,007 over a tree 5 deep), however many
+    /// names it holds.
+    /// Revert-check: `attributeWalkRefusal` in `parseOnMeasuringThread`
+    /// (`deep` is admitted), and passing it the bound in place of the
+    /// measured depth (`shallow` is refused).
+    func testParseOnMeasuringThread_attributeWalks_followTheMeasuredDepth() throws {
+        let unsureForms = String(repeating: "<form>x", count: 1_000)
+        var deep = String(repeating: "<div>", count: 300) + unsureForms
+        for tag in 0..<150 {
+            deep += "<b" + (0..<100).map { " n\(tag)x\($0)=1" }.joined() + "></b>"
+        }
+        var shallow = unsureForms + "<table>"
+        for row in 0..<2_000 {
+            shallow += "<tr><td" + (0..<12).map { " a\(row)x\($0)=1" }.joined() + ">x</td></tr>"
+        }
+        shallow += "</table>"
+        for html in [deep, shallow] {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertGreaterThan(cost.depth, EmailDOMParseAdmission.maximumDepth)
+            XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertNil(cost.excessWork)
+        }
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(deep), "deep") { error in
+            guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        }
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(shallow), "shallow")
     }
 
     /// Attribute-heavy mail is charged far below the limit: a newsletter of
@@ -708,6 +741,10 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             XCTAssertLessThan(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork / 100, String(html.prefix(60)))
             XCTAssertLessThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork / 100, String(html.prefix(60)))
             XCTAssertLessThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork / 10, String(html.prefix(60)))
+            XCTAssertNil(
+                EmailDOMParseAdmission.attributeWalkRefusal(depth: cost.depth, attributeNames: cost.attributeNames),
+                String(html.prefix(60))
+            )
             XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(60)))
         }
     }

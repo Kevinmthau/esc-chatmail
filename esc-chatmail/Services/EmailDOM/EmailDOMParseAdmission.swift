@@ -157,7 +157,12 @@ enum EmailDOMParseAdmission {
             throw refusal(excessWork: excess)
         }
         if bound > maximumDepth {
-            return try parseOnMeasuringThread(rootDepth: rootDepth, roots: roots, parse: parse)
+            return try parseOnMeasuringThread(
+                rootDepth: rootDepth,
+                attributeNames: cost.attributeNames,
+                roots: roots,
+                parse: parse
+            )
         }
 
         var parsed: Parsed? = try parse()
@@ -171,11 +176,16 @@ enum EmailDOMParseAdmission {
             runOnMeasuringThread(handOff) { $0.parsed = nil }
             throw refusal(depth: depth)
         }
+        if let excess = attributeWalkRefusal(depth: depth, attributeNames: cost.attributeNames) {
+            // Within `maximumDepth`: released here.
+            throw refusal(excessWork: excess)
+        }
         return parsed!
     }
 
     private static func parseOnMeasuringThread<Parsed>(
         rootDepth: Int,
+        attributeNames: Int,
         roots: @escaping (Parsed) -> [Node],
         parse: @escaping () throws -> Parsed
     ) throws -> Parsed {
@@ -185,7 +195,11 @@ enum EmailDOMParseAdmission {
                 let parsed = try parse()
                 let depth = measuredDepth(of: roots(parsed), rootDepth: rootDepth)
                 if depth <= maximumDepth {
-                    handOff.parsed = parsed
+                    if let excess = attributeWalkRefusal(depth: depth, attributeNames: attributeNames) {
+                        handOff.error = refusal(excessWork: excess)
+                    } else {
+                        handOff.parsed = parsed
+                    }
                 } else {
                     // `parsed` is released when this closure returns, on
                     // this thread.
@@ -366,11 +380,15 @@ enum EmailDOMParseAdmission {
     ///   `<html a b c d>`s took 10 s in a Release build, in the parse. The
     ///   scan charges, at each name of every such tag, the size of every
     ///   name such tags gave before it, in bytes and one for each name.
-    /// - Added to `treeWork`, the names times the depth bound, nine times
-    ///   over: each name made into an element's list, or removed from it,
-    ///   marks the element's query indexes stale up every ancestor (about
-    ///   275 ns a name and level, measured in Release for both, against
-    ///   about 33 ns a unit of `treeWork`).
+    /// - `attributeNames`, for the walks after the parse: each name made
+    ///   into an element's list, or removed from it, marks the element's
+    ///   query indexes stale up every ancestor (1,000 `<b>`s of 100 names
+    ///   under 500 `div`s: 6.3 s to make, 7.5 s more for the sanitizer to
+    ///   remove them, in a Release build). The tree's real depth decides
+    ///   that, and every tree handed back is measured, so the names times
+    ///   the measured depth are checked then (`attributeWalkRefusal`); the
+    ///   scan's depth bound would refuse an old-style newsletter its
+    ///   unclosed tags give a bound in the thousands.
     struct ParseCost: Equatable {
         let depth: Int
         let treeWork: Int
@@ -379,6 +397,8 @@ enum EmailDOMParseAdmission {
         let childMoveWork: Int
         let attributeDedupWork: Int
         let rootAttributeMergeWork: Int
+        /// Attribute names begun in every tag the scan read.
+        let attributeNames: Int
 
         /// The refusal past one of the work limits.
         var excessWork: EmailDOMParseRefusal? {
@@ -432,9 +452,19 @@ enum EmailDOMParseAdmission {
     /// About half a second of index rebuilds (measured at about 14 ns a
     /// unit, for `html` and `body` alike).
     static let maximumRootAttributeMergeWork = 35_000_000
-    /// `treeWork` units for each attribute name at each level of the depth
-    /// bound (`ParseCost`).
-    static let attributeWalkWeight = 9
+    /// About a second of walks up the ancestors of attribute-holding
+    /// elements, in names times levels (measured at about 275 ns each to
+    /// make a name and remove it, half that to make it alone).
+    static let maximumAttributeWalkWork = 4_000_000
+
+    /// The refusal of a tree whose attribute names, made into their lists,
+    /// would walk past `maximumAttributeWalkWork` (`ParseCost`): checked
+    /// against the measured depth, which every name's walk is within.
+    static func attributeWalkRefusal(depth: Int, attributeNames: Int) -> EmailDOMParseRefusal? {
+        let work = Saturating.multiply(depth, attributeNames)
+        guard work > maximumAttributeWalkWork else { return nil }
+        return .tooCostlyToParse(work: work, limit: maximumAttributeWalkWork)
+    }
 
     /// `isTableContextFragment`: parsed in a table part's context
     /// (`EmailDOMFragmentParser`), where SwiftSoup ignores table parts that
@@ -566,23 +596,15 @@ enum EmailDOMParseAdmission {
             childMoveWork = scanner.childMoveWork
             attributeWork = scanner.attributeWork
         }
-        // Each attribute name made into an element's list, or removed from
-        // it, marks the element's query indexes stale up every ancestor.
-        let attributeWalks = Saturating.multiply(
-            Saturating.multiply(depth, attributeWork.names),
-            attributeWalkWeight
-        )
         return ParseCost(
             depth: depth,
-            treeWork: Saturating.add(
-                Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
-                attributeWalks
-            ),
+            treeWork: Saturating.add(Saturating.multiply(depth, count.tokenCount), rebuildWork),
             titleSearchBytes: TitleSearchCost.bytesRead(in: bytes),
             formattingCompareWork: formattingCompareWork,
             childMoveWork: childMoveWork,
             attributeDedupWork: attributeWork.dedupWork,
-            rootAttributeMergeWork: attributeWork.rootMergeWork
+            rootAttributeMergeWork: attributeWork.rootMergeWork,
+            attributeNames: attributeWork.names
         )
     }
 }
