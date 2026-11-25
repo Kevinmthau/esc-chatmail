@@ -3,14 +3,16 @@ import CoreData
 @testable import esc_chatmail
 
 /// Two lookups that read their table from one end until model 8 gave them an index, on a
-/// real SQLite store. In the default plan, unlike `ScaleQueryPlanTests`: each asserts only
-/// what the schema leaves SQLite (an equality or `IN` on a column with an index, against a
-/// whole-table read), never a choice between two indexes.
+/// real SQLite store. In the default plan, unlike `ScaleQueryPlanTests`: each asserts an
+/// indexed search against a whole-table read, never a choice between two indexes. The
+/// conversation lookup is an equality on the one indexed column; the attachment check is
+/// an `OR` of two `IN`s, whose two-index plan is a cost choice SQLite's no-statistics
+/// defaults make lopsidedly.
 final class ModelV8IndexPlanTests: XCTestCase {
-    /// A conversation looked up by its UUID (`ConversationPredicates.id`, about twenty
-    /// callers: the page loader's first lookup, send anchoring, launch repairs) searches
-    /// `byConversationIdIndex`. Before model 8 `ZCONVERSATION.ZID` had no index, and each
-    /// lookup read every conversation.
+    /// A conversation looked up by its UUID (`ConversationPredicates.id`, and the many
+    /// call sites that spell `id == %@` themselves: the page loader's first lookup, send
+    /// anchoring, launch repairs) searches `byConversationIdIndex`. Before model 8
+    /// `ZCONVERSATION.ZID` had no index, and each lookup read every conversation.
     ///
     /// HONEST SCOPE: no line of production code reverts this; a model version that drops
     /// the index does.
@@ -35,7 +37,12 @@ final class ModelV8IndexPlanTests: XCTestCase {
         }
 
         XCTAssertEqual(found, [wanted])
-        let plan = try XCTUnwrap(plans.first { $0.reads("ZCONVERSATION") }, "\(plans)")
+        // Asked for by its SQL: a recording is of the whole process, and a task an
+        // earlier test left can add a fetch of its own.
+        let plan = try XCTUnwrap(
+            plans.first { $0.reads("ZCONVERSATION") && $0.sql.contains("ZID =") },
+            "\(plans)"
+        )
         XCTAssertEqual(plan.scans(of: "ZCONVERSATION"), [], "\(plan)")
         XCTAssertTrue(
             plan.indexes(on: "ZCONVERSATION").contains("Z_Conversation_byConversationIdIndex"),
@@ -77,7 +84,10 @@ final class ModelV8IndexPlanTests: XCTestCase {
         }
 
         XCTAssertEqual(referenced, ["attachments/v8/b.pdf", "previews/v8/a.jpg"])
-        let plan = try XCTUnwrap(plans.first { $0.reads("ZATTACHMENT") }, "\(plans)")
+        let plan = try XCTUnwrap(
+            plans.first { $0.reads("ZATTACHMENT") && $0.sql.contains("ZLOCALURL IN") },
+            "\(plans)"
+        )
         XCTAssertEqual(plan.scans(of: "ZATTACHMENT"), [], "\(plan)")
         XCTAssertEqual(
             Set(plan.indexes(on: "ZATTACHMENT")),

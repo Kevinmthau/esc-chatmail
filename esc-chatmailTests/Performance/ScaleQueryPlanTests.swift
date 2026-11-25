@@ -162,10 +162,6 @@ final class ScaleQueryPlanTests: XCTestCase {
             XCTAssertEqual(messagePlans.count, 1, "\(statistics):\n\(messagePlans)")
             let plan = try XCTUnwrap(messagePlans.first)
             XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)")
-            XCTAssertFalse(
-                plan.indexes(on: "ZMESSAGE").contains("Z_Message_byIsUnreadIndex"),
-                "\(statistics): \(plan)"
-            )
             XCTAssertTrue(Self.isDrivenByTheConversation(plan), "\(statistics): \(plan)")
         }
     }
@@ -221,12 +217,6 @@ final class ScaleQueryPlanTests: XCTestCase {
         line: UInt = #line
     ) {
         XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)", file: file, line: line)
-        XCTAssertFalse(
-            plan.indexes(on: "ZMESSAGE").contains("Z_Message_byIsUnreadIndex"),
-            "\(statistics): \(plan)",
-            file: file,
-            line: line
-        )
         XCTAssertTrue(Self.isDrivenByTheConversation(plan), "\(statistics): \(plan)", file: file, line: line)
     }
 

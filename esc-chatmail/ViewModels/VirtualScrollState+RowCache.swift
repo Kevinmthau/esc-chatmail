@@ -313,8 +313,9 @@ extension VirtualScrollState {
     ///
     /// The conversation is looked up by its UUID, unless the caller hands in
     /// the permanent objectID an earlier load resolved
-    /// (`knownConversationObjectID`): the lookup compares a UUID no index
-    /// covers, and a chat that pages as it scrolls made it at every page.
+    /// (`knownConversationObjectID`): the lookup is a fetch by a UUID (with
+    /// no index on it before model 8, a read of every conversation), and a
+    /// chat that pages as it scrolls made it at every page.
     /// The messages are then asked for by the objectID, which SQLite answers
     /// from the conversation's own message index whatever statistics the
     /// store has. A known ID whose conversation the store no longer has

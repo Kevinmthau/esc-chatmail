@@ -244,9 +244,13 @@ enum MessagePredicates {
     }
 
     /// See `visibleInChat(conversation:)`. This form joins every message to
-    /// its conversation to compare a UUID no index covers, and on a store
-    /// without SQLite statistics that walks the whole message table
-    /// (`docs/scalability-review.md`, `chat-transcript-uuid-join-offset-paging`).
+    /// its conversation to compare a UUID. Before model 8 no index covered
+    /// that UUID, and on a store without SQLite statistics the join walked
+    /// the whole message table (`docs/scalability-review.md`,
+    /// `chat-transcript-uuid-join-offset-paging`); model 8's
+    /// `byConversationIdIndex` lets SQLite find the conversation first, but
+    /// which side it starts from is still its cost choice, and the objectID
+    /// form needs no join at all.
     /// Use it only where the conversation has no permanent objectID yet.
     static func visibleInChat(conversationId: UUID) -> NSPredicate {
         NSPredicate(

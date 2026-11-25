@@ -9,10 +9,16 @@ import XCTest
 /// in the store itself (so a `bodyEvicted == NO` filter matches it on SQLite), and come out
 /// with model 8's indexes and none of the ones it dropped.
 ///
-/// The index assertions are the point of the `versionHashModifier` on each entity model 8
-/// changes: an index-only edit leaves the entity's version hash as it was, Core Data then
-/// sees nothing to migrate, and an existing store keeps its old indexes for good while a
-/// new install gets the new ones.
+/// The index assertions are why model 8 sets a `versionHashModifier` on each entity whose
+/// indexes it changes: an index-only edit leaves the entity's version hash as it was, and
+/// a store with nothing to migrate keeps its old indexes for good while a new install gets
+/// the new ones.
+///
+/// HONEST SCOPE: Message's new attribute makes this store migrate whatever the modifiers
+/// say, so this test cannot show that the modifiers on Conversation, Attachment,
+/// SyncCheckpoint and AbandonedSyncMessage are needed (Core Data may rebuild every index
+/// in any migration). It does fail if a migrated store lacks an added index or keeps a
+/// dropped one, and if a migrated row holds NULL for `bodyEvicted`.
 @MainActor
 final class IndexesAndBodyEvictedV8MigrationTests: XCTestCase {
     /// The fetch indexes model 8 declares, by the name Core Data gives them in SQLite.
