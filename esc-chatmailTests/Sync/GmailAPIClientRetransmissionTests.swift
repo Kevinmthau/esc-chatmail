@@ -142,7 +142,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
 
         do {
             _ = try await client.sendMessage(
-                rawMessage: "raw",
+                mimeData: Data("raw".utf8),
                 beforeTransmission: {
                     await admissionProbe.record()
                 }
@@ -166,7 +166,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.status(500)]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected ambiguous delivery")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             guard case APIError.serverError(let code) = underlying else {
@@ -184,7 +184,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.error(URLError(.timedOut))]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected ambiguous delivery")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             XCTAssertEqual((underlying as? URLError)?.code, .timedOut)
@@ -199,7 +199,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.error(URLError(.networkConnectionLost))]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected ambiguous delivery")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             XCTAssertEqual((underlying as? URLError)?.code, .networkConnectionLost)
@@ -218,7 +218,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             .data(200, Self.sendResponseBody)
         ]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "Connect failures prove the request was never delivered; retry is safe")
@@ -230,7 +230,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             .data(200, Self.sendResponseBody)
         ]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A TLS handshake failure proves no application data was sent; retry is safe")
@@ -262,7 +262,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
                 .data(200, Self.sendResponseBody)
             ]
 
-            let response = try await client.sendMessage(rawMessage: "raw")
+            let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
             XCTAssertEqual(response.id, "sent-1", "\(code.rawValue)")
             XCTAssertEqual(
@@ -290,7 +290,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             StubURLProtocol.script = [.error(URLError(code))]
 
             do {
-                _ = try await client.sendMessage(rawMessage: "raw")
+                _ = try await client.sendMessage(mimeData: Data("raw".utf8))
                 XCTFail("Expected a definite failure for \(code.rawValue)")
             } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
                 XCTFail("\(code.rawValue) never reached Gmail; it must not be ambiguous: \(underlying)")
@@ -313,7 +313,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.status(400)]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected definite client rejection")
         } catch is GmailMessageSendError {
             XCTFail("A 400 response proves Gmail rejected the send")
@@ -330,7 +330,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             .data(200, Self.sendResponseBody)
         ]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A 429 proves the request was rejected; retry is safe")
@@ -342,7 +342,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             .data(200, Self.sendResponseBody)
         ]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(
@@ -363,7 +363,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         ]
 
         let task = Task {
-            try await client.sendMessage(rawMessage: "raw")
+            try await client.sendMessage(mimeData: Data("raw".utf8))
         }
 
         let enteredBackoff = await waitUntil {
@@ -404,7 +404,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         ]
 
         let task = Task {
-            try await client.sendMessage(rawMessage: "raw")
+            try await client.sendMessage(mimeData: Data("raw".utf8))
         }
 
         let enteredBackoff = await waitUntil {
@@ -445,7 +445,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         ]
 
         let task = Task {
-            try await client.sendMessage(rawMessage: "raw")
+            try await client.sendMessage(mimeData: Data("raw".utf8))
         }
 
         let enteredBackoff = await waitUntil {
@@ -545,7 +545,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.status(401), .data(200, Self.sendResponseBody)]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected the breaker to stop the refreshed attempt")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             XCTFail("A 401 proves Gmail refused the send; it must not be ambiguous: \(underlying)")
@@ -606,7 +606,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.status(429), .data(200, Self.sendResponseBody)]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected the breaker to stop the second attempt")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             XCTFail("A 429 proves Gmail refused the send; it must not be ambiguous: \(underlying)")
@@ -636,7 +636,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         )
         StubURLProtocol.script = [.data(200, Self.sendResponseBody)]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
@@ -671,7 +671,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
         StubURLProtocol.script = [.error(URLError(.notConnectedToInternet))]
 
         do {
-            _ = try await client.sendMessage(rawMessage: "raw")
+            _ = try await client.sendMessage(mimeData: Data("raw".utf8))
             XCTFail("Expected a definite offline failure")
         } catch GmailMessageSendError.ambiguousDelivery(let underlying) {
             XCTFail("An offline send never left the device; it must not be ambiguous: \(underlying)")
@@ -707,7 +707,7 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             .data(200, Self.sendResponseBody)
         ]
 
-        let response = try await client.sendMessage(rawMessage: "raw")
+        let response = try await client.sendMessage(mimeData: Data("raw".utf8))
 
         XCTAssertEqual(response.id, "sent-1")
         XCTAssertEqual(StubURLProtocol.requestCount, 2, "A 401 proves the request was rejected; refresh + retry is safe")
