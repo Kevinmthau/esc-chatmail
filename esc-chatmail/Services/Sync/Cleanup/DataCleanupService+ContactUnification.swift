@@ -235,7 +235,11 @@ extension DataCleanupService {
             // added that sorts first moves the key, and the chat holding the
             // old key names only the old one.
             let keyNow = Self.noteToSelfKey(known: known, contactAddresses: current)
-            let earlierKeys = [applied, routedBefore, legacyOfLastRead]
+            // The old rule's key only until a set is recorded: after that the
+            // stored conversations carry the applied set's, and the old rule's,
+            // kept in memory for the process, would put a key in scope at every
+            // pass for good.
+            let earlierKeys = [applied ?? legacyOfLastRead, routedBefore]
                 .compactMap { $0 }
                 .compactMap { Self.noteToSelfKey(known: known, contactAddresses: $0) }
             if let keyNow, earlierKeys.contains(where: { $0 != keyNow }) {

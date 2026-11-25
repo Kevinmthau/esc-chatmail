@@ -790,6 +790,26 @@ final class ContactUnificationCleanupTests: XCTestCase {
         XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [], "Nothing adopted")
     }
 
+    /// Once a set is recorded, the old rule's set says nothing about the stored
+    /// conversations: with nothing changed, the pass has nothing to do, even where the
+    /// old rule's note-to-self key differs from the current one (round 4 of PR 481).
+    ///
+    /// Revert-check: `applied ?? legacyOfLastRead` in the note-to-self key block of
+    /// `DataCleanupService.SelfAddressChange` (list `legacyOfLastRead` always).
+    func testSelfAddressChange_steadyState_needsNoPassWhateverTheOldRuleSaid() {
+        let current: Set<String> = [Self.me, "zz.me@old.example"]
+        let change = DataCleanupService.SelfAddressChange(
+            applied: current,
+            routedBefore: current,
+            current: current,
+            knownAddresses: [Self.me],
+            legacyOfLastRead: [Self.me, "zz.me@old.example", "a.me@icloud.example"]
+        )
+
+        XCTAssertFalse(change.needsPass)
+        XCTAssertEqual(change.changedAddresses, [])
+    }
+
     /// After a switch of accounts the router hashed with nothing from Contacts until
     /// this pass adopted the new account's set; the applied set, if any, is another
     /// account's. What the router used until now is in scope too.
