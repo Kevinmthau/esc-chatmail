@@ -673,7 +673,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
         XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
         XCTAssertNil(cost.excessWork)
-        XCTAssertEqual(cost.attributeNames, 100_000)
+        XCTAssertGreaterThanOrEqual(cost.attributeNames, 100_000)
         XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
             guard case let .tooCostlyToParse(work, limit) = error as? EmailDOMParseRefusal else {
                 return XCTFail("\(error)")
@@ -716,6 +716,63 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
         }
         XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(shallow), "shallow")
+    }
+
+    /// A formatting element SwiftSoup rebuilds is copied with its names, in
+    /// the parse, where no walk is made; the sanitizer then removes every
+    /// copy's `on…` names, each removal a walk up its ancestors. 400 `div`s,
+    /// a `b` of 20 `on…` names closed by `</p>`, then 10,000 `<p>y</p>`s,
+    /// each rebuilding it: 12.7 s of removals in a Release build, from 20
+    /// names read. Other names a copy is given walk nowhere.
+    /// Revert-check: `rebuildNamesAcrossTokens` in `estimate(in:limit:…)`'s
+    /// copied names (the body is admitted).
+    func testParseDocument_eventNamesCopiedByRebuilds_areCountedForTheirWalks() {
+        func body(_ prefix: String) -> String {
+            String(repeating: "<div>", count: 400)
+                + "<p><b" + (0..<20).map { " \(prefix)\($0)=1" }.joined() + ">x</p>"
+                + String(repeating: "<p>y</p>", count: 1_000)
+        }
+        let events = body("on")
+        let cost = EmailDOMParseAdmission.estimatedCost(of: events, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertNil(cost.excessWork)
+        XCTAssertGreaterThan(cost.attributeNames, 20 * 1_000)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(events)) { error in
+            guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        }
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: body("class")).attributeNames, 20)
+    }
+
+    /// SwiftSoup takes a tag for the run of its name after the last NUL
+    /// when that run has no uppercase letter (`readTagName` sets the tag's
+    /// identity from each run): `<x\0html a>` gives the root `a`, as
+    /// `<html a>` does, and `<x\0select>` is a `select`. A run with an
+    /// uppercase letter, or none, leaves the tag unknown.
+    /// Revert-check: the last run in `TokenizingScanner.readTag` (the first
+    /// two are admitted, and `select` is not read), and the NUL in
+    /// `AttributeWorkBound.rootTagNameEnds` (the third is admitted).
+    func testParseDocument_tagNamedAfterANul_isReadAsSwiftSoupReadsIt() {
+        let tags = (0..<4_000).map { " a\($0) b\($0) c\($0) d\($0)>" }
+        let shapes = [
+            "<html><body>x" + tags.map { "<x\u{0}html" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<Y\u{0}\u{0}body" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<x\u{0}html" + $0 }.joined() + "<select>",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertGreaterThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+        }
+        XCTAssertEqual(
+            EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}html a b>").rootAttributeMergeWork,
+            EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<html a b>").rootAttributeMergeWork
+        )
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}HTML a b>").rootAttributeMergeWork, 0)
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}html\u{0} a b>").rootAttributeMergeWork, 0)
+        XCTAssertFalse(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: "<p><x\u{0}select><b>").followed)
+        XCTAssertTrue(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: "<p><x\u{0}SELECT><b>").followed)
     }
 
     /// Attribute-heavy mail is charged far below the limit: a newsletter of
@@ -1363,9 +1420,13 @@ private struct TagSoupGenerator {
         while Self.rareNames.contains(name), below(8) != 0 {
             name = pick(Self.names)
         }
-        switch below(10) {
+        switch below(12) {
         case 0: return name.uppercased()
         case 1: return name.prefix(1).uppercased() + name.dropFirst()
+        // SwiftSoup takes the tag for the run after a NUL in its name when
+        // that run has no uppercase letter.
+        case 2: return "x\u{0}" + name
+        case 3: return pick(["x", "X\u{0}y", "b"]) + "\u{0}" + name.uppercased()
         default: return name
         }
     }
