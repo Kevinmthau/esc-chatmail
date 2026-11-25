@@ -2,10 +2,12 @@ import Foundation
 import CoreData
 
 /// Whether the pending-action processing loop may continue after an action's
-/// outcome. `.stopRun` means the failure is account-scoped (authentication,
-/// revoked credentials, or Gmail quota exhaustion): every remaining action
-/// would fail identically, burning its retry budget toward abandonment for a
-/// condition no action caused.
+/// outcome. `.stopRun` means either the failure is account-scoped
+/// (authentication, revoked credentials, or Gmail quota exhaustion), where
+/// every remaining action would fail identically, burning its retry budget
+/// toward abandonment for a condition no action caused, or it is transient
+/// (`.transientFailure`), which ends the run and leaves the wait to the
+/// manager's out-of-run timer.
 enum PendingActionRunDisposition {
     case continueRun
     case stopRun(PendingActionRunStopReason)
@@ -16,6 +18,15 @@ enum PendingActionRunStopReason {
     case credentialsRevoked
     case quotaExhausted
     case cancelled
+    /// A retryable failure (5xx, rate limit, timeout, a transport error): the
+    /// head spent at most one unit of its budget and the run ends, so the
+    /// exclusive boundary is free while the manager waits
+    /// (`PendingActionsManager.scheduleTransientRetry`). It used to sleep
+    /// 2 to 30 s inside the run and go again at once: a minute of 5xx spent
+    /// the head's whole budget and abandoned it, then each row behind it,
+    /// while foreground sync waited for the run. `retryAfter` is Gmail's
+    /// Retry-After, when it gave one.
+    case transientFailure(retryAfter: TimeInterval?)
 }
 
 /// The fields of a `PendingAction` that processing needs, read on the fetching
@@ -235,28 +246,43 @@ extension PendingActionsManager {
             }
 
             let shouldRetry = shouldRetryError(error)
-            await handleActionFailure(
-                objectID: objectID,
-                retryCount: retryCount,
-                shouldRetry: shouldRetry,
-                context: context
-            )
-
-            // Only apply backoff delay for retryable errors
-            // Non-retryable errors (404, 401, validation) skip delay since retrying won't help
-            if shouldRetry {
-                // Wait before processing next action using exponential backoff
-                // Uses the PRE-increment retryCount intentionally:
-                // - After 1st failure (retryCount was 0): 2^0 * base = 2s
-                // - After 2nd failure (retryCount was 1): 2^1 * base = 4s
-                // - After 3rd failure (retryCount was 2): 2^2 * base = 8s, etc.
-                let delay = baseRetryDelay * pow(2.0, Double(retryCount))
-                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(min(delay, 30.0) * 1_000_000_000)) else {
-                    return .stopRun(.cancelled)
-                }
+            guard shouldRetry else {
+                // Not retryable (404, validation): abandoned at once, and the
+                // rows behind it go on in this run.
+                await handleActionFailure(
+                    objectID: objectID,
+                    retryCount: retryCount,
+                    shouldRetry: false,
+                    context: context
+                )
+                return .continueRun
             }
-            return .continueRun
+
+            if networkMonitor.isConnected {
+                // One unit for this run's one attempt, never more: the next
+                // attempt waits for the manager's timer, out of the run.
+                await handleActionFailure(
+                    objectID: objectID,
+                    retryCount: retryCount,
+                    shouldRetry: true,
+                    context: context
+                )
+            } else {
+                // The path went away under the request: not a verdict on the
+                // action. Requeue it with its budget untouched.
+                await updateActionStatus(objectID: objectID, status: "pending", context: context)
+            }
+            // Strictly oldest-first: the rows behind the head wait with it,
+            // so a later markUnread never overtakes an earlier markRead.
+            return .stopRun(.transientFailure(retryAfter: Self.retryAfter(of: error)))
         }
+    }
+
+    private nonisolated static func retryAfter(of error: Error) -> TimeInterval? {
+        if case .rateLimited(let retryAfter)? = error as? APIError {
+            return retryAfter
+        }
+        return nil
     }
 
     private func pendingActionRunStopReason(for error: APIError) -> PendingActionRunStopReason? {
@@ -374,7 +400,7 @@ extension PendingActionsManager {
         payload: [String: Any]?,
         completedActionCreatedAt: Date
     ) async {
-        let completedTargetIDs = Self.executedTargetMessageIDs(
+        let completedTargetIDs = PendingActionTargets.messageIDs(
             actionType: actionType,
             messageId: messageId,
             payload: payload
@@ -392,7 +418,7 @@ extension PendingActionsManager {
             do {
                 let actionRequest = NSFetchRequest<PendingAction>(entityName: "PendingAction")
                 actionRequest.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                    NSPredicate(format: "status IN %@", ["pending", "processing", "failed"]),
+                    NSPredicate(format: "status IN %@", PendingActionTargets.liveStatuses),
                     NSCompoundPredicate(orPredicateWithSubpredicates: [
                         NSPredicate(format: "messageId IN %@", Array(completedTargetIDs)),
                         NSPredicate(format: "payload != nil")
@@ -402,7 +428,7 @@ extension PendingActionsManager {
 
                 var protectedTargetIDs = Set<String>()
                 for action in try markerContext.fetch(actionRequest) {
-                    let targetIDs = Self.executedTargetMessageIDs(
+                    let targetIDs = PendingActionTargets.messageIDs(
                         actionType: action.actionTypeEnum,
                         messageId: action.messageIdValue,
                         payloadString: action.payloadValue
@@ -447,54 +473,6 @@ extension PendingActionsManager {
                 category: .sync
             )
         }
-    }
-
-    private nonisolated static func executedTargetMessageIDs(
-        actionType: PendingAction.ActionType?,
-        messageId: String?,
-        payload: [String: Any]?
-    ) -> Set<String> {
-        var directMessageIDs = Set<String>()
-        if let messageId, !messageId.isEmpty {
-            directMessageIDs.insert(messageId)
-        }
-        let payloadMessageIDs = Set(
-            (payload?["messageIds"] as? [String] ?? []).filter { !$0.isEmpty }
-        )
-
-        guard let actionType else {
-            // An invalid live row will be abandoned when processed. Until
-            // then, retain every marker it might plausibly describe.
-            return directMessageIDs.union(payloadMessageIDs)
-        }
-
-        switch actionType {
-        case .markRead:
-            return payloadMessageIDs.isEmpty ? directMessageIDs : payloadMessageIDs
-        case .archiveConversation, .reportSpam:
-            return payloadMessageIDs
-        case .markUnread, .archive, .star, .unstar:
-            return directMessageIDs
-        }
-    }
-
-    private nonisolated static func executedTargetMessageIDs(
-        actionType: PendingAction.ActionType?,
-        messageId: String?,
-        payloadString: String?
-    ) -> Set<String> {
-        let payload: [String: Any]?
-        if let payloadString,
-           let data = payloadString.data(using: .utf8) {
-            payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        } else {
-            payload = nil
-        }
-        return executedTargetMessageIDs(
-            actionType: actionType,
-            messageId: messageId,
-            payload: payload
-        )
     }
 
     /// Cleans up completed actions from the database.

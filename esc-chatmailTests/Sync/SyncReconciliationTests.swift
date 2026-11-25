@@ -436,6 +436,77 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertTrue(reconciledState.labelIds.contains("INBOX"))
     }
 
+    // The review's pinning test (outbound-and-actions#4, background-energy#3):
+    // a message archived and read locally two hours ago, its action still
+    // queued, and Gmail still saying INBOX and UNREAD. The 30-minute marker
+    // has lapsed; the live action keeps it as the user left it.
+    // Revert-check: fails if `SyncReconciliation.processReconciliationMismatches`
+    // stops skipping a message a live pending action names.
+    func testReconcileLabelStates_liveQueuedActionKeepsALapsedLocalChange() async throws {
+        let (state, outcome) = try await reconcileQueuedArchive(actionStatus: "failed")
+
+        XCTAssertEqual(outcome, .completed)
+        XCTAssertFalse(state.labelIds.contains("INBOX"), "The queued archive stays")
+        XCTAssertFalse(state.isUnread, "The queued read stays")
+    }
+
+    func testReconcileLabelStates_abandonedActionNoLongerShieldsTheMessage() async throws {
+        let (state, _) = try await reconcileQueuedArchive(actionStatus: "abandoned")
+
+        XCTAssertTrue(state.labelIds.contains("INBOX"), "Gmail's state returns once the action gave up")
+        XCTAssertTrue(state.isUnread)
+    }
+
+    private func reconcileQueuedArchive(
+        actionStatus: String
+    ) async throws -> (state: (isUnread: Bool, labelIds: Set<String>), outcome: LabelReconciliationOutcome) {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.setMessageList(["queued-archive"])
+        mockAPI.addMessage(
+            GmailMessageBuilder().withId("queued-archive").withLabels(["INBOX", "UNREAD"]).build()
+        )
+
+        let seedContext = stack.makeMainQueueViewContext()
+        _ = LabelBuilder.inboxLabel(in: seedContext)
+        let conversation = ConversationBuilder.simple(in: seedContext)
+        let message = MessageBuilder()
+            .withId("queued-archive")
+            .withThreadId("thread-queued-archive")
+            .read()
+            .inConversation(conversation)
+            .build(in: seedContext)
+        message.localModifiedAt = Date().addingTimeInterval(-2 * 60 * 60)
+        _ = PendingActionBuilder()
+            .archive()
+            .forMessage("queued-archive")
+            .withStatus(actionStatus)
+            .createdAt(Date().addingTimeInterval(-2 * 60 * 60))
+            .build(in: seedContext)
+        _ = PendingActionBuilder()
+            .markAsRead()
+            .forMessage("queued-archive")
+            .withStatus(actionStatus)
+            .createdAt(Date().addingTimeInterval(-2 * 60 * 60))
+            .build(in: seedContext)
+        try seedContext.save()
+
+        let sut = SyncReconciliation(messageFetcher: MessageFetcher(apiClient: mockAPI))
+        let reconcileContext = stack.newBackgroundContext()
+        let result = await sut.reconcileLabelStatesWithDiagnostics(
+            in: reconcileContext,
+            labelIds: ["INBOX"],
+            modificationTransaction: nil
+        )
+        let state = try await reconcileContext.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", "queued-archive")
+            request.fetchLimit = 1
+            let message = try XCTUnwrap(reconcileContext.fetch(request).first)
+            return (isUnread: message.isUnread, labelIds: Set((message.labels ?? []).map(\.id)))
+        }
+        return (state, result.outcome)
+    }
+
     func testReconcileLabelStatesWithDiagnosticsIsIncompleteWhenInboxLabelIsMissing() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.setMessageList(["message-needs-inbox"])

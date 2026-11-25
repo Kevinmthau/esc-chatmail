@@ -8,6 +8,7 @@ private enum PendingActionProcessingOutcome: Equatable {
     case authenticationError
     case credentialsRevoked
     case quotaExhausted
+    case transientFailure(retryAfter: TimeInterval?)
     case cancelled
     case skipped
 }
@@ -57,11 +58,17 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private let quotaRetryBaseDelay: TimeInterval
     private let quotaRetryMaximumDelay: TimeInterval
     private let quotaRetrySleeper: @Sendable (TimeInterval) async -> Bool
+    private let transientRetryBaseDelay: TimeInterval
+    private let transientRetryMaximumDelay: TimeInterval
+    private let transientRetrySleeper: @Sendable (TimeInterval) async -> Bool
 
     // MARK: - Configuration (internal for extensions)
 
+    /// A row's retry budget. A transient failure spends one unit per run, and
+    /// the runs are spaced by the transient timer (60 s doubling to 15 min),
+    /// so a head that keeps failing is abandoned after five attempts over
+    /// about 15 minutes, no longer five bursts of three requests in 45 s.
     let maxRetries = 5
-    let baseRetryDelay: TimeInterval = 2.0
     let processingStaleInterval: TimeInterval = 10 * 60
 
     // MARK: - State
@@ -75,6 +82,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     private var quotaRetryTask: Task<Void, Never>?
     private var quotaRetryTaskID: UUID?
     private var quotaRetryAttempt = 0
+    private var transientRetryTask: Task<Void, Never>?
+    private var transientRetryTaskID: UUID?
+    private var transientRetryAttempt = 0
     private var activeProcessingOutcome: PendingActionProcessingOutcome = .completed
     private var processingWasRequested = false
     /// Parked-queue latch for revoked credentials. Released ONLY by
@@ -111,7 +121,20 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 nanoseconds: UInt64(delay * 1_000_000_000)
             )
         }
+        self.transientRetryBaseDelay = Self.defaultTransientRetryBaseDelay
+        self.transientRetryMaximumDelay = Self.defaultTransientRetryMaximumDelay
+        self.transientRetrySleeper = { delay in
+            await Task.sleepUnlessCancelled(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
+        }
     }
+
+    /// The transient timer's first wait, doubling per consecutive transient
+    /// run up to `defaultTransientRetryMaximumDelay`. With `maxRetries` 5 a
+    /// head that keeps failing is tried at about 0, 1, 3, 7 and 15 minutes.
+    static let defaultTransientRetryBaseDelay: TimeInterval = 60
+    static let defaultTransientRetryMaximumDelay: TimeInterval = 15 * 60
 
     /// Testable initializer with dependency injection
     init(
@@ -134,6 +157,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             await Task.sleepUnlessCancelled(
                 nanoseconds: UInt64(delay * 1_000_000_000)
             )
+        },
+        transientRetryBaseDelay: TimeInterval = PendingActionsManager.defaultTransientRetryBaseDelay,
+        transientRetryMaximumDelay: TimeInterval = PendingActionsManager.defaultTransientRetryMaximumDelay,
+        transientRetrySleeper: @escaping @Sendable (TimeInterval) async -> Bool = { delay in
+            await Task.sleepUnlessCancelled(
+                nanoseconds: UInt64(delay * 1_000_000_000)
+            )
         }
     ) {
         self.coreDataStack = coreDataStack
@@ -148,6 +178,9 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         self.quotaRetryBaseDelay = quotaRetryBaseDelay
         self.quotaRetryMaximumDelay = quotaRetryMaximumDelay
         self.quotaRetrySleeper = quotaRetrySleeper
+        self.transientRetryBaseDelay = transientRetryBaseDelay
+        self.transientRetryMaximumDelay = transientRetryMaximumDelay
+        self.transientRetrySleeper = transientRetrySleeper
     }
 
     /// Sets up network monitoring on first use
@@ -194,6 +227,14 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             return
         }
 
+        // A transient failure's wait is the queue head's backoff. An enqueue
+        // or a connectivity edge during it is remembered, not run: the head
+        // goes first (strict FIFO) and would only spend its budget faster.
+        guard transientRetryTask == nil else {
+            processingWasRequested = true
+            return
+        }
+
         // Coalesce duplicate work without discarding the signal. In particular,
         // an enqueue may land after a run releases the sync boundary but before
         // its quota outcome clears pendingProcessTask.
@@ -223,6 +264,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         case .authenticationError:
             pendingProcessTask = nil
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
             scheduleAuthenticationRetry()
             return
         case .credentialsRevoked:
@@ -230,11 +272,17 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             isWaitingForCredentialRecovery = true
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
             return
         case .quotaExhausted:
             pendingProcessTask = nil
             resetAuthenticationRetryBackoff()
+            resetTransientRetryBackoff()
             scheduleQuotaRetry()
+            return
+        case .transientFailure(let retryAfter):
+            pendingProcessTask = nil
+            scheduleTransientRetry(retryAfter: retryAfter)
             return
         case .skipped:
             pendingProcessTask = nil
@@ -243,6 +291,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         case .completed:
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
         case .cancelled:
             break
         }
@@ -362,6 +411,50 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         quotaRetryAttempt = 0
     }
 
+    /// Arms the queue head's backoff after a transient failure: the base delay
+    /// doubling per consecutive transient run, at least Gmail's Retry-After.
+    private func scheduleTransientRetry(retryAfter: TimeInterval?) {
+        guard transientRetryTask == nil else { return }
+
+        let backoff = Self.transientRetryDelay(
+            forAttempt: transientRetryAttempt,
+            baseDelay: transientRetryBaseDelay,
+            maximumDelay: transientRetryMaximumDelay
+        )
+        let delay = max(backoff, retryAfter ?? 0)
+        transientRetryAttempt = min(transientRetryAttempt + 1, 63)
+
+        let taskID = UUID()
+        let sleeper = transientRetrySleeper
+        transientRetryTaskID = taskID
+        transientRetryTask = Task { [weak self] in
+            guard await sleeper(delay) else { return }
+            await self?.transientRetryDelayElapsed(taskID: taskID)
+        }
+
+        Log.info("Scheduled pending-action retry after a transient failure in \(delay) seconds", category: .sync)
+    }
+
+    private func transientRetryDelayElapsed(taskID: UUID) {
+        guard transientRetryTaskID == taskID else { return }
+        transientRetryTask = nil
+        transientRetryTaskID = nil
+        // Offline at expiry: the next connectivity edge resumes the queue.
+        guard networkMonitor.isConnected else { return }
+        scheduleProcessing()
+    }
+
+    private func cancelTransientRetryTask() {
+        transientRetryTask?.cancel()
+        transientRetryTask = nil
+        transientRetryTaskID = nil
+    }
+
+    private func resetTransientRetryBackoff() {
+        cancelTransientRetryTask()
+        transientRetryAttempt = 0
+    }
+
     /// Retires delayed retries owned by the account being torn down. The
     /// manager is process-wide, so carrying attempt counters into the next
     /// authenticated account could delay unrelated work.
@@ -370,6 +463,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         hasUnconsumedTransitionReset = true
         resetAuthenticationRetryBackoff()
         resetQuotaRetryBackoff()
+        resetTransientRetryBackoff()
     }
 
     /// Releases a revoked-credential gate only after authentication has
@@ -421,7 +515,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         // bounded retry timers (its arm resets both backoffs and returns
         // without rescheduling).
         switch result.outcome {
-        case .authenticationError, .credentialsRevoked, .quotaExhausted, .completed:
+        case .authenticationError, .credentialsRevoked, .quotaExhausted, .transientFailure, .completed:
             return .skipped
         case .cancelled, .skipped:
             return result.outcome
@@ -429,6 +523,18 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     }
 
     nonisolated static func authenticationRetryDelay(
+        forAttempt attempt: Int,
+        baseDelay: TimeInterval,
+        maximumDelay: TimeInterval
+    ) -> TimeInterval {
+        retryDelay(
+            forAttempt: attempt,
+            baseDelay: baseDelay,
+            maximumDelay: maximumDelay
+        )
+    }
+
+    nonisolated static func transientRetryDelay(
         forAttempt attempt: Int,
         baseDelay: TimeInterval,
         maximumDelay: TimeInterval
@@ -509,6 +615,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         networkMonitor.stop()
         cancelAuthenticationRetryTask()
         cancelQuotaRetryTask()
+        cancelTransientRetryTask()
         isInitialized = false
     }
 
@@ -776,6 +883,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             return
         }
 
+        // The head's transient backoff gates a direct request too (every
+        // foreground start makes one), or it would bypass the wait.
+        guard transientRetryTask == nil else {
+            processingWasRequested = true
+            return
+        }
+
         guard pendingProcessTask == nil, !isProcessing else {
             processingWasRequested = true
             return
@@ -785,17 +899,23 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         switch outcome {
         case .authenticationError:
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
             scheduleAuthenticationRetry()
         case .credentialsRevoked:
             isWaitingForCredentialRecovery = true
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
         case .quotaExhausted:
             resetAuthenticationRetryBackoff()
+            resetTransientRetryBackoff()
             scheduleQuotaRetry()
+        case .transientFailure(let retryAfter):
+            scheduleTransientRetry(retryAfter: retryAfter)
         case .completed:
             resetAuthenticationRetryBackoff()
             resetQuotaRetryBackoff()
+            resetTransientRetryBackoff()
             _ = scheduleRequestedFollowUpIfNeeded()
         case .cancelled, .skipped:
             _ = scheduleRequestedFollowUpIfNeeded()
@@ -898,6 +1018,8 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 activeProcessingOutcome = .quotaExhausted
             case .stopRun(.cancelled):
                 activeProcessingOutcome = .cancelled
+            case .stopRun(.transientFailure(let retryAfter)):
+                activeProcessingOutcome = .transientFailure(retryAfter: retryAfter)
             }
             break
         }
