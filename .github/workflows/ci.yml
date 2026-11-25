@@ -13,8 +13,11 @@ on:
     paths-ignore: ['web/**', '.github/workflows/web.yml']
   workflow_dispatch:
 
+# A PR's newer push cancels its older run. A push to main never cancels another: every
+# main commit gets a verdict, so `ship-gate` can advance `testflight` to it, and a re-run
+# of an older main run cannot cancel the newest one (which would leave it unshipped).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'latest' }}
   cancel-in-progress: true
 
 # Read-only by default. Only `ship-gate` writes, and only the `testflight` branch.
@@ -99,7 +102,8 @@ jobs:
   # Release-only compile error or warning (wholemodule -O, `#if !DEBUG` branches;
   # warnings are errors in Release too) used to surface first as a failed archive after
   # the merge (architecture review 2026-11, testing-ci-release#2). The app alone: the
-  # test target needs DEBUG-only seams. Then the built Info.plist is checked, because a
+  # test target needs DEBUG-only seams. One architecture: Release builds every one it can
+  # for a generic destination, and the archive is arm64 only. Then the built Info.plist is checked, because a
   # Release build with an empty GOOGLE_* value does not trap the way Debug does.
   # iOS only: a Mac Release compile would add a second macOS job (10x minutes), which
   # is Kevin's call.
@@ -118,7 +122,7 @@ jobs:
       - name: Build app (Release, iOS Simulator, unsigned)
         run: |
           CONFIGURATION=Release DESTINATION='generic/platform=iOS Simulator' \
-            bash Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO -derivedDataPath build/DerivedData
+            bash Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO ARCHS=arm64 -derivedDataPath build/DerivedData
 
       - name: Check the built Info.plist
         run: |
@@ -132,10 +136,11 @@ jobs:
   # only a commit whose every job below passed is archived.
   #
   # - Runs only for a push to main, after every build and test job succeeded
-  #   (`needs` skips it otherwise, and a run cancelled by a newer merge never gets here).
+  #   (`needs` skips it otherwise).
   # - Fast-forwards `testflight` to exactly this commit, never with --force or a `+`
-  #   refspec: GitHub refuses an older commit as a non-fast-forward, so a re-run of an
-  #   older main commit cannot move the shipped branch back.
+  #   refspec, so the shipped branch never moves back. Runs on main are not cancelled by
+  #   later ones, so an older one can finish last: where `testflight` already holds a
+  #   newer commit that contains this one, it pushes nothing and succeeds.
   # - Lint is advisory and is not waited for; web/ has its own workflow and does not
   #   ship through Xcode Cloud.
   ship-gate:
@@ -152,7 +157,13 @@ jobs:
           fetch-depth: 0
 
       - name: Fast-forward testflight to this commit
-        run: git push origin "${GITHUB_SHA}:refs/heads/testflight"
+        run: |
+          if git fetch --quiet origin refs/heads/testflight:refs/remotes/origin/testflight 2>/dev/null \
+            && git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/testflight; then
+            echo "testflight already contains ${GITHUB_SHA}; nothing to push"
+            exit 0
+          fi
+          git push origin "${GITHUB_SHA}:refs/heads/testflight"
 
   lint:
     name: SwiftLint (advisory)

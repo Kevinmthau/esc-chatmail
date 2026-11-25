@@ -12,9 +12,13 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
 
         XCTAssertTrue(job.contains("needs: [test, build-macos, build-release-ios]"))
         XCTAssertTrue(job.contains("if: github.event_name == 'push' && github.ref == 'refs/heads/main'"))
-        XCTAssertTrue(job.contains("git push origin \"${GITHUB_SHA}:refs/heads/testflight\""))
         XCTAssertTrue(job.contains("contents: write"))
-        for forbidden in ["--force", "push -f", "push origin -f", "\"+", " +$", "+refs/"] {
+        // Exactly one push, and it is this line: no flag, no `+` refspec, no other ref.
+        let pushLines = job.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.contains("git push") }
+        XCTAssertEqual(pushLines, ["git push origin \"${GITHUB_SHA}:refs/heads/testflight\""])
+        for forbidden in ["--force", "--mirror", "+refs/", "+${"] {
             XCTAssertFalse(job.contains(forbidden), forbidden)
         }
     }
@@ -53,8 +57,12 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         var end = lines.count
         for index in (start + 1)..<lines.count {
             let line = lines[index]
-            let isJobKey = line.hasPrefix("  ") && !line.hasPrefix("   ") && line.hasSuffix(":")
-            if isJobKey || (!line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("#")) {
+            // A job key or a comment at the jobs' own indent (the next job's preamble), or
+            // anything at the top level, ends the block.
+            let isAtJobIndent = line.hasPrefix("  ") && !line.hasPrefix("   ")
+            let isJobKeyOrPreamble = isAtJobIndent
+                && (line.hasSuffix(":") || line.trimmingCharacters(in: .whitespaces).hasPrefix("#"))
+            if isJobKeyOrPreamble || (!line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("#")) {
                 end = index
                 break
             }
