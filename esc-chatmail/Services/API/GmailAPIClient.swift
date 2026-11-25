@@ -83,6 +83,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// so that a test can advance the breaker's time without the backoff
     /// sleeps advancing it too, and the reverse.
     let circuitBreakerClock: any SyncClock
+    /// Where a read's response date goes (`ServerClockEstimate`), for the `after:` floors
+    /// sync draws from Gmail's time. Never fed by messages.send.
+    let serverClock: ServerClockEstimate
 
     /// Tracks cumulative rate limit backoff time to prevent API exhaustion
     let rateLimitTracker = RateLimitTracker()
@@ -107,9 +110,11 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         session: URLSession? = nil,
         sendSession: URLSession? = nil,
         retryClock: any SyncClock = SystemSyncClock(),
-        circuitBreakerClock: any SyncClock = SystemSyncClock()
+        circuitBreakerClock: any SyncClock = SystemSyncClock(),
+        serverClock: ServerClockEstimate = .shared
     ) {
         self.tokenManager = tokenManager
+        self.serverClock = serverClock
         self.retryStrategy = retryStrategy
         self.retryClock = retryClock
         self.circuitBreakerClock = circuitBreakerClock
@@ -513,6 +518,15 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     throw APIError.authenticationError
 
                 default:
+                    // Gmail's time, for sync's `after:` floors (`ServerClockEstimate`).
+                    // Only a request that may be retransmitted, so never messages.send:
+                    // its outcome classification is a duplicate-send hazard, and nothing
+                    // on that path may depend on a header. Recording never throws.
+                    if behavior.allowsRetransmission, (200..<300).contains(httpResponse.statusCode) {
+                        serverClock.recordResponseDate(
+                            httpDateHeader: httpResponse.value(forHTTPHeaderField: "Date")
+                        )
+                    }
                     return try await handleStatus(httpResponse.statusCode, data)
                 }
 

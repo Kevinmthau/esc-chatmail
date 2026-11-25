@@ -85,26 +85,60 @@ struct SyncTimeCalculator {
     ///
     /// Results are capped by maxWindow if specified and never go before install cutoff.
     ///
+    /// The stored last-sync time and mailbox start are read as no later than `now`
+    /// (`clampedToNow`): a device clock that was set ahead when they were written left
+    /// them past Gmail's time, and a floor drawn from them skipped the mail between. The
+    /// clamp can only move a floor earlier. Callers pass `now` from their
+    /// `ServerTimeSource`, the earlier of the device's time and Gmail's; a clamp to the
+    /// device's own time alone helps nothing while the device is still ahead.
+    ///
+    /// Two more corrections, for times written before Gmail's time was known, which a
+    /// clamp to now does not reach once now has passed them (a history expiry takes days):
+    /// - The last-sync time is read `deviceClockLead` earlier: an earlier build stamped it
+    ///   with the device's clock, which was then ahead by about as much as it is now. A
+    ///   stamp this build wrote from Gmail's time is moved that much earlier too: every
+    ///   recovery and reconciliation then lists the whole lead again (reconciliation within
+    ///   its 24-hour cap), which costs listing and skips nothing. HONEST SCOPE: a stamp an
+    ///   earlier build wrote ahead is not reached once the clock is set right, because the
+    ///   lead is then zero.
+    /// - The mailbox start is read as no later than the last-sync time where both are
+    ///   set. A sync always follows the move of the start: every path that empties the
+    ///   mailbox clears the last-sync time (`AuthSession`'s two sign-outs, the failed
+    ///   session's cleanup and the durable cleanup), and the other move, an interactive
+    ///   sign-in onto an empty store, finds it cleared by one of them. So a start after the
+    ///   last sync was written by a device clock that was ahead, and its floor would skip
+    ///   the mail between. A new path that moves the start over a kept last-sync time
+    ///   breaks this and must clear it.
+    ///
     /// - Parameters:
     ///   - config: Configuration determining which timestamps to check and buffers to apply
     ///   - installTimestamp: Optional explicit install timestamp (defaults to UserDefaults value)
     ///   - now: Optional explicit current time (defaults to the system clock)
+    ///   - deviceClockLead: How far the device's clock is ahead of Gmail's now
+    ///     (`ServerTimeSource.deviceClockLead()`); never negative
     ///   - defaults: Where `lastSuccessfulSyncTime` and `installTimestamp` are read from
     /// - Returns: The calculated start timestamp as TimeInterval since 1970
     static func calculateStartTime(
         config: Config,
         installTimestamp: TimeInterval? = nil,
         now: TimeInterval? = nil,
+        deviceClockLead: TimeInterval = 0,
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let now = now ?? Date().timeIntervalSince1970
-        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
+        let install = clampedToNow(
+            installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            now: now
+        )
 
         // Try last successful sync first (if configured)
         if config.useLastSyncAsPrimary {
-            let lastSuccessfulSync = defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+            let lastSuccessfulSync = clampedToNow(
+                defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey),
+                now: now
+            )
             if lastSuccessfulSync > 0 {
-                var startTime = lastSuccessfulSync - config.primaryBuffer
+                var startTime = lastSuccessfulSync - max(0, deviceClockLead) - config.primaryBuffer
 
                 // Apply max window cap if specified
                 if let maxWindow = config.maxWindow {
@@ -112,9 +146,9 @@ struct SyncTimeCalculator {
                     startTime = max(startTime, minAllowedTime)
                 }
 
-                // Never go before install cutoff
+                // Never go before install cutoff, read as no later than the last sync.
                 if install > 0 {
-                    let installCutoff = install - config.installBuffer
+                    let installCutoff = min(install, lastSuccessfulSync) - config.installBuffer
                     startTime = max(startTime, installCutoff)
                 }
 
@@ -145,10 +179,23 @@ struct SyncTimeCalculator {
     static func calculateStartDate(
         config: Config,
         installTimestamp: TimeInterval? = nil,
+        now: TimeInterval? = nil,
+        deviceClockLead: TimeInterval = 0,
         defaults: UserDefaults = .standard
     ) -> Date {
-        let timestamp = calculateStartTime(config: config, installTimestamp: installTimestamp, defaults: defaults)
+        let timestamp = calculateStartTime(
+            config: config,
+            installTimestamp: installTimestamp,
+            now: now,
+            deviceClockLead: deviceClockLead,
+            defaults: defaults
+        )
         return Date(timeIntervalSince1970: timestamp)
+    }
+
+    /// A stored time read as no later than `now`; zero (unset) stays zero.
+    static func clampedToNow(_ stored: TimeInterval, now: TimeInterval) -> TimeInterval {
+        stored > 0 ? min(stored, now) : stored
     }
 
     /// Lower bound for a history recovery that has no `lastSuccessfulSyncTime`
@@ -170,8 +217,11 @@ struct SyncTimeCalculator {
         defaults: UserDefaults = .standard
     ) -> TimeInterval {
         let config = Config.historyRecovery
-        let install = installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey)
         let now = now ?? Date().timeIntervalSince1970
+        let install = clampedToNow(
+            installTimestamp ?? defaults.double(forKey: SyncConfig.mailboxStartTimestampKey),
+            now: now
+        )
         guard let newestReceivedInternalDate else {
             if install > 0 {
                 return install - config.installBuffer

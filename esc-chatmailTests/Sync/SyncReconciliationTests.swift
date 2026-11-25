@@ -73,6 +73,100 @@ final class SyncReconciliationTests: XCTestCase {
         XCTAssertEqual(mockAPI.listMessagesCallCount, 2)
     }
 
+    /// A last-sync time stamped while the device clock was two hours ahead of Gmail's:
+    /// the missed-message check must list from Gmail's time, not from a point Gmail has
+    /// not reached, where it found nothing (architecture review, gap-wall-clock-time#1).
+    ///
+    /// Revert-check: pass the device's `Date()` again as reconciliation's `now` in
+    /// `SyncReconciliation.checkForMissedMessagesWithDiagnostics`.
+    func testCheckForMissedMessages_stampAheadOfGmail_listsFromGmailsTime() async throws {
+        let suiteName = "SyncReconciliationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        defaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            failureTracker: SyncFailureTracker(defaults: defaults),
+            defaults: defaults,
+            // No lead: only `conservativeNow()` can move the floor, so the revert fails.
+            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600, reportsLead: false)
+        )
+
+        _ = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(48 * 60 * 60)).timeIntervalSince1970
+        )
+
+        let query = try XCTUnwrap(mockAPI.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(
+            query.range(of: "after:").flatMap { Int(query[$0.upperBound...].prefix { $0.isNumber }) },
+            query
+        )
+        let gmailNow = Date().timeIntervalSince1970 - 2 * 3600
+        XCTAssertLessThanOrEqual(TimeInterval(floor), gmailNow - SyncConfig.timestampBufferSeconds, query)
+    }
+
+    /// A last-sync time the device clock stamped while it was ahead, and that now has
+    /// passed: the missed-message check lists from the lead earlier.
+    ///
+    /// Revert-check: pass no `deviceClockLead` from
+    /// `SyncReconciliation.calculateReconciliationStartTime`.
+    func testCheckForMissedMessages_passedStampWithTheClockAhead_listsTheLeadEarlier() async throws {
+        let suiteName = "SyncReconciliationTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        let stamp = TimeInterval(Int(Date().timeIntervalSince1970 - 6 * 3600))
+        defaults.set(stamp, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            failureTracker: SyncFailureTracker(defaults: defaults),
+            defaults: defaults,
+            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600)
+        )
+
+        _ = await sut.checkForMissedMessagesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            installTimestamp: Date().addingTimeInterval(-(48 * 60 * 60)).timeIntervalSince1970
+        )
+
+        let query = try XCTUnwrap(mockAPI.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(
+            query.range(of: "after:").flatMap { Int(query[$0.upperBound...].prefix { $0.isNumber }) },
+            query
+        )
+        XCTAssertLessThanOrEqual(TimeInterval(floor), stamp - 2 * 3600 - SyncConfig.timestampBufferSeconds, query)
+    }
+
+    /// Label reconciliation's day is Gmail's day where the device clock is ahead.
+    ///
+    /// Revert-check: `Date()` in place of `serverTime.conservativeNow()` for `oneDayAgo` in
+    /// `SyncReconciliation.reconcileLabelStatesWithDiagnostics`.
+    func testReconcileLabelStates_deviceClockAhead_listsGmailsLastDay() async throws {
+        let mockAPI = MockGmailAPIClient()
+        mockAPI.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        let sut = SyncReconciliation(
+            messageFetcher: MessageFetcher(apiClient: mockAPI),
+            serverTime: FakeServerTimeSource(serverOffsetFromDevice: -2 * 3600)
+        )
+
+        _ = await sut.reconcileLabelStatesWithDiagnostics(
+            in: stack.newBackgroundContext(),
+            labelIds: [],
+            modificationTransaction: nil
+        )
+
+        let query = try XCTUnwrap(mockAPI.listMessagesQueries.first ?? nil)
+        let floor = try XCTUnwrap(
+            query.range(of: "after:").flatMap { Int(query[$0.upperBound...].prefix { $0.isNumber }) },
+            query
+        )
+        XCTAssertLessThanOrEqual(TimeInterval(floor), Date().timeIntervalSince1970 - 2 * 3600 - 86_400, query)
+    }
+
     func testCheckForMissedMessagesWithDiagnosticsReportsCappedReconciliation() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.paginatedListMessagesResponses = [
