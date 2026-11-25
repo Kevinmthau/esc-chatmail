@@ -5,12 +5,17 @@ import Foundation
 extension DatabaseMaintenanceService {
 
     func performAnalyze() async -> Bool {
-        guard let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
-            return false
-        }
-
-        return await StoreMaintenanceCoordinator.shared.runWhenStoreIsIdle(operationName: "database analyze") {
-            await Self.performSQLiteCommand("ANALYZE", storeURL: storeURL, successMessage: "Database analyze completed successfully", failureMessage: "Database analyze failed")
+        let coreDataStack = self.coreDataStack
+        return await storeMaintenanceCoordinator.runWhenStoreIsIdle(operationName: "database analyze") {
+            // Read inside the run, where no reset can begin, and before
+            // `persistentContainer`, whose first touch would start the store
+            // load here, inside no bootstrap.
+            guard coreDataStack.isStoreLoaded,
+                  let storeURL = coreDataStack.persistentContainer.persistentStoreDescriptions.first?.url else {
+                Log.info("Database analyze skipped: the store is not loaded", category: .coreData)
+                return false
+            }
+            return await Self.performSQLiteCommand("ANALYZE", storeURL: storeURL, successMessage: "Database analyze completed successfully", failureMessage: "Database analyze failed")
         }
     }
 

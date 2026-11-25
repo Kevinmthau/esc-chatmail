@@ -6,11 +6,19 @@
 import type { CalendarEventData } from '../db/types'
 import { GmailApiError, isAccountScopedSyncAbort } from '../gmail/errors'
 import type { GmailHeader, GmailMessage, GmailPart } from '../gmail/types'
-import { addressTokens, extractDisplayName, extractEmail, normalizeEmail } from './address'
+import {
+  addressTokens,
+  displayNameInToken,
+  extractDisplayName,
+  extractEmail,
+  mailboxAddress,
+  normalizeEmail,
+} from './address'
 import { extractAttachments, isAttachmentPart, type ParsedAttachment } from './attachments'
 import { analyzeCalendarInvite } from './calendarInvite'
 import { base64UrlDecodeToString, decodeTransferEncoding } from './decode'
 import { extractPlainTextFromHtml } from './htmlText'
+import { extractMimeBody, resolvedMimeType } from './mimeBody'
 import { extractDisplayText, extractHtmlFromRawSource } from './rawSource'
 import { decodeRfc2047 } from './rfc2047Decoder'
 
@@ -74,12 +82,13 @@ export interface ParseGmailMessageOptions {
  */
 export function parseEmailAddresses(headerValue: string): ParsedAddress[] {
   const result: ParsedAddress[] = []
-  for (const token of addressTokens(headerValue)) {
-    const email = extractEmail(token)
-    if (email === null) continue
+  const tokens = addressTokens(headerValue)
+  for (const token of tokens) {
+    const match = mailboxAddress(token, tokens.length === 1)
+    if (match === null) continue
     result.push({
-      email: normalizeEmail(email),
-      name: extractDisplayName(token),
+      email: normalizeEmail(match.email),
+      name: displayNameInToken(token, match),
     })
   }
   return result
@@ -167,36 +176,6 @@ function extractHeaders(headers: readonly GmailHeader[]): ParsedHeaders {
 
 // MARK: - Content extraction
 
-function headerValueOf(part: GmailPart, name: string): string | null {
-  const header = part.headers?.find((h) => h.name.toLowerCase() === name)
-  return header ? header.value : null
-}
-
-function resolvedMimeType(part: GmailPart): string | null {
-  const direct = part.mimeType?.trim()
-  if (direct !== undefined && direct.length > 0) {
-    return direct
-  }
-
-  const contentType = headerValueOf(part, 'content-type')?.trim()
-  if (contentType === undefined || contentType === null || contentType.length === 0) {
-    return null
-  }
-  return contentType
-}
-
-function isHtmlMimeType(mimeType: string | null): boolean {
-  if (mimeType === null) return false
-  const normalized = mimeType.trim().toLowerCase()
-  return normalized.length > 0 && normalized.startsWith('text/html')
-}
-
-function isPlainTextMimeType(mimeType: string | null): boolean {
-  if (mimeType === null) return false
-  const normalized = mimeType.trim().toLowerCase()
-  return normalized.length > 0 && normalized.startsWith('text/plain')
-}
-
 /**
  * Whether a part could carry raw email source with HTML embedded in it — the
  * only thing the embedded-HTML rescue is looking for. Mirrors
@@ -282,11 +261,6 @@ interface ExtractedMessageContent {
   plainText: string | null
 }
 
-function normalizedNonEmpty(value: string | null): string | null {
-  if (value === null) return null
-  return value.trim().length === 0 ? null : value
-}
-
 function normalizedPlainTextBody(plainText: string | null): string | null {
   if (plainText === null) return null
   const normalized = extractDisplayText(plainText).trim()
@@ -317,43 +291,10 @@ async function extractContent(
     return null
   }
 
-  const extract = async (current: GmailPart): Promise<ExtractedMessageContent> => {
-    const mimeType = resolvedMimeType(current)
-
-    if (isAttachmentPart(current)) {
-      return { html: null, plainText: null }
-    }
-
-    if (isHtmlMimeType(mimeType)) {
-      return { html: normalizedNonEmpty(await decodedBody(current)), plainText: null }
-    }
-    if (isPlainTextMimeType(mimeType)) {
-      return { html: null, plainText: normalizedNonEmpty(await decodedBody(current)) }
-    }
-
-    const parts = current.parts
-    if (parts === undefined || parts.length === 0) {
-      return { html: null, plainText: null }
-    }
-
-    const extracted: ExtractedMessageContent = { html: null, plainText: null }
-    for (const subpart of parts) {
-      const childContent = await extract(subpart)
-      if (extracted.html === null) {
-        extracted.html = childContent.html
-      }
-      if (extracted.plainText === null) {
-        extracted.plainText = childContent.plainText
-      }
-      if (extracted.html !== null && extracted.plainText !== null) {
-        break
-      }
-    }
-
-    return extracted
-  }
-
-  const extracted = await extract(part)
+  // Every leaf the body takes, a continuation segment's included, is decoded
+  // or fetched under fetchLargeBodyContent's contract: a transient failure
+  // throws, and only a 404 leaves that one part out (mimeBody.ts).
+  const extracted: ExtractedMessageContent = await extractMimeBody(part, decodedBody)
 
   if (extracted.html === null) {
     extracted.html = await extractEmbeddedHtmlFromTextualBodies(part, messageId, fetchLargeBody)

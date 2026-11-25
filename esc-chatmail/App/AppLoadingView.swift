@@ -17,6 +17,11 @@ struct AppLoadingView: View {
         _model = ObservedObject(wrappedValue: model ?? .shared)
     }
 
+    /// The confirmation the notice on screen asks for.
+    private var resetConfirmation: AppLoadingPolicy.MailboxResetConfirmation {
+        model.storeLoadFailure?.resetConfirmation ?? AppLoadingPolicy.mailboxResetConfirmation
+    }
+
     var body: some View {
         VStack(spacing: 20) {
             Image(systemName: "envelope.fill")
@@ -51,15 +56,15 @@ struct AppLoadingView: View {
             }
         }
         .alert(
-            AppLoadingPolicy.mailboxResetConfirmation.title,
+            resetConfirmation.title,
             isPresented: $isConfirmingMailboxReset
         ) {
-            Button(AppLoadingPolicy.mailboxResetConfirmation.confirmButtonTitle, role: .destructive) {
+            Button(resetConfirmation.confirmButtonTitle, role: .destructive) {
                 model.resetMailbox()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(AppLoadingPolicy.mailboxResetConfirmation.message)
+            Text(resetConfirmation.message)
         }
     }
 }

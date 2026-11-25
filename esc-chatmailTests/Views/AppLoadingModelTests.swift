@@ -16,6 +16,79 @@ final class AppLoadingModelTests: XCTestCase {
         )
     )
 
+    private let newerBuildFailure = CoreDataError.storeLoadFailed(
+        PersistentStoreLoadError.storeFromNewerVersion(
+            NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
+        )
+    )
+    private let failedMigration = CoreDataError.storeLoadFailed(
+        PersistentStoreLoadError.migrationFailed(
+            NSError(domain: NSCocoaErrorDomain, code: NSMigrationError)
+        )
+    )
+
+    /// Kevin, 2026-11-24: one rule for every migration-class error. A store a
+    /// newer MushMail saved is offered the confirmed reset past the threshold,
+    /// as any other failure is, and never before; only the words differ.
+    ///
+    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering
+    /// false for `.storeFromNewerVersion` (the failures then never count).
+    func testShowStoreLoadFailure_storeFromNewerVersion_offersResetAtThresholdAndAsksToUpdate() {
+        let harness = Harness()
+
+        for _ in 0..<(threshold - 1) {
+            harness.model.showStoreLoadFailure(newerBuildFailure)
+            XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+        }
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Update MushMail")
+
+        harness.model.showStoreLoadFailure(newerBuildFailure)
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
+        XCTAssertEqual(harness.model.storeLoadFailure?.title, "Update MushMail")
+        XCTAssertEqual(
+            harness.model.storeLoadFailure?.resetConfirmation,
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation
+        )
+        XCTAssertEqual(harness.resetCallCount, 0, "Nothing is reset until the user confirms")
+    }
+
+    /// Kevin, 2026-11-24: a migration that fails on the user's data is offered
+    /// the confirmed reset once retrying has not helped, and not before.
+    ///
+    /// Revert-check: `AppLoadingPolicy.offersResetPastThreshold` answering
+    /// false for `.migrationFailed`.
+    func testShowStoreLoadFailure_failedMigration_offersResetAtThreshold() {
+        let harness = Harness()
+
+        for _ in 0..<(threshold - 1) {
+            harness.model.showStoreLoadFailure(failedMigration)
+        }
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, false)
+
+        harness.model.showStoreLoadFailure(failedMigration)
+        XCTAssertEqual(harness.model.storeLoadFailure?.offersMailboxReset, true)
+    }
+
+    /// The launch loop's timed retries do not reload a store whose migration
+    /// failed; the retry the user asks for, and the one after a reset, must.
+    ///
+    /// Revert-check: the `permitReloadAfterDeterministicFailure()` call in
+    /// `AppLoadingModel.retry`.
+    func testRetryAndReset_permitTheReloadOfAFailedMigration() {
+        let harness = Harness()
+        harness.model.showStoreLoadFailure(failedMigration)
+
+        harness.model.retry()
+        XCTAssertEqual(harness.reloadPermitCount, 1)
+
+        for _ in 0..<threshold {
+            harness.model.showStoreLoadFailure(failedMigration)
+        }
+        harness.model.resetMailbox()
+        XCTAssertEqual(harness.resetCallCount, 1)
+        XCTAssertEqual(harness.reloadPermitCount, 2, "The empty store must be loaded after the reset")
+    }
+
     /// Revert-check: making `AppLoadingModel.showStoreLoadFailure` pass a
     /// `previousCount` of 0 never reaches the threshold and fails this.
     func testShowStoreLoadFailure_repeatedKeptStoreFailures_offerResetAtThreshold() {
@@ -198,6 +271,7 @@ final class AppLoadingModelTests: XCTestCase {
         let retryRequests = RetryRequestCounter()
         var resetOutcome: CoreDataStack.StoreResetOutcome = .removed
         var resetCallCount = 0
+        var reloadPermitCount = 0
         var isProtectedDataAvailable = true
         var availableCapacityBytes: Int64? = 50 * 1024 * 1024 * 1024
         private(set) var model: AppLoadingModel!
@@ -210,6 +284,9 @@ final class AppLoadingModelTests: XCTestCase {
                 resetStore: { [unowned self] in
                     resetCallCount += 1
                     return resetOutcome
+                },
+                permitReloadAfterDeterministicFailure: { [unowned self] in
+                    reloadPermitCount += 1
                 },
                 availableCapacityBytes: { [unowned self] in availableCapacityBytes },
                 isProtectedDataAvailable: { [unowned self] in isProtectedDataAvailable }

@@ -44,17 +44,17 @@ final class CoreDataErrorClassifierTests: XCTestCase {
 
     /// A version-hash mismatch is deterministic (the store's hashes match no
     /// bundled model), so it must never be classified retryable: retries can't
-    /// fix it and only delayed the same migration-recovery outcome.
+    /// fix it and only delayed the same migration-failure outcome.
     func testIsRecoverableError_incompatibleVersionHash_returnsFalse() {
         let error = NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
         XCTAssertFalse(CoreDataErrorClassifier.isRecoverableError(error, currentAttempts: 0, maxAttempts: 3))
     }
 
-    func testRecommendedAction_incompatibleVersionHash_returnsMigrationRecoveryImmediately() {
+    func testRecommendedAction_incompatibleVersionHash_returnsMigrationFailedImmediately() {
         let error = NSError(domain: NSCocoaErrorDomain, code: NSPersistentStoreIncompatibleVersionHashError)
         let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
-        guard case .migrationRecovery = action else {
-            return XCTFail("Expected .migrationRecovery on first attempt (no pointless retries), got \(action)")
+        guard case .migrationFailed = action else {
+            return XCTFail("Expected .migrationFailed on first attempt (no pointless retries), got \(action)")
         }
     }
 
@@ -73,22 +73,22 @@ final class CoreDataErrorClassifierTests: XCTestCase {
         }
     }
 
-    func testRecommendedAction_migrationError_returnsMigrationRecovery() {
+    func testRecommendedAction_migrationError_returnsMigrationFailed() {
         let error = NSError(domain: NSCocoaErrorDomain, code: NSMigrationError)
         let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
-        guard case .migrationRecovery = action else {
-            return XCTFail("Expected .migrationRecovery, got \(action)")
+        guard case .migrationFailed = action else {
+            return XCTFail("Expected .migrationFailed, got \(action)")
         }
     }
 
     /// Deterministic migration failures used to reach a reset through the
-    /// old `.storeReset` fallback. Under the allow-list a code missing from
-    /// `isMigrationError` keeps a store that can never open, so launch would
-    /// sit on the failure screen for good.
+    /// old `.storeReset` fallback. A code missing from `isMigrationError`
+    /// latches `.unavailable` instead of a migration failure, so the timed
+    /// retries would run its migration again and again on the main actor.
     ///
     /// Revert-check: removing any of these codes from
     /// `CoreDataErrorClassifier.isMigrationError` fails the matching case.
-    func testRecommendedAction_deterministicMigrationFailures_returnMigrationRecovery() {
+    func testRecommendedAction_deterministicMigrationFailures_returnMigrationFailed() {
         let cases: [(String, Int)] = [
             ("NSMigrationMissingMappingModelError", NSMigrationMissingMappingModelError),
             ("NSMigrationManagerSourceStoreError", NSMigrationManagerSourceStoreError),
@@ -99,8 +99,8 @@ final class CoreDataErrorClassifierTests: XCTestCase {
         for (name, code) in cases {
             let error = NSError(domain: NSCocoaErrorDomain, code: code)
             let action = CoreDataErrorClassifier.recommendedAction(for: error, currentAttempts: 0, maxAttempts: 3)
-            guard case .migrationRecovery = action else {
-                XCTFail("Expected \(name) to run migration recovery, got \(action)")
+            guard case .migrationFailed = action else {
+                XCTFail("Expected \(name) to be a migration failure, got \(action)")
                 continue
             }
         }

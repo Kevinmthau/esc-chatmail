@@ -70,18 +70,16 @@ class MessageProcessor: @unchecked Sendable {
             maxSuccessBytes: Self.attachmentFetchMemoMaxSuccessBytes
         )
         let content = try await extractContent(from: payload, messageId: gmailMessage.id, fetchMemo: fetchMemo)
+        // Text derivation reads the whole body several times and none of its
+        // steps can be interrupted, so a cancelled run (an expired background
+        // task, an account transition) is answered between them: thrown as
+        // `CancellationError`, which records no verdict for the message
+        // (`MessagePersister.prepareMessage`).
+        try Task.checkCancellation()
         processedMessage.htmlBody = content.html
         processedMessage.plainTextBody = resolvedPlainTextBody(
             plainText: content.plainText,
             html: content.html
-        )
-        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
-        processedMessage.chatPreviewText = createChatPreviewText(
-            html: content.html,
-            plainText: content.plainText,
-            snippet: gmailMessage.snippet,
-            isOutgoingForward: processedMessage.headers.isFromMe &&
-                ForwardingHeuristics.isForwardedSubject(processedMessage.headers.subject)
         )
 
         // Process labels
@@ -90,15 +88,9 @@ class MessageProcessor: @unchecked Sendable {
             processedMessage.isUnread = labelIds.contains("UNREAD")
         }
 
-        // Detect if this is a newsletter/promotion
-        processedMessage.isNewsletter = isNewsletterOrPromotion(
-            labelIds: processedMessage.labelIds,
-            headers: processedMessage.headers,
-            html: content.html,
-            plainText: content.plainText
-        )
-
-        // Check for attachments (exclude body parts that we fetched as content)
+        // `hasAttachments` counts any attachmentId, a large body's included:
+        // it is the bubble's cue to recover HTML for a row with no body.
+        // `extractAttachments` leaves body parts out.
         processedMessage.hasAttachments = checkForAttachments(in: payload)
         processedMessage.attachmentInfo = extractAttachments(from: payload)
         if !processedMessage.attachmentInfo.isEmpty {
@@ -110,10 +102,63 @@ class MessageProcessor: @unchecked Sendable {
         )
         processedMessage.inlineCIDPrefetchContentIDs = inlineCIDPrefetchTargets.contentIDs
         processedMessage.inlineCIDPrefetchAttachmentIDs = inlineCIDPrefetchTargets.attachmentIDs
+        // Ahead of the text derivation: its HTML (`storedHTML`) is the string
+        // the preview and the rich-content pre-run are derived from.
         processedMessage.canonicalContent = canonicalContent(
             html: content.html,
             plainText: content.plainText,
             attachmentInfo: processedMessage.attachmentInfo
+        )
+
+        try Task.checkCancellation()
+        processedMessage.cleanedSnippet = createCleanedSnippet(html: content.html, plainText: content.plainText, snippet: gmailMessage.snippet, isFromMe: processedMessage.headers.isFromMe)
+
+        // One cleanup of the stored HTML gives both the chat preview and the
+        // rich-content pre-run (content-pipeline-cpu#2), which used to run the
+        // cleanup chain again in `MessagePersister`. Derived from the trimmed
+        // string the persister saves and `ChatPreviewRepair` re-derives from,
+        // never the untrimmed part, and the pre-run is reused only for the
+        // exact string it was computed on. The two derive alike for every
+        // golden-corpus input (`IngestCleanupSharingTests`); they differ only
+        // where trailing whitespace fell inside an element left open to the
+        // end (a plain-text part with a bare `<bob@example.com>`), and there
+        // ingest now gives the preview the repair already gave.
+        try Task.checkCancellation()
+        let classifiesRichContent = MessagePersister.richContentPrerunApplies(to: processedMessage)
+        var storedHTMLDerivation: ChatBubbleTextProcessingResult?
+        let storedHTML = processedMessage.storedHTML
+        func derivedFromStoredHTML() -> ChatBubbleTextProcessingResult {
+            if let storedHTMLDerivation {
+                return storedHTMLDerivation
+            }
+            let derived = Self.deriveHTMLChatPreviewAndVerdict(
+                from: storedHTML,
+                classifiesRichContent: classifiesRichContent
+            )
+            storedHTMLDerivation = derived
+            return derived
+        }
+        processedMessage.chatPreviewText = createChatPreviewText(
+            htmlPreview: { derivedFromStoredHTML().mainText },
+            plainText: content.plainText,
+            snippet: gmailMessage.snippet,
+            isOutgoingForward: processedMessage.headers.isFromMe &&
+                ForwardingHeuristics.isForwardedSubject(processedMessage.headers.subject)
+        )
+        if classifiesRichContent, let storedHTML {
+            processedMessage.richContentPrerun = RichContentPrerun(
+                html: storedHTML,
+                isRich: derivedFromStoredHTML().hasRichContent
+            )
+        }
+
+        try Task.checkCancellation()
+        // Detect if this is a newsletter/promotion
+        processedMessage.isNewsletter = isNewsletterOrPromotion(
+            labelIds: processedMessage.labelIds,
+            headers: processedMessage.headers,
+            html: content.html,
+            plainText: content.plainText
         )
 
         return processedMessage
@@ -404,38 +449,18 @@ class MessageProcessor: @unchecked Sendable {
     }
     
     private func parseEmailAddresses(from headerValue: String) -> [EmailAddress] {
-        EmailAddressListParser.addressTokens(from: headerValue).compactMap { trimmed in
-            guard let email = emailNormalizer.extractEmail(from: trimmed) else { return nil }
-            return EmailAddress(
-                email: emailNormalizer.normalize(email),
-                displayName: emailNormalizer.extractDisplayName(from: trimmed)
-            )
-        }
+        EmailAddressListParser.mailboxes(from: headerValue)
     }
     
-    private struct ExtractedMessageContent: Sendable {
-        var html: String?
-        var plainText: String?
-
-        var hasAnyContent: Bool {
-            html != nil || plainText != nil
-        }
-
-        mutating func mergeMissing(from other: ExtractedMessageContent) {
-            if html == nil {
-                html = other.html
-            }
-            if plainText == nil {
-                plainText = other.plainText
-            }
-        }
-    }
-
     private func extractContent(
         from part: MessagePart,
         messageId: String,
         fetchMemo: AttachmentFetchMemo
     ) async throws -> (html: String?, plainText: String?) {
+        // Every leaf the body takes, a continuation segment's included, is
+        // decoded or fetched under `fetchLargeBodyContent`'s contract: a
+        // transient failure throws, and only a 404 or an undecodable response
+        // leaves that one part out (`MIMEBodyExtractor`).
         func decodedBody(_ part: MessagePart) async throws -> String? {
             if let data = part.body?.data {
                 return decodeBody(data, headers: part.headers)
@@ -453,49 +478,7 @@ class MessageProcessor: @unchecked Sendable {
             return nil
         }
 
-        func normalizedNonEmpty(_ value: String?) -> String? {
-            guard let value else { return nil }
-
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : value
-        }
-
-        func extract(from part: MessagePart) async throws -> ExtractedMessageContent {
-            let resolvedMimeType = resolvedMimeType(for: part)
-
-            if isAttachmentContentPart(part) {
-                return ExtractedMessageContent()
-            }
-
-            if isHTMLMimeType(resolvedMimeType) {
-                return ExtractedMessageContent(
-                    html: normalizedNonEmpty(try await decodedBody(part)),
-                    plainText: nil
-                )
-            } else if isPlainTextMimeType(resolvedMimeType) {
-                return ExtractedMessageContent(
-                    html: nil,
-                    plainText: normalizedNonEmpty(try await decodedBody(part))
-                )
-            }
-
-            guard let parts = part.parts, !parts.isEmpty else {
-                return ExtractedMessageContent()
-            }
-
-            var extracted = ExtractedMessageContent()
-            for subpart in parts {
-                let childContent = try await extract(from: subpart)
-                extracted.mergeMissing(from: childContent)
-                if extracted.html != nil && extracted.plainText != nil {
-                    break
-                }
-            }
-
-            return extracted
-        }
-
-        var extracted = try await extract(from: part)
+        var extracted = try await MIMEBodyExtractor.extract(from: part, decodedBody: decodedBody)
 
         // Don't clean HTML content here - preserve original for display
         // The cleaning will be done only when creating snippets
@@ -625,7 +608,7 @@ class MessageProcessor: @unchecked Sendable {
         // Fetch only body-content parts. File attachments (PDFs, images,
         // archives) are never message bodies — downloading them just to probe
         // for embedded HTML wastes bandwidth and adds needless failure modes.
-        if let attachmentId = part.body?.attachmentId, !isAttachmentContentPart(part) {
+        if let attachmentId = part.body?.attachmentId, !MIMEBodyExtractor.isAttachmentContentPart(part) {
             return try await fetchLargeBodyContent(
                 attachmentId: attachmentId,
                 messageId: messageId,
@@ -804,60 +787,6 @@ class MessageProcessor: @unchecked Sendable {
         return decodedData
     }
 
-    private func resolvedMimeType(for part: MessagePart) -> String? {
-        if let directMimeType = part.mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !directMimeType.isEmpty {
-            return directMimeType
-        }
-
-        guard let contentType = part.headers?
-            .first(where: { $0.name.lowercased() == "content-type" })?
-            .value
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !contentType.isEmpty else {
-            return nil
-        }
-
-        return contentType
-    }
-
-    private func isHTMLMimeType(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !mimeType.isEmpty else {
-            return false
-        }
-
-        return mimeType.hasPrefix("text/html")
-    }
-
-    private func isPlainTextMimeType(_ mimeType: String?) -> Bool {
-        guard let mimeType = mimeType?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased(),
-              !mimeType.isEmpty else {
-            return false
-        }
-
-        return mimeType.hasPrefix("text/plain")
-    }
-
-    private func isAttachmentContentPart(_ part: MessagePart) -> Bool {
-        let trimmedFilename = part.filename?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !trimmedFilename.isEmpty {
-            return true
-        }
-
-        let contentDisposition = part.headers?
-            .first(where: { $0.name.lowercased() == "content-disposition" })?
-            .value
-            .lowercased() ?? ""
-
-        return contentDisposition.contains("attachment")
-    }
-
     private func decodeTransferEncoding(_ text: String, headers: [MessageHeader]?) -> String {
         let encoding = headers?.first { $0.name.lowercased() == "content-transfer-encoding" }?.value.lowercased()
         if encoding?.contains("quoted-printable") == true {
@@ -922,7 +851,7 @@ class MessageProcessor: @unchecked Sendable {
     }
 
     private func createChatPreviewText(
-        html: String?,
+        htmlPreview: () -> String?,
         plainText: String?,
         snippet: String?,
         isOutgoingForward: Bool = false
@@ -937,7 +866,7 @@ class MessageProcessor: @unchecked Sendable {
             }
         }
 
-        if let htmlPreview = Self.deriveHTMLChatPreview(from: html) {
+        if let htmlPreview = htmlPreview() {
             return htmlPreview
         }
 
@@ -958,10 +887,22 @@ class MessageProcessor: @unchecked Sendable {
 
     /// Shared by ingest and the versioned repair; never mutates canonical HTML.
     static func deriveHTMLChatPreview(from html: String?) -> String? {
+        deriveHTMLChatPreviewAndVerdict(from: html, classifiesRichContent: false).mainText
+    }
+
+    /// `deriveHTMLChatPreview` and, with `classifiesRichContent`, the
+    /// rich-content classifier's answer over the same cleanup
+    /// (`RichContentClassifier.hasGenuineRichContentAfterCleanup`), from one
+    /// pass of the cleanup chain. The preview does not depend on whether the
+    /// verdict is asked for.
+    static func deriveHTMLChatPreviewAndVerdict(
+        from html: String?,
+        classifiesRichContent: Bool
+    ) -> ChatBubbleTextProcessingResult {
         ChatBubbleTextProcessor.htmlCompatibilityFallback(
             from: html,
-            classifyRichContent: false
-        ).mainText
+            classifyRichContent: classifiesRichContent
+        )
     }
 
     private func createOutgoingForwardChatPreviewText(
@@ -1014,25 +955,25 @@ class MessageProcessor: @unchecked Sendable {
         return result.mainText
     }
 
-    // prepareHTMLForSnippet's three patterns, compiled once instead of per
-    // message. Each keeps the options its per-call replacement passed:
-    // .caseInsensitive on the <head> and hidden-element patterns, none on the
-    // comment pattern. The hidden-element pattern's `\1` is a backreference in
-    // the pattern, not the template; every template is "".
-    private static let snippetHeadElementRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<head\\b[^>]*>[\\s\\S]*?</head>", options: [.caseInsensitive])
-    }()
+    // prepareHTMLForSnippet's three patterns: `<head\b[^>]*>[\s\S]*?</head>`
+    // (.caseInsensitive), `<!--[\s\S]*?-->` (no options) and the hidden-element
+    // pattern (`HiddenElementRule.snippet`, which documents it and its one
+    // difference), each removed with the result its regex gave but
+    // read once (`HTMLMarkupScan`): the regexes reread the rest of the text at
+    // every start with nothing to close it.
+    private static let snippetHeadElementRule = HTMLBlockRule(
+        start: "<head\\b",
+        close: "</head>",
+        readsToTagEnd: true,
+        options: [.caseInsensitive]
+    )
 
-    private static let snippetHTMLCommentRegex: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "<!--[\\s\\S]*?-->", options: [])
-    }()
-
-    private static let snippetHiddenElementRegex: NSRegularExpression? = {
-        try? NSRegularExpression(
-            pattern: "<([a-zA-Z0-9]+)\\b[^>]*style\\s*=\\s*['\"][^'\"]*(?:display\\s*:\\s*none|visibility\\s*:\\s*hidden|mso-hide\\s*:\\s*all|max-height\\s*:\\s*0|opacity\\s*:\\s*0|font-size\\s*:\\s*0)[^'\"]*['\"][^>]*>[\\s\\S]*?</\\1>",
-            options: [.caseInsensitive]
-        )
-    }()
+    private static let snippetHTMLCommentRule = HTMLBlockRule(
+        start: "<!--",
+        close: "-->",
+        readsToTagEnd: false,
+        options: []
+    )
 
     /// Prepares HTML for snippet extraction by removing metadata and hidden preheaders
     /// that frequently pollute conversation list previews (e.g., title tags, Outlook comments).
@@ -1040,13 +981,13 @@ class MessageProcessor: @unchecked Sendable {
         var cleaned = html
 
         // Remove HTML head content (title, meta, style, mso settings, etc.)
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHeadElementRegex)
+        cleaned = Self.snippetHeadElementRule?.removingBlocks(from: cleaned) ?? cleaned
 
         // Remove HTML comments, including Outlook conditional blocks.
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHTMLCommentRegex)
+        cleaned = Self.snippetHTMLCommentRule?.removingBlocks(from: cleaned) ?? cleaned
 
         // Remove hidden preheader/style-hiding elements.
-        cleaned = RegexSanitizer.replace(in: cleaned, regex: Self.snippetHiddenElementRegex)
+        cleaned = HTMLMarkupScan.removingHiddenElements(from: cleaned)
 
         return cleaned
     }
@@ -1080,8 +1021,22 @@ class MessageProcessor: @unchecked Sendable {
 
             // Only process actual file parts, not multipart containers.
             // Also skip duplicate attachment IDs.
+            //
+            // A body is not a file. Gmail serves a text part over about 25 KB
+            // by attachmentId, as it does a file, and the body walk follows
+            // that indirection (`fetchLargeBodyContent`); taken for a file it
+            // became an `attachment.html` or `.txt` card that the post-sync
+            // sweep downloaded a second time (architecture review
+            // gap-message-shape-extremes#3). So a text/html or text/plain part
+            // with no filename and no `attachment` disposition is never one,
+            // whether or not the walk took it for the body, as on web
+            // (`isServerAttachmentPart`, which reads `mimeType` alone where
+            // this also reads the Content-Type header). A nameless text/calendar part is
+            // still a file (it drives the invite and reservation cards), and
+            // `hasAttachments`, which counts any attachmentId, is left as it is.
             if let attachmentId = part.body?.attachmentId,
                !(part.mimeType?.hasPrefix("multipart/") ?? false),
+               MIMEBodyExtractor.bodyLeafKind(of: part) == nil,
                !seenIds.contains(attachmentId) {
                 seenIds.insert(attachmentId)
 
@@ -1128,12 +1083,6 @@ class MessageProcessor: @unchecked Sendable {
         }
 
         traverse(part)
-
-        #if DEBUG
-        if attachments.isEmpty && checkForAttachments(in: part) {
-            Log.debug("checkForAttachments=true but extractAttachments=0. Part structure may need review.", category: .sync)
-        }
-        #endif
 
         return attachments
     }

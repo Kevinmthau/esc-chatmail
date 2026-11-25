@@ -9,10 +9,28 @@ import Foundation
 /// these definitions, so each pattern has exactly one home.
 
 enum EmailPatterns {
-    /// Matches an email address anywhere in a line.
+    /// Matches an email address anywhere in a line:
+    /// `[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}`, case-insensitive.
+    ///
+    /// A match starts only where a run of the local part's characters starts
+    /// (or where the previous match ended, `\G`). Unguarded, the regex was
+    /// tried at every character of such a run and read to its end each time,
+    /// so a line of 16,000 `x`, `a.` or digits held a message's ingest for 14
+    /// to 35 s in the signature classifiers. The guard changes no match: from
+    /// anywhere in a run the local part reaches the same end of the run and
+    /// needs the `@` there (`@` is not one of its characters), so a start
+    /// inside a run matches exactly when the run's own start does, and the
+    /// leftmost start, the one a search returns, is the run's.
+    /// `EmailPatternsTests` compares the two.
     static let address: NSRegularExpression? = {
-        try? NSRegularExpression(pattern: "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}", options: [.caseInsensitive])
+        try? NSRegularExpression(
+            pattern: "(?:(?<![A-Z0-9._%+-])|\\G)" + unguardedAddressPattern,
+            options: [.caseInsensitive]
+        )
     }()
+
+    /// The address pattern without the guard, for `EmailPatternsTests`.
+    static let unguardedAddressPattern = "[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}"
 }
 
 enum URLPatterns {

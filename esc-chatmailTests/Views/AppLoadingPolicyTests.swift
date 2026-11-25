@@ -176,6 +176,77 @@ final class AppLoadingPolicyTests: XCTestCase {
         }
     }
 
+    func testStoreLoadFailureKind_migrationFailedWithSpace_isMigrationFailed() {
+        let error = CoreDataError.storeLoadFailed(
+            PersistentStoreLoadError.migrationFailed(NSError(domain: NSCocoaErrorDomain, code: NSMigrationError))
+        )
+
+        let kind = AppLoadingPolicy.storeLoadFailureKind(for: error, availableCapacityBytes: 50 * 1024 * 1024 * 1024)
+
+        XCTAssertEqual(kind, .migrationFailed)
+    }
+
+    /// The words are what differs for a newer build's store: the notice asks to
+    /// update, and the confirmation says that updating keeps the mailbox.
+    ///
+    /// Revert-check: the `where` clause of the first `.storeFromNewerVersion`
+    /// case in `AppLoadingPolicy.storeLoadFailureNotice` (dropped, the offer
+    /// comes before the threshold), and its `resetConfirmation:` argument.
+    func testStoreLoadFailureNotice_storeFromNewerVersion_offersResetOnlyFromThresholdInItsOwnWords() {
+        let below = AppLoadingPolicy.storeLoadFailureNotice(
+            for: .storeFromNewerVersion,
+            resetEligibleFailureCount: threshold - 1,
+            isFreeSpaceKnown: true
+        )
+        let atThreshold = AppLoadingPolicy.storeLoadFailureNotice(
+            for: .storeFromNewerVersion,
+            resetEligibleFailureCount: threshold,
+            isFreeSpaceKnown: true
+        )
+
+        XCTAssertFalse(below.offersMailboxReset)
+        XCTAssertTrue(atThreshold.offersMailboxReset)
+        XCTAssertEqual(atThreshold.title, "Update MushMail")
+        XCTAssertEqual(atThreshold.resetConfirmation, AppLoadingPolicy.newerVersionMailboxResetConfirmation)
+        XCTAssertTrue(
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation.message.contains("Updating MushMail keeps your mailbox")
+        )
+        XCTAssertNotEqual(
+            AppLoadingPolicy.storeLoadFailureNotice(
+                for: .migrationFailed,
+                resetEligibleFailureCount: threshold,
+                isFreeSpaceKnown: true
+            ).resetConfirmation,
+            AppLoadingPolicy.newerVersionMailboxResetConfirmation
+        )
+    }
+
+    /// The launch screen and the stack offer and allow a reset for the same
+    /// load errors, so the button never does nothing.
+    func testResetOffer_matchesWhatTheStackWillReset() {
+        let underlying = NSError(domain: NSCocoaErrorDomain, code: NSMigrationError)
+        let cases: [(PersistentStoreLoadError, AppLoadingPolicy.StoreLoadFailureKind)] = [
+            (.unavailable(underlying), .storeUnavailable),
+            (.migrationFailed(underlying), .migrationFailed),
+            (.storeFromNewerVersion(underlying), .storeFromNewerVersion),
+            (.insufficientStorage(NSError(domain: NSCocoaErrorDomain, code: NSFileWriteOutOfSpaceError)), .insufficientStorage)
+        ]
+        for (loadError, kind) in cases {
+            XCTAssertEqual(
+                AppLoadingPolicy.storeLoadFailureKind(
+                    for: CoreDataError.storeLoadFailed(loadError),
+                    availableCapacityBytes: 50 * 1024 * 1024 * 1024
+                ),
+                kind
+            )
+            XCTAssertEqual(
+                AppLoadingPolicy.offersResetPastThreshold(kind),
+                CoreDataStack.allowsResetAfterLoadFailure(loadError),
+                "\(kind)"
+            )
+        }
+    }
+
     /// The confirmation is the user's only warning of what a reset loses.
     func testMailboxResetConfirmation_namesUnsyncedChangesAndUnsentMessages() {
         let message = AppLoadingPolicy.mailboxResetConfirmation.message

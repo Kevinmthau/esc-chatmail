@@ -10,6 +10,10 @@ final class AppLoadingModel: ObservableObject {
     @Published private(set) var storeLoadFailure: AppLoadingPolicy.StoreLoadFailureNotice?
 
     private let requestRetry: @Sendable () async -> Void
+    /// Lets the retry the user asked for reload a store whose migration
+    /// failed (`CoreDataStack.permitReloadAfterDeterministicFailure()`), which
+    /// the launch loop's timed retries leave alone.
+    private let permitReloadAfterDeterministicFailure: @MainActor () -> Void
     private let resetStore: @MainActor () -> CoreDataStack.StoreResetOutcome
     private let availableCapacityBytes: @Sendable () -> Int64?
     private let isProtectedDataAvailable: @MainActor () -> Bool
@@ -25,6 +29,9 @@ final class AppLoadingModel: ObservableObject {
         resetStore: @escaping @MainActor () -> CoreDataStack.StoreResetOutcome = {
             CoreDataStack.shared.resetStoreAfterLoadFailure()
         },
+        permitReloadAfterDeterministicFailure: @escaping @MainActor () -> Void = {
+            CoreDataStack.shared.permitReloadAfterDeterministicFailure()
+        },
         availableCapacityBytes: @escaping @Sendable () -> Int64? = {
             StoreVolumeFreeSpace.availableBytes()
         },
@@ -36,6 +43,7 @@ final class AppLoadingModel: ObservableObject {
             await AppStartupBootstrap.shared.requestPersistenceRetry()
         }
         self.resetStore = resetStore
+        self.permitReloadAfterDeterministicFailure = permitReloadAfterDeterministicFailure
         self.availableCapacityBytes = availableCapacityBytes
         self.isProtectedDataAvailable = isProtectedDataAvailable
     }
@@ -69,6 +77,9 @@ final class AppLoadingModel: ObservableObject {
     /// again shows the notice again.
     func retry() {
         storeLoadFailure = nil
+        // The user asked: this reload may run a failed migration again, and
+        // after a reset it must load the empty store.
+        permitReloadAfterDeterministicFailure()
         let requestRetry = self.requestRetry
         Task {
             await requestRetry()

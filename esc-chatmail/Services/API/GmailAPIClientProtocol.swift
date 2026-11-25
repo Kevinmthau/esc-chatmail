@@ -9,6 +9,12 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     /// Lists messages in the mailbox.
     func listMessages(pageToken: String?, maxResults: Int, query: String?) async throws -> MessagesListResponse
 
+    /// One page of a search over every label, Spam and Trash included
+    /// (`includeSpamTrash=true`), for a question whose answer must not miss a
+    /// message the user trashed: the "Delivery unknown" lookup
+    /// (`DeliveryUnknownProbe`). The API leaves Spam and Trash out by default.
+    func searchAllMessages(query: String, maxResults: Int) async throws -> MessagesListResponse
+
     /// Fetches a single message by ID.
     func getMessage(id: String, format: String) async throws -> GmailMessage
 

@@ -251,39 +251,16 @@ final class ConversationManager: Sendable {
         from headers: ProcessedHeaders,
         myAliases: Set<String>
     ) -> ConversationIdentity {
-        let messageHeaders = createMessageHeaders(from: headers)
+        // Every From mailbox, read by the parser that read To and Cc, and
+        // the parsed To and Cc themselves: never a header rebuilt from them
+        // (`makeConversationIdentity(participants:…)` says why). BCC is
+        // intentionally excluded.
+        let from = headers.from.map(EmailAddressListParser.mailboxes(from:)) ?? []
         return makeConversationIdentity(
-            from: messageHeaders,
+            participants: from + headers.to + headers.cc,
+            rawListId: headers.listId,
             myAliases: myAliases,
             contactLinks: contactLinks()
         )
-    }
-
-    // MARK: - Private Helpers
-
-    private func createMessageHeaders(from headers: ProcessedHeaders) -> [MessageHeader] {
-        var messageHeaders: [MessageHeader] = []
-
-        if let from = headers.from {
-            messageHeaders.append(MessageHeader(name: "From", value: from))
-        }
-
-        for recipient in headers.to {
-            let value = recipient.displayName.map { "\($0) <\(recipient.email)>" } ?? recipient.email
-            messageHeaders.append(MessageHeader(name: "To", value: value))
-        }
-
-        for recipient in headers.cc {
-            let value = recipient.displayName.map { "\($0) <\(recipient.email)>" } ?? recipient.email
-            messageHeaders.append(MessageHeader(name: "Cc", value: value))
-        }
-
-        // Note: BCC is intentionally excluded from headers for identity creation
-
-        if let listId = headers.listId {
-            messageHeaders.append(MessageHeader(name: "List-Id", value: listId))
-        }
-
-        return messageHeaders
     }
 }

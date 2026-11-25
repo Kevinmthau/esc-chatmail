@@ -442,7 +442,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         ]
         for html in shapes {
             XCTAssertLessThan(EmailDOMParseAdmission.estimatedCost(of: html).childMoveWork, 100_000, String(html.prefix(40)))
-            XCTAssertNoThrow(try EmailDOMParseAdmission.admit(html), String(html.prefix(40)))
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(40)))
         }
     }
 
@@ -466,7 +466,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         let cost = EmailDOMParseAdmission.estimatedCost(of: wrapper)
         XCTAssertGreaterThanOrEqual(cost.childMoveWork, 16_000_000)
         XCTAssertLessThanOrEqual(cost.childMoveWork, 4 * 16_000_000)
-        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(wrapper))
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(wrapper))
     }
 
     /// Where the second scan cannot follow the markup (here after a
@@ -650,6 +650,94 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertEqual(processed.cleanedSnippet.map { $0.contains(Self.sentinel) }, true)
     }
 
+    // MARK: - SwiftSoup's tokenizer overread
+
+    /// Bodies ending where SwiftSoup 2.13.5 reads past the end of its input
+    /// (a stale UTF-8 decoder in `consumeLetterSequenceSlice`), each of
+    /// which trapped the parse (measured): an end tag name in raw text or
+    /// script data, after text outside ASCII too, a script's double escape,
+    /// a doctype's name, and a trailing space read over.
+    private static let overreadingBodies = [
+        "<style></a\u{E9}x\u{E9}",
+        "<script><!--<script\u{E9}x\u{E9}",
+        "<noframes></xx\u{E9}x\u{E9}",
+        "<script></ax\u{3A9}\u{3A9}\u{65E5} ",
+        "<style>a</a\u{436}a\u{E9}",
+        "<p>Hello</p><title><!--</script\u{E9}x\u{E9}",
+        "<style>\u{E9}</a\u{E9}x\u{E9}",
+        "<script>\"\u{E9}\"</a\u{E9}x\u{E9}",
+        "<!DOCTYPE a\u{E9}a\u{E9}",
+        "<p>Hello</p><!DOCTYPE html\u{E9}x\u{E9}",
+    ]
+
+    /// Revert-check: `paddedAgainstTheTokenizerOverread` in the three parse
+    /// entry points (without it each of these crashes the test host).
+    func testParse_bodyEndingWhereTheTokenizerOverreads_parsesWithoutTrapping() throws {
+        let context = try Element(Tag.valueOf("tr"), "")
+        for html in Self.overreadingBodies {
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), html.debugDescription)
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseBodyFragment(html), html.debugDescription)
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseFragment(html, context: context), html.debugDescription)
+        }
+    }
+
+    /// Only a body whose last four bytes hold one outside ASCII is padded,
+    /// and the padding changes no text a reader sees. HONEST SCOPE: `text()`
+    /// trims whitespace, so the text comparison holds for any padding of
+    /// spaces; what pins the padding is the `html + "    "` check.
+    func testPadding_bodiesEndingInTextOutsideASCII_readTheSame() throws {
+        XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("<p>Caf\u{E9}</p>"), "<p>Caf\u{E9}</p>")
+        XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread("plain"), "plain")
+        let bodies = [
+            "Merci, \u{E0} bient\u{F4}t \u{E9}t\u{E9}",
+            "<p>a<b>\u{E9}t\u{E9}",
+            "<div title=\"\u{E9}x\u{E9}\">\u{65E5}\u{672C}",
+            "<p>\u{65E5}\u{672C}\u{8A9E}",
+        ]
+        for html in bodies {
+            XCTAssertEqual(EmailDOMParseAdmission.paddedAgainstTheTokenizerOverread(html), html + "    ")
+            let padded = try EmailDOMParseAdmission.parseDocument(html)
+            let plain = try SwiftSoup.parse(html)
+            XCTAssertEqual(try padded.text(), try plain.text(), html.debugDescription)
+        }
+    }
+
+    /// A message whose body ends this way is processed and kept with its
+    /// body and its text.
+    /// HONEST SCOPE: without the padding this test crashes rather than fails.
+    func testProcessGmailMessage_bodyEndingWhereTheTokenizerOverreads_persistsTheBody() async throws {
+        let html = "<p>Hello there</p><style></a\u{E9}x\u{E9}"
+        let message = GmailMessage(
+            id: "overread-html",
+            threadId: "overread-html-thread",
+            labelIds: ["INBOX"],
+            snippet: "Hello there",
+            historyId: "1",
+            internalDate: "1704067200000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "text/html",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Sender <sender@example.com>"),
+                    MessageHeader(name: "Content-Type", value: "text/html; charset=utf-8"),
+                ],
+                body: MessageBody(
+                    size: html.utf8.count,
+                    data: Data(html.utf8).base64EncodedString(),
+                    attachmentId: nil
+                ),
+                parts: nil
+            ),
+            sizeEstimate: html.utf8.count
+        )
+
+        let result = try await MessageProcessor().processGmailMessage(message, myAliases: [])
+        let processed = try XCTUnwrap(result)
+        XCTAssertEqual(processed.htmlBody, html)
+        XCTAssertEqual(processed.chatPreviewText.map { $0.contains("Hello there") }, true)
+    }
+
     // MARK: - Ordinary mail is admitted
 
     /// No golden-corpus output may change, and web replays the corpus: every
@@ -664,7 +752,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             + corpus.cleanedSnippetCases.compactMap(\.html)
         XCTAssertGreaterThan(inputs.count, 100)
         for html in inputs {
-            XCTAssertNoThrow(try EmailDOMParseAdmission.admit(html), String(html.prefix(120)))
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(120)))
             XCTAssertLessThan(EmailDOMParseAdmission.tokenizedDepthEstimate(of: html), 100, String(html.prefix(120)))
         }
     }
@@ -675,7 +763,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         for index in 0..<120 {
             chain = "<div dir=\"ltr\">reply \(index)</div><div class=\"gmail_quote\"><div dir=\"ltr\" class=\"gmail_attr\">On a day, someone wrote:<br></div><blockquote class=\"gmail_quote\" style=\"margin:0 0 0 .8ex\">" + chain + "</blockquote></div>"
         }
-        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(chain))
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(chain))
 
         // A large old-style newsletter: thousands of tags, unclosed cells,
         // fonts and list items, conditional comments and a commented style
@@ -685,7 +773,7 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
             newsletter += "<!--[if mso]><table><tr><td><![endif]--><table><tr><td><font face=Arial>row \(row)<td>cell<tr><td><ul><li>a<li>b</ul></table><!--[if mso]></td></tr></table><![endif]--><p>para<p>next"
         }
         newsletter += "</body></html>"
-        XCTAssertNoThrow(try EmailDOMParseAdmission.admit(newsletter))
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(newsletter))
     }
 
     // MARK: - The bound is never below SwiftSoup's depth

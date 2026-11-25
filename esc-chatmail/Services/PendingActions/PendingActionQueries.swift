@@ -294,7 +294,9 @@ extension PendingActionsManager {
 
         // Processing acquires its own cancellable run. Start it only after the
         // mutation lease has been released to avoid recursive acquisition.
+        // The user asked for it now: a transient backoff does not hold it.
         if didReset {
+            resetTransientRetryBackoff()
             await processAllPendingActions()
         }
     }
@@ -338,6 +340,7 @@ extension PendingActionsManager {
         } ?? false
 
         if didReset {
+            resetTransientRetryBackoff()
             await processAllPendingActions()
         }
     }

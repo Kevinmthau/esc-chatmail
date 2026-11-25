@@ -54,6 +54,55 @@ final class SendAsReplyFromTests: XCTestCase {
         }
     }
 
+    func testAddressTokens_commaInsideComment_staysInsideItsMailbox() {
+        // Revert-check: dropping the `.comment` mode from
+        // `EmailAddressListParser.addressTokens` splits each of these at the
+        // comma inside the comment, and the first half of
+        // `(<boss@corp.example>, x) <x@attacker.example>` became a mailbox of
+        // its own whose address was boss@corp.example.
+        let firstRecipients = [
+            "(<boss@corp.example>, x) <x@attacker.example>",
+            "(a (b, c) d) <x@attacker.example>",
+            #"(a \), b) <x@attacker.example>"#
+        ]
+
+        for first in firstRecipients {
+            XCTAssertEqual(
+                EmailAddressListParser.addressTokens(from: "\(first), bob@example.com"),
+                [first, "bob@example.com"],
+                first
+            )
+        }
+    }
+
+    func testAddressTokens_unclosedComment_runsToTheEndLikeAnUnclosedQuote() {
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: "(a, <b@example.com>, c@example.com"),
+            ["(a, <b@example.com>, c@example.com"]
+        )
+    }
+
+    /// Revert-check: dropping the `.phraseLiteral` mode from
+    /// `EmailAddressListParser.addressTokens` splits the bare address's
+    /// domain literal at its comma.
+    func testAddressTokens_bareAddressDomainLiteral_staysWholeOnlyAfterAnAt() {
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: "x@[a,b], c@d.com"),
+            ["x@[a,b]", "c@d.com"]
+        )
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: "[Ops, West] <o@x.com>"),
+            ["[Ops", "West] <o@x.com>"]
+        )
+    }
+
+    func testAddressTokens_quoteInsideComment_isText() {
+        XCTAssertEqual(
+            EmailAddressListParser.addressTokens(from: #"(") <a@example.com>, <b@example.com>"#),
+            [#"(") <a@example.com>"#, "<b@example.com>"]
+        )
+    }
+
     func testProcessMessage_unbalancedRecipientBracket_preservesFollowingAlias() async throws {
         for headerName in ["To", "Cc"] {
             let message = makeGmailMessage(

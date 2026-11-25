@@ -1213,6 +1213,153 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
         XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
     }
 
+    // MARK: - Delivery unknown, resolved by Message-ID
+
+    // Revert-check: fails if `GmailSendService.recordRemoteSendState` stops
+    // stamping `admittedAt` with the in-flight marker: the probe would never
+    // resolve a send this build made.
+    func testRecordRemoteSendAdmission_stampsTheAdmissionTimeThatAmbiguityAndColdRecoveryKeep() async throws {
+        let recipient = "admission-time@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Admitted",
+            optimisticConversation: .participantHash(calculateParticipantHash(from: [normalizedEmail(recipient)]))
+        )
+        try sendService.persistOptimisticMessageBeforeTransmission(optimisticMessageID: handle.optimisticMessageID)
+        XCTAssertNil(try durableAdmittedAt(id: handle.optimisticMessageID), "Not admitted yet")
+
+        let before = Date()
+        try sendService.recordRemoteSendAdmission(optimisticMessageID: handle.optimisticMessageID)
+        let after = Date()
+        let admittedAt = try XCTUnwrap(durableAdmittedAt(id: handle.optimisticMessageID))
+        XCTAssertGreaterThanOrEqual(admittedAt, before)
+        XCTAssertLessThanOrEqual(admittedAt, after)
+
+        viewContext.reset()
+        let coldStartSendService = GmailSendService(viewContext: viewContext, apiClient: MockGmailAPIClient())
+        coldStartSendService.reconcileAbandonedOptimisticSendMutations()
+
+        XCTAssertEqual(
+            try durableMutationState(id: handle.optimisticMessageID)?.remoteCommittedMessageId,
+            OutboundSendRemoteState.ambiguousMessageID
+        )
+        XCTAssertEqual(try durableAdmittedAt(id: handle.optimisticMessageID), admittedAt)
+    }
+
+    // The review's pinning test (outbound-and-actions#2): a reply Gmail never
+    // received leaves "Delivery unknown" for "Not sent", and Edit and resend
+    // then works, with nothing sent on the way.
+    // Revert-check: fails if `DeliveryUnknownResolution.stageNotSent` stops
+    // writing the `notSent` marker (recover throws `notDefinitelyUnsent`).
+    func testDeliveryUnknownProbe_replyGmailHasNoCopyOf_becomesNotSentAndEditAndResendRecoversIt() async throws {
+        let conversation = ConversationBuilder().withDisplayName("Friend").visible().recentlyActive().build(in: viewContext)
+        try viewContext.obtainPermanentIDs(for: [conversation])
+        try saveViewContext()
+        let metadata = OutboundMessageRequest.ReplyMetadata(
+            recipientEmails: ["friend@example.com"], fromEmail: "me@example.com", fromName: "Me",
+            subject: "Re: Plans", threadId: "plans-thread", inReplyTo: "<plans@example.com>",
+            references: ["<plans@example.com>"],
+            originalMessage: QuotedMessage(senderName: "Friend", senderEmail: "friend@example.com",
+                                           date: Date(timeIntervalSince1970: 1), body: "Plans?")
+        )
+        let handle = try await sendService.createOptimisticMessage(
+            to: metadata.recipientEmails, body: "Saturday works", subject: metadata.subject, threadId: metadata.threadId,
+            optimisticConversation: .existingConversation(.init(objectID: conversation.objectID)),
+            replyMetadata: metadata
+        )
+        try sendService.persistOptimisticMessageBeforeTransmission(optimisticMessageID: handle.optimisticMessageID)
+        try sendService.recordRemoteSendAdmission(optimisticMessageID: handle.optimisticMessageID)
+        try sendService.recordAmbiguousRemoteSend(optimisticMessageID: handle.optimisticMessageID)
+        let store = ChatReplyDraftStore(context: viewContext)
+        let ambiguousMessage = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertThrowsError(try store.recover(ambiguousMessage, conversation: conversation, currentUserEmail: "me@example.com"))
+
+        try backdateAdmission(id: handle.optimisticMessageID, by: 2 * 60 * 60)
+        let api = MockGmailAPIClient()
+        let syncContext = coreDataStack.newBackgroundContext()
+        let outcome = try await DeliveryUnknownProbe(messageFetcher: MessageFetcher(apiClient: api, clock: FakeSyncClock()))
+            .run(runStartedAt: Date(), in: syncContext)
+        try await syncContext.perform { try syncContext.save() }
+        viewContext.refreshAllObjects()
+
+        XCTAssertEqual(outcome.resolvedAsNotSent, [handle.optimisticMessageID])
+        XCTAssertEqual(api.sendMessageCallCount, 0)
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertEqual(OutboundSendDeliveryState.resolve(for: message), .notSent)
+        let conversationID = conversation.id
+        _ = try store.recover(message, conversation: conversation, currentUserEmail: "me@example.com")
+        let (draft, _) = try XCTUnwrap(store.load(conversationID: conversationID))
+        XCTAssertEqual(draft.text, "Saturday works")
+        XCTAssertEqual(draft.recoveredEnvelope?.threadId, "plans-thread")
+        XCTAssertEqual(api.sendMessageCallCount, 0, "Edit and resend is the user's; nothing was resent")
+    }
+
+    // Revert-check: fails if `ReconciliationPhase.execute` stops persisting
+    // the probe's found IDs: the record would stay "Delivery unknown".
+    func testDeliveryUnknownProbe_messageFoundInGmail_isPersistedAndItsEchoConsumesTheRecord() async throws {
+        let recipient = "found-by-message-id@example.com"
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "This one did reach Gmail",
+            optimisticConversation: .participantHash(calculateParticipantHash(from: [normalizedEmail(recipient)]))
+        )
+        try sendService.persistOptimisticMessageBeforeTransmission(optimisticMessageID: handle.optimisticMessageID)
+        try sendService.recordRemoteSendAdmission(optimisticMessageID: handle.optimisticMessageID)
+        try sendService.recordAmbiguousRemoteSend(optimisticMessageID: handle.optimisticMessageID)
+        try backdateAdmission(id: handle.optimisticMessageID, by: 2 * 60 * 60)
+
+        let remoteMessageID = "gmail-found-by-message-id"
+        let api = MockGmailAPIClient()
+        api.listMessagesResponsesByQuery[
+            DeliveryUnknownProbePolicy.query(forOptimisticMessageID: handle.optimisticMessageID)
+        ] = MessagesListResponse(
+            messages: [MessageListItem(id: remoteMessageID, threadId: "found-thread")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        api.getMessageResponses[remoteMessageID] = GmailMessage(
+            id: remoteMessageID, threadId: "found-thread", labelIds: ["SENT"], snippet: "Committed list reply",
+            historyId: nil, internalDate: nil, payload: nil, sizeEstimate: nil
+        )
+        let fetcher = MessageFetcher(apiClient: api, clock: FakeSyncClock())
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "DeliveryUnknownFound-\(UUID().uuidString)"))
+        let phase = ReconciliationPhase(
+            reconciliation: SyncReconciliation(messageFetcher: fetcher, defaults: defaults),
+            messageFetcher: fetcher,
+            messagePersister: MessagePersister(
+                coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+                messageProcessor: StubRemoteSentMessageProcessor(
+                    processedMessage: makeHeaderlessSentMessage(
+                        id: remoteMessageID,
+                        threadId: "found-thread",
+                        messageId: MimeBuilder.messageId(forOptimisticMessageID: handle.optimisticMessageID)
+                    )
+                ),
+                photoPrefetcher: { _ in }
+            ),
+            defaults: defaults
+        )
+        let syncContext = coreDataStack.newBackgroundContext()
+
+        _ = try await phase.execute(
+            input: ReconciliationInput(skipLabelReconciliation: true, probesDeliveryUnknownSends: true),
+            context: SyncPhaseContext(
+                coreDataContext: syncContext,
+                labelIds: [],
+                myAliases: ["me@example.com"],
+                syncStartTime: Date(),
+                progressHandler: { _, _ in },
+                failureTracker: .shared
+            )
+        )
+        try await syncContext.perform { try syncContext.save() }
+
+        XCTAssertEqual(try durableMutationRecordCount(), 0)
+        XCTAssertNil(try durableMessageState(id: handle.optimisticMessageID))
+        XCTAssertNotNil(try durableMessageState(id: remoteMessageID))
+        XCTAssertEqual(api.sendMessageCallCount, 0)
+    }
+
     func testColdRecovery_missingOptimisticListReplyRetainsRouteUntilSentSyncConsumesItAtomically() async throws {
         let context: NSManagedObjectContext = viewContext
         let listId = "list.example.com"
@@ -2148,6 +2295,28 @@ final class GmailSendServiceOptimisticFailureTests: XCTestCase {
                 remoteCommittedMessageId: record.remoteCommittedMessageId,
                 remoteCommittedThreadId: record.remoteCommittedThreadId
             )
+        }
+    }
+
+    private func durableAdmittedAt(id: String) throws -> Date? {
+        let verificationContext = coreDataStack.newBackgroundContext()
+        return try verificationContext.performAndWait {
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            request.fetchLimit = 1
+            return try verificationContext.fetch(request).first?.admittedAt
+        }
+    }
+
+    private func backdateAdmission(id: String, by interval: TimeInterval) throws {
+        let writeContext = coreDataStack.newBackgroundContext()
+        try writeContext.performAndWait {
+            let request = OutboundSendMutationRecord.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            for record in try writeContext.fetch(request) {
+                record.admittedAt = record.admittedAt?.addingTimeInterval(-interval)
+            }
+            try writeContext.save()
         }
     }
 

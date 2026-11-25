@@ -160,6 +160,58 @@ final class BaseEmailWebViewTests: XCTestCase {
         }
     }
 
+    // Revert-check: fails if `BaseEmailWebView.Coordinator.webViewWebContentProcessDidTerminate`
+    // stops reloading (the preview stays blank: `needsReload` compares only the recorded
+    // signature), or reloads past the cap (drop its `admitsReloadAfterWebContentTermination`
+    // guard: a page that crashes WebKit then reloads at every termination and every update after
+    // it). No reload here finishes, so a reload killed before it could show still counts.
+    func testWebContentTermination_reloadsUpToTheCapThenLeavesTheSignatureRecorded() {
+        let view = makeWebView(message: nil, html: "<p>Preview</p>")
+        let coordinator = BaseEmailWebView.Coordinator(view)
+        let webView = RecordingPreviewWebView()
+        let cap = EmailWebViewLoadCoordination.maximumWebContentTerminationReloads
+        coordinator.loadContentIfReady(in: webView)
+        coordinator.webView(webView, didFinish: nil)
+
+        for _ in 0..<cap {
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+        }
+        XCTAssertEqual(webView.loadedHTML, Array(repeating: "<p>Preview</p>", count: 1 + cap))
+        XCTAssertTrue(webView.loadedRequests.isEmpty, "The coordinator loads no URL request")
+
+        coordinator.webViewWebContentProcessDidTerminate(webView)
+        coordinator.updateParent(view)
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(webView.loadedHTML.count, 1 + cap)
+        XCTAssertFalse(coordinator.needsReload)
+    }
+
+    // Revert-check: fails if the preview's `didFail` or `didFailProvisionalNavigation` loses its
+    // `isWebContentProcessTerminationError` guard (each reverted on its own): the failure resets
+    // the signature the termination's reload recorded, and the next update loads it again.
+    func testWebContentTermination_failureReportedForTheDeadNavigation_doesNotRearmAReload() {
+        for isProvisional in [false, true] {
+            let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil))
+            let webView = RecordingPreviewWebView()
+            coordinator.loadContentIfReady(in: webView)
+            coordinator.webViewWebContentProcessDidTerminate(webView)
+            XCTAssertEqual(webView.loadedHTML.count, 2)
+
+            let error = WKError(.webContentProcessTerminated)
+            if isProvisional {
+                coordinator.webView(webView, didFailProvisionalNavigation: nil, withError: error)
+            } else {
+                coordinator.webView(webView, didFail: nil, withError: error)
+            }
+            coordinator.webView(webView, didFinish: nil)
+            coordinator.loadContentIfReady(in: webView)
+
+            XCTAssertEqual(webView.loadedHTML.count, 2, "isProvisional=\(isProvisional)")
+            XCTAssertFalse(coordinator.needsReload, "isProvisional=\(isProvisional)")
+        }
+    }
+
     func testResetLoadedSignatureAfterFailureMakesCurrentContentEligibleForRetry() {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil))
 
@@ -292,6 +344,7 @@ final class BaseEmailWebViewTests: XCTestCase {
 private final class RecordingPreviewWebView: WKWebView {
     private let testWindow = UIWindow()
     private(set) var loadedHTML: [String] = []
+    private(set) var loadedRequests: [URLRequest] = []
 
     // Supply a ready viewport without incidental UIKit layout callbacks replaying a missed update.
     override var window: UIWindow? { testWindow }
@@ -306,6 +359,11 @@ private final class RecordingPreviewWebView: WKWebView {
 
     override func loadHTMLString(_ string: String, baseURL: URL?) -> WKNavigation? {
         loadedHTML.append(string)
+        return nil
+    }
+
+    override func load(_ request: URLRequest) -> WKNavigation? {
+        loadedRequests.append(request)
         return nil
     }
 }

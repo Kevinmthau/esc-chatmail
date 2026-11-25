@@ -88,6 +88,137 @@ describe('extractEmail', () => {
   })
 })
 
+// Port of EmailNormalizerTests' quoted-name cases (architecture review
+// gap-mime-decoding-i18n#2). Revert-check: reading the first `<…@…>` anywhere
+// again in `extractEmail` (`firstAddressAnywhere`) fails the rows whose forged
+// address comes first; turning off the scanner's quote, comment,
+// angle-comment or escape rules in `scanMailbox` fails the rows that need
+// each; reading step 2 from the unblanked token fails `(boss@corp.example)
+// x@attacker.example`.
+describe('extractEmail skips quoted names and comments', () => {
+  it.each([
+    ['quoted name holding another address', '"Boss <boss@corp.example>" <x@attacker.example>'],
+    ['quoted name holding the own address', '"Me <me@gmail.com>" <x@attacker.example>'],
+    ['comment holding another address', '(Boss <boss@corp.example>) <x@attacker.example>'],
+    ['nested comment', '(a (Boss <boss@corp.example>) b) <x@attacker.example>'],
+    [
+      'escaped quote inside the name',
+      String.raw`"Boss \" <boss@corp.example>" <x@attacker.example>`,
+    ],
+    [
+      'escaped paren inside a comment',
+      String.raw`(Boss \) <boss@corp.example>) <x@attacker.example>`,
+    ],
+    ['comma inside a comment', '(<boss@corp.example>, x) <x@attacker.example>'],
+    ['quote that never closes', '"Boss <boss@corp.example> <x@attacker.example>'],
+    ['comment that never closes', '(Boss <boss@corp.example> <x@attacker.example>'],
+    ['address before a quote that never closes', '<x@attacker.example> "Boss <boss@corp.example>'],
+    ['bare address after a quoted address', '"Boss boss@corp.example" x@attacker.example'],
+    ['a quote followed by a combining mark', '"́Boss <boss@corp.example>" <x@attacker.example>'],
+    ['comment after the angle-addr', '"Boss" <x@attacker.example> (<boss@corp.example>)'],
+    ['quoted string after the angle-addr', '<x@attacker.example> "<boss@corp.example>"'],
+    ['comment inside the angle-addr', '<x@attacker.example (><me@gmail.com>)>'],
+    ['comment opening the angle-addr', '<(><me@gmail.com>)x@attacker.example>'],
+    ['backslash outside quotes', String.raw`x\"<me@gmail.com>" <x@attacker.example>`],
+    ['bare address in a comment', '(boss@corp.example) x@attacker.example'],
+  ])('reads the mailbox address past a %s', (_name, value) => {
+    expect(extractEmail(value)).toBe('x@attacker.example')
+  })
+
+  // Revert-check, each in `scanMailbox`: returning the first or the last
+  // complete angle-addr in place of 'ambiguous' fails one of the two orders;
+  // returning 'ambiguous' for an abandoned address only beside a complete one
+  // fails `<me@gmail.com <x@attacker.example (>`; leaving an unclosed
+  // angle-addr's text to step 2 fails `Me <me@gmail.com
+  // (<x@attacker.example>`; blanking with a space fails `me@corp.com(x)…` and
+  // `me@corp.com"x"…`; letting step 3 read past an `@` fails the
+  // `(<me@gmail.com>` rows; reading on to the next token after an unreadable
+  // one in `firstMailbox` fails `"x"@attacker.example, <me@gmail.com>`;
+  // letting step 3 run on a header of more than one token fails the
+  // parseEmailAddresses case in mime/address.test.ts; dropping 'phraseLiteral' fails
+  // `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress` fails the
+  // obsolete-syntax rows; dropping its ambiguity fails `me@gmail.com
+  // x@attacker.example`; blanking an angle-addr whose `@` the pattern cannot
+  // read without counting it fails the `<x@[…>…]>` rows. The NFD row pins
+  // parity with Swift.
+  it.each([
+    'Boss <boss@corp.example> <x@attacker.example>',
+    '<x@attacker.example> <me@gmail.com>',
+    '<x@attacker.example <me@gmail.com>>',
+    '<x@[><me@gmail.com>]>',
+    '<me@gmail.com"> <x@attacker.example>',
+    '<me@gmail.com(> <x@attacker.example>',
+    '<me@gmail.com[> <x@attacker.example>',
+    'Me <me@gmail.com (<x@attacker.example>',
+    '<me@gmail.com <x@attacker.example (>',
+    'me@corp.com(x).attacker.example',
+    'me@corp.com"x".attacker.example',
+    'x@attacker.xn--p1ai (<me@gmail.com>',
+    '"x"@attacker.example (<me@gmail.com>',
+    '<\u00e9@x.com> <e\u0301@x.com>',
+    '"x"@attacker.example, (<me@gmail.com>',
+    '"x"@attacker.example, <me@gmail.com>',
+    'x@attacker.xn--p1ai, (<me@gmail.com>',
+    'x@[1.2.3.4], "Kevin <me@gmail.com>',
+    'x@[me@gmail.com]',
+    'x@[foo, me@gmail.com]',
+    'me@gmail.com.(x)attacker.example',
+    'me@gmail.com .attacker.example',
+    'me@gmail.com. attacker.example',
+    'me@gmail.com\r\n .attacker.example',
+    'x. me@gmail.com',
+    'me@gmail.com x@attacker.example',
+    '<x@[1.2.3.4>]>, me@gmail.com',
+    '<x@[a>b]> me@gmail.com',
+    '<x@[a>b]> <me@gmail.com>',
+  ])('reads no address from the ambiguous or literal %s', (value) => {
+    expect(extractEmail(value)).toBeNull()
+  })
+
+  it('reads one address written twice, and a domain literal', () => {
+    expect(extractEmail('Ann <a@x.com> <A@x.com>')).toBe('a@x.com')
+    expect(extractEmail('<ops@[192.168.0.1]>')).toBe('ops@[192.168.0.1]')
+    expect(extractEmail('<ops@[(]>')).toBe('ops@[(]')
+    expect(extractEmail('Name <a@b.com')).toBe('a@b.com')
+    expect(extractEmail('a@b.com.')).toBe('a@b.com')
+    expect(extractEmail('[EXTERNAL] John <j@x.com>')).toBe('j@x.com')
+    expect(extractDisplayName('[EXTERNAL] John <j@x.com>')).toBe('[EXTERNAL] John')
+  })
+
+  it('keeps the embedded address in the display name, where it is hidden', () => {
+    const value = '"Boss <boss@corp.example>" <x@attacker.example>'
+    const name = extractDisplayName(value)
+    expect(name).toBe('Boss <boss@corp.example>')
+    expect(isEmailAddressShapedDisplayName(name ?? '')).toBe(true)
+  })
+
+  // Revert-check: letting step 3 of `mailboxAddress` read a token whose
+  // quotes all close reads boss@corp.example first.
+  it('reads no address that sits only inside a closed quote', () => {
+    expect(extractEmail('"John Doe <john@x.com>"')).toBeNull()
+    expect(extractEmail('"<boss@corp.example>", <x@attacker.example>')).toBe('x@attacker.example')
+  })
+
+  // Revert-check: reading only the first token with an address in
+  // `firstMailbox` gives `Inc` and `Jane?=`.
+  it('keeps the part of a name before a comma no one quoted', () => {
+    const value = 'The River Club of NY, Inc <events@example.com>'
+    expect(extractDisplayName(value)).toBe('The River Club of NY, Inc')
+    expect(extractEmail(value)).toBe('events@example.com')
+    expect(extractDisplayName('=?utf-8?Q?Doe,Jane?= <jane@example.com>')).toBe('Doe,Jane')
+  })
+
+  it('reads the first mailbox of a list', () => {
+    expect(extractEmail('"A <a@x.com>" <b@x.com>, <c@x.com>')).toBe('b@x.com')
+    expect(extractEmail('words, Carol <carol@x.com>')).toBe('carol@x.com')
+  })
+
+  it('still treats a name that embeds an address as address-shaped', () => {
+    expect(isEmailAddressShapedDisplayName('Acme (support@acme.com)')).toBe(true)
+    expect(isEmailAddressShapedDisplayName('Boss <boss@corp.example>')).toBe(true)
+  })
+})
+
 describe('extractAllEmails', () => {
   it('splits comma-separated recipients', () => {
     expect(extractAllEmails('A <a@x.com>, b@y.com, "C" <c@z.org>')).toEqual([

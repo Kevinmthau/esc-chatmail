@@ -349,6 +349,36 @@ final class RichContentVerdictBackfillTests: XCTestCase {
         withExtendedLifetime(repair) {}
     }
 
+    /// A row an earlier launch died classifying three times stays unknown, its
+    /// bubble then classifies it on load as before; the rest are stamped and
+    /// the pass latches.
+    /// Revert-check: the `rowQuarantine?.isQuarantined` test in
+    /// `RichContentVerdictBackfill.prepareBatch` (the row is then stamped), and
+    /// `beginRow`/`endRow` around the verdict (no mark is written).
+    func testCoordinatorBackfill_rowAnEarlierLaunchDiedOnThreeTimes_staysUnknownAndThePassLatches() async throws {
+        try row("003", html: richHTML)
+        try row("002", html: richHTML)
+        try row("001", html: plainHTML)
+        try viewContext.save()
+        flags.setString("002\n002", forKey: LaunchPassRowQuarantine.deathsKey(forPassKey: migrationKey))
+        flags.setString("an-earlier-launch|002", forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: migrationKey))
+
+        let repair = makeCoordinator()
+        repair.backfillRichContentVerdicts()
+        await joinBackfill(repair)
+
+        XCTAssertTrue(flags.bool(forKey: migrationKey))
+        let stored = try await storedVerdicts()
+        XCTAssertEqual(stored, ["003": .rich, "002": .unknown, "001": .notRich])
+        XCTAssertEqual(flags.string(forKey: LaunchPassRowQuarantine.quarantineKey(forPassKey: migrationKey)), "002")
+        XCTAssertNil(flags.string(forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: migrationKey)))
+        XCTAssertEqual(
+            flags.stringWriteCount(forKey: LaunchPassRowQuarantine.inFlightKey(forPassKey: migrationKey)), 6,
+            "This test's own mark, its clearing, then each classified row marked and cleared"
+        )
+        withExtendedLifetime(repair) {}
+    }
+
     // Deliberate, unlike `repairMissingConversationPreviews`, which stays armed on an empty
     // store: every row the current build ingests is stamped as it is written, so a fresh
     // install that latches here leaves nothing behind.

@@ -7,48 +7,13 @@
 // Gmail dot-strip / plus-truncation / googlemail→gmail), matching iOS
 // MessageProcessor.parseEmailAddresses which stores canonicalized addresses
 // on parsed recipient rows.
-export { extractDisplayName, extractEmail, normalizeEmail } from '../identity/normalizeEmail'
-
-/**
- * Splits a recipient header into per-address tokens, respecting quoted
- * strings and angle brackets (port of EmailAddressListParser.addressTokens).
- */
-export function addressTokens(headerValue: string): string[] {
-  const tokens: string[] = []
-  let current = ''
-  let isInQuotes = false
-  let angleDepth = 0
-  let previousWasEscape = false
-
-  const push = (token: string) => {
-    const trimmed = token.trim()
-    if (trimmed.length > 0) {
-      tokens.push(trimmed)
-    }
-  }
-
-  for (const character of headerValue) {
-    if (character === '"' && !previousWasEscape) {
-      isInQuotes = !isInQuotes
-      current += character
-    } else if (character === '<' && !isInQuotes) {
-      // Mailbox delimiters cannot nest. Restart at the newest '<'
-      // so an unmatched display-name bracket cannot swallow later recipients.
-      angleDepth = 1
-      current += character
-    } else if (character === '>' && !isInQuotes) {
-      angleDepth = Math.max(0, angleDepth - 1)
-      current += character
-    } else if (character === ',' && !isInQuotes && angleDepth === 0) {
-      push(current)
-      current = ''
-    } else {
-      current += character
-    }
-
-    previousWasEscape = character === '\\' && !previousWasEscape
-  }
-
-  push(current)
-  return tokens
-}
+// addressTokens (EmailAddressListParser.addressTokens) lives there too, beside
+// the mailbox scanner that must read quotes and comments by its rules.
+export {
+  addressTokens,
+  displayNameInToken,
+  extractDisplayName,
+  extractEmail,
+  mailboxAddress,
+  normalizeEmail,
+} from '../identity/normalizeEmail'

@@ -105,14 +105,16 @@ enum EmailDOMParseAdmission {
 
     /// Parses a document, unless it is nested too deeply (`EmailDOMParseRefusal`).
     static func parseDocument(_ html: String) throws -> Document {
-        try admittedParse(html, rootDepth: 1, roots: { [$0] }) {
+        let html = paddedAgainstTheTokenizerOverread(html)
+        return try admittedParse(html, rootDepth: 1, roots: { [$0] }) {
             try SwiftSoup.parse(html)
         }
     }
 
     /// Parses a body fragment, unless it is nested too deeply (`EmailDOMParseRefusal`).
     static func parseBodyFragment(_ html: String) throws -> Document {
-        try admittedParse(html, readsHead: false, rootDepth: 1, roots: { [$0] }) {
+        let html = paddedAgainstTheTokenizerOverread(html)
+        return try admittedParse(html, readsHead: false, rootDepth: 1, roots: { [$0] }) {
             try SwiftSoup.parseBodyFragment(html)
         }
     }
@@ -121,7 +123,8 @@ enum EmailDOMParseAdmission {
     /// (`EmailDOMParseRefusal`). The nodes are measured as
     /// `EmailDOMFragmentParser` places them, under a document's `body`.
     static func parseFragment(_ html: String, context: Element) throws -> [Node] {
-        try admittedParse(
+        let html = paddedAgainstTheTokenizerOverread(html)
+        return try admittedParse(
             html,
             isTableContextFragment: true,
             readsHead: false,
@@ -130,11 +133,6 @@ enum EmailDOMParseAdmission {
         ) {
             try Parser.parseFragment(html, context, [UInt8]())
         }
-    }
-
-    /// Whether `html` would be admitted, without keeping the tree.
-    static func admit(_ html: String) throws {
-        _ = try parseDocument(html)
     }
 
     private static func admittedParse<Parsed>(
@@ -233,6 +231,46 @@ enum EmailDOMParseAdmission {
         )
         return .nestingTooDeep(depth: depth, limit: maximumDepth)
     }
+
+    /// `html`, with four spaces after it where its last four bytes hold one
+    /// outside ASCII, so that SwiftSoup 2.13.5 can never read past its end.
+    ///
+    /// Its letter-sequence readers (`CharacterReader
+    /// .consumeLetterSequenceSlice`, for end tag names in raw text, RCDATA
+    /// and script data, script data's double escapes and doctype names) keep
+    /// one UTF-8 decoder across characters, and the decoder keeps bytes it
+    /// read ahead for the next one. After a character of two bytes or more,
+    /// the next non-ASCII one is decoded from stale bytes and the read
+    /// position moves by that wrong character's width, which near the end
+    /// of the input takes it past the end: `<style></aéxé`, `<!DOCTYPE
+    /// aéaé` and `<style>é</aéxé` each trapped the app at every parse of
+    /// such a message, a crash loop at sync. Fixed upstream in 2.14.0
+    /// ("repair unicode cursors"), whose other changes the scans here would
+    /// have to be checked against first.
+    ///
+    /// A wrong move starts at a byte of 0x80 or more and is one character's
+    /// width, at most four bytes (two in practice: the decoder keeps at
+    /// most two bytes ahead), so with four ASCII bytes after the last byte
+    /// of 0x80 or more it ends inside the input, on ASCII. Measured against
+    /// SwiftSoup: of 121 bodies that trapped, one space after them still
+    /// trapped 39, two or more none; review then found no trap among 14
+    /// million padded bodies. The spaces add trailing whitespace to text,
+    /// raw text or a comment, which nothing shows outside `pre` and the
+    /// like, and leave a tag cut off by the end as it was. Two endings read
+    /// differently: a literal `</` just after text outside ASCII becomes an
+    /// empty comment instead of text (`Café</`), and a cut-off RCDATA end
+    /// tag is no longer echoed with its last letter doubled. Only bodies
+    /// whose last four bytes are not all ASCII are padded; refusing them
+    /// instead would have shown ordinary mail as escaped text.
+    static func paddedAgainstTheTokenizerOverread(_ html: String) -> String {
+        let utf8 = html.utf8
+        let endsOutsideASCII = utf8.suffix(Self.overreadReach).contains { $0 >= 0x80 }
+        return endsOutsideASCII ? html + Self.overreadPadding : html
+    }
+
+    /// The furthest one wrong move reads: one character's UTF-8 width.
+    private static let overreadReach = 4
+    private static let overreadPadding = String(repeating: " ", count: overreadReach)
 
     /// Nodes on the longest path below `roots`, each root counting as
     /// `rootDepth`, walked without recursion.

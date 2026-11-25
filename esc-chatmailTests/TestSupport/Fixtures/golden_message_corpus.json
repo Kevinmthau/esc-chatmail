@@ -1815,6 +1815,313 @@
         "type": "oneToOne",
         "listId": null
       }
+    },
+    {
+      "id": "quoted_display_name_embeds_other_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "\"Boss <boss@corp.example>\" <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A quoted display name is a phrase, not an address: the mailbox is the angle-addr after it. Revert-check: reading the first <…@…> in the value again (EmailNormalizer.mailboxAddress / web mailboxAddress take the last one outside quoted strings and comments)."
+    },
+    {
+      "id": "quoted_display_name_embeds_own_alias",
+      "headers": [
+        {
+          "name": "From",
+          "value": "\"Me <me@gmail.com>\" <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "The user's own address inside the quoted name must not make the message the user's own (it routed to note-to-self)."
+    },
+    {
+      "id": "unclosed_quote_takes_last_angle_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "\"Boss <boss@corp.example> <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A quote that never closes: the last bracketed address, never the first."
+    },
+    {
+      "id": "comment_display_name_embeds_other_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "(Boss <boss@corp.example>) <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "An RFC 5322 comment is skipped like a quoted string."
+    },
+    {
+      "id": "comma_inside_comment_does_not_split_mailbox",
+      "headers": [
+        {
+          "name": "From",
+          "value": "(<boss@corp.example>, x) <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A comma inside a comment does not end the mailbox, so the comment's address cannot become a mailbox of its own. Revert-check: EmailAddressListParser.addressTokens / web addressTokens tracking comments."
+    },
+    {
+      "id": "recipient_name_with_address_and_comma_adds_no_participant",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "\"bob@old.example, Bob\" <bob@new.example>, me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com",
+          "bob@new.example"
+        ],
+        "participantHash": "4b8c35112e418a6595e1728d100fc571eeefb1791c1396fc66281eb515aa6fea",
+        "type": "group",
+        "listId": null
+      },
+      "notes": "A To name holding an address and a comma names no one: the identity is built from the parsed mailboxes, never from a name re-joined to its address and split again on commas."
+    },
+    {
+      "id": "encoded_recipient_name_cannot_replace_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "To",
+          "value": "=?utf-8?Q?=3Cboss@corp.example=3E_=28?= <bob@real.example>, me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com",
+          "bob@real.example"
+        ],
+        "participantHash": "6dcc81c56491b17eac3b268566928e57d01edc31c65b4011541acfae1a17a1bf",
+        "type": "group",
+        "listId": null
+      },
+      "notes": "An RFC 2047 name that decodes to \"<boss@corp.example> (\" stays a name; the recipient is still bob@real.example. Joined back to its address and parsed again, the open comment hid the real address and left the decoded one."
+    },
+    {
+      "id": "nameless_internationalized_recipient_is_a_participant",
+      "headers": [
+        {
+          "name": "From",
+          "value": "Alice <alice@example.com>"
+        },
+        {
+          "name": "Cc",
+          "value": "<étudiant@x.fr>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "alice@example.com",
+          "étudiant@x.fr"
+        ],
+        "participantHash": "c29f6a68a75a87aec5edb5b4c97cbad1e53fd22874cb2d40bf89af408390c877",
+        "type": "group",
+        "listId": null
+      },
+      "notes": "A bracketed address with no name keeps its participant even when the bare-address pattern would reject it."
+    },
+    {
+      "id": "trailing_comment_holding_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "\"Boss\" <x@attacker.example> (<boss@corp.example>)"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A comment may follow the angle-addr (RFC 5322 CFWS); an address inside it is not the mailbox's, though it is the last one written. Revert-check: the comment mode of EmailNormalizer.mailboxAddress / web mailboxAddress."
+    },
+    {
+      "id": "trailing_quoted_string_holding_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "<x@attacker.example> \"<boss@corp.example>\""
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A quoted string after the angle-addr is text, though its address is the last one written. Revert-check: the quote mode of EmailNormalizer.mailboxAddress / web mailboxAddress."
+    },
+    {
+      "id": "comment_inside_angle_addr_holding_address",
+      "headers": [
+        {
+          "name": "From",
+          "value": "<x@attacker.example (><me@gmail.com>)>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "RFC 5322 allows a comment inside the angle-addr, and its < and > are text; the address is x@attacker.example. Read as structure, the comment's address was the last complete angle-addr and made the message the user's own. Revert-check: the angleComment mode of EmailNormalizer.scanMailbox / web scanMailbox."
+    },
+    {
+      "id": "backslash_outside_quotes_escapes_nothing",
+      "headers": [
+        {
+          "name": "From",
+          "value": "x\\\"<me@gmail.com>\" <x@attacker.example>"
+        },
+        {
+          "name": "To",
+          "value": "me@gmail.com"
+        }
+      ],
+      "myAliases": [
+        "me@gmail.com"
+      ],
+      "expected": {
+        "participants": [
+          "x@attacker.example"
+        ],
+        "participantHash": "a57fa78331b76e70c82850b00031e6406bc5f30ef6912b0b8e21ac2c2f7128b4",
+        "type": "oneToOne",
+        "listId": null
+      },
+      "notes": "A backslash escapes only inside a quoted string, a comment or a domain literal; here the quote after it opens the name. Revert-check: honoring the backslash in the phrase in EmailNormalizer.scanMailbox / web scanMailbox."
     }
   ],
   "cleanedSnippetCases": [

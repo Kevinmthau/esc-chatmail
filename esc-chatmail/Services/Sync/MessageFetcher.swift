@@ -435,6 +435,16 @@ final class MessageFetcher: @unchecked Sendable {
         return (messageIds, response.nextPageToken)
     }
 
+    /// One page of a search over every label, Spam and Trash included
+    /// (`GmailAPIClientProtocol.searchAllMessages`).
+    func searchAllMessages(
+        query: String,
+        maxResults: Int
+    ) async throws -> (messageIds: [String], nextPageToken: String?) {
+        let response = try await apiClient.searchAllMessages(query: query, maxResults: maxResults)
+        return (response.messages?.map { $0.id } ?? [], response.nextPageToken)
+    }
+
     /// Fetches history records from Gmail API
     /// - Parameters:
     ///   - startHistoryId: Starting history ID

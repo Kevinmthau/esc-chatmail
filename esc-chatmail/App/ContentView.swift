@@ -21,6 +21,13 @@ struct ContentView: View {
             if authSession.canAccessMailbox {
                 // A pushed list on iOS, a sidebar and chat column on the Mac.
                 MailboxRootView(dependencies: dependencies)
+            } else if let heldAccount = authSession.heldAccount {
+                // The launch restore kept the account but could not reach Google:
+                // not the first-run sign-in screen, which read as a sign-out.
+                HeldAccountView(
+                    heldAccount: heldAccount,
+                    retryCoordinator: dependencies.launchRestoreRetryCoordinator
+                )
             } else {
                 SignInView()
             }

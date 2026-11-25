@@ -84,29 +84,42 @@ enum TextProcessing {
     /// per-call replacements passed only `.regularExpression`, so no options.
     private static let whitespaceNormalizationRules: [ReplacementRule] = compiledRules([
         ("[ \\t]+", " ", []),
-        ("\\n[ \\t]*\\n", "\n\n", []),
-        ("(\\s*\\n\\s*){2,}", "\n\n", [])
+        ("\\n[ \\t]*\\n", "\n\n", [])
     ])
 
-    /// recoverPlainTextFromMalformedHTML's structural steps, in its order, up to
-    /// the first non-regex replacement. The <head> and comment patterns keep
-    /// the `.caseInsensitive` their per-call replacements passed; the rest
-    /// passed only `.regularExpression`.
-    private static let malformedHTMLStructureRules: [ReplacementRule] = compiledRules([
+    /// The three whitespace-collapse steps: `whitespaceNormalizationRules`,
+    /// then `(\s*\n\s*){2,}` → "\n\n" through
+    /// `HTMLMarkupScan.collapsingLineBreakRuns`, with that regex's result. The
+    /// regex was cubic on whitespace the first rule leaves (a run of 1,600
+    /// no-break spaces around a newline took 69 s).
+    private static func normalizingWhitespace(_ text: String) -> String {
+        HTMLMarkupScan.collapsingLineBreakRuns(in: applying(whitespaceNormalizationRules, to: text))
+    }
+
+    /// The block rules of recoverPlainTextFromMalformedHTML, in its order:
+    /// `<head\b[^>]*>[\s\S]*?</head>` and `<!--[\s\S]*?-->` (both
+    /// `.caseInsensitive`, as their per-call replacements passed), then
+    /// `<script[^>]*>[\s\S]*?</script>` and `<style[^>]*>[\s\S]*?</style>` (no
+    /// options). Each removes what the regex's matches did
+    /// (`HTMLMarkupScan.replacingBlocks`); the regex read to the end of the
+    /// text at every start with nothing to close it.
+    private static let malformedHTMLBlockRules: [HTMLBlockRule] = ([
         // Avoid leaking <head> metadata (title tags, MSO conditionals) into bubble text.
+        HTMLBlockRule(start: "<head\\b", close: "</head>", readsToTagEnd: true, options: [.caseInsensitive]),
         // Also strip HTML comments entirely; conditional comments often contain Outlook-only XML
         // that can show up as garbage like "96" in extracted plain text.
-        ("<head\\b[^>]*>[\\s\\S]*?</head>", "", [.caseInsensitive]),
-        ("<!--[\\s\\S]*?-->", "", [.caseInsensitive]),
+        HTMLBlockRule(start: "<!--", close: "-->", readsToTagEnd: false, options: [.caseInsensitive]),
         // Remove script and style tags and their content
-        ("<script[^>]*>[\\s\\S]*?</script>", "", []),
-        ("<style[^>]*>[\\s\\S]*?</style>", "", []),
-        // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
-        // First: <br><br> or <br>\s*<br> → paragraph break
-        ("<br[^>]*>\\s*<br[^>]*>", "\n\n", []),
-        // Then: remaining single <br> → newline (let unwrapEmailLineBreaks decide whether to join)
-        ("<br[^>]*>", "\n", []),
-        // Paragraphs and headings get double newlines (actual content breaks)
+        HTMLBlockRule(start: "<script", close: "</script>", readsToTagEnd: true, options: []),
+        HTMLBlockRule(start: "<style", close: "</style>", readsToTagEnd: true, options: [])
+    ] as [HTMLBlockRule?]).compactMap { $0 }
+
+    /// `<br[^>]*>`, every match of which ends at a `>`
+    /// (`HTMLMarkupScan.replacingTagsEndingAtTagEnd`).
+    private static let singleBreakRegex = try? NSRegularExpression(pattern: "<br[^>]*>", options: [])
+
+    /// Paragraphs and headings get double newlines (actual content breaks).
+    private static let paragraphCloseRules: [ReplacementRule] = compiledRules([
         ("</p>", "\n\n", []),
         ("</h[1-6]>", "\n\n", [])
     ])
@@ -116,10 +129,13 @@ enum TextProcessing {
         ("</t[dh]>", " ", [.caseInsensitive])
     ])
 
-    /// Tag removal: every remaining tag, then truncated opening tags (e.g. a
-    /// snippet cut in the middle of `<div style="...`).
-    private static let malformedHTMLTagStripRules: [ReplacementRule] = compiledRules([
-        ("<[^>]+>", "", []),
+    /// Tag removal: every remaining tag (`<[^>]+>`, every match of which ends
+    /// at a `>`), then truncated opening tags (e.g. a snippet cut in the middle
+    /// of `<div style="...`). The second reads to the end of a line from each
+    /// `<` and a letter; once the first has run, those are only after the
+    /// text's last `>`, where each match takes the rest of its line.
+    private static let tagStripRegex = try? NSRegularExpression(pattern: "<[^>]+>", options: [])
+    private static let truncatedTagStripRules: [ReplacementRule] = compiledRules([
         ("<[a-zA-Z][^>\\n]*(?=\\n|$)", "", [])
     ])
 
@@ -143,7 +159,7 @@ enum TextProcessing {
             scalar.value != 0x200B && scalar.value != 0x200C && scalar.value != 0x200D
         }.map { String($0) }.joined()
 
-        normalized = applying(whitespaceNormalizationRules, to: normalized)
+        normalized = normalizingWhitespace(normalized)
         normalized = normalized.split(separator: "\n", omittingEmptySubsequences: false)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: "\n")
@@ -152,9 +168,17 @@ enum TextProcessing {
     }
 
     private static func recoverPlainTextFromMalformedHTML(from html: String) -> String {
-        // Structural cleanup (head, comments, script/style, <br>, paragraph and
-        // heading closes); the rule list carries the step-by-step comments.
-        var text = applying(malformedHTMLStructureRules, to: html)
+        // Structural cleanup (head, comments, script/style); the rule list
+        // carries the step-by-step comments.
+        var text = malformedHTMLBlockRules.reduce(html) { $1.removingBlocks(from: $0) }
+        // Convert consecutive <br> tags to paragraph breaks, single <br> to space (soft wrap)
+        // First: <br><br> or <br>\s*<br> → paragraph break
+        text = HTMLMarkupScan.replacingBreakPairs(in: text, with: "\n\n")
+        // Then: remaining single <br> → newline (let unwrapEmailLineBreaks decide whether to join)
+        if let singleBreakRegex {
+            text = HTMLMarkupScan.replacingTagsEndingAtTagEnd(in: text, regex: singleBreakRegex, with: "\n")
+        }
+        text = applying(paragraphCloseRules, to: text)
 
         // Div closures create single newlines - let unwrapEmailLineBreaks decide whether to join
         // Gmail mobile wraps each line in <div>, so using \n allows smart join logic to work
@@ -170,7 +194,10 @@ enum TextProcessing {
         text = text.replacingOccurrences(of: "</table>", with: "\n\n", options: .caseInsensitive, range: nil)
 
         // Remove all HTML tags, then truncated opening tags (e.g., snippet cut in middle of `<div style="...`).
-        text = applying(malformedHTMLTagStripRules, to: text)
+        if let tagStripRegex {
+            text = HTMLMarkupScan.replacingTagsEndingAtTagEnd(in: text, regex: tagStripRegex, with: "")
+        }
+        text = applying(truncatedTagStripRules, to: text)
 
         // Decode HTML entities in a single pass using the pre-built lookup table
         text = decodeHTMLEntities(text)
@@ -182,7 +209,7 @@ enum TextProcessing {
 
         // Clean up whitespace: collapse runs of spaces/tabs, whitespace-only
         // lines to a single newline, then any newline sequence to at most two.
-        text = applying(whitespaceNormalizationRules, to: text)
+        text = normalizingWhitespace(text)
 
         // Trim whitespace from each line to clean up artifacts like " \n" from decoded &nbsp;
         text = text.split(separator: "\n", omittingEmptySubsequences: false)
@@ -194,7 +221,7 @@ enum TextProcessing {
         return text
     }
 
-    private static let knownHTMLTagNames: Set<String> = [
+    static let knownHTMLTagNames: Set<String> = [
         "a", "abbr", "address", "area", "article", "aside", "audio",
         "b", "bdi", "bdo", "blockquote", "body", "br",
         "caption", "center", "cite", "code", "col", "colgroup",
@@ -209,67 +236,19 @@ enum TextProcessing {
         "u", "ul", "var", "video", "wbr"
     ]
 
+    /// Linear, with the walk's answers (`HTMLMarkupScan.containsLikelyHTMLMarkup`).
     private static func containsLikelyHTMLMarkup(_ html: String) -> Bool {
-        var index = html.startIndex
-
-        while let tagStart = html[index...].firstIndex(of: "<") {
-            let nextIndex = html.index(after: tagStart)
-            guard nextIndex < html.endIndex else { return false }
-
-            let firstCharacter = html[nextIndex]
-            if firstCharacter.isLetter,
-               let tagEnd = tagEndIndex(in: html, from: nextIndex) {
-                let tagNameStart = nextIndex
-                var tagNameEnd = tagNameStart
-                while tagNameEnd < html.endIndex, isTagNameCharacter(html[tagNameEnd]) {
-                    tagNameEnd = html.index(after: tagNameEnd)
-                }
-
-                let tagName = String(html[tagNameStart..<tagNameEnd]).lowercased()
-                if knownHTMLTagNames.contains(tagName) ||
-                    tagHasAttributes(in: html, nameEnd: tagNameEnd, tagEnd: tagEnd) ||
-                    hasExplicitCloseTag(named: tagName, in: html, after: html.index(after: tagEnd)) {
-                    return true
-                }
-            } else if firstCharacter == "!",
-                      html[nextIndex...].lowercased().hasPrefix("!doctype"),
-                      tagEndIndex(in: html, from: nextIndex) != nil {
-                return true
-            }
-            if firstCharacter == "!",
-               html[nextIndex...].hasPrefix("!--"),
-               html[nextIndex...].range(of: "-->") != nil {
-                return true
-            }
-
-            if firstCharacter == "/" {
-                let nameStart = html.index(after: nextIndex)
-                var nameEnd = nameStart
-                while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
-                    nameEnd = html.index(after: nameEnd)
-                }
-
-                let tagName = String(html[nameStart..<nameEnd]).lowercased()
-                if nameStart < html.endIndex,
-                   html[nameStart].isLetter,
-                   knownHTMLTagNames.contains(tagName),
-                   tagEndIndex(in: html, from: nameEnd) != nil {
-                    return true
-                }
-            }
-
-            index = nextIndex
-        }
-
-        return false
+        HTMLMarkupScan.containsLikelyHTMLMarkup(html)
     }
 
-    /// Whether some `<` and a letter has no `tagEndIndex` after it.
+    /// Whether some `<` and a letter has no tag end after it: no `>` outside
+    /// quotes, a quote being opened by `"` or `'` and closed by the same
+    /// character.
     ///
-    /// One pass from the end, not a `tagEndIndex` walk from every `<`: that
+    /// One pass from the end, not a walk to the tag end from every `<`: that
     /// was quadratic, and a sender's `<a` repeated 20,000 times then `>`
     /// (40 KB) took 4 s ahead of every text extraction. Walking back, it keeps
-    /// whether `tagEndIndex` would find its `>` from the next character with
+    /// whether that walk would find its `>` from the next character with
     /// no quote open, inside `"`, or inside `'`, which is all that walk
     /// depends on, so the answer is the same
     /// (`TextProcessingUnclosedTagTests` compares the two).
@@ -306,29 +285,7 @@ enum TextProcessing {
         return false
     }
 
-    private static func tagEndIndex(in html: String, from startIndex: String.Index) -> String.Index? {
-        var index = startIndex
-        var quote: Character?
-
-        while index < html.endIndex {
-            let character = html[index]
-            if let activeQuote = quote {
-                if character == activeQuote {
-                    quote = nil
-                }
-            } else if character == "\"" || character == "'" {
-                quote = character
-            } else if character == ">" {
-                return index
-            }
-
-            index = html.index(after: index)
-        }
-
-        return nil
-    }
-
-    private static func tagHasAttributes(in html: String, nameEnd: String.Index, tagEnd: String.Index) -> Bool {
+    static func tagHasAttributes(in html: String, nameEnd: String.Index, tagEnd: String.Index) -> Bool {
         var index = nameEnd
         var hasAttributeSeparator = false
 
@@ -366,50 +323,7 @@ enum TextProcessing {
         return false
     }
 
-    private static func hasExplicitCloseTag(
-        named tagName: String,
-        in html: String,
-        after startIndex: String.Index
-    ) -> Bool {
-        var index = startIndex
-
-        while let tagStart = html[index...].firstIndex(of: "<") {
-            let afterOpen = html.index(after: tagStart)
-            guard afterOpen < html.endIndex else { return false }
-
-            guard html[afterOpen] == "/" else {
-                index = afterOpen
-                continue
-            }
-
-            let nameStart = html.index(after: afterOpen)
-            var nameEnd = nameStart
-            while nameEnd < html.endIndex, isTagNameCharacter(html[nameEnd]) {
-                nameEnd = html.index(after: nameEnd)
-            }
-
-            guard String(html[nameStart..<nameEnd]).caseInsensitiveCompare(tagName) == .orderedSame,
-                  let tagEnd = tagEndIndex(in: html, from: nameEnd) else {
-                index = nameEnd
-                continue
-            }
-
-            var closeRemainder = nameEnd
-            while closeRemainder < tagEnd, html[closeRemainder].isWhitespace {
-                closeRemainder = html.index(after: closeRemainder)
-            }
-
-            if closeRemainder == tagEnd {
-                return true
-            }
-
-            index = html.index(after: tagEnd)
-        }
-
-        return false
-    }
-
-    private static func isTagNameCharacter(_ character: Character) -> Bool {
+    static func isTagNameCharacter(_ character: Character) -> Bool {
         character.isLetter || character.isNumber || character == "-" || character == ":" || character == "_"
     }
 

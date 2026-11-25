@@ -925,4 +925,175 @@ final class EmailNormalizerTests: XCTestCase {
         XCTAssertFalse(EmailNormalizer.isHideMyEmailDisplayName(""))
         XCTAssertFalse(EmailNormalizer.isHideMyEmailDisplayName("San Francisco Ballet"))
     }
+
+    // MARK: - Quoted names and comments (architecture review gap-mime-decoding-i18n#2)
+
+    /// Revert-check: reading the first `<…@…>` anywhere again in
+    /// `EmailNormalizer.extractEmail` (`firstAddressAnywhere`) fails the
+    /// rows whose forged address comes first; turning off the scanner's
+    /// quote, comment, angle-comment or escape rules in `scanMailbox` fails
+    /// the rows that need each; reading step 2 from the unblanked token fails
+    /// `(boss@corp.example) x@attacker.example`. The same table is in
+    /// `web/src/identity/normalizeEmail.test.ts`.
+    func testExtractEmail_addressInsideQuotedNameOrComment_readsTheMailboxAddress() {
+        let values = [
+            #""Boss <boss@corp.example>" <x@attacker.example>"#,
+            #""Me <me@gmail.com>" <x@attacker.example>"#,
+            "(Boss <boss@corp.example>) <x@attacker.example>",
+            "(a (Boss <boss@corp.example>) b) <x@attacker.example>",
+            #""Boss \" <boss@corp.example>" <x@attacker.example>"#,
+            #"(Boss \) <boss@corp.example>) <x@attacker.example>"#,
+            "(<boss@corp.example>, x) <x@attacker.example>",
+            #""Boss <boss@corp.example> <x@attacker.example>"#,
+            "(Boss <boss@corp.example> <x@attacker.example>",
+            #"<x@attacker.example> "Boss <boss@corp.example>"#,
+            #""Boss boss@corp.example" x@attacker.example"#,
+            "\"\u{0301}Boss <boss@corp.example>\" <x@attacker.example>",
+            #""Boss" <x@attacker.example> (<boss@corp.example>)"#,
+            #"<x@attacker.example> "<boss@corp.example>""#,
+            "<x@attacker.example (><me@gmail.com>)>",
+            "<(><me@gmail.com>)x@attacker.example>",
+            #"x\"<me@gmail.com>" <x@attacker.example>"#,
+            "(boss@corp.example) x@attacker.example"
+        ]
+
+        for value in values {
+            XCTAssertEqual(EmailNormalizer.extractEmail(from: value), "x@attacker.example", value)
+        }
+    }
+
+    /// Two different addresses outside quotes and comments, in either order,
+    /// one abandoned for a nested `<`, or one in an angle-addr that never
+    /// closes after a quote, comment or literal opened in it: the order is
+    /// the sender's, so neither is read. Nor is an address a comment or a
+    /// quote cuts short, or one past a real address the bare-address pattern
+    /// does not know.
+    ///
+    /// Revert-check, each in `EmailNormalizer.scanMailbox`: returning the
+    /// first or the last complete angle-addr in place of `.ambiguous` fails
+    /// one of the two orders; returning `.ambiguous` for an abandoned address
+    /// only beside a complete one fails `<me@gmail.com <x@attacker.example (>`;
+    /// leaving an unclosed angle-addr's text to step 2 fails
+    /// `Me <me@gmail.com (<x@attacker.example>`; blanking with a space fails
+    /// `me@corp.com(x)…` and `me@corp.com"x"…`; letting step 3 read past an `@` fails the
+    /// `(<me@gmail.com>` rows; comparing by `String` equality fails the NFD
+    /// row; reading on to the next token after an `.unreadable` one in
+    /// `firstMailbox` fails `"x"@attacker.example, <me@gmail.com>`; letting
+    /// step 3 run on a header of more than one token fails the `mailboxes`
+    /// assertion below; dropping `.phraseLiteral`
+    /// fails `x@[me@gmail.com]`; dropping the `.` checks in `bareAddress`
+    /// fails the obsolete-syntax rows; dropping its ambiguity fails
+    /// `me@gmail.com x@attacker.example`; blanking an angle-addr whose `@`
+    /// the pattern cannot read without counting it fails the `<x@[…>…]>`
+    /// rows.
+    func testExtractEmail_ambiguousOrLiteralAngleAddresses_readNoAddress() {
+        let values = [
+            "Boss <boss@corp.example> <x@attacker.example>",
+            "<x@attacker.example> <me@gmail.com>",
+            "<x@attacker.example <me@gmail.com>>",
+            "<x@[><me@gmail.com>]>",
+            #"<me@gmail.com"> <x@attacker.example>"#,
+            "<me@gmail.com(> <x@attacker.example>",
+            "<me@gmail.com[> <x@attacker.example>",
+            "Me <me@gmail.com (<x@attacker.example>",
+            "<me@gmail.com <x@attacker.example (>",
+            "me@corp.com(x).attacker.example",
+            #"me@corp.com"x".attacker.example"#,
+            "x@attacker.xn--p1ai (<me@gmail.com>",
+            #""x"@attacker.example (<me@gmail.com>"#,
+            "<\u{E9}@x.com> <e\u{301}@x.com>",
+            #""x"@attacker.example, (<me@gmail.com>"#,
+            #""x"@attacker.example, <me@gmail.com>"#,
+            "x@attacker.xn--p1ai, (<me@gmail.com>",
+            #"x@[1.2.3.4], "Kevin <me@gmail.com>"#,
+            "x@[me@gmail.com]",
+            "x@[foo, me@gmail.com]",
+            "me@gmail.com.(x)attacker.example",
+            "me@gmail.com .attacker.example",
+            "me@gmail.com. attacker.example",
+            "me@gmail.com\r\n .attacker.example",
+            "x. me@gmail.com",
+            "me@gmail.com x@attacker.example",
+            "<x@[1.2.3.4>]>, me@gmail.com",
+            "<x@[a>b]> me@gmail.com",
+            "<x@[a>b]> <me@gmail.com>"
+        ]
+        for value in values {
+            XCTAssertNil(EmailNormalizer.extractEmail(from: value), value)
+        }
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "Ann <a@x.com> <A@x.com>"), "a@x.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "<ops@[192.168.0.1]>"), "ops@[192.168.0.1]")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "<ops@[(]>"), "ops@[(]")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "Name <a@b.com"), "a@b.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "a@b.com."), "a@b.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "[EXTERNAL] John <j@x.com>"), "j@x.com")
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: "[EXTERNAL] John <j@x.com>"), "[EXTERNAL] John")
+        XCTAssertEqual(
+            EmailAddressListParser.mailboxes(from: #""x"@attacker.example, (<me@gmail.com>"#).map(\.email),
+            []
+        )
+    }
+
+    /// Revert-check: dropping the `.angleComment` mode from
+    /// `EmailAddressListParser.addressTokens` splits the comment at its comma
+    /// and adds boss@corp.example as a recipient.
+    func testMailboxes_commaInsideAngleAddrComment_addsNoRecipient() {
+        let mailboxes = EmailAddressListParser.mailboxes(
+            from: "<a@x.com>, <me@gmail.com (>, <boss@corp.example>)>"
+        )
+        XCTAssertEqual(mailboxes.map(\.email), ["a@x.com", "me@gmail.com"])
+    }
+
+    func testExtractDisplayName_addressInsideQuotedName_staysInTheNameAndIsHidden() {
+        let value = #""Boss <boss@corp.example>" <x@attacker.example>"#
+
+        let name = EmailNormalizer.extractDisplayName(from: value)
+
+        XCTAssertEqual(name, "Boss <boss@corp.example>")
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName(name ?? ""))
+    }
+
+    /// Revert-check: letting step 3 of `mailboxAddress(inToken:)` read a
+    /// token whose quotes all close reads boss@corp.example first.
+    func testExtractEmail_addressOnlyInsideAClosedQuote_isNoAddress() {
+        XCTAssertNil(EmailNormalizer.extractEmail(from: #""John Doe <john@x.com>""#))
+        XCTAssertEqual(
+            EmailNormalizer.extractEmail(from: #""<boss@corp.example>", <x@attacker.example>"#),
+            "x@attacker.example"
+        )
+    }
+
+    /// A name with a comma no one quoted keeps the part before the comma.
+    /// Revert-check: reading only the first token with an address in
+    /// `EmailNormalizer.firstMailbox` gives `Inc` and `Jane?=`.
+    func testExtractDisplayName_unquotedCommaInName_keepsTheWholeName() {
+        let value = "The River Club of NY, Inc <events@example.com>"
+        XCTAssertEqual(EmailNormalizer.extractDisplayName(from: value), "The River Club of NY, Inc")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: value), "events@example.com")
+        XCTAssertEqual(
+            EmailNormalizer.extractDisplayName(from: "=?utf-8?Q?Doe,Jane?= <jane@example.com>"),
+            "Doe,Jane"
+        )
+    }
+
+    func testExtractEmail_list_readsTheFirstMailbox() {
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: #""A <a@x.com>" <b@x.com>, <c@x.com>"#), "b@x.com")
+        XCTAssertEqual(EmailNormalizer.extractEmail(from: "words, Carol <carol@x.com>"), "carol@x.com")
+    }
+
+    /// `PersonDisplayNameResolver` hides a name that embeds an address; that
+    /// question still reads an address anywhere in the name.
+    func testIsEmailAddressShapedDisplayName_nameEmbeddingAnAddress_staysAddressShaped() {
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("Acme (support@acme.com)"))
+        XCTAssertTrue(EmailNormalizer.isEmailAddressShapedDisplayName("Boss <boss@corp.example>"))
+    }
+
+    func testMailboxes_encodedNameDecodingToAnAddress_keepsTheMailboxAddress() {
+        let mailboxes = EmailAddressListParser.mailboxes(
+            from: "=?utf-8?Q?=3Cboss@corp.example=3E_=28?= <bob@real.example>, me@gmail.com"
+        )
+
+        XCTAssertEqual(mailboxes.map(\.email), ["bob@real.example", "me@gmail.com"])
+        XCTAssertEqual(mailboxes.first?.displayName, "<boss@corp.example> (")
+    }
 }

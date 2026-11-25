@@ -1292,6 +1292,9 @@ final class AttachmentDownloader: ObservableObject {
         let context = coreDataStack.newBackgroundContext()
         let validFiles: Set<String>? = await context.perform {
             do {
+                // Outside the injectable fetch: with no store attached the
+                // fetch answers [] and every file would be an orphan.
+                try CoreDataStack.requireAttachedStore(in: context)
                 let references = try fetchAttachmentFileReferences(context)
                 return Set(references.flatMap { reference -> [String] in
                     [reference["localURL"] as? String, reference["previewURL"] as? String].compactMap { $0 }

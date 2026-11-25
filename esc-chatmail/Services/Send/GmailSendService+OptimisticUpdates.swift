@@ -387,7 +387,10 @@ extension GmailSendService {
     }
 
     /// Transitions an admitted request from actively sending to terminal delivery
-    /// ambiguity. This state is retained indefinitely and is never auto-retried.
+    /// ambiguity. This state is never auto-retried. It is retained until a synced
+    /// echo consumes it or, for a record admitted by model 7 or later, until the
+    /// sync's Message-ID lookup proves Gmail never received it and resolves it
+    /// as "Not sent" (`DeliveryUnknownProbe`).
     @MainActor
     func recordAmbiguousRemoteSend(optimisticMessageID: String) throws {
         guard try recordRemoteSendState(
@@ -583,6 +586,13 @@ extension GmailSendService {
 
             record.remoteCommittedMessageId = messageID
             record.remoteCommittedThreadId = threadID
+            if messageID == OutboundSendRemoteState.inFlightMessageID {
+                // In the admission marker's own transaction: the
+                // "Delivery unknown" probe measures its quiet period from
+                // here, and resolves only records that carry it
+                // (`DeliveryUnknownProbePolicy`).
+                record.admittedAt = Date()
+            }
 
             if messageID == OutboundSendRemoteState.notSentMessageID,
                let envelope = try? StoredForwardEnvelope.decode(from: record.replyEnvelopeData),

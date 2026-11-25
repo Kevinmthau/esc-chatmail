@@ -737,6 +737,25 @@ final class OutboundMessageCoordinatorTests: XCTestCase {
         XCTAssertTrue(mutationTracker.failedMutationIDs.isEmpty)
     }
 
+    // Check Delivery asks; it never answers by sending. The Message-ID lookup
+    // that can resolve a "Delivery unknown" row runs inside the incremental
+    // sync it starts (`DeliveryUnknownProbe`), never here.
+    // Revert-check: fails if `OutboundMessageCoordinator.checkDelivery` stops
+    // running exactly one incremental sync, or starts sending.
+    func testCheckDelivery_runsOneIncrementalSyncAndNeverSends() async throws {
+        let sendService = MockOutboundMessageSendService(context: viewContext)
+        let syncPerformer = MockCoordinatorSyncPerformer()
+        let coordinator = makeCoordinator(sendService: sendService, syncPerformer: syncPerformer)
+
+        try await coordinator.checkDelivery()
+
+        XCTAssertEqual(syncPerformer.performIncrementalSyncCalls, 1)
+        let snapshot = sendService.snapshot
+        XCTAssertTrue(snapshot.sendNewCalls.isEmpty)
+        XCTAssertTrue(snapshot.sendReplyCalls.isEmpty)
+        XCTAssertTrue(snapshot.createOptimisticCalls.isEmpty)
+    }
+
     func testSend_waitsForPreflightAndTransmissionAdmissionBeforeReturning() async throws {
         let preflightGate = OutboundSendTestGate()
         let sendService = MockOutboundMessageSendService(context: viewContext)

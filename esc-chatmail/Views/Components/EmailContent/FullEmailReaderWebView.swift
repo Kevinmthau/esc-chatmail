@@ -357,6 +357,10 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func completeAdoptionCallbacksIfActive() {
             guard !isInvalidated else { return }
+            // A WebContent termination in the turn before this one has given the view back
+            // (clearing the marker) and is reloading it: the adopted paint is gone, so the
+            // placeholder stays until the reload's own paint confirmation removes it.
+            guard adoptedPrerenderedMessageId != nil else { return }
             parent.onAdoptedPrerendered?()
             parent.onLoadFinished?()
         }
@@ -496,6 +500,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
             guard !isInvalidated else { return }
+            guard !EmailWebViewLoadCoordination.isWebContentProcessTerminationError(error) else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -507,6 +512,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
             guard !isInvalidated else { return }
+            guard !EmailWebViewLoadCoordination.isWebContentProcessTerminationError(error) else { return }
             isLoading = false
             let didResetLoad = resetLoadedSignatureAfterFailure(for: error)
             if didResetLoad {
@@ -514,6 +520,49 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             }
             Log.debug("WebView provisional navigation failed: \(error)", category: .ui)
             reloadAfterCurrentLoadIfNeeded(in: webView)
+        }
+
+        /// The web view's WebContent process died (jetsam while the app was suspended, or a page
+        /// that crashes WebKit), so the view shows nothing and the recorded signature no longer
+        /// describes anything on screen. Implementing this is also what stops WebKit's own reload:
+        /// with no handler, a process killed during a load was reloaded by WebKit from the network
+        /// at the load's base URL, the sender's `https://<From domain>/`, as an `.other` navigation
+        /// the policy allows (measured on the iOS 27.0 simulator, 2026-11-24).
+        ///
+        /// The reader puts its placeholder back, gives a pooled view back to the pool's records
+        /// (`discard`, so the pool never re-hosts or hands out a dead view), and reloads its own
+        /// content, never the base URL or anything else from the email, as often as
+        /// `admitsReloadAfterWebContentTermination` allows: at most three times for one content and
+        /// signature. The reload
+        /// is the HTML the reader already holds, so no body is read again; its `cid:` images are
+        /// asked of `CIDSchemeHandler` again, as at the first load and at an attachment's arrival,
+        /// and an attachment that must be downloaded goes through `AttachmentDownloader`'s account boundary. A
+        /// reader an account transition scrubbed is invalidated and does nothing here.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            guard !isInvalidated else { return }
+            Log.warning(
+                "Full reader WebContent process terminated messageId=\(Log.hashIdentifier(parent.message?.id))",
+                category: .ui
+            )
+            if let messageId = adoptedPrerenderedMessageId {
+                adoptedPrerenderedMessageId = nil
+                parent.webViewAdoptionProvider?.discard(messageId: messageId, webView: webView)
+            }
+            isLoading = false
+            shouldReloadAfterCurrentLoad = false
+            parent.onLoadFailed?()
+            guard coordination.admitsReloadAfterWebContentTermination(
+                content: parent.htmlContent,
+                reloadSignature: reloadSignature()
+            ) else {
+                // The same content has used its reloads. Leave its signature recorded so
+                // `updateWebView` does not load it again; only the paint gate is reset, so a late
+                // confirmation of the dead document cannot remove the placeholder.
+                resetPaintConfirmationState()
+                return
+            }
+            resetLoadedSignatureAfterFailure()
+            loadContentIfReady(in: webView)
         }
 
         private func reloadAfterCurrentLoadIfNeeded(in webView: WKWebView) {

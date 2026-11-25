@@ -89,6 +89,43 @@ describe('preparePersistPlan', () => {
     expect(plan.bodyHtml).toBeNull()
   })
 
+  // Architecture review gap-mime-decoding-i18n#2: an address inside a quoted
+  // display name is not the mailbox's. Revert-check: reading the first
+  // `<…@…>` anywhere again in `extractEmail` (`firstAddressAnywhere`) makes
+  // the message the user's own, from the user, in note-to-self.
+  it('reads the sender past an address quoted in its display name', async () => {
+    const plan = (await preparePersistPlan(
+      textMessage({
+        id: 'm1',
+        from: `"Me <${ME}>" <x@attacker.example>`,
+        to: [ME],
+      }),
+      ctx,
+    )) as MessagePersistPlan
+    expect(plan.kind).toBe('message')
+    expect(plan.message.isFromMe).toBe(0)
+    expect(plan.message.senderEmail).toBe('x@attacker.example')
+    expect(plan.participants.filter((p) => p.kind === 'from').map((p) => p.email)).toEqual([
+      'x@attacker.example',
+    ])
+    expect(plan.identity.participants).toEqual(['x@attacker.example'])
+  })
+
+  // Revert-check: letting step 3 of `scanMailbox` run on a header of more than
+  // one token gives the message a `from` row for the user's address (web reads
+  // From rows with `parseEmailAddresses`). Reading on after an unreadable
+  // token in `firstMailbox` is pinned in normalizeEmail.test.ts instead: this
+  // test cannot see it.
+  it('reads no sender where an unreadable From address is followed by a commented one', async () => {
+    const plan = (await preparePersistPlan(
+      textMessage({ id: 'm1', from: `"x"@attacker.example, (<${ME}>`, to: [ME] }),
+      ctx,
+    )) as MessagePersistPlan
+    expect(plan.kind).toBe('message')
+    expect(plan.message.isFromMe).toBe(0)
+    expect(plan.participants.filter((p) => p.kind === 'from')).toEqual([])
+  })
+
   it('keys identity by From+To+Cc minus self, BCC excluded, Hide-My-Email dropped', async () => {
     const plan = (await preparePersistPlan(
       textMessage({
