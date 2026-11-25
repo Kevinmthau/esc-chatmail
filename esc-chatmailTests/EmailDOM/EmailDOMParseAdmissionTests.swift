@@ -532,6 +532,355 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertNil(EmailDocument.tryParse(Self.deepDivNest))
     }
 
+    /// A tag's attributes are made into its list when something first reads
+    /// one, each name compared with every name kept before it
+    /// (`Attributes.ensureMaterialized`), so a tag of n distinct names costs
+    /// n², all of it after the parse (one `<div>` of 16,000 names: 0.9 s in a
+    /// Release build, 27 s in the app's Debug build, in the quote remover's
+    /// first selector). These take about 1.5 s in a Release build. The
+    /// second scan reads the first two; `<select>` makes the last two the
+    /// byte bound's.
+    /// Revert-check: the `dedupWork` addition in `AttributeWork.read` (all
+    /// four are admitted), and `AttributeWorkBound.work` (returning an empty
+    /// `AttributeWork`, the last two are).
+    func testParseDocument_tagOfManyDistinctAttributeNames_isRefusedAsTooCostly() {
+        let names = (0..<20_000).map { " a\($0)=1" }.joined()
+        let eventNames = (0..<20_000).map { " on\($0)=1" }.joined()
+        let shapes = [
+            "<div" + names + ">x</div>",
+            "<p><div" + eventNames + ">x</div>",
+            "<div" + names + ">x</div><select>",
+            "<select><option" + eventNames + ">",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+            XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+            XCTAssertLessThanOrEqual(cost.childMoveWork, EmailDOMParseAdmission.maximumChildMoveWork)
+            XCTAssertGreaterThan(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+                XCTAssertEqual(
+                    error as? EmailDOMParseRefusal,
+                    .tooCostlyToParse(work: cost.attributeDedupWork, limit: EmailDOMParseAdmission.maximumAttributeDedupWork)
+                )
+            }
+        }
+    }
+
+    /// Each name costs a comparison with every name before it in its tag, of
+    /// one more than its length: the most SwiftSoup's search compares
+    /// (equal lengths are compared byte by byte). A NUL is three bytes,
+    /// because SwiftSoup writes U+FFFD for it. A quote, `<` or NUL after a
+    /// name and whitespace goes on that name in SwiftSoup, which the scan
+    /// reads as a name of its own: a finer split, never cheaper.
+    /// HONEST SCOPE: SwiftSoup's comparisons cannot be counted here. A copy
+    /// of SwiftSoup 2.13.5 that counts them was compared with this charge
+    /// over a million attribute-heavy documents (tag soup, quotes, NUL,
+    /// `<`, `/`, mode-dependent markup), off the suite, with none above it.
+    /// Revert-check: the NUL width in `AttributeWork.read` (`withNul`), and
+    /// the dedup's `startsAttribute` term there (`plain`).
+    func testAttributeDedupWork_eachNameIsChargedForTheNamesBeforeIt() {
+        func work(_ html: String) -> Int {
+            EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork
+        }
+        // 0 + 1·(1 + 1) + 2·(1 + 2)
+        XCTAssertEqual(work("<div a b=1 cc='x'>"), 8, "plain")
+        // 0 + 1·(1 + 3)
+        XCTAssertEqual(work("<div a \u{0}>"), 4, "withNul")
+        // 0 + 1·(1 + 2), read as two names
+        XCTAssertEqual(work("<div a \"b>"), 3)
+        // Each tag's names are its own; end tags are charged too.
+        XCTAssertEqual(work("<p a b></p c d><p e f>"), 6)
+        XCTAssertEqual(work("<div>"), 0)
+        XCTAssertEqual(work("<div a=\"<b c d e\">"), 0)
+    }
+
+    /// Where the second scan cannot follow the markup, every `<` and letter
+    /// is read as a tag, from each state at once: never below what the
+    /// second scan charges for the same tags, and linear however the reads
+    /// overlap.
+    func testAttributeDedupWork_byteBound_isNeverBelowTheSecondScan() {
+        let shapes = [
+            "<div a b=1 cc='x'>",
+            "<div a \u{0} \"b <c d>",
+            "<p a b></p c d><p e f>",
+            "<div title=\"<a b c\" d e>",
+            "<div a/b/c/d>",
+            "<a b c<d e f>",
+            "<style><x a b c></style><div d e>",
+        ]
+        for html in shapes {
+            let followed = EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork
+            let bound = EmailDOMParseAdmission.estimatedCost(of: html + "<select>").attributeDedupWork
+            XCTAssertGreaterThanOrEqual(bound, followed, html.debugDescription)
+        }
+
+        // Every "<" starts a read that runs to the one ">" at the end.
+        let overlapping = String(repeating: "<a b ", count: 20_000) + ">"
+        let start = Date()
+        _ = EmailDOMParseAdmission.estimatedCost(of: overlapping + "<select>")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    /// An `html` or `body` start tag gives the root element its names, and
+    /// each one added rebuilds the list's key indexes over every name the
+    /// root holds, so the cost grows with the square of the names all such
+    /// tags gave (4,000 `<html a b c d>`s: 10 s in a Release build, in the
+    /// parse; one `<html>` of 11,000 names: 5.3 s). The last is read by the
+    /// byte bound (`<select>`).
+    /// Revert-check: `mergesIntoRoot` in `TokenizingScanner.readTag`
+    /// (passing false, the first three are admitted), and the `html`/`body`
+    /// readings of `AttributeWorkBound.work` (the last is).
+    func testParseDocument_manyNamesGivenToTheRoot_isRefusedAsTooCostly() {
+        let tags = (0..<4_000).map { " a\($0) b\($0) c\($0) d\($0)>" }
+        let names = (0..<11_000).map { " n\($0)" }.joined()
+        let shapes = [
+            "<html><body>x" + tags.map { "<html" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<BODY" + $0 }.joined(),
+            "<html><body>x<html" + names + ">",
+            "<html><body>x" + tags.map { "<html" + $0 }.joined() + "<select>",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork, String(html.prefix(40)))
+            XCTAssertLessThanOrEqual(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork)
+            XCTAssertGreaterThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+                XCTAssertEqual(
+                    error as? EmailDOMParseRefusal,
+                    .tooCostlyToParse(
+                        work: cost.rootAttributeMergeWork,
+                        limit: EmailDOMParseAdmission.maximumRootAttributeMergeWork
+                    )
+                )
+            }
+        }
+    }
+
+    /// Each attribute name made into an element's list after the parse, or
+    /// removed from it by the sanitizer, marks the element's query indexes
+    /// stale up every ancestor, so names cost the depth each: 1,000 `<b>`s
+    /// of 100 names under 500 `div`s took 6.3 s to make and 7.5 s more to
+    /// remove the names, in a Release build (0.6 s under 5 `div`s). The
+    /// tree's measured depth decides it, after the parse.
+    /// Revert-check: `attributeWalkRefusal` in `admittedParse` (the body is
+    /// admitted).
+    func testParseDocument_manyNamesDeepInTheTree_isRefusedAsTooCostly() {
+        var html = String(repeating: "<div>", count: 500)
+        for tag in 0..<1_000 {
+            html += "<b" + (0..<100).map { " on\(tag)x\($0)=1" }.joined() + "></b>"
+        }
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+        XCTAssertNil(cost.excessWork)
+        XCTAssertGreaterThanOrEqual(cost.attributeWalksPerLevel, 100_000)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            guard case let .tooCostlyToParse(work, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+            XCTAssertGreaterThanOrEqual(work, 500 * 100_000)
+        }
+    }
+
+    /// Where the scan's bound sends a body to the measuring thread, the
+    /// walks are checked against the depth measured there: refused where
+    /// the tree is deep, and admitted where only the bound is (here, forms
+    /// inside a form, which SwiftSoup ignores and the scan cannot be sure
+    /// of: 1,000 give a bound of 1,007 over a tree 5 deep), however many
+    /// names it holds.
+    /// Revert-check: `attributeWalkRefusal` in `parseOnMeasuringThread`
+    /// (`deep` is admitted), and passing it the bound in place of the
+    /// measured depth (`shallow` is refused).
+    func testParseOnMeasuringThread_attributeWalks_followTheMeasuredDepth() throws {
+        let unsureForms = String(repeating: "<form>x", count: 1_000)
+        var deep = String(repeating: "<div>", count: 330) + unsureForms
+        for tag in 0..<300 {
+            deep += "<b" + (0..<100).map { " n\(tag)x\($0)=1" }.joined() + "></b>"
+        }
+        var shallow = unsureForms + "<table>"
+        for row in 0..<2_000 {
+            shallow += "<tr><td" + (0..<12).map { " a\(row)x\($0)=1" }.joined() + ">x</td></tr>"
+        }
+        shallow += "</table>"
+        for html in [deep, shallow] {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertGreaterThan(cost.depth, EmailDOMParseAdmission.maximumDepth)
+            XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertNil(cost.excessWork)
+        }
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(deep), "deep") { error in
+            guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        }
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(shallow), "shallow")
+    }
+
+    /// A formatting element SwiftSoup rebuilds is copied with its names, in
+    /// the parse, where no walk is made; the sanitizer then removes every
+    /// copy's `on…` names, each removal a walk up its ancestors. 400 `div`s,
+    /// a `b` of 20 `on…` names closed by `</p>`, then `<p>y</p>`s, each
+    /// rebuilding it (10,000 of them: 12.7 s of removals in a Release build,
+    /// from 20 names read). A vertical tab before a name is trimmed, so it
+    /// is still removed. Other names a copy is given walk nowhere in a
+    /// document's parse.
+    /// Revert-check: `rebuildNamesAcrossTokens` in `estimate(in:limit:…)`'s
+    /// copied names (both are admitted), and the vertical tab's skip in
+    /// `endOfAttributes` (the second is).
+    func testParseDocument_eventNamesCopiedByRebuilds_areCountedForTheirWalks() {
+        func body(_ prefix: String) -> String {
+            String(repeating: "<div>", count: 400)
+                + "<p><b" + (0..<20).map { " \(prefix)\($0)=1" }.joined() + ">x</p>"
+                + String(repeating: "<p>y</p>", count: 1_000)
+        }
+        for events in [body("on"), body("\u{0B}on")] {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: events, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertNil(cost.excessWork)
+            XCTAssertGreaterThan(cost.attributeWalksPerLevel, 20 * 1_000)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(events)) { error in
+                guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                    return XCTFail("\(error)")
+                }
+                XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+            }
+        }
+        // 20 names, and two for the `b` that holds them.
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: body("class")).attributeWalksPerLevel, 22)
+    }
+
+    /// A fragment is parsed without SwiftSoup's bulk building, so a rebuilt
+    /// copy is given its names once it is in the tree, each a walk up its
+    /// ancestors inside the parse, whatever the names: a `b` of 100 names
+    /// under 400 `div`s rebuilt 1,000 times took 6.4 s in
+    /// `parseBodyFragment` and 0.2 s in `parseDocument` (Release). Charged
+    /// in `treeWork`, for a fragment only.
+    /// Revert-check: the fragment term of `treeWork` in
+    /// `estimate(in:limit:…)` (the fragment is admitted).
+    func testParseBodyFragment_namesOfRebuiltCopies_areChargedInTheParse() {
+        let html = String(repeating: "<div>", count: 400)
+            + "<p><b" + (0..<100).map { " class\($0)=1" }.joined() + ">x</p>"
+            + String(repeating: "<p>y</p>", count: 1_000)
+        let limit = EmailDOMParseAdmission.maximumBoundForMeasuredParse
+        let fragment = EmailDOMParseAdmission.estimatedCost(of: html, limit: limit, readsHead: false)
+        let document = EmailDOMParseAdmission.estimatedCost(of: html, limit: limit)
+        XCTAssertGreaterThan(fragment.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertLessThanOrEqual(document.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseBodyFragment(html)) { error in
+            XCTAssertEqual(
+                error as? EmailDOMParseRefusal,
+                .tooCostlyToParse(work: fragment.treeWork, limit: EmailDOMParseAdmission.maximumTreeWork)
+            )
+        }
+    }
+
+    /// Making an element's names walks its ancestors a few times whatever
+    /// their number, so names one to an element cost the most: one `on…`
+    /// name on each of 15,900 `<br>`s under 495 `div`s took 3.7 s to make
+    /// and remove in a Release build. Each such element counts four walks a
+    /// level, not one.
+    /// Revert-check: the `namedTags` term of `attributeWalksPerLevel` in
+    /// `estimate(in:limit:…)` (the count is halved; with the `on…` term too,
+    /// the body is admitted).
+    func testParseDocument_oneEventNameOnEachOfManyElements_isRefusedAsTooCostly() {
+        let html = String(repeating: "<div>", count: 495) + String(repeating: "<br onclick=1>", count: 15_900)
+        let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+        XCTAssertNil(cost.excessWork)
+        XCTAssertEqual(cost.attributeWalksPerLevel, 4 * 15_900)
+        XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+            guard case let .tooCostlyToParse(_, limit) = error as? EmailDOMParseRefusal else {
+                return XCTFail("\(error)")
+            }
+            XCTAssertEqual(limit, EmailDOMParseAdmission.maximumAttributeWalkWork)
+        }
+    }
+
+    /// A fragment of paragraphs each with a `font` the `</p>` leaves open is
+    /// ordinary enough (7 ms in `parseBodyFragment`, 9 deep), though the
+    /// scan's bound grows two a paragraph; the copies' walks are charged at
+    /// what they measured, so 300 of them are admitted.
+    /// Revert-check: `fragmentCopyWalkWeight` at 5 (refused).
+    func testParseBodyFragment_paragraphsOverUnclosedFonts_areAdmitted() {
+        let html = String(repeating: "<p><font face=\"Arial\" size=\"2\" color=\"#333333\">line of text</p>", count: 300)
+        XCTAssertNoThrow(try EmailDOMParseAdmission.parseBodyFragment(html))
+    }
+
+    /// SwiftSoup takes a tag for the run of its name after the last NUL
+    /// when that run has no uppercase letter (`readTagName` sets the tag's
+    /// identity from each run): `<x\0html a>` gives the root `a`, as
+    /// `<html a>` does, and `<x\0select>` is a `select`. A run with an
+    /// uppercase letter, or none, or one that is not among SwiftSoup's
+    /// `TagId` names leaves the tag unknown, an element that stays open:
+    /// `<y\0link>` × 50,000 nests 50,000 deep, and `<y\0x></x>` is never
+    /// closed by its end tag.
+    /// Revert-check: the last run in `TokenizingScanner.readTag` (the first
+    /// two are admitted, and `select` is not read), the `swiftSoupTagIds`
+    /// check there (the deep ones are bounded low), and the NUL in
+    /// `AttributeWorkBound.rootTagNameEnds` (the third is admitted).
+    func testParseDocument_tagNamedAfterANul_isReadAsSwiftSoupReadsIt() {
+        let tags = (0..<4_000).map { " a\($0) b\($0) c\($0) d\($0)>" }
+        let shapes = [
+            "<html><body>x" + tags.map { "<x\u{0}html" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<Y\u{0}\u{0}body" + $0 }.joined(),
+            "<html><body>x" + tags.map { "<x\u{0}html" + $0 }.joined() + "<select>",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertGreaterThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html))
+        }
+        XCTAssertEqual(
+            EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}html a b>").rootAttributeMergeWork,
+            EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<html a b>").rootAttributeMergeWork
+        )
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}HTML a b>").rootAttributeMergeWork, 0)
+        XCTAssertEqual(EmailDOMParseAdmission.estimatedCost(of: "<html><body>x<x\u{0}html\u{0} a b>").rootAttributeMergeWork, 0)
+        XCTAssertFalse(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: "<p><x\u{0}select><b>").followed)
+        XCTAssertTrue(EmailDOMParseAdmission.followedTokenizedDepthEstimate(of: "<p><x\u{0}SELECT><b>").followed)
+
+        let unknownRuns = [
+            String(repeating: "<y\u{0}link>", count: 1_000),
+            String(repeating: "<y\u{0}x></x>", count: 1_000),
+            "<y\u{0}link><noscript>" + String(repeating: "<div>", count: 1_000),
+            String(repeating: "<y\u{0}font>", count: 1_000),
+        ]
+        for html in unknownRuns {
+            XCTAssertGreaterThanOrEqual(EmailDOMParseAdmission.estimatedDepth(of: html), 1_000, html.debugDescription.prefix(30).description)
+        }
+    }
+
+    /// Attribute-heavy mail is charged far below the limit: a newsletter of
+    /// 2,000 cells each with a dozen attributes, and the shapes item 2b
+    /// measured (`<head`, `<br` and `<a` run together are one tag name each).
+    func testAttributeDedupWork_ordinaryAttributeHeavyMail_isAdmitted() throws {
+        var newsletter = "<html><body><table>"
+        for row in 0..<2_000 {
+            newsletter += "<tr><td align=\"left\" valign=\"top\" width=\"600\" height=\"20\" bgcolor=\"#ffffff\" class=\"c\(row)\" id=\"r\(row)\" style=\"padding:0\" dir=\"ltr\" role=\"presentation\" data-a=\"1\" data-b=\"2\">row \(row)</td></tr>"
+        }
+        newsletter += "</table></body></html>"
+        let shapes = [
+            newsletter,
+            "<html lang=\"en\" dir=\"ltr\" xmlns=\"http://www.w3.org/1999/xhtml\"><head></head>"
+                + "<body style=\"margin:0\" bgcolor=\"#ffffff\" class=\"body\" link=\"#000\" vlink=\"#000\">"
+                + newsletter,
+            "<html><body>" + String(repeating: "<head", count: 8_000) + "</body></html>",
+            String(repeating: "<br", count: 8_000),
+            String(repeating: "<a", count: 8_000),
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html)
+            XCTAssertLessThan(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork / 100, String(html.prefix(60)))
+            XCTAssertLessThan(cost.rootAttributeMergeWork, EmailDOMParseAdmission.maximumRootAttributeMergeWork / 100, String(html.prefix(60)))
+            XCTAssertLessThan(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork / 10, String(html.prefix(60)))
+            XCTAssertNil(
+                EmailDOMParseAdmission.attributeWalkRefusal(depth: cost.depth, walksPerLevel: cost.attributeWalksPerLevel),
+                String(html.prefix(60))
+            )
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(60)))
+        }
+    }
+
     // MARK: - Each caller's failure branch runs
 
     func testExtractPlainText_deepNest_recoversTextWithoutTheDOM() {
@@ -1146,9 +1495,13 @@ private struct TagSoupGenerator {
         while Self.rareNames.contains(name), below(8) != 0 {
             name = pick(Self.names)
         }
-        switch below(10) {
+        switch below(12) {
         case 0: return name.uppercased()
         case 1: return name.prefix(1).uppercased() + name.dropFirst()
+        // SwiftSoup takes the tag for the run after a NUL in its name when
+        // that run has no uppercase letter.
+        case 2: return "x\u{0}" + name
+        case 3: return pick(["x", "X\u{0}y", "b"]) + "\u{0}" + name.uppercased()
         default: return name
         }
     }
