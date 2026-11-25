@@ -25,11 +25,13 @@ final class BackgroundRunJournal: @unchecked Sendable {
         /// bundle prefix.
         let task: String
         let startedAt: Date
+        /// For a `started` entry, the start again: nothing has ended yet.
         let endedAt: Date
         let outcome: BackgroundRunOutcome
         /// Expiration won: iOS was told the run failed, whatever its outcome.
         let expired: Bool
-        /// What `setTaskCompleted(success:)` was given.
+        /// What `setTaskCompleted(success:)` was given. For a `started` entry, false and
+        /// meaningless: nothing was reported yet.
         let reportedSuccess: Bool
     }
 

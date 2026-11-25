@@ -5,8 +5,20 @@ import XCTest
 /// The last background-task runs, kept for Share Diagnostics (architecture review 2026-11,
 /// `observability-errors#3`).
 final class BackgroundRunJournalTests: XCTestCase {
+    private var suiteNames: [String] = []
+
+    override func tearDown() {
+        for name in suiteNames {
+            UserDefaults().removePersistentDomain(forName: name)
+        }
+        suiteNames = []
+        super.tearDown()
+    }
+
     private func makeDefaults() -> UserDefaults {
-        UserDefaults(suiteName: "BackgroundRunJournalTests.\(UUID().uuidString)")!
+        let name = "BackgroundRunJournalTests.\(UUID().uuidString)"
+        suiteNames.append(name)
+        return UserDefaults(suiteName: name)!
     }
 
     private func entry(_ index: Int, outcome: BackgroundRunOutcome = .completed) -> BackgroundRunJournal.Entry {
@@ -75,6 +87,21 @@ final class BackgroundRunJournalTests: XCTestCase {
         )
 
         XCTAssertEqual(journal.entries().map(\.task), ["appRefresh", "processing"])
+        XCTAssertEqual(journal.entries().map(\.outcome), [.started, .completed])
+    }
+
+    // Revert-check: fails if the replacement stops matching on `startedAt`: the next run of
+    // the same task would then remove a killed run's `started` entry, the only trace of it.
+    func testStartedEntryOfAKilledRun_survivesTheNextRunOfTheSameTask() {
+        let journal = BackgroundRunJournal(defaults: makeDefaults())
+        let killed = Date(timeIntervalSince1970: 100)
+        let next = Date(timeIntervalSince1970: 1_000)
+
+        journal.recordStart(task: "processing", startedAt: killed)
+        journal.recordStart(task: "processing", startedAt: next)
+        journal.record(task: "processing", startedAt: next, endedAt: next, outcome: .completed, reported: true, expired: false)
+
+        XCTAssertEqual(journal.entries().map(\.startedAt), [killed, next])
         XCTAssertEqual(journal.entries().map(\.outcome), [.started, .completed])
     }
 

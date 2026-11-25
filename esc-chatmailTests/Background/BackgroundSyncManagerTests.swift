@@ -906,9 +906,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
     func testTaskRunner_expiredRun_isJournaledAsExpiredBeforeItIsReported() async {
         let readinessGate = BackgroundSyncReadinessGate()
         let expiration = BackgroundTaskExpirationHandlerProbe()
-        let journal = BackgroundRunJournal(
-            defaults: UserDefaults(suiteName: "BackgroundSyncManagerTests.journal.\(UUID().uuidString)")!
-        )
+        let journal = BackgroundRunJournal(defaults: defaults)
         let entriesAtReport = BackgroundJournalSnapshotProbe()
         let manager = makeManager(
             authoritativeSyncReadiness: { await readinessGate.waitUntilReleased() },
@@ -939,9 +937,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
     // account was signed out for good or is only held after a failed restore.
     func testTaskRunner_noSession_tellsSignedOutFromHeld() async {
         for (isDurablySignedOut, expected) in [(true, BackgroundRunOutcome.signedOut), (false, .noSessionYet)] {
-            let journal = BackgroundRunJournal(
-                defaults: UserDefaults(suiteName: "BackgroundSyncManagerTests.journal.\(UUID().uuidString)")!
-            )
+            defaults.removeObject(forKey: BackgroundRunJournal.defaultsKey)
+            let journal = BackgroundRunJournal(defaults: defaults)
             let completion = BackgroundTaskCompletionProbe()
             let manager = makeManager(
                 authoritativeSyncIsAuthenticated: { false },
@@ -988,9 +985,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
 
     func testTaskRunner_completedRun_isJournaledWithItsOutcome() async {
         let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: .completed) }
-        let journal = BackgroundRunJournal(
-            defaults: UserDefaults(suiteName: "BackgroundSyncManagerTests.journal.\(UUID().uuidString)")!
-        )
+        let journal = BackgroundRunJournal(defaults: defaults)
         let completion = BackgroundTaskCompletionProbe()
         let manager = makeManager(authoritativeSyncExecutor: executor, runJournal: journal)
 
@@ -1729,9 +1724,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
                 assertions.begin(onExpiration: onExpiration)
                 return { assertions.end() }
             },
-            runJournal: runJournal ?? BackgroundRunJournal(
-                defaults: UserDefaults(suiteName: "BackgroundSyncManagerTests.journal.\(UUID().uuidString)")!
-            )
+            runJournal: runJournal ?? BackgroundRunJournal(defaults: defaults)
         )
     }
 
