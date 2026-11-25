@@ -573,13 +573,13 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
     }
 
     /// The image is decoded to be re-encoded, so it is decoded through `ImageDownsampler`:
-    /// one wider than the pixel cap goes into the page at the cap.
+    /// one longer than the page's pixel cap goes into the page at that cap.
     ///
     /// Revert-check: `ImageDownsampler.decode` in
     /// `HTMLRemoteImageAttachmentFallback.makeDataURL`. `PlatformImage(data:)` there
-    /// re-encodes all 3,000 pixels of its width.
-    func testMakeDataURL_imageWiderThanThePixelCap_isReEncodedAtTheCap() throws {
-        let jpeg = try TestImageData.encoded(as: .jpeg, pixelSizes: [CGSize(width: 3_000, height: 2_000)])
+    /// re-encodes all 6,000 pixels of its width.
+    func testMakeDataURL_imageLongerThanThePagePixelCap_isReEncodedAtTheCap() throws {
+        let jpeg = try TestImageData.encoded(as: .jpeg, pixelSizes: [CGSize(width: 6_000, height: 300)])
 
         let dataURL = try XCTUnwrap(
             HTMLRemoteImageAttachmentFallback.makeDataURL(
@@ -592,8 +592,29 @@ final class HTMLRemoteImageAttachmentFallbackTests: XCTestCase {
         let pixelSize = try XCTUnwrap(TestImageData.pixelSizes(of: try payload(of: dataURL)).first)
         XCTAssertEqual(
             max(pixelSize.width, pixelSize.height),
-            ImageDownsampler.defaultMaxPixelDimension,
+            HTMLRemoteImageAttachmentFallback.maxInlinePixelDimension,
             accuracy: 1
+        )
+    }
+
+    /// A tall image the page draws at its own width keeps its pixels: the image caches'
+    /// 1,440 cap on the longer side would leave this one 216 pixels wide.
+    ///
+    /// Revert-check: `maxPixelDimension: maxInlinePixelDimension` in `makeDataURL`.
+    func testMakeDataURL_tallImageWithinThePagePixelCap_keepsItsSize() throws {
+        let jpeg = try TestImageData.encoded(as: .jpeg, pixelSizes: [CGSize(width: 600, height: 4_000)])
+
+        let dataURL = try XCTUnwrap(
+            HTMLRemoteImageAttachmentFallback.makeDataURL(
+                from: jpeg,
+                response: try imageResponse(mimeType: "image/jpeg"),
+                maxInlineBytes: HTMLRemoteImageAttachmentFallback.maxInlineBytes
+            )
+        )
+
+        XCTAssertEqual(
+            TestImageData.pixelSizes(of: try payload(of: dataURL)).first,
+            CGSize(width: 600, height: 4_000)
         )
     }
 

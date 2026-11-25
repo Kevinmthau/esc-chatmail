@@ -160,6 +160,12 @@ actor HTMLRemoteImageAttachmentFallback {
     /// The most bytes of one image this takes, as fetched and again as the data URL's
     /// payload.
     static let maxInlineBytes = 2 * 1024 * 1024
+    /// The longer side, in pixels, of an image this puts in a page. Not the image caches'
+    /// 1,440: the page draws this image at the width its HTML gives it, so a tall one
+    /// (600 x 4,000) cut to 1,440 on its longer side would be drawn at nearly three times
+    /// the pixels it has left. 4,096 keeps such an image whole and bounds the bitmap at
+    /// 64 MB.
+    static let maxInlinePixelDimension: CGFloat = 4_096
     private let previewEagerResolutionTimeoutNanoseconds: UInt64
 
     /// - Parameter requestExecutor: the default reads through
@@ -819,14 +825,17 @@ actor HTMLRemoteImageAttachmentFallback {
     ///
     /// Decoded through `ImageDownsampler`, never `PlatformImage(data:)`: the bytes are a
     /// sender's, and re-encoding an image decodes all of it. An image past the source-pixel
-    /// budget is refused undecoded, and one past the pixel cap is re-encoded at the cap.
-    /// Internal for `HTMLRemoteImageAttachmentFallbackTests`.
+    /// budget is refused undecoded, and one past `maxInlinePixelDimension` is re-encoded at
+    /// that size. Internal for `HTMLRemoteImageAttachmentFallbackTests`.
     static func makeDataURL(from data: Data, response: HTTPURLResponse, maxInlineBytes: Int) -> String? {
         guard !data.isEmpty,
               data.count <= maxInlineBytes,
               let mimeType = response.mimeType?.lowercased(),
               Self.rewritableSourceImageMimeTypes.contains(mimeType),
-              let image = ImageDownsampler.decode(data: data) else {
+              let image = ImageDownsampler.decode(
+                  data: data,
+                  maxPixelDimension: maxInlinePixelDimension
+              ) else {
             return nil
         }
 
