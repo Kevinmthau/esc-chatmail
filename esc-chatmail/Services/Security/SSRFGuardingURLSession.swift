@@ -13,11 +13,21 @@ import Foundation
 /// Callers should still do a pre-fetch check with
 /// `PrivateNetworkAddressDetector.isPrivateOrReserved(_:)` on the initial URL
 /// — the redirect delegate only sees URLs reached via redirection.
+///
+/// `SSRFGuardingURLSession+BoundedData.swift` holds `boundedData(for:maxBytes:)`, the read
+/// that stops at a size limit while the body arrives. A fetch of a sender's URL whose body
+/// the app keeps in memory goes through it, not `data(for:)`.
 enum SSRFGuardingURLSession {
     static let shared: URLSession = makeSession()
 
-    private static func makeSession() -> URLSession {
+    /// - Parameter protocolClasses: for tests only, which answer the session's requests from
+    ///   a `URLProtocol` stub. Everything else about the session is `shared`'s, the redirect
+    ///   guard included, which is what such a test is about.
+    static func makeSession(protocolClasses: [AnyClass]? = nil) -> URLSession {
         let configuration = URLSessionConfiguration.default
+        if let protocolClasses {
+            configuration.protocolClasses = protocolClasses
+        }
         configuration.httpCookieStorage = nil
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
