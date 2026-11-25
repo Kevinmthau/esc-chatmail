@@ -75,6 +75,10 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// listMessages() responses keyed by the exact query, checked before
     /// `listMessagesResponse`, for a run that lists with more than one query.
     var listMessagesResponsesByQuery: [String: MessagesListResponse] = [:]
+    /// Answers a listMessages() query the test cannot spell out in full (one with
+    /// computed date bounds), checked after `listMessagesResponsesByQuery`; nil falls
+    /// through to the rest.
+    var listMessagesResponder: (@Sendable (String) -> MessagesListResponse?)?
     /// listMessages() errors keyed by the exact query (reset after throwing).
     var listMessagesErrorsByQuery: [String: Error] = [:]
     /// Error to throw on listMessages() (resets after throwing)
@@ -212,6 +216,7 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             listMessagesError = nil
             listMessagesErrorsByPageToken = [:]
             listMessagesResponsesByQuery = [:]
+            listMessagesResponder = nil
             listMessagesErrorsByQuery = [:]
             getMessageError = nil
             getMessageErrors = [:]
@@ -284,6 +289,9 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 throw error
             }
             if let query, let response = listMessagesResponsesByQuery[query] {
+                return response
+            }
+            if let query, let response = listMessagesResponder?(query) {
                 return response
             }
             if let error = listMessagesError {

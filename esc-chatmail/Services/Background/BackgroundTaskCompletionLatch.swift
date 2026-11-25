@@ -20,10 +20,17 @@ final class BackgroundTaskLifecycleState: @unchecked Sendable {
     }
 
     func complete(success: Bool) -> Bool? {
-        state.withLock { state -> Bool? in
+        completeReportingExpiry(success: success)?.reported
+    }
+
+    /// `complete(success:)`, also saying whether expiration had won: the result iOS is
+    /// given and the reason for it come from the one transition, so a record of the run
+    /// cannot disagree with what was reported.
+    func completeReportingExpiry(success: Bool) -> (reported: Bool, didExpire: Bool)? {
+        state.withLock { state -> (reported: Bool, didExpire: Bool)? in
             guard !state.didComplete else { return nil }
             state.didComplete = true
-            return success && !state.didExpire
+            return (success && !state.didExpire, state.didExpire)
         }
     }
 
@@ -58,9 +65,17 @@ final class BackgroundTaskCompletionLatch: @unchecked Sendable {
     }
 
     func complete(success: Bool) {
-        let outcome = lifecycleState.complete(success: success)
-        guard let outcome else { return }
-        onComplete(outcome)
+        complete(success: success, beforeReporting: nil)
+    }
+
+    /// Completes once, first calling `beforeReporting` with what iOS is about to be told and
+    /// whether expiration won. It runs before `onComplete` because iOS may suspend the
+    /// process as soon as `setTaskCompleted` returns: a record written after it, or from the
+    /// expiration handler, could be lost (`BackgroundRunJournal`). Nothing in it may wait.
+    func complete(success: Bool, beforeReporting: ((_ reported: Bool, _ didExpire: Bool) -> Void)?) {
+        guard let result = lifecycleState.completeReportingExpiry(success: success) else { return }
+        beforeReporting?(result.reported, result.didExpire)
+        onComplete(result.reported)
     }
 }
 

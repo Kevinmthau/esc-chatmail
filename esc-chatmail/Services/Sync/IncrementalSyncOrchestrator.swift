@@ -49,6 +49,8 @@ final class IncrementalSyncOrchestrator {
     private let historyCheckpointStore: ForegroundHistoryCheckpointStore
     private let failureCounterStore: SyncFailureCounterCheckpointStore
     private let recoveryWindowCheckpointStore: SyncWindowCheckpointStore
+    /// The repair a history recovery owes the rows it did not visit (`HistoryRecoveryRepair`).
+    private let recoveryRepairStore: HistoryRecoveryRepairCheckpointStore
     private let aliasRefreshPolicy: SendAsAliasRefreshPolicy
     private let rollupMutationSerializer: ConversationRollupMutationSerializer
     /// Where the run reads `lastSuccessfulSyncTime` and `installTimestamp` and
@@ -112,6 +114,7 @@ final class IncrementalSyncOrchestrator {
         historyCheckpointStore: ForegroundHistoryCheckpointStore = ForegroundHistoryCheckpointStore(),
         failureCounterStore: SyncFailureCounterCheckpointStore = SyncFailureCounterCheckpointStore(),
         recoveryWindowCheckpointStore: SyncWindowCheckpointStore = .historyRecovery,
+        recoveryRepairStore: HistoryRecoveryRepairCheckpointStore = HistoryRecoveryRepairCheckpointStore(),
         aliasRefreshPolicy: SendAsAliasRefreshPolicy = SendAsAliasRefreshPolicy(),
         rollupMutationSerializer: ConversationRollupMutationSerializer = .shared,
         defaults: UserDefaults = .standard,
@@ -132,6 +135,7 @@ final class IncrementalSyncOrchestrator {
         self.historyCheckpointStore = historyCheckpointStore
         self.failureCounterStore = failureCounterStore
         self.recoveryWindowCheckpointStore = recoveryWindowCheckpointStore
+        self.recoveryRepairStore = recoveryRepairStore
         self.aliasRefreshPolicy = aliasRefreshPolicy
         self.rollupMutationSerializer = rollupMutationSerializer
         self.defaults = defaults
@@ -415,6 +419,22 @@ final class IncrementalSyncOrchestrator {
                 detail: "labelOutcome=\(reconciliationResult.labelOutcome) \(reconciliationResult.diagnostics.summary)"
             )
 
+            // One batch of the repair an earlier history recovery owes the rows it did
+            // not visit. Planned here (network work, nothing written), applied in the
+            // final save's rollup block and saved with its progress. Only after a
+            // terminal, clean slice, as the delivery-unknown probe: its requests come
+            // before the final save, and a slice still catching up, or one that will
+            // retry its failures, should commit its own mail first.
+            let repairTimer = timing.start("historyRecoveryRepair")
+            let recoveryRepairStep = try await planHistoryRecoveryRepair(
+                accountEmail: accountData.email,
+                allowsExpensiveWork: allowsExpensiveRecovery
+                    && historyResult.nextPageToken == nil
+                    && !fetchResult.hasFailures,
+                in: context
+            )
+            timing.finish(repairTimer, detail: recoveryRepairStep.map { "\($0.plan.progress)" } ?? "none")
+
             // Resolve this slice's ledger before advancing either continuation
             // or cursor. Below the failure threshold the current checkpoint is
             // left untouched so the same slice is retried. Once every outcome
@@ -463,7 +483,11 @@ final class IncrementalSyncOrchestrator {
                 log.info("History slice remains at its current durable position for retry")
             }
 
-            let modifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            let trackedModifiedConversations = await ModificationTracker.shared.modifiedConversations(in: modificationTransaction)
+            // The repair's conversations take their turns with the rest, and get their
+            // rollups recomputed whether or not the repair ends up changing them.
+            let modifiedConversations = trackedModifiedConversations
+                .union(recoveryRepairStep?.plan.conversationObjectIDs ?? [])
             let trackedDisplayNameOnlyConversations = await ModificationTracker.shared
                 .displayNameOnlyConversations(in: modificationTransaction)
             let displayNameOnlyConversations = trackedDisplayNameOnlyConversations.subtracting(modifiedConversations)
@@ -487,6 +511,11 @@ final class IncrementalSyncOrchestrator {
                         conversationIDs: affectedConversationIDs,
                         in: context
                     ) {
+                        // Inside the conversations' turns, so an Archive or a mark-read
+                        // of one of them is wholly before or after it.
+                        if let recoveryRepairStep {
+                            try await self.applyHistoryRecoveryRepair(recoveryRepairStep, in: context)
+                        }
                         if !modifiedConversations.isEmpty {
                             await conversationManager.updateRollupsForModifiedConversations(
                                 conversationIDs: modifiedConversations,
@@ -865,6 +894,16 @@ final class IncrementalSyncOrchestrator {
                 // from the expired cursor commit together. A held recovery
                 // keeps its frozen window so the retry re-lists the same span.
                 try await recoveryWindowCheckpointStore.stageClear(in: context)
+                // The rows stored before the window were not visited: whatever happened
+                // to them during the gap is in no history the new cursor returns. Owed
+                // from the end of time, never the device's clock, which can be behind
+                // the rows; a repair a recovery before this one left unfinished starts
+                // over, since this gap's changes can be on rows it had already compared.
+                try await recoveryRepairStore.stageOwed(
+                    upperBound: .distantFuture,
+                    accountEmail: accountEmail,
+                    in: context
+                )
                 await messagePersister.setAccountHistoryId(profile.historyId, in: context)
             } else {
                 log.warning("Recovery had fetch failures - keeping previous historyId to retry safely")
@@ -916,6 +955,74 @@ final class IncrementalSyncOrchestrator {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             throw error
+        }
+    }
+
+    /// One planned batch of an owed history-recovery repair, and the bound it was owed at.
+    struct RecoveryRepairStep: Sendable {
+        let plan: HistoryRecoveryRepair.Plan
+        let owed: HistoryRecoveryRepairCheckpoint
+    }
+
+    /// Plans the next batch of an owed history-recovery repair, or returns nil when none
+    /// is owed or the run may not do expensive work. Writes nothing: the plan is applied,
+    /// and its progress staged, in the final save's rollup block
+    /// (`applyHistoryRecoveryRepair`). Cancellation and account-scoped failures are
+    /// rethrown and end the run.
+    private func planHistoryRecoveryRepair(
+        accountEmail: String,
+        allowsExpensiveWork: Bool,
+        in context: NSManagedObjectContext
+    ) async throws -> RecoveryRepairStep? {
+        guard allowsExpensiveWork,
+              let owed = try await recoveryRepairStore.load(accountEmail: accountEmail, in: context) else {
+            return nil
+        }
+        let plan = try await HistoryRecoveryRepair(messageFetcher: messageFetcher)
+            .planNextBatch(before: owed.upperBound, in: context)
+        return RecoveryRepairStep(plan: plan, owed: owed)
+    }
+
+    /// Applies a planned batch and stages its progress, after the application: a row it
+    /// left alone because a user's action was queued meanwhile keeps the bound above it.
+    /// Only inside the final save's rollup block.
+    private func applyHistoryRecoveryRepair(
+        _ step: RecoveryRepairStep,
+        in context: NSManagedObjectContext
+    ) async throws {
+        let skippedDates = try await HistoryRecoveryRepair.apply(step.plan, in: context)
+        let applied = HistoryRecoveryRepairPolicy.progressAfterApply(
+            planned: step.plan.progress,
+            owedUpperBound: step.owed.upperBound,
+            skippedDates: skippedDates
+        )
+        let (progress, runsWithoutProgress) = HistoryRecoveryRepairPolicy.progressAfterStall(
+            applied,
+            owedUpperBound: step.owed.upperBound,
+            runsWithoutProgressBefore: step.owed.runsWithoutProgress,
+            escapeBound: step.plan.escapeBound
+        )
+        switch progress {
+        case .holds:
+            try await recoveryRepairStore.stageOwed(
+                upperBound: step.owed.upperBound,
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
+        case .advances(let upperBound):
+            if case .advances(let planned) = applied, planned >= step.owed.upperBound, upperBound < step.owed.upperBound {
+                log.warning("History-recovery repair stepped past a row that held it for \(HistoryRecoveryRepairPolicy.maximumRunsWithoutProgress) runs")
+            }
+            try await recoveryRepairStore.stageOwed(
+                upperBound: min(upperBound, step.owed.upperBound),
+                runsWithoutProgress: runsWithoutProgress,
+                accountEmail: step.owed.accountEmail,
+                in: context
+            )
+        case .finished:
+            log.info("History-recovery repair finished")
+            try await recoveryRepairStore.stageClear(in: context)
         }
     }
 
