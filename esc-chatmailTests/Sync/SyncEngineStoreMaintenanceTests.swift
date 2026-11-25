@@ -95,7 +95,6 @@ final class SyncEngineStoreMaintenanceTests: XCTestCase {
             dataCleanupService: cleanupService,
             conversationManager: conversationManager,
             coreDataStack: coreDataStack,
-            attachmentDownloader: AttachmentDownloader.shared,
             networkMonitor: NetworkMonitorService(),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock()

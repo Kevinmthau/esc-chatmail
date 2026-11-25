@@ -96,12 +96,6 @@ class MessageProcessor: @unchecked Sendable {
         if !processedMessage.attachmentInfo.isEmpty {
             processedMessage.hasAttachments = true
         }
-        let inlineCIDPrefetchTargets = self.inlineCIDPrefetchTargets(
-            html: content.html,
-            attachmentInfo: processedMessage.attachmentInfo
-        )
-        processedMessage.inlineCIDPrefetchContentIDs = inlineCIDPrefetchTargets.contentIDs
-        processedMessage.inlineCIDPrefetchAttachmentIDs = inlineCIDPrefetchTargets.attachmentIDs
         // Ahead of the text derivation: its HTML (`storedHTML`) is the string
         // the preview and the rich-content pre-run are derived from.
         processedMessage.canonicalContent = canonicalContent(
@@ -521,32 +515,6 @@ class MessageProcessor: @unchecked Sendable {
         }
 
         return nil
-    }
-
-    private func inlineCIDPrefetchTargets(
-        html: String?,
-        attachmentInfo: [AttachmentInfo]
-    ) -> (contentIDs: Set<String>, attachmentIDs: Set<String>) {
-        var normalizedContentIDs = Set<String>()
-        var attachmentIDs = Set<String>()
-
-        for attachment in attachmentInfo {
-            guard let normalizedContentID = EmailDocument.normalizedContentID(attachment.contentId) else {
-                continue
-            }
-
-            normalizedContentIDs.insert(normalizedContentID)
-            if !attachment.id.isEmpty, !attachment.id.hasPrefix("local_") {
-                attachmentIDs.insert(attachment.id)
-            }
-        }
-
-        if html?.range(of: "cid:", options: .caseInsensitive) != nil,
-           let document = EmailDocument.tryParse(html) {
-            normalizedContentIDs.formUnion(document.referencedInlineContentIDs())
-        }
-
-        return (normalizedContentIDs, attachmentIDs)
     }
 
     /// Best-effort salvage probe for HTML embedded in textual bodies. The
@@ -1143,8 +1111,6 @@ struct ProcessedMessage: Sendable {
     var isNewsletter: Bool = false
     var hasAttachments: Bool = false
     var attachmentInfo: [AttachmentInfo] = []
-    var inlineCIDPrefetchContentIDs: Set<String> = []
-    var inlineCIDPrefetchAttachmentIDs: Set<String> = []
     /// The rich-content classifier's answer for `storedHTML`, pre-computed in the
     /// concurrent preparation phase (`MessagePersister.richContentPrerun`). Purely
     /// an optimisation: nil means "not pre-computed", never "not rich", and the

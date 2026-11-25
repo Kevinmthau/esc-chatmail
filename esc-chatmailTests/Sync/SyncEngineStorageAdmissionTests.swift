@@ -53,7 +53,6 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
             dataCleanupService: DataCleanupService(),
             conversationManager: conversationManager,
             coreDataStack: coreDataStack,
-            attachmentDownloader: AttachmentDownloader.shared,
             networkMonitor: NetworkMonitorService(),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock(),

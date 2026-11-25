@@ -136,7 +136,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
            ),
            let data = AttachmentPaths.loadData(from: localPath) {
             guard activeTasks.isActive(taskID) else { return }
-            Log.debug("CIDSchemeHandler: eager/local hit for Content-ID: \(contentId)", category: .ui)
+            Log.debug("CIDSchemeHandler: local hit for Content-ID: \(contentId)", category: .ui)
             respond(urlSchemeTask, taskID: taskID, with: data, mimeType: attachment.mimeType)
             return
         }

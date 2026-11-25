@@ -1,6 +1,6 @@
 #if os(iOS)
 // UIKit modal presentation, used only by iOS-only presenters (`ContactPresenter`,
-// `SettingsAppSignOutPrompter`, `QuickLookPreviewController`). The Mac presents
+// `SettingsAppSignOutPrompter`, `QuickLookPreviewController`) and `AppModalPresentation`. The Mac presents
 // through SwiftUI instead (`.alert`, `.quickLookPreview`, the Contacts app).
 #if canImport(UIKit)
 import UIKit
@@ -97,18 +97,31 @@ enum TopPresentableViewController {
         return viewController
     }
 
+    /// Whether the foreground window shows anything presented over its root
+    /// (`AppModalPresentation`): a SwiftUI sheet, alert or dialog, or a UIKit modal
+    /// such as Quick Look. One already being dismissed does not count.
+    @MainActor
+    static func foregroundWindowHasPresentation() -> Bool {
+        guard let rootViewController = foregroundWindow()?.rootViewController,
+              let presented = rootViewController.presentedViewController else { return false }
+        return !presented.isBeingDismissed
+    }
+
     @MainActor
     private static func foregroundTopViewController() -> UIViewController? {
+        guard let rootViewController = foregroundWindow()?.rootViewController else { return nil }
+        return resolve(startingFrom: rootViewController)
+    }
+
+    @MainActor
+    private static func foregroundWindow() -> UIWindow? {
         let windowScenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
             .filter { $0.activationState == .foregroundActive || $0.activationState == .foregroundInactive }
 
         let windows = windowScenes.flatMap(\.windows)
-        let window = windows.first(where: \.isKeyWindow)
+        return windows.first(where: \.isKeyWindow)
             ?? windows.first(where: { !$0.isHidden && $0.windowLevel == .normal })
-
-        guard let rootViewController = window?.rootViewController else { return nil }
-        return resolve(startingFrom: rootViewController)
     }
 
     @MainActor

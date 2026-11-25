@@ -342,6 +342,14 @@ enum SynthesizedInlineAttachmentRecovery {
     }
 }
 
+/// Downloads a received attachment only when something asks for it: a chat that
+/// shows it (each attachment view's `onAppear`), a tap on Retry, an inline image
+/// a bubble needs (`InlineAttachmentDownloadTrigger`), a `cid:` reference the
+/// reader renders, or a forward that copies it (`ChatViewModel.setMessageToForward`).
+/// Nothing downloads ahead of time, on any network: there is no post-sync sweep
+/// (architecture review 2026-11, attachments-storage-disk#3, Kevin's call), so a
+/// received row stays `queued` until it is shown, and mail never opened costs
+/// neither disk nor data.
 @MainActor
 final class AttachmentDownloader: ObservableObject {
     static let shared = AttachmentDownloader()
@@ -469,14 +477,6 @@ final class AttachmentDownloader: ObservableObject {
         ]
     }
 
-    /// Starts the post-sync attachment sweep and registers it before returning,
-    /// so account teardown can cancel and await every automatic downloader task.
-    func schedulePendingAttachmentDownloads() {
-        _ = startDownloadOperation { [weak self] generation in
-            await self?.enqueueAllPendingAttachments(generation: generation)
-        }
-    }
-
     /// Reopens attachment work only after AuthSession has isolated the new
     /// account's store and is ready to publish authenticated UI.
     ///
@@ -502,7 +502,7 @@ final class AttachmentDownloader: ObservableObject {
 
     /// Invalidates every common download operation, cancels tasks owned by the
     /// downloader, and waits for all writers to unwind. New operations stay
-    /// suspended until the next account's post-sync sweep is scheduled.
+    /// refused until `reopenAdmission()` lets the next account's downloads in.
     func cancelAndAwaitAllDownloads() async {
         acceptsNewDownloads = false
         let operations = Array(activeDownloadOperations.values)
@@ -548,59 +548,6 @@ final class AttachmentDownloader: ObservableObject {
 
     private func isActive(_ generation: AttachmentDownloadGenerationToken) -> Bool {
         !Task.isCancelled && !generation.isCancelled
-    }
-    
-    func enqueueAllPendingAttachments() async {
-        guard let task = startDownloadOperation({ [weak self] generation in
-            await self?.enqueueAllPendingAttachments(generation: generation)
-        }) else { return }
-        await awaitDownloadOperation(task)
-    }
-
-    private func enqueueAllPendingAttachments(
-        generation: AttachmentDownloadGenerationToken
-    ) async {
-        guard isActive(generation) else { return }
-        let context = coreDataStack.newBackgroundContext()
-
-        // Extract needed data inside context.perform to avoid faulting on wrong thread
-        let attachmentData: [(objectID: NSManagedObjectID, messageId: String)] = await context.perform {
-            let request = NSFetchRequest<Attachment>(entityName: "Attachment")
-            request.predicate = NSCompoundPredicate(orPredicateWithSubpredicates: [
-                NSPredicate(format: "stateRaw == %@", Attachment.State.queued.rawValue),
-                NSPredicate(format: "id BEGINSWITH %@", "local_inline_")
-            ])
-            request.fetchBatchSize = 10  // Process attachments in small batches to reduce memory usage
-
-            let attachments: [Attachment]
-            do {
-                attachments = try context.fetch(request)
-            } catch {
-                Log.warning("Failed to fetch pending attachments", category: .attachment)
-                return []
-            }
-
-            return attachments.compactMap { attachment in
-                guard let message = attachment.message else { return nil }
-                if attachment.id?.hasPrefix("local_inline_") == true,
-                   attachment.state != .queued,
-                   !attachment.needsRedownload {
-                    return nil
-                }
-                return (attachment.objectID, message.id)
-            }
-        }
-
-        guard isActive(generation) else { return }
-        for data in attachmentData {
-            guard isActive(generation) else { return }
-            await performDownloadAttachment(
-                attachmentObjectID: data.objectID,
-                messageId: data.messageId,
-                in: context,
-                generation: generation
-            )
-        }
     }
     
     func downloadAttachment(attachmentObjectID: NSManagedObjectID, messageId: String, in context: NSManagedObjectContext) async {
