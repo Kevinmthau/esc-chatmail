@@ -51,8 +51,9 @@ enum RichContentVerdictResolver {
         /// The message has no HTML to classify: the classifier term is false.
         case none
         /// A stored HTML file exists but could not be read (an I/O error, or the account
-        /// boundary refused the read). Not the same as having no HTML: classifying the next
-        /// candidate instead would call a row with rich HTML on disk "not rich".
+        /// boundary refused the read), or the row's HTML body is gone from disk and has to be
+        /// fetched again (`noCandidate(for:)`). Not the same as having no HTML: classifying
+        /// the next candidate instead would call a row with rich HTML "not rich".
         case undetermined
     }
 
@@ -120,11 +121,27 @@ enum RichContentVerdictResolver {
             return .html(html)
         }
 
-        guard let bodyText = inputs.bodyText else { return .none }
+        guard let bodyText = inputs.bodyText else { return noCandidate(for: inputs) }
         if let rawSourceHTML = RawEmailSourceSanitizer.extractHTMLText(from: bodyText) {
             return .html(rawSourceHTML)
         }
-        return ChatBubbleTextProcessor.containsHTMLTags(bodyText) ? .html(bodyText) : .none
+        return ChatBubbleTextProcessor.containsHTMLTags(bodyText) ? .html(bodyText) : noCandidate(for: inputs)
+    }
+
+    /// What "no HTML left to classify" means for this row. A row with no `bodyStorageURI`
+    /// never had an HTML body: sync and the reader set that URI only after writing one
+    /// (`MessagePersister+Creation`, `FullEmailOpenSession.updateBodyStorageURIIfNeeded`),
+    /// so its classifier term is false. A row with a URI did have one, and both file checks
+    /// above have just found it gone: evicted under a storage cap (`Message.bodyEvicted`), or
+    /// not brought back by a device restore, which returns the store without `Messages`. Its body is to be fetched again, not a body it never had, so the
+    /// answer is undetermined: every writer then keeps the verdict the row stored, and the
+    /// loader publishes it with no refresh, so a card stays a card while its pipeline and the
+    /// reader fetch the body again (architecture review 2026-11, attachments-storage-disk#4).
+    ///
+    /// Only these two exits change. A missing file alone is not the test: a plain-text row
+    /// has no file either, and would stay unknown for good.
+    private static func noCandidate(for inputs: RichContentVerdictInputs) -> ClassifierCandidate {
+        inputs.bodyStorageURI == nil ? .none : .undetermined
     }
 
     /// The verdict for a message's stored state, or `.unknown` when that state could not be

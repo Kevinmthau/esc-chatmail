@@ -783,6 +783,11 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
                 let messagesDirectory = documentsPath.appendingPathComponent("Messages")
                 let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
                 message.bodyStorageURI = fileURL.absoluteString
+                // The reader loaded or recovered the body from this file, so an evicted
+                // body is on disk again (`Message.bodyEvicted`).
+                if message.bodyEvicted {
+                    message.bodyEvicted = false
+                }
                 context.saveOrLog(operation: "update message body storage URI")
             }
         }

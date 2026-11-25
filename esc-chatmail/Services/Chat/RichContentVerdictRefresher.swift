@@ -112,6 +112,7 @@ final class RichContentVerdictRefresher: RichContentVerdictRefreshing {
     private struct RowSnapshot: Sendable {
         let objectID: NSManagedObjectID
         let inputs: RichContentVerdictInputs
+        let bodyEvicted: Bool
     }
 
     private func refreshHoldingLease(messageID: String, handler: HTMLContentHandler) async -> Outcome {
@@ -123,7 +124,11 @@ final class RichContentVerdictRefresher: RichContentVerdictRefreshing {
             request.predicate = MessagePredicates.id(messageID)
             do {
                 return try context.fetch(request).map {
-                    RowSnapshot(objectID: $0.objectID, inputs: $0.richContentVerdictInputs)
+                    RowSnapshot(
+                        objectID: $0.objectID,
+                        inputs: $0.richContentVerdictInputs,
+                        bodyEvicted: $0.bodyEvicted
+                    )
                 }
             } catch {
                 Log.error("Rich content verdict refresh could not read the message", category: .coreData, error: error)
@@ -143,12 +148,28 @@ final class RichContentVerdictRefresher: RichContentVerdictRefreshing {
                 expectedAccountGeneration: generation
             )
         }
+        // An evicted body that is on disk again: recovery saved it, and scheduled this
+        // refresh. Its marker comes off with the re-stamp (`Message.bodyEvicted`). Read
+        // through the handler, under the same generation as the verdicts.
+        let bodyIsBack = snapshots.map {
+            $0.bodyEvicted &&
+                handler.htmlFileExists(for: messageID, expectedGeneration: generation) &&
+                handler.isAccountGenerationCurrent(generation)
+        }
 
         return await context.perform {
             context.refreshAllObjects()
             var didChange = false
             var sawUndetermined = false
-            for (snapshot, verdict) in zip(snapshots, verdicts) {
+            for ((snapshot, verdict), bodyIsBack) in zip(zip(snapshots, verdicts), bodyIsBack) {
+                if bodyIsBack,
+                   let message = try? context.existingObject(with: snapshot.objectID) as? Message,
+                   !message.isDeleted,
+                   message.bodyEvicted,
+                   message.richContentVerdictInputs == snapshot.inputs {
+                    message.bodyEvicted = false
+                    didChange = true
+                }
                 guard verdict != .unknown else {
                     sawUndetermined = true
                     continue
