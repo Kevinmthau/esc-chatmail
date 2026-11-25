@@ -156,6 +156,10 @@ final class RetiredAccountDirectoryTests: XCTestCase {
     // Revert-check: the loop over `tombstones(of:)` in `RetiredAccountDirectory.sweepLeftovers`.
     // Without the launch sweep a tombstone whose removal the last run did not finish stays
     // for good, with a signed-out account's mail in it.
+    //
+    // The sweep's task is awaited, never polled for against a deadline: it runs at
+    // background priority, and on CI it twice had not finished after a 5-second wait
+    // (PRs 463 and 470) while it passed every local run.
     func testSweepLeftovers_removesTheTombstonesAnEarlierRunLeft_andNothingElse() async throws {
         let messages = try makeDirectory("Messages", files: ["live.html"])
         let attachments = root.appendingPathComponent("Attachments", isDirectory: true)
@@ -163,13 +167,17 @@ final class RetiredAccountDirectoryTests: XCTestCase {
         let leftAttachments = try makeDirectory("Attachments.deleting-\(UUID().uuidString)", files: ["old.bin"])
         let unrelated = try makeDirectory("Messages.deleting-not-a-uuid", files: ["keep"])
 
-        RetiredAccountDirectory.sweepLeftovers(beside: [messages, attachments])
+        let sweep = try XCTUnwrap(
+            RetiredAccountDirectory.sweepLeftovers(beside: [messages, attachments]),
+            "The sweep was refused, so nothing was started"
+        )
+        await sweep.value
 
-        let swept = await waitUntil(timeout: 5) {
-            !self.fileManager.fileExists(atPath: leftMessages.path)
-                && !self.fileManager.fileExists(atPath: leftAttachments.path)
-        }
-        XCTAssertTrue(swept, "The leftover tombstones were not removed")
+        XCTAssertFalse(fileManager.fileExists(atPath: leftMessages.path), "The leftover Messages tombstone was not removed")
+        XCTAssertFalse(
+            fileManager.fileExists(atPath: leftAttachments.path),
+            "The leftover Attachments tombstone was not removed"
+        )
         XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: messages.path), ["live.html"])
         XCTAssertEqual(try fileManager.contentsOfDirectory(atPath: unrelated.path), ["keep"])
     }
@@ -290,19 +298,6 @@ final class RetiredAccountDirectoryTests: XCTestCase {
     private func fileNumber(of url: URL) throws -> Int {
         let attributes = try fileManager.attributesOfItem(atPath: url.path)
         return try XCTUnwrap((attributes[.systemFileNumber] as? NSNumber)?.intValue)
-    }
-
-    private func waitUntil(
-        timeout: TimeInterval,
-        pollIntervalNanoseconds: UInt64 = 5_000_000,
-        condition: () async -> Bool
-    ) async -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if await condition() { return true }
-            try? await Task.sleep(nanoseconds: pollIntervalNanoseconds)
-        }
-        return await condition()
     }
 }
 

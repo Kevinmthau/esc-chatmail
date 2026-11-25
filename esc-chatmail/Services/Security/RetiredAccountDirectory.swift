@@ -182,17 +182,25 @@ enum RetiredAccountDirectory {
     /// Removes, in the background, the tombstones an earlier run of the app left: one whose
     /// removal was cut short by the app being closed, or by the device restarting. Called at
     /// every launch. It is not an account transition and takes no part in one.
-    static func sweepLeftovers(beside directories: [URL]? = nil) {
+    ///
+    /// Returns the task doing the removal (nil where the Mac's tripwire refused the sweep).
+    /// The launch discards it: nothing in the app waits for the sweep. It is returned for a
+    /// test, which must await it rather than poll the disk against a deadline: the task runs
+    /// at background priority, which the system runs only when higher-priority work leaves
+    /// room, and on a loaded CI runner it had not finished after a 5-second wait (PRs 463 and
+    /// 470). Awaiting it waits for as long as it takes.
+    @discardableResult
+    static func sweepLeftovers(beside directories: [URL]? = nil) -> Task<Void, Never>? {
         #if os(macOS)
         // Outside the App Sandbox these are the user's own Documents and the shared
         // Application Support. No cleanup makes a tombstone there, because each is
         // refused first, but nothing is removed on that reasoning alone.
         guard SandboxTripwire.permitsDestructiveCleanup(.retiredAccountDirectorySweep) else {
-            return
+            return nil
         }
         #endif
         let directories = directories ?? accountDirectories()
-        Task.detached(priority: .background) {
+        return Task.detached(priority: .background) {
             for directory in directories {
                 for tombstone in tombstones(of: directory) {
                     remove(tombstone)
