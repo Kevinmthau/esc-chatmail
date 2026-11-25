@@ -30,13 +30,16 @@ final class GmailMultipartSendUploadTests: XCTestCase {
         )
 
         let body = try Data(contentsOf: upload.fileURL)
-        let expected = Data(
-            ("--B0UNDARY\r\n"
-                + "Content-Type: application/json; charset=UTF-8\r\n\r\n"
-                + #"{"threadId":"thread-1"}"#
-                + "\r\n--B0UNDARY\r\n"
-                + "Content-Type: message/rfc822\r\n\r\n").utf8
-        ) + Self.mime + Data("\r\n--B0UNDARY--\r\n".utf8)
+        // Two statements, with the type written out: as one expression (five strings
+        // joined inside `Data(…)` and added to two more `Data`s) Swift 6.4 gives up on it
+        // ("unable to type-check this expression in reasonable time"), which Swift 6.2,
+        // CI's compiler, does not.
+        let preamble: String = "--B0UNDARY\r\n"
+            + "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+            + #"{"threadId":"thread-1"}"#
+            + "\r\n--B0UNDARY\r\n"
+            + "Content-Type: message/rfc822\r\n\r\n"
+        let expected: Data = Data(preamble.utf8) + Self.mime + Data("\r\n--B0UNDARY--\r\n".utf8)
         XCTAssertEqual(body, expected)
         XCTAssertEqual(upload.boundary, "B0UNDARY")
         XCTAssertEqual(upload.contentType, "multipart/related; boundary=B0UNDARY")
