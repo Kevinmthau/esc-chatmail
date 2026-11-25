@@ -980,9 +980,12 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
                 retryStateGeneration: generationBeforeRunAcquisition
             )
         }
+        // No path, no run: `.offline`, not `.completed`, which would reset
+        // every backoff (the head's doubling included) for a run in which
+        // nothing was sent. The next connectivity edge resumes the queue.
         guard networkMonitor.isConnected else {
             return PendingActionProcessingResult(
-                outcome: .completed,
+                outcome: .offline,
                 retryStateGeneration: generationBeforeRunAcquisition
             )
         }
@@ -1037,7 +1040,7 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         _ = await recoverStuckProcessingActions(within: syncRun)
 
         guard networkMonitor.isConnected, !Task.isCancelled else {
-            activeProcessingOutcome = Task.isCancelled ? .cancelled : .completed
+            activeProcessingOutcome = Task.isCancelled ? .cancelled : .offline
             return
         }
 

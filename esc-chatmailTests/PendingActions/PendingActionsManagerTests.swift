@@ -1723,6 +1723,38 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
     }
 
+    // Revert-check: fails if `processAllPendingActionsWithOutcome` goes back to
+    // reporting `.completed` for a run that found no path: that reset the
+    // head's doubling on every offline foreground start, so an outage with
+    // offline spells spent the five units a minute apart.
+    func testOfflineForegroundStart_keepsTheHeadsBackoff() async throws {
+        let monitor = ControllableNetworkMonitor(isConnected: true)
+        let executor = TransientFailureActionExecutor(error: APIError.serverError(503))
+        let recorder = TransientRetryRecorder()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: monitor,
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetryBaseDelay: 0.05,
+            transientRetrySleeper: { delay in await recorder.record(delay: delay) }
+        )
+        _ = PendingActionBuilder().markAsRead().forMessage("head").pending().build(in: context)
+        try saveViewContext()
+
+        await manager.processAllPendingActions()
+        try await recorder.waitUntilScheduled(count: 1)
+        try await Task.sleep(nanoseconds: 100_000_000)  // past the 0.05 s deadline
+        monitor.setConnected(false)
+        await manager.processAllPendingActions()          // a foreground start with no path
+        monitor.setConnected(true)                        // the edge resumes the queue
+        try await recorder.waitUntilScheduled(count: 2)
+
+        XCTAssertEqual(executor.executedMessageIds, ["head", "head"])
+        let delays = await recorder.scheduledDelays
+        XCTAssertEqual(delays, [0.05, 0.1], "The head's second failure doubles; the offline start reset nothing")
+    }
+
     // Revert-check: fails if `retryAllAbandonedActions` stops resetting the
     // transient backoff: the banner's Retry would hide the banner and send
     // nothing until the timer ran out.
