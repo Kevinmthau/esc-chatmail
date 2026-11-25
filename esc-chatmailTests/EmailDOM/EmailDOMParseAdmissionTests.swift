@@ -532,6 +532,121 @@ final class EmailDOMParseAdmissionTests: XCTestCase {
         XCTAssertNil(EmailDocument.tryParse(Self.deepDivNest))
     }
 
+    /// A tag's attributes are made into its list when something first reads
+    /// one, each name compared with every name kept before it
+    /// (`Attributes.ensureMaterialized`), so a tag of n distinct names costs
+    /// n², all of it after the parse (one `<div>` of 16,000 names: 0.9 s in a
+    /// Release build, 27 s in the app's Debug build, in the quote remover's
+    /// first selector). These take about 1.5 s in a Release build. The
+    /// second scan reads the first two; `<select>` makes the last two the
+    /// byte bound's.
+    /// Revert-check: the `attributeDedupWork` addition in
+    /// `TokenizingScanner.readTag` (the first two are admitted), and
+    /// `AttributeDedupBound.work` (returning 0, the last two are).
+    func testParseDocument_tagOfManyDistinctAttributeNames_isRefusedAsTooCostly() {
+        let names = (0..<20_000).map { " a\($0)=1" }.joined()
+        let eventNames = (0..<20_000).map { " on\($0)=1" }.joined()
+        let shapes = [
+            "<div" + names + ">x</div>",
+            "<p><div" + eventNames + ">x</div>",
+            "<div" + names + ">x</div><select>",
+            "<select><option" + eventNames + ">",
+        ]
+        for html in shapes {
+            let cost = EmailDOMParseAdmission.estimatedCost(of: html, limit: EmailDOMParseAdmission.maximumBoundForMeasuredParse)
+            XCTAssertLessThanOrEqual(cost.depth, EmailDOMParseAdmission.maximumDepth)
+            XCTAssertLessThanOrEqual(cost.treeWork, EmailDOMParseAdmission.maximumTreeWork)
+            XCTAssertLessThanOrEqual(cost.childMoveWork, EmailDOMParseAdmission.maximumChildMoveWork)
+            XCTAssertGreaterThan(cost.attributeDedupWork, EmailDOMParseAdmission.maximumAttributeDedupWork)
+            XCTAssertThrowsError(try EmailDOMParseAdmission.parseDocument(html)) { error in
+                XCTAssertEqual(
+                    error as? EmailDOMParseRefusal,
+                    .tooCostlyToParse(work: cost.attributeDedupWork, limit: EmailDOMParseAdmission.maximumAttributeDedupWork)
+                )
+            }
+        }
+    }
+
+    /// Each name costs a comparison with every name before it in its tag, of
+    /// one more than its length: the most SwiftSoup's search compares
+    /// (equal lengths are compared byte by byte). A NUL is three bytes,
+    /// because SwiftSoup writes U+FFFD for it. A quote, `<` or NUL after a
+    /// name and whitespace goes on that name in SwiftSoup, which the scan
+    /// reads as a name of its own: a finer split, never cheaper.
+    /// HONEST SCOPE: SwiftSoup's comparisons cannot be counted here. A copy
+    /// of SwiftSoup 2.13.5 that counts them was compared with this charge
+    /// over a million attribute-heavy documents (tag soup, quotes, NUL,
+    /// `<`, `/`, mode-dependent markup), off the suite, with none above it.
+    /// Revert-check: the NUL width in `TagAttributeReading.dedupWork`
+    /// (`withNul`), and its `startsAttribute` term (`plain`).
+    func testAttributeDedupWork_eachNameIsChargedForTheNamesBeforeIt() {
+        func work(_ html: String) -> Int {
+            EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork
+        }
+        // 0 + 1·(1 + 1) + 2·(1 + 2)
+        XCTAssertEqual(work("<div a b=1 cc='x'>"), 8, "plain")
+        // 0 + 1·(1 + 3)
+        XCTAssertEqual(work("<div a \u{0}>"), 4, "withNul")
+        // 0 + 1·(1 + 2), read as two names
+        XCTAssertEqual(work("<div a \"b>"), 3)
+        // Each tag's names are its own; end tags are charged too.
+        XCTAssertEqual(work("<p a b></p c d><p e f>"), 6)
+        XCTAssertEqual(work("<div>"), 0)
+        XCTAssertEqual(work("<div a=\"<b c d e\">"), 0)
+    }
+
+    /// Where the second scan cannot follow the markup, every `<` and letter
+    /// is read as a tag, from each state at once: never below what the
+    /// second scan charges for the same tags, and linear however the reads
+    /// overlap.
+    func testAttributeDedupWork_byteBound_isNeverBelowTheSecondScan() {
+        let shapes = [
+            "<div a b=1 cc='x'>",
+            "<div a \u{0} \"b <c d>",
+            "<p a b></p c d><p e f>",
+            "<div title=\"<a b c\" d e>",
+            "<div a/b/c/d>",
+            "<a b c<d e f>",
+            "<style><x a b c></style><div d e>",
+        ]
+        for html in shapes {
+            let followed = EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork
+            let bound = EmailDOMParseAdmission.estimatedCost(of: html + "<select>").attributeDedupWork
+            XCTAssertGreaterThanOrEqual(bound, followed, html.debugDescription)
+        }
+
+        // Every "<" starts a read that runs to the one ">" at the end.
+        let overlapping = String(repeating: "<a b ", count: 20_000) + ">"
+        let start = Date()
+        _ = EmailDOMParseAdmission.estimatedCost(of: overlapping + "<select>")
+        XCTAssertLessThan(Date().timeIntervalSince(start), 5)
+    }
+
+    /// Attribute-heavy mail is charged far below the limit: a newsletter of
+    /// 2,000 cells each with a dozen attributes, and the shapes item 2b
+    /// measured (`<head`, `<br` and `<a` run together are one tag name each).
+    func testAttributeDedupWork_ordinaryAttributeHeavyMail_isAdmitted() throws {
+        var newsletter = "<html><body><table>"
+        for row in 0..<2_000 {
+            newsletter += "<tr><td align=\"left\" valign=\"top\" width=\"600\" height=\"20\" bgcolor=\"#ffffff\" class=\"c\(row)\" id=\"r\(row)\" style=\"padding:0\" dir=\"ltr\" role=\"presentation\" data-a=\"1\" data-b=\"2\">row \(row)</td></tr>"
+        }
+        newsletter += "</table></body></html>"
+        let shapes = [
+            newsletter,
+            "<html><body>" + String(repeating: "<head", count: 8_000) + "</body></html>",
+            String(repeating: "<br", count: 8_000),
+            String(repeating: "<a", count: 8_000),
+        ]
+        for html in shapes {
+            XCTAssertLessThan(
+                EmailDOMParseAdmission.estimatedCost(of: html).attributeDedupWork,
+                EmailDOMParseAdmission.maximumAttributeDedupWork / 100,
+                String(html.prefix(60))
+            )
+            XCTAssertNoThrow(try EmailDOMParseAdmission.parseDocument(html), String(html.prefix(60)))
+        }
+    }
+
     // MARK: - Each caller's failure branch runs
 
     func testExtractPlainText_deepNest_recoversTextWithoutTheDOM() {
