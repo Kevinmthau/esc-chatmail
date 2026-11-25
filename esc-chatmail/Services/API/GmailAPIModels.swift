@@ -74,11 +74,6 @@ struct BatchModifyRequest: Codable {
     let removeLabelIds: [String]?
 }
 
-struct SendMessageRequest: Codable {
-    let raw: String
-    let threadId: String?
-}
-
 struct SendMessageResponse: Codable {
     let id: String
     let threadId: String

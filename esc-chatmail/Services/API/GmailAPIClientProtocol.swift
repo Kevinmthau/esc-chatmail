@@ -40,9 +40,9 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
     /// Archives messages by removing the INBOX label.
     func archiveMessages(ids: [String]) async throws
 
-    /// Sends a MIME-encoded raw message.
+    /// Sends one message: `mimeData` is its RFC 822 bytes, not base64.
     func sendMessage(
-        rawMessage: String,
+        mimeData: Data,
         threadId: String?,
         beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> SendMessageResponse
@@ -97,9 +97,9 @@ extension GmailAPIClientProtocol {
         try await batchModify(ids: ids, addLabelIds: addLabelIds, removeLabelIds: removeLabelIds)
     }
 
-    func sendMessage(rawMessage: String, threadId: String? = nil) async throws -> SendMessageResponse {
+    func sendMessage(mimeData: Data, threadId: String? = nil) async throws -> SendMessageResponse {
         try await sendMessage(
-            rawMessage: rawMessage,
+            mimeData: mimeData,
             threadId: threadId,
             beforeTransmission: {}
         )

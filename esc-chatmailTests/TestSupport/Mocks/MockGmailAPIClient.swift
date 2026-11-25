@@ -400,11 +400,14 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         )
     }
 
+    /// Records the MIME as base64url (`sendMessageCalls[].rawMessage`), the form
+    /// these tests have always read it in.
     func sendMessage(
-        rawMessage: String,
+        mimeData: Data,
         threadId: String?,
         beforeTransmission: @Sendable () async throws -> Void
     ) async throws -> SendMessageResponse {
+        let rawMessage = MimeBuilder.base64UrlEncode(mimeData)
         do {
             try Task.checkCancellation()
             try await beforeTransmission()

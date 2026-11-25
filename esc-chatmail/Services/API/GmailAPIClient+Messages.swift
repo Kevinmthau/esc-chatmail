@@ -67,30 +67,57 @@ extension GmailAPIClient {
         let _: EmptyResponse = try await performRequestWithRetry(request)
     }
 
-    /// Sends a MIME-encoded raw message.
+    /// Sends one message: `mimeData` is its RFC 822 bytes, not base64.
+    ///
+    /// The body goes to messages.send's upload endpoint (`uploadType=multipart`),
+    /// streamed from a file (`GmailMultipartSendUpload`), not as one in-memory
+    /// base64-in-JSON body: that body was about 4/3 of the MIME, and three or four
+    /// photos on cellular ran past the send's 300 s cap after the barrier into
+    /// "Delivery unknown". Only the transport of the body changed: the barrier, the
+    /// send session and the no-retransmission rules are as they were.
     nonisolated func sendMessage(
-        rawMessage: String,
+        mimeData: Data,
         threadId: String? = nil,
         beforeTransmission: @Sendable () async throws -> Void = {}
     ) async throws -> SendMessageResponse {
         let request: URLRequest
+        let upload: GmailMultipartSendUpload
         do {
-            let url = try buildURL(endpoint: APIEndpoints.sendMessage())
+            let url = try buildURL(
+                endpoint: APIEndpoints.sendMessageUpload(),
+                queryItems: [URLQueryItem(name: "uploadType", value: "multipart")]
+            )
             var preparedRequest = try await authenticatedRequest(url: url)
             preparedRequest.httpMethod = "POST"
-            preparedRequest.httpBody = try JSONEncoder().encode(
-                SendMessageRequest(raw: rawMessage, threadId: threadId)
+
+            // The body file is written before the barrier: a write that fails
+            // (a full disk) proves nothing reached Gmail.
+            let written = try GmailMultipartSendUpload.write(
+                mimeData: mimeData,
+                threadId: threadId,
+                in: sendUploadDirectory
             )
+            preparedRequest.setValue(written.contentType, forHTTPHeaderField: "Content-Type")
 
             // This is the final safe boundary: authentication and request-body
             // construction are complete, but URLSession has not admitted the
             // first non-idempotent request yet.
-            try Task.checkCancellation()
-            try await beforeTransmission()
+            do {
+                try Task.checkCancellation()
+                try await beforeTransmission()
+            } catch {
+                written.remove()
+                throw error
+            }
             request = preparedRequest
+            upload = written
         } catch {
             throw GmailMessageSendError.transmissionNotStarted(error)
         }
+        // Every attempt (a retry after a 401, a 429 or a pre-transmission
+        // failure) uploads the same file, so it is removed only once the
+        // whole send has ended.
+        defer { upload.remove() }
 
         // Sending is not idempotent and Gmail has no idempotency key: resending after
         // an ambiguous failure (timeout, 5xx) could deliver the email twice. Preserve
@@ -104,7 +131,8 @@ extension GmailAPIClient {
             return try await performRequestWithRetry(
                 request,
                 allowsRetransmission: false,
-                session: sendSession
+                session: sendSession,
+                uploadingBodyFrom: upload.fileURL
             )
         } catch {
             if Self.isAmbiguousSendFailure(error) {

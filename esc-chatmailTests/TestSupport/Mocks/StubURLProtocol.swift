@@ -18,6 +18,7 @@ final class StubURLProtocol: URLProtocol {
     private static var _script: [Response] = []
     private static var _requestCount = 0
     private static var _requestURLs: [URL] = []
+    private static var _requests: [URLRequest] = []
 
     static var script: [Response] {
         get { lock.withLock { _script } }
@@ -34,11 +35,18 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock { _requestURLs }
     }
 
+    /// Every request served, in arrival order, as the loading system handed it
+    /// over (method and headers; an upload's body is not in it).
+    static var requests: [URLRequest] {
+        lock.withLock { _requests }
+    }
+
     static func reset() {
         lock.withLock {
             _script = []
             _requestCount = 0
             _requestURLs = []
+            _requests = []
         }
     }
 
@@ -49,10 +57,11 @@ final class StubURLProtocol: URLProtocol {
         return URLSession(configuration: configuration)
     }
 
-    private static func nextResponse(for url: URL?) -> Response? {
+    private static func nextResponse(for request: URLRequest) -> Response? {
         lock.withLock {
             _requestCount += 1
-            if let url {
+            _requests.append(request)
+            if let url = request.url {
                 _requestURLs.append(url)
             }
             guard !_script.isEmpty else { return nil }
@@ -64,7 +73,7 @@ final class StubURLProtocol: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
-        guard let url = request.url, let response = Self.nextResponse(for: request.url) else {
+        guard let url = request.url, let response = Self.nextResponse(for: request) else {
             client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
             return
         }
