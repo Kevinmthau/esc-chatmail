@@ -40,7 +40,9 @@ import SwiftSoup
 ///   it is within `maximumDepth` and released on that thread otherwise. The
 ///   scan over-counts what it cannot be sure the tree builder closes (an
 ///   optional end tag left out before its parent's, `<ul><li>a</ul>`), so
-///   a large old-style newsletter can land here and still be admitted.
+///   a large old-style newsletter can land here and still be admitted. One
+///   refused here is remembered (`RefusedParseMemo`), so the next cleanup
+///   stage that asks for the same body is refused without parsing it again.
 /// Every admitted tree is measured too, and one deeper than `maximumDepth`
 /// is refused and released on that thread. That backstop is partial: such a
 /// tree was already built on the caller's stack, where building it recurses
@@ -106,7 +108,7 @@ enum EmailDOMParseAdmission {
     /// Parses a document, unless it is nested too deeply (`EmailDOMParseRefusal`).
     static func parseDocument(_ html: String) throws -> Document {
         let html = paddedAgainstTheTokenizerOverread(html)
-        return try admittedParse(html, rootDepth: 1, roots: { [$0] }) {
+        return try admittedParse(html, kind: .document, rootDepth: 1, roots: { [$0] }) {
             try SwiftSoup.parse(html)
         }
     }
@@ -114,7 +116,7 @@ enum EmailDOMParseAdmission {
     /// Parses a body fragment, unless it is nested too deeply (`EmailDOMParseRefusal`).
     static func parseBodyFragment(_ html: String) throws -> Document {
         let html = paddedAgainstTheTokenizerOverread(html)
-        return try admittedParse(html, readsHead: false, rootDepth: 1, roots: { [$0] }) {
+        return try admittedParse(html, kind: .bodyFragment, readsHead: false, rootDepth: 1, roots: { [$0] }) {
             try SwiftSoup.parseBodyFragment(html)
         }
     }
@@ -126,6 +128,12 @@ enum EmailDOMParseAdmission {
         let html = paddedAgainstTheTokenizerOverread(html)
         return try admittedParse(
             html,
+            // SwiftSoup also reads the context's document (quirks mode) and
+            // any form around it, so only a context that has neither is
+            // known by its name alone.
+            kind: context.parent() == nil && context.ownerDocument() == nil
+                ? .fragment(context: context.tagName())
+                : nil,
             isTableContextFragment: true,
             readsHead: false,
             rootDepth: enclosingNodeCount + 1,
@@ -137,6 +145,7 @@ enum EmailDOMParseAdmission {
 
     private static func admittedParse<Parsed>(
         _ html: String,
+        kind: RefusedParseMemo.ParseKind?,
         isTableContextFragment: Bool = false,
         readsHead: Bool = true,
         rootDepth: Int,
@@ -156,10 +165,52 @@ enum EmailDOMParseAdmission {
         if let excess = cost.excessWork {
             throw refusal(excessWork: excess)
         }
+        // A body only a parse can refuse, which the same message's next
+        // cleanup stage would parse again, is refused once.
+        let memoKey = mayBeRefusedOnlyByItsParse(cost) ? kind.map { RefusedParseMemo.Key(html, kind: $0) } : nil
+        if let memoKey, let earlier = RefusedParseMemo.shared.refusal(for: memoKey) {
+            throw earlier
+        }
+        do {
+            return try measuredParse(
+                bound: bound,
+                walksPerLevel: cost.attributeWalksPerLevel,
+                rootDepth: rootDepth,
+                roots: roots,
+                parse: parse
+            )
+        } catch let refused as EmailDOMParseRefusal {
+            if let memoKey {
+                RefusedParseMemo.shared.record(refused, for: memoKey)
+            }
+            throw refused
+        }
+    }
+
+    /// Whether the scan leaves the answer to the parse: a bound past
+    /// `maximumDepth` sends the body to the measuring thread, where the real
+    /// depth may refuse it, and attribute walks the bound would take past
+    /// `maximumAttributeWalkWork` may be refused at the measured depth
+    /// (`attributeWalkRefusal`), which is never more than the bound.
+    private static func mayBeRefusedOnlyByItsParse(_ cost: ParseCost) -> Bool {
+        cost.depth > maximumDepth
+            || attributeWalkRefusal(depth: cost.depth, walksPerLevel: cost.attributeWalksPerLevel) != nil
+    }
+
+    /// The parse and its measurement, on the measuring thread where the
+    /// bound is past `maximumDepth`, with the refusals only the measured
+    /// depth can reach.
+    private static func measuredParse<Parsed>(
+        bound: Int,
+        walksPerLevel: Int,
+        rootDepth: Int,
+        roots: @escaping (Parsed) -> [Node],
+        parse: @escaping () throws -> Parsed
+    ) throws -> Parsed {
         if bound > maximumDepth {
             return try parseOnMeasuringThread(
                 rootDepth: rootDepth,
-                walksPerLevel: cost.attributeWalksPerLevel,
+                walksPerLevel: walksPerLevel,
                 roots: roots,
                 parse: parse
             )
@@ -176,7 +227,7 @@ enum EmailDOMParseAdmission {
             runOnMeasuringThread(handOff) { $0.parsed = nil }
             throw refusal(depth: depth)
         }
-        if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: cost.attributeWalksPerLevel) {
+        if let excess = attributeWalkRefusal(depth: depth, walksPerLevel: walksPerLevel) {
             // Within `maximumDepth`: released here.
             throw refusal(excessWork: excess)
         }
