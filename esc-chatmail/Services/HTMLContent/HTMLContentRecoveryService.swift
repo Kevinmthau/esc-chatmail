@@ -348,7 +348,11 @@ actor HTMLContentRecoveryService: HTMLContentRecovering {
             // a body split around an inline photo comes back whole. Only when
             // that body shows nothing does the scoring below pick among every
             // HTML part. Fetch failures leave a part out here, as everywhere
-            // in recovery, which is best effort.
+            // in recovery, which is best effort. So recovery no longer trades
+            // a stored body that shows something for a richer HTML part
+            // beside it (two text/html parts side by side in a
+            // multipart/mixed): the next refetch would have stored the first
+            // one again.
             let bodyFetches = RecoveryBodyFetches()
             let syncedHTML = (try? await MIMEBodyExtractor.extract(
                 from: payload,
