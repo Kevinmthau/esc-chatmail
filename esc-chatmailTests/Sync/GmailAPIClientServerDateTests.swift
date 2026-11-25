@@ -57,6 +57,8 @@ final class GmailAPIClientServerDateTests: XCTestCase {
         XCTAssertEqual(estimate.timeIntervalSince(serverDate), 0, accuracy: 60)
     }
 
+    /// Revert-check: the `(200..<300).contains(httpResponse.statusCode)` condition in
+    /// `GmailAPIClient.performRetryingRequest`'s record.
     func testRead_non2xx_recordsNothing() async {
         StubURLProtocol.script = [
             .dataWithHeaders(404, Data(), ["Date": Self.serverDateHeader])

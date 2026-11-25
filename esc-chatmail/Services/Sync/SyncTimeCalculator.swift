@@ -102,9 +102,13 @@ struct SyncTimeCalculator {
     ///   earlier build wrote ahead is not reached once the clock is set right, because the
     ///   lead is then zero.
     /// - The mailbox start is read as no later than the last-sync time where both are
-    ///   set. A sync always follows the move of the start (the sign-out that moves it
-    ///   also clears the last-sync time), so a start after the last sync was written by a
-    ///   device clock that was ahead, and its floor would skip the mail between.
+    ///   set. A sync always follows the move of the start: every path that empties the
+    ///   mailbox clears the last-sync time (`AuthSession`'s two sign-outs, the failed
+    ///   session's cleanup and the durable cleanup), and the other move, an interactive
+    ///   sign-in onto an empty store, finds it cleared by one of them. So a start after the
+    ///   last sync was written by a device clock that was ahead, and its floor would skip
+    ///   the mail between. A new path that moves the start over a kept last-sync time
+    ///   breaks this and must clear it.
     ///
     /// - Parameters:
     ///   - config: Configuration determining which timestamps to check and buffers to apply
