@@ -80,7 +80,9 @@ enum DiagnosticsReport {
             options: [.skipsHiddenFiles]
         )) ?? []
         for folder in folders {
-            let created = (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? .distantPast
+            // A folder whose age cannot be read is treated as new: removing it could be
+            // removing another share's file while it is read.
+            let created = (try? folder.resourceValues(forKeys: [.creationDateKey]).creationDate) ?? now
             if now.timeIntervalSince(created) > staleReportAge {
                 try? fileManager.removeItem(at: folder)
             }

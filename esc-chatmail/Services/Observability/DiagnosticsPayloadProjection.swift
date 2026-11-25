@@ -49,6 +49,8 @@ enum DiagnosticsPayloadProjection {
         "includesMultipleApplicationVersions"
     ]
 
+    /// `virtualMemoryRegionInfo` is left out on purpose: it is free text, and its region
+    /// detail can name a mapped file's path.
     static let metaDataKeys: Set<String> = [
         "appBuildVersion",
         "appVersion",
@@ -62,7 +64,6 @@ enum DiagnosticsPayloadProjection {
         "exceptionCode",
         "signal",
         "terminationReason",
-        "virtualMemoryRegionInfo",
         "hangDuration",
         "launchDuration",
         "totalCPUTime",

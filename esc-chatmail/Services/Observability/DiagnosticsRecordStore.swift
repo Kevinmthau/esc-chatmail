@@ -106,16 +106,25 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
     private func fileName(for kind: DiagnosticsPayloadProjection.Kind, sequence: Int) -> String {
         let milliseconds = Int64((now().timeIntervalSince1970 * 1000).rounded())
         let suffix = UUID().uuidString.prefix(8)
-        return String(format: "%@%010d-%@-%lld-%@.%@",
+        return String(format: "%@%010ld-%@-%lld-%@.%@",
                       Self.filePrefix, sequence, kind.rawValue, milliseconds, String(suffix), Self.fileExtension)
     }
 
+    /// One past the highest sequence among the store's files. A name counts only when ten
+    /// digits and a `-` follow the prefix exactly, so a file of another shape cannot set
+    /// the sequence (it is still listed, and pruned, by name).
     private func nextSequenceLocked() -> Int {
         let highest = ownFilesLocked().compactMap { url -> Int? in
             let name = url.lastPathComponent.dropFirst(Self.filePrefix.count)
-            return Int(name.prefix(10))
+            let digits = name.prefix(10)
+            guard digits.count == 10,
+                  digits.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  name.dropFirst(10).first == "-" else {
+                return nil
+            }
+            return Int(digits)
         }.max() ?? 0
-        return highest + 1
+        return min(highest + 1, 9_999_999_999)
     }
 
     private func ownFilesLocked() -> [URL] {

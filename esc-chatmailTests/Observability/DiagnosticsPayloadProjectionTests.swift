@@ -21,6 +21,7 @@ final class DiagnosticsPayloadProjectionTests: XCTestCase {
         XCTAssertEqual(metaData["signal"] as? Int, 6)
         XCTAssertEqual(metaData["terminationReason"] as? String, "Namespace SIGNAL, Code 0x6")
         XCTAssertNil(metaData["regionFormat"], "Not on the allowlist")
+        XCTAssertNil(metaData["virtualMemoryRegionInfo"], "Free text that can name a mapped file")
     }
 
     // Revert-check: fails if `projectCallStackTree` / `projectFrame` keep frames whole
@@ -102,6 +103,7 @@ final class DiagnosticsPayloadProjectionTests: XCTestCase {
                     "appVersion": "1.0",
                     "osVersion": "iPhone OS 27.0",
                     "regionFormat": "US",
+                    "virtualMemoryRegionInfo": "0 is not in any region. REGION DETAIL: /var/mobile/Containers/Data/x/Attachments/a.pdf",
                     "signal": 6,
                     "exceptionType": 10,
                     "terminationReason": "Namespace SIGNAL, Code 0x6",

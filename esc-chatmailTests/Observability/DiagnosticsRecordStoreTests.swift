@@ -53,19 +53,33 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
         XCTAssertEqual(store.recordURLs().count, 1)
     }
 
-    // Revert-check: fails if `pruneLocked` may remove the file just written: with the
-    // clock set back, the new record's name sorts first and was pruned at once.
-    func testRecord_afterTheClockWentBack_keepsTheNewRecord() throws {
-        let clock = StoreTestClock()
-        let store = DiagnosticsRecordStore(directory: directory, maxRecords: 2, now: { clock.next() })
-        store.record(kind: .diagnostic, payloadJSON: hangPayload())
-        store.record(kind: .diagnostic, payloadJSON: hangPayload())
-        clock.setBack(by: 3600)
+    // Revert-check: fails if `pruneLocked` may remove the file just written. A file of the
+    // store's prefix whose name sorts after every sequence (one of another shape) makes the
+    // new record sort before it, as the oldest.
+    func testRecord_neverPrunesTheFileJustWritten() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("mx-zzzz-sorts-last.json"))
+        let store = DiagnosticsRecordStore(directory: directory, maxRecords: 1)
 
         let written = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
 
         XCTAssertTrue(FileManager.default.fileExists(atPath: written.path))
-        XCTAssertEqual(store.recordURLs().count, 2)
+        XCTAssertEqual(store.recordURLs(), [written])
+    }
+
+    // Revert-check: fails if `nextSequenceLocked` takes any ten leading characters: a file
+    // named with a fifteen-digit stamp set the next sequence past ten digits, and every
+    // record after it got the same one.
+    func testSequence_ignoresNamesOfAnotherShape() throws {
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: directory.appendingPathComponent("mx-999999999999999-diagnostic-old.json"))
+        let store = DiagnosticsRecordStore(directory: directory)
+
+        let first = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
+        let second = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
+
+        XCTAssertTrue(first.lastPathComponent.hasPrefix("mx-0000000001-"), first.lastPathComponent)
+        XCTAssertTrue(second.lastPathComponent.hasPrefix("mx-0000000002-"), second.lastPathComponent)
     }
 
     // Revert-check: fails if file names sort by time again: after the clock goes back each
