@@ -68,6 +68,11 @@ struct esc_chatmailApp: App {
         // host app's real defaults.
         if !isRunningUnitTests {
             SettingsAppAccountPublisher.shared.start(observing: AuthSession.shared)
+            #if os(iOS)
+            // MetricKit's crash, hang and exit payloads, kept on the device for Share
+            // Diagnostics. Its file work is on a utility queue and never awaited.
+            MetricKitDiagnosticsRecorder.shared.start()
+            #endif
             #if os(macOS)
             // The file of an image pasted into a reply is removed when its import ends. One
             // whose import never ran, because its chat was closed first, goes here, where no
