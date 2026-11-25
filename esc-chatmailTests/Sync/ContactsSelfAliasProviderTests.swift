@@ -47,6 +47,86 @@ final class ContactsSelfAliasProviderTests: XCTestCase {
         XCTAssertEqual(contactStore.enumerateContactsCallCount, 0)
     }
 
+    // Revert-check: the `SelfContactCards.selfAddresses` call in
+    // `ContactsSelfAliasProvider.aliases(knownEmails:)`. Restoring the union
+    // of every matched card makes Jane one of the user's addresses: her mail
+    // drawn as the user's own and her chat keyed as note-to-self.
+    func testAliases_householdCardWhosePartnerHasOwnCard_doesNotAdmitPartner() async {
+        let household = makeContact(emails: ["kevin@example.com", "jane@example.com"])
+        let jane = makeContact(emails: ["jane@example.com", "jane@work.example"])
+        let contactStore = StubSelfAliasContactStore(
+            unifiedContacts: [household],
+            enumeratedContacts: [household, jane]
+        )
+        let provider = ContactsSelfAliasProvider(
+            contactStore: contactStore,
+            authorizationStatusProvider: { .authorized }
+        )
+
+        let aliases = await provider.aliases(knownEmails: ["kevin@example.com"])
+
+        XCTAssertFalse(aliases.contains("jane@example.com"))
+        XCTAssertEqual(aliases, [])
+    }
+
+    func testAliases_ownCardBesideHouseholdCard_admitsOwnCardOnly() async {
+        let own = makeContact(emails: ["kevin@example.com", "kevin@icloud.com"])
+        let household = makeContact(emails: ["kevin@example.com", "jane@example.com"])
+        let jane = makeContact(emails: ["jane@example.com"])
+        let contactStore = StubSelfAliasContactStore(
+            unifiedContacts: [own, household],
+            enumeratedContacts: [own, household, jane]
+        )
+        let provider = ContactsSelfAliasProvider(
+            contactStore: contactStore,
+            authorizationStatusProvider: { .authorized }
+        )
+
+        let aliases = await provider.aliases(knownEmails: ["kevin@example.com"])
+
+        XCTAssertEqual(aliases, ["kevin@example.com", "kevin@icloud.com"])
+    }
+
+    // Revert-check: the `nil` return of `allContactAddressLists` on a thrown
+    // walk. Admitting the matched cards there lets an unreadable address book
+    // make someone else the user.
+    func testAliases_walkFails_admitsNoCardListingAnotherAddress() async {
+        let household = makeContact(emails: ["kevin@example.com", "jane@example.com"])
+        let contactStore = StubSelfAliasContactStore(
+            unifiedContacts: [household],
+            enumeratedContacts: [household],
+            enumerationError: CocoaError(.fileReadUnknown)
+        )
+        let provider = ContactsSelfAliasProvider(
+            contactStore: contactStore,
+            authorizationStatusProvider: { .authorized }
+        )
+
+        let aliases = await provider.aliases(knownEmails: ["kevin@example.com"])
+
+        XCTAssertEqual(aliases, [])
+        XCTAssertEqual(contactStore.enumerateContactsCallCount, 1)
+    }
+
+    /// A card that lists only the user's own addresses needs no decision, so
+    /// the address book is not walked.
+    func testAliases_cardListingOnlyKnownAddresses_doesNotEnumerate() async {
+        let own = makeContact(emails: ["kevin@example.com", "Kevin@Example.com "])
+        let contactStore = StubSelfAliasContactStore(
+            unifiedContacts: [own],
+            enumeratedContacts: [own]
+        )
+        let provider = ContactsSelfAliasProvider(
+            contactStore: contactStore,
+            authorizationStatusProvider: { .authorized }
+        )
+
+        let aliases = await provider.aliases(knownEmails: ["kevin@example.com"])
+
+        XCTAssertEqual(aliases, ["kevin@example.com"])
+        XCTAssertEqual(contactStore.enumerateContactsCallCount, 0)
+    }
+
     private func makeContact(emails: [String]) -> CNContact {
         let contact = CNMutableContact()
         contact.emailAddresses = emails.map {
@@ -60,11 +140,13 @@ private final class StubSelfAliasContactStore: SelfAliasContactStore, @unchecked
     private let lock = NSLock()
     private let unifiedContacts: [CNContact]
     private let enumeratedContacts: [CNContact]
+    private let enumerationError: Error?
     private var _enumerateContactsCallCount = 0
 
-    init(unifiedContacts: [CNContact], enumeratedContacts: [CNContact]) {
+    init(unifiedContacts: [CNContact], enumeratedContacts: [CNContact], enumerationError: Error? = nil) {
         self.unifiedContacts = unifiedContacts
         self.enumeratedContacts = enumeratedContacts
+        self.enumerationError = enumerationError
     }
 
     var enumerateContactsCallCount: Int {
@@ -87,6 +169,10 @@ private final class StubSelfAliasContactStore: SelfAliasContactStore, @unchecked
         lock.lock()
         _enumerateContactsCallCount += 1
         lock.unlock()
+
+        if let enumerationError {
+            throw enumerationError
+        }
 
         for contact in enumeratedContacts {
             var stop = ObjCBool(false)
