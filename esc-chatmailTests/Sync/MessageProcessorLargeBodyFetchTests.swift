@@ -103,6 +103,192 @@ final class MessageProcessorLargeBodyFetchTests: XCTestCase {
         XCTAssertNil(processed?.htmlBody)
     }
 
+    // MARK: - A large body is not a file
+
+    /// Gmail serves a text body over about 25 KB by attachmentId, as it does a
+    /// file, and every part with an attachmentId became an attachment row: an
+    /// `attachment.txt` card beside the body it was, downloaded a second time
+    /// by the post-sync sweep (architecture review
+    /// gap-message-shape-extremes#3). `hasAttachments` still counts it: it is
+    /// the bubble's cue to recover HTML for a row with no body.
+    ///
+    /// Revert-check: the `bodyLeafKind` clause in
+    /// `MessageProcessor.extractAttachments`.
+    func testLargePlainTextBody_isNotAnAttachment() async throws {
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in Data("Body".utf8) })
+
+        let processed = try await processor.processGmailMessage(makeLargeBodyMessage(), myAliases: [])
+
+        XCTAssertEqual(processed?.attachmentInfo.count, 0)
+        XCTAssertEqual(processed?.hasAttachments, true)
+    }
+
+    /// Large bodies of both kinds, both taken by the walk, are not files.
+    func testLargeBodyPartsOfBothKinds_areNotAttachments() async throws {
+        let message = GmailMessage(
+            id: "m-large-alternative",
+            threadId: "t-m-large-alternative",
+            labelIds: ["INBOX"],
+            snippet: "Snippet",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/alternative",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0",
+                        mimeType: "text/plain",
+                        filename: "",
+                        headers: [MessageHeader(name: "Content-Disposition", value: "inline")],
+                        body: MessageBody(size: 30_000, data: nil, attachmentId: "att-plain"),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "1",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 40_000, data: nil, attachmentId: "att-html"),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: 70_000
+        )
+        let processor = MessageProcessor(fetchAttachmentData: { _, attachmentId in
+            Data((attachmentId == "att-html" ? "<p>Body</p>" : "Body").utf8)
+        })
+
+        let processed = try await processor.processGmailMessage(message, myAliases: [])
+
+        XCTAssertEqual(processed?.attachmentInfo.map(\.id), [])
+        XCTAssertEqual(processed?.hasAttachments, true)
+    }
+
+    /// A large nameless text part the walk did not take for the body (a
+    /// second one beside the body, not after an inline file) is not a file
+    /// either: it is left out, as web leaves it out.
+    func testLargeTextPartTheWalkDidNotTake_isNotAnAttachment() async throws {
+        let message = GmailMessage(
+            id: "m-large-untaken",
+            threadId: "t-m-large-untaken",
+            labelIds: ["INBOX"],
+            snippet: "Snippet",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 11, data: Data("<p>Body</p>".utf8).base64EncodedString(), attachmentId: nil),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "1",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 40_000, data: nil, attachmentId: "att-untaken"),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: 40_011
+        )
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in
+            XCTFail("A text part the walk does not take is not fetched")
+            return Data()
+        })
+
+        let processed = try await processor.processGmailMessage(message, myAliases: [])
+
+        XCTAssertEqual(processed?.storedHTML, "<p>Body</p>")
+        XCTAssertEqual(processed?.attachmentInfo.map(\.id), [])
+        XCTAssertEqual(processed?.hasAttachments, true)
+    }
+
+    /// A nameless calendar part is a file: it drives the invite card. So is
+    /// a text part that has a filename or an `attachment` disposition.
+    func testNamelessCalendarPartAndNamedTextFile_stayAttachments() async throws {
+        let message = GmailMessage(
+            id: "m-calendar",
+            threadId: "t-m-calendar",
+            labelIds: ["INBOX"],
+            snippet: "Invite",
+            historyId: nil,
+            internalDate: "1700000000000",
+            payload: MessagePart(
+                partId: "",
+                mimeType: "multipart/mixed",
+                filename: nil,
+                headers: [
+                    MessageHeader(name: "From", value: "Alice Smith <alice@example.com>"),
+                    MessageHeader(name: "To", value: "me@example.com")
+                ],
+                body: nil,
+                parts: [
+                    MessagePart(
+                        partId: "0",
+                        mimeType: "text/plain",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 4, data: Data("Body".utf8).base64EncodedString(), attachmentId: nil),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "1",
+                        mimeType: "text/calendar",
+                        filename: nil,
+                        headers: nil,
+                        body: MessageBody(size: 30_000, data: nil, attachmentId: "att-ics"),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "2",
+                        mimeType: "text/plain",
+                        filename: "notes.txt",
+                        headers: nil,
+                        body: MessageBody(size: 30_000, data: nil, attachmentId: "att-notes"),
+                        parts: nil
+                    ),
+                    MessagePart(
+                        partId: "3",
+                        mimeType: "text/html",
+                        filename: nil,
+                        headers: [MessageHeader(name: "Content-Disposition", value: "attachment")],
+                        body: MessageBody(size: 30_000, data: nil, attachmentId: "att-page"),
+                        parts: nil
+                    )
+                ]
+            ),
+            sizeEstimate: 90_000
+        )
+        // The embedded-HTML probe reads the nameless calendar part.
+        let processor = MessageProcessor(fetchAttachmentData: { _, _ in Data("BEGIN:VCALENDAR".utf8) })
+
+        let processed = try await processor.processGmailMessage(message, myAliases: [])
+
+        XCTAssertEqual(processed?.attachmentInfo.map(\.id), ["att-ics", "att-notes", "att-page"])
+    }
+
     // MARK: - Salvage probe (embedded-HTML sweep)
 
     /// A message whose salvage probe must perform its own fetch: the large
