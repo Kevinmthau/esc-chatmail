@@ -72,7 +72,7 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
                 try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
                 let url = directory.appendingPathComponent(fileName(for: kind))
                 try projected.write(to: url, options: [.atomic])
-                pruneLocked()
+                pruneLocked(keeping: url)
                 return url
             } catch {
                 Log.warning(
@@ -87,6 +87,15 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
     /// The store's files, oldest first.
     func recordURLs() -> [URL] {
         lock.withLock { ownFilesLocked() }
+    }
+
+    /// Each file's name and contents, oldest first, read under the lock so a delivery
+    /// arriving meanwhile cannot prune a file between the listing and its read. Nil
+    /// contents is a file that could not be read.
+    func recordContents() -> [(name: String, data: Data?)] {
+        lock.withLock {
+            ownFilesLocked().map { ($0.lastPathComponent, try? Data(contentsOf: $0)) }
+        }
     }
 
     /// The file name sorts by time: milliseconds since 1970, zero-padded, then a random
@@ -106,13 +115,16 @@ final class DiagnosticsRecordStore: @unchecked Sendable {
             .map { directory.appendingPathComponent($0) }
     }
 
-    private func pruneLocked() {
-        var files = ownFilesLocked().map { url -> (URL, Int) in
+    /// Removes the oldest files past the caps, never `written`: a clock set back makes the
+    /// newest record's name sort first, and pruning by name alone deleted it at once.
+    private func pruneLocked(keeping written: URL) {
+        var files = ownFilesLocked().filter { $0 != written }.map { url -> (URL, Int) in
             let size = (try? fileManager.attributesOfItem(atPath: url.path)[.size] as? Int) ?? 0
             return (url, size)
         }
-        var totalBytes = files.reduce(0) { $0 + $1.1 }
-        while !files.isEmpty, files.count > maxRecords || totalBytes > maxBytes {
+        let writtenSize = (try? fileManager.attributesOfItem(atPath: written.path)[.size] as? Int) ?? 0
+        var totalBytes = files.reduce(writtenSize) { $0 + $1.1 }
+        while !files.isEmpty, files.count + 1 > maxRecords || totalBytes > maxBytes {
             let (oldest, size) = files.removeFirst()
             do {
                 try fileManager.removeItem(at: oldest)

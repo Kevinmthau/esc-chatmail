@@ -1,6 +1,4 @@
-import CoreTransferable
 import Foundation
-import UniformTypeIdentifiers
 
 /// One JSON file the user can share from the app: the app's version, the OS, and every
 /// record `DiagnosticsRecordStore` keeps. It is made when the user shares it
@@ -14,16 +12,15 @@ enum DiagnosticsReport {
     static let formatVersion = 1
 
     static func makeData(
-        recordURLs: [URL],
+        records recordContents: [(name: String, data: Data?)],
         appVersion: String?,
         appBuild: String?,
         osVersion: String,
         generatedAt: Date
     ) -> Data {
-        let records: [[String: Any]] = recordURLs.map { url in
-            var record: [String: Any] = ["file": url.lastPathComponent]
-            if let data = try? Data(contentsOf: url),
-               let payload = try? JSONSerialization.jsonObject(with: data) {
+        let records: [[String: Any]] = recordContents.map { name, data in
+            var record: [String: Any] = ["file": name]
+            if let data, let payload = try? JSONSerialization.jsonObject(with: data) {
                 record["payload"] = payload
             } else {
                 record["unreadable"] = true
@@ -42,7 +39,8 @@ enum DiagnosticsReport {
             ?? Data("{}".utf8)
     }
 
-    /// Writes the report into a directory of its own under `temporaryDirectory`.
+    /// Writes the report into `temporaryDirectory/DiagnosticsReport`, emptied first, so
+    /// sharing again replaces the last report instead of leaving one behind each time.
     static func writeFile(
         store: DiagnosticsRecordStore,
         bundle: Bundle = .main,
@@ -50,14 +48,14 @@ enum DiagnosticsReport {
         now: Date = Date()
     ) throws -> URL {
         let data = makeData(
-            recordURLs: store.recordURLs(),
+            records: store.recordContents(),
             appVersion: bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
             appBuild: bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
             osVersion: ProcessInfo.processInfo.operatingSystemVersionString,
             generatedAt: now
         )
-        let directory = temporaryDirectory
-            .appendingPathComponent("DiagnosticsReport-\(UUID().uuidString)", isDirectory: true)
+        let directory = temporaryDirectory.appendingPathComponent("DiagnosticsReport", isDirectory: true)
+        try? FileManager.default.removeItem(at: directory)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
@@ -65,15 +63,5 @@ enum DiagnosticsReport {
         let url = directory.appendingPathComponent("MushMail Diagnostics \(formatter.string(from: now)).json")
         try data.write(to: url, options: [.atomic])
         return url
-    }
-}
-
-/// What the Share Diagnostics item hands the share sheet: the report, made only when the
-/// user picks where to send it.
-struct DiagnosticsReportFile: Transferable {
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(exportedContentType: .json) { _ in
-            SentTransferredFile(try DiagnosticsReport.writeFile(store: .shared))
-        }
     }
 }

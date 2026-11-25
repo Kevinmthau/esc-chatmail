@@ -4,7 +4,9 @@ import Foundation
 /// allowlist, applied to the payload's `jsonRepresentation()` before anything is written.
 ///
 /// Everything not named here is dropped, so a key MetricKit adds later is not kept until
-/// someone decides it may be. In particular an Objective-C exception's `composedMessage`,
+/// someone decides it may be. One exception: a metric section that is named
+/// (`metricSectionKeys`) is kept whole, because every one of them is numbers and unit
+/// strings; a section added to that list must be checked for free text first. In particular an Objective-C exception's `composedMessage`,
 /// `arguments` and `formatString` are dropped: they are the exception's text, and the
 /// text of an exception raised over a message or a contact can hold an address or a
 /// subject (CLAUDE.md, Logging: redaction is a hard rule). Its name, type and class are
@@ -37,7 +39,14 @@ enum DiagnosticsPayloadProjection {
         "applicationTimeMetrics",
         "memoryMetrics",
         "cpuMetrics",
-        "diskIOMetrics"
+        "diskIOMetrics",
+        "diskSpaceUsageMetrics",
+        "animationMetrics"
+    ]
+
+    static let metricTopLevelKeys: Set<String> = [
+        "latestApplicationVersion",
+        "includesMultipleApplicationVersions"
     ]
 
     static let metaDataKeys: Set<String> = [
@@ -98,6 +107,11 @@ enum DiagnosticsPayloadProjection {
         case .metrics:
             if let metaData = object["metaData"] as? [String: Any] {
                 projected["metaData"] = projectMetaData(metaData)
+            }
+            for key in metricTopLevelKeys {
+                if let value = object[key], value is String || value is NSNumber {
+                    projected[key] = value
+                }
             }
             for key in metricSectionKeys {
                 if let section = object[key] as? [String: Any] {

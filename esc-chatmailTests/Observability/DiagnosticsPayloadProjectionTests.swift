@@ -60,6 +60,8 @@ final class DiagnosticsPayloadProjectionTests: XCTestCase {
             "applicationExitMetrics": [
                 "backgroundExitData": ["cumulativeMemoryResourceLimitExitCount": 3]
             ],
+            "diskSpaceUsageMetrics": ["totalDataFileSize": "120 MB"],
+            "latestApplicationVersion": "1.0",
             "signpostMetrics": [["signpostName": address]]
         ]
         let kept = try projected(.metrics, try JSONSerialization.data(withJSONObject: payload))
@@ -67,6 +69,8 @@ final class DiagnosticsPayloadProjectionTests: XCTestCase {
         XCTAssertNil(kept["signpostMetrics"])
         let exits = try XCTUnwrap(kept["applicationExitMetrics"] as? [String: Any])
         XCTAssertNotNil(exits["backgroundExitData"])
+        XCTAssertNotNil(kept["diskSpaceUsageMetrics"])
+        XCTAssertEqual(kept["latestApplicationVersion"] as? String, "1.0")
         let metaData = try XCTUnwrap(kept["metaData"] as? [String: Any])
         XCTAssertEqual(metaData["appBuildVersion"] as? String, "612")
         XCTAssertNil(metaData["regionFormat"])

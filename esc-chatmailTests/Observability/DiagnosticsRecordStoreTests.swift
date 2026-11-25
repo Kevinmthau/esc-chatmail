@@ -53,6 +53,21 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
         XCTAssertEqual(store.recordURLs().count, 1)
     }
 
+    // Revert-check: fails if `pruneLocked` may remove the file just written: with the
+    // clock set back, the new record's name sorts first and was pruned at once.
+    func testRecord_afterTheClockWentBack_keepsTheNewRecord() throws {
+        let clock = StoreTestClock()
+        let store = DiagnosticsRecordStore(directory: directory, maxRecords: 2, now: { clock.next() })
+        store.record(kind: .diagnostic, payloadJSON: hangPayload())
+        store.record(kind: .diagnostic, payloadJSON: hangPayload())
+        clock.setBack(by: 3600)
+
+        let written = try XCTUnwrap(store.record(kind: .diagnostic, payloadJSON: hangPayload()))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: written.path))
+        XCTAssertEqual(store.recordURLs().count, 2)
+    }
+
     func testRecord_largerThanTheByteCap_isNotWritten() {
         let store = DiagnosticsRecordStore(directory: directory, maxBytes: 10)
 
@@ -79,7 +94,7 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
         try Data("not json".utf8).write(to: unreadable)
 
         let data = DiagnosticsReport.makeData(
-            recordURLs: store.recordURLs(),
+            records: store.recordContents(),
             appVersion: "1.0",
             appBuild: "612",
             osVersion: "iOS 27.0",
@@ -115,6 +130,10 @@ final class DiagnosticsRecordStoreTests: XCTestCase {
 private final class StoreTestClock: @unchecked Sendable {
     private let lock = NSLock()
     private var seconds: TimeInterval = 1_800_000_000
+
+    func setBack(by interval: TimeInterval) {
+        lock.withLock { seconds -= interval }
+    }
 
     func next() -> Date {
         lock.withLock {
