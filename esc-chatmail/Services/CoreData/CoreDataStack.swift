@@ -284,10 +284,12 @@ final class CoreDataStack: @unchecked Sendable {
         // store is attached before any test runs.
         description?.shouldAddStoreAsynchronously = !RuntimeEnvironment.isRunningUnitTests
 
-        loadPersistentStores(for: container)
-
+        // Before the load starts, so that the main thread never asks the
+        // coordinator for its view context while the add holds it.
         container.viewContext.automaticallyMergesChangesFromParent = true
         container.viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+        loadPersistentStores(for: container)
         return container
     }()
 
@@ -665,6 +667,8 @@ final class CoreDataStack: @unchecked Sendable {
     /// it. A store that is not loaded and has no load in flight is waited
     /// for all the same, as before: a retry may still start one.
     func waitForStoreToLoad(timeout: TimeInterval = 10) async throws {
+        // The common case, on every background save's path.
+        if isStoreLoaded { return }
         let waiterID = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
@@ -795,6 +799,14 @@ final class CoreDataStack: @unchecked Sendable {
         if let injectedContainerForTesting {
             return injectedContainerForTesting.persistentStoreDescriptions.first?.url
         }
+        #if os(macOS)
+        // A Mac test host's store is not at the default URL, which there is
+        // the mailbox of the Mac app the user runs
+        // (`makeUnitTestHostStoreURL()`); never remove that by path.
+        if RuntimeEnvironment.isRunningUnitTests {
+            return nil
+        }
+        #endif
         return Self.defaultStoreURL
     }
 
@@ -810,6 +822,7 @@ final class CoreDataStack: @unchecked Sendable {
         }
 
         try destroyAllData()
+        addEmptyStoreSynchronously()
 
         // Reset the viewContext to clear any stale managed objects
         await resetViewContextState()
@@ -819,6 +832,17 @@ final class CoreDataStack: @unchecked Sendable {
 
         // Reset viewContext again after stores are loaded to ensure clean state
         await resetViewContextState()
+    }
+
+    /// Makes the next add synchronous. After `destroyAllData()` the store
+    /// being added is empty, so there is no migration to keep off the
+    /// caller's thread, and an asynchronous add would leave the coordinator
+    /// with no store for its whole duration, in which a save or a batch
+    /// delete raises.
+    private func addEmptyStoreSynchronously() {
+        for description in persistentContainer.persistentStoreDescriptions {
+            description.shouldAddStoreAsynchronously = false
+        }
     }
 
     func newBackgroundContext() -> NSManagedObjectContext {
@@ -884,9 +908,10 @@ final class CoreDataStack: @unchecked Sendable {
         // Safely reset the store
         try destroyAllData()
 
-        // Reinitialize. In production the add is asynchronous, so the wait
-        // below, not this call, is when the empty store is back; sign-out
-        // runs this under quiescence, with sync drained.
+        // Reinitialize, synchronously (`addEmptyStoreSynchronously()`), so
+        // the coordinator is without a store no longer than it was before
+        // the launch's load moved off the main thread.
+        addEmptyStoreSynchronously()
         loadPersistentStores(for: persistentContainer)
 
         // Wait for store to be ready

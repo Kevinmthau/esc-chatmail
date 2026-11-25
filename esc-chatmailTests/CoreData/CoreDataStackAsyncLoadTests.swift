@@ -40,7 +40,8 @@ final class CoreDataStackAsyncLoadTests: XCTestCase {
     }
 
     /// Revert-check: dropping the timer from
-    /// `CoreDataStack.registerLoadWaiter` leaves the waiter waiting forever.
+    /// `CoreDataStack.registerLoadWaiter` leaves the waiter waiting, and the
+    /// cancel then ends it with `CancellationError`.
     func testWaitForStoreToLoad_noLoadStarted_throwsAtItsTimeoutAndForgetsTheWaiter() async throws {
         let stack = CoreDataStack(
             unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(
@@ -48,23 +49,33 @@ final class CoreDataStackAsyncLoadTests: XCTestCase {
             )
         )
 
+        let waiter = Task { try await stack.waitForStoreToLoad(timeout: 0.2) }
+        await waitUntil { stack.debugPendingLoadWaiterCount == 1 }
+
+        // Bounded, so a waiter its timer never answers fails here rather
+        // than hanging the run; the cancel then ends it.
+        await waitUntil { stack.debugPendingLoadWaiterCount == 0 }
+        waiter.cancel()
+
         do {
-            try await stack.waitForStoreToLoad(timeout: 0.05)
+            try await waiter.value
             XCTFail("Expected the wait to time out")
         } catch CoreDataError.storeLoadFailed {
         }
-        XCTAssertEqual(stack.debugPendingLoadWaiterCount, 0)
     }
 
     /// Revert-check: removing the `onCancel` handler from
-    /// `CoreDataStack.waitForStoreToLoad` leaves the cancelled waiter waiting.
+    /// `CoreDataStack.waitForStoreToLoad` leaves the cancelled waiter to its
+    /// timeout.
     func testWaitForStoreToLoad_cancelledWhileWaiting_throwsCancellationError() async throws {
         let stack = CoreDataStack(
             unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(
                 storeURL: try makeStoreURL()
             )
         )
-        let waiter = Task { try await stack.waitForStoreToLoad(timeout: .infinity) }
+        // Finite, so a cancellation that answers nothing ends in the timeout
+        // error and fails the match below rather than hanging.
+        let waiter = Task { try await stack.waitForStoreToLoad(timeout: 5) }
         await waitUntil { stack.debugPendingLoadWaiterCount == 1 }
 
         waiter.cancel()
@@ -81,7 +92,7 @@ final class CoreDataStackAsyncLoadTests: XCTestCase {
     /// the waiter exists, so only the re-check after registering answers it.
     ///
     /// Revert-check: dropping the `Task.isCancelled` check from
-    /// `CoreDataStack.registerLoadWaiter` leaves the waiter waiting.
+    /// `CoreDataStack.registerLoadWaiter` leaves the waiter to its timeout.
     func testWaitForStoreToLoad_cancelledBeforeWaiting_throwsCancellationError() async throws {
         let stack = CoreDataStack(
             unloadedPersistentContainerForTesting: TestCoreDataStack.makeUnloadedSQLiteContainer(
@@ -91,7 +102,7 @@ final class CoreDataStackAsyncLoadTests: XCTestCase {
         let (gate, openGate) = AsyncStream<Void>.makeStream()
         let waiter = Task {
             for await _ in gate { break }
-            try await stack.waitForStoreToLoad(timeout: .infinity)
+            try await stack.waitForStoreToLoad(timeout: 5)
         }
 
         waiter.cancel()
@@ -153,8 +164,9 @@ final class CoreDataStackAsyncLoadTests: XCTestCase {
     /// destroyed and reloaded, never removed by path from under it.
     ///
     /// Revert-check: dropping the `_isContainerCreated` check from
-    /// `CoreDataStack.storeURLIfContainerNotCreated` removes the files of the
-    /// open store, which fails the reload.
+    /// `CoreDataStack.storeURLIfContainerNotCreated` unlinks the files of the
+    /// open store, which still reads its row through its open file, and
+    /// fails the empty-store assertion.
     func testRemoveStoreForFreshInstall_containerCreated_reloadsAnEmptyStore() async throws {
         let container = TestCoreDataStack.makeUnloadedSQLiteContainer(
             storeURL: try makeStoreURL(),
