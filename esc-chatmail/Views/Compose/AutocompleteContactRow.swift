@@ -1,21 +1,23 @@
 import SwiftUI
 
 /// Sizes of a To: field suggestion row, shared by the row and its divider so the divider's
-/// inset stays under the name. iPhone sizes went up on Kevin's ask (2026-11-25: name and
-/// address read too small at 16 and 13 points); the Mac keeps the old ones beside its
-/// 13-point body text, and has no Dynamic Type to scale them.
+/// inset stays under the name. On the iPhone the text uses the system's own text styles,
+/// like Mail's and Contacts' pickers, so it follows the phone's text size setting (Kevin,
+/// 2026-11-25: use my system default text sizes; fixed 16 and 13 read too small, fixed 20
+/// too big). The Mac has no Dynamic Type and its `.body` is 13 points, so it keeps the
+/// old fixed sizes beside its 13-point body text.
 enum AutocompleteContactRowMetrics {
     #if os(macOS)
-    static let nameSize: CGFloat = 16
-    static let emailSize: CGFloat = 13
-    static let avatarSize: CGFloat = 40
+    static let nameFont: Font = .system(size: 16)
+    static let emailFont: Font = .system(size: 13)
     #else
-    static let nameSize: CGFloat = 20
-    static let emailSize: CGFloat = 16
-    static let avatarSize: CGFloat = 44
+    static let nameFont: Font = .body
+    static let emailFont: Font = .subheadline
     #endif
-    /// The avatar scales with Dynamic Type up to here, so the largest text sizes leave the
-    /// width to the name and address rather than to the picture.
+    /// The avatar's size at the default text size; it scales with `.body`.
+    static let avatarSize: CGFloat = 40
+    /// The avatar stops growing here, so the largest text sizes leave the width to the
+    /// name and address rather than to the picture.
     static let maxAvatarSize: CGFloat = 56
     static let horizontalPadding: CGFloat = 16
     static let avatarTextSpacing: CGFloat = 12
@@ -32,13 +34,10 @@ enum AutocompleteContactRowMetrics {
 /// One contact in the To: field's suggestion list. Its own view, because the section is
 /// also reached as a plain value (`ComposeView` reads `autocompleteOverlay` off it), where
 /// a `@ScaledMetric` would never be installed and would keep its default size.
-/// Name and address follow Dynamic Type, the name a step above the address.
 struct AutocompleteContactRow: View {
     let contact: ContactsService.ContactMatch
 
-    @ScaledMetric(relativeTo: .title3) private var nameSize: CGFloat = AutocompleteContactRowMetrics.nameSize
-    @ScaledMetric(relativeTo: .callout) private var emailSize: CGFloat = AutocompleteContactRowMetrics.emailSize
-    @ScaledMetric(relativeTo: .title3) private var scaledAvatarSize: CGFloat = AutocompleteContactRowMetrics.avatarSize
+    @ScaledMetric(relativeTo: .body) private var scaledAvatarSize: CGFloat = AutocompleteContactRowMetrics.avatarSize
 
     init(contact: ContactsService.ContactMatch) {
         self.contact = contact
@@ -54,12 +53,12 @@ struct AutocompleteContactRow: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(contact.displayName)
-                    .font(.system(size: nameSize))
+                    .font(AutocompleteContactRowMetrics.nameFont)
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(contact.primaryEmail)
-                    .font(.system(size: emailSize))
+                    .font(AutocompleteContactRowMetrics.emailFont)
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -96,7 +95,7 @@ struct AutocompleteContactRow: View {
 
 /// The hairline under each suggestion, inset to start under the name.
 struct AutocompleteContactRowDivider: View {
-    @ScaledMetric(relativeTo: .title3) private var scaledAvatarSize: CGFloat = AutocompleteContactRowMetrics.avatarSize
+    @ScaledMetric(relativeTo: .body) private var scaledAvatarSize: CGFloat = AutocompleteContactRowMetrics.avatarSize
 
     init() {}
 
