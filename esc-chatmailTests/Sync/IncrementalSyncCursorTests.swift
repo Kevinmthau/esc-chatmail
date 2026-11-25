@@ -166,7 +166,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// `.standard` is how production gets it and is not matched.
     ///
     /// Revert-check: reading `UserDefaults.standard` in
-    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryQuery`, or writing it in
+    /// `IncrementalSyncOrchestrator.resolveHistoryRecoveryListing`, or writing it in
     /// `recordReconciliationTime`, fails this.
     ///
     /// HONEST SCOPE: this reads source text. It does not catch a call that leaves out its
@@ -1425,6 +1425,197 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
     }
 
+    /// An app refresh syncs its history slice and leaves what does not move
+    /// the cursor to a sync with a larger budget: no abandoned-message drain,
+    /// no label reconciliation (and no reconciliation time recorded, so it
+    /// stays due), and the missed messages its one list call finds are kept,
+    /// not fetched. The next foreground sync fetches them and forgets them.
+    ///
+    /// Revert-check: pass `.empty` only when `allowsDeferrableWork` is true
+    /// (i.e. always drain) in `IncrementalSyncOrchestrator.performSync` and
+    /// the refresh fetches "was-abandoned".
+    /// Revert-check: drop `!allowsDeferrableWork ||` from
+    /// `shouldSkipReconciliation` and the refresh lists messages twice and
+    /// records a reconciliation time.
+    /// Revert-check: pass `defersMissedMessageFetches: false` there and the
+    /// refresh fetches "missed-1".
+    /// Revert-check: drop `deferred.stillMissing` from `missedIds` in
+    /// `ReconciliationPhase.execute` and the foreground sync never fetches
+    /// "missed-1", which its own check no longer lists.
+    @MainActor
+    func testAppRefreshBudgetLeavesDrainLabelReconciliationAndMissedFetchesForLater() async throws {
+        try await seedLedgerRow(id: "was-abandoned", state: .abandoned)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageResponses["was-abandoned"] = makeFullMessage(id: "was-abandoned")
+        apiClient.getMessageResponses["missed-1"] = makeFullMessage(id: "missed-1")
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "missed-1", threadId: "t-missed-1")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+
+        let budget = BackgroundMailboxSyncBudget.appRefresh
+        _ = try await makeOrchestrator().performSync(
+            historyPageLimit: budget.historyPageLimit,
+            historyPageSize: budget.historyPageSize,
+            allowsExpensiveRecovery: budget.allowsExpensiveRecovery,
+            allowsDeferrableWork: budget.allowsDeferrableWork,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(apiClient.getMessageCalledIds.contains("m-new"), "Positive control: the slice ran")
+        XCTAssertFalse(apiClient.getMessageCalledIds.contains("was-abandoned"), "No drain in an app refresh")
+        XCTAssertFalse(apiClient.getMessageCalledIds.contains("missed-1"), "Missed fetches wait")
+        XCTAssertEqual(apiClient.listMessagesCallCount, 1, "Only the missed-message list call runs")
+        XCTAssertEqual(deferredMissedIds(), ["missed-1"], "The missed message is kept for a later sync")
+        XCTAssertEqual(
+            defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0,
+            "Label reconciliation stays due"
+        )
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["was-abandoned"])
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertNotEqual(historyId, Self.startingHistoryId, "The cursor still moves in an app refresh")
+
+        // The next foreground sync's own check no longer lists "missed-1".
+        apiClient.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        await ModificationTracker.shared.reset()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let missedStored = await messageExists(id: "missed-1")
+        XCTAssertTrue(missedStored, "The foreground sync fetches the deferred missed message")
+        XCTAssertNil(defaults.object(forKey: SyncConfig.deferredMissedMessageIdsKey))
+        let drained = await messageExists(id: "was-abandoned")
+        XCTAssertTrue(drained, "The foreground sync drains")
+        XCTAssertGreaterThan(defaults.double(forKey: SyncConfig.lastReconciliationTimeKey), 0)
+    }
+
+    /// A deferred missed message whose fetch fails in the foreground sync is
+    /// kept, not forgotten: that sync's own check lists after its last sync
+    /// less five minutes and no longer holds it, nor does any later one. The
+    /// next sync fetches it.
+    ///
+    /// Revert-check: forget every attempted deferred ID in
+    /// `SyncReconciliation.settleMissedMessageFetches` (drop the
+    /// `keepFailure(entry)` branch for a stored entry) and "missed-1" is
+    /// never stored.
+    /// Revert-check: settle with `failedIds: []` in
+    /// `IncrementalSyncOrchestrator`'s commit and the same.
+    @MainActor
+    func testDeferredMissedMessageWhoseFetchFailsIsKeptUntilItIsStored() async throws {
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageResponses["missed-1"] = makeFullMessage(id: "missed-1")
+        apiClient.listMessagesResponse = MessagesListResponse(
+            messages: [MessageListItem(id: "missed-1", threadId: "t-missed-1")],
+            nextPageToken: nil,
+            resultSizeEstimate: 1
+        )
+        _ = try await makeOrchestrator().performSync(
+            allowsExpensiveRecovery: false,
+            allowsDeferrableWork: false,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        XCTAssertEqual(deferredMissedIds(), ["missed-1"], "Positive control: the app refresh deferred it")
+
+        // The foreground sync's own check no longer lists it, and its fetch fails.
+        apiClient.listMessagesResponse = MessagesListResponse(messages: [], nextPageToken: nil, resultSizeEstimate: 0)
+        apiClient.getMessageErrors["missed-1"] = APIError.serverError(503)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        await ModificationTracker.shared.reset()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        XCTAssertTrue(
+            apiClient.getMessageCalledIds.contains("missed-1"),
+            "Positive control: the foreground sync tried the deferred fetch"
+        )
+        let storedAfterFailure = await messageExists(id: "missed-1")
+        XCTAssertFalse(storedAfterFailure)
+        XCTAssertEqual(deferredMissedIds(), ["missed-1"], "A failed fetch is kept for the next sync")
+
+        apiClient.getMessageErrors["missed-1"] = nil
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        await ModificationTracker.shared.reset()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let stored = await messageExists(id: "missed-1")
+        XCTAssertTrue(stored, "The next sync fetches it")
+        XCTAssertNil(defaults.object(forKey: SyncConfig.deferredMissedMessageIdsKey))
+    }
+
+    /// An app refresh whose fetch is rate limited does not wait the limit
+    /// out (50 seconds of ladder, or the server's Retry-After, against a
+    /// half-minute task): it saves what it fetched and holds the cursor for
+    /// the refused message.
+    ///
+    /// Revert-check: run `performSync` under `MessageFetchWaitBudget.standard`
+    /// whatever `allowsDeferrableWork` says and the fetcher sleeps a minute
+    /// and more.
+    @MainActor
+    func testRateLimitedAppRefreshSavesWhatItFetchedAndHoldsTheCursorWithoutWaiting() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [
+                                HistoryMessageAdded(message: makeHistoryStub(id: "m-ok")),
+                                HistoryMessageAdded(message: makeHistoryStub(id: "m-limited"))
+                            ],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        // "m-limited" is refused only once "m-ok" has been sent: refused
+        // first, its pause would keep "m-ok" from being sent at all.
+        apiClient.getMessageOperation = OkSentBeforeLimited.operation(
+            ok: ("m-ok", makeFullMessage(id: "m-ok"))
+        )
+        let clock = FakeSyncClock()
+
+        let budget = BackgroundMailboxSyncBudget.appRefresh
+        let result = try await makeOrchestrator(fetcherClock: clock).performSync(
+            historyPageLimit: budget.historyPageLimit,
+            historyPageSize: budget.historyPageSize,
+            allowsExpensiveRecovery: budget.allowsExpensiveRecovery,
+            allowsDeferrableWork: budget.allowsDeferrableWork,
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let slept = Double(clock.sleeps.reduce(0, +)) / 1_000_000_000
+        XCTAssertLessThan(slept, 5, "An app refresh must not wait out a rate limit")
+        XCTAssertTrue(result.needsFollowUp)
+        let okStored = await messageExists(id: "m-ok")
+        XCTAssertTrue(okStored, "What the slice fetched is saved")
+        let limitedStored = await messageExists(id: "m-limited")
+        XCTAssertFalse(limitedStored)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId, "The refused message holds the cursor")
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["m-limited"])
+    }
+
     // MARK: - History-recovery scenarios
 
     // Revert-check: fails if the `guard allowsExpensiveRecovery` inside `performSync`'s
@@ -1699,7 +1890,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// holds a newer received row. The advancing run deletes it.
     ///
     /// Revert-check: remove the `recoveryWindowCheckpointStore.load` branch
-    /// from `resolveHistoryRecoveryQuery` and the second run starts after
+    /// from `resolveHistoryRecoveryListing` and the second run starts after
     /// the newer row. Revert-check: pass `newestReceivedInternalDate: nil`
     /// there and the first run lists from the 400-day-old install time.
     @MainActor
@@ -1959,7 +2150,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
     /// otherwise anchor on the newest page the first attempt saved.
     ///
     /// Revert-check: return the `.historyRecovery` query directly from the
-    /// last-sync branch of `resolveHistoryRecoveryQuery` (no freeze) and the
+    /// last-sync branch of `resolveHistoryRecoveryListing` (no freeze) and the
     /// second run starts at the newest received row.
     @MainActor
     func testRecoveryFreezesTheLastSuccessfulSyncBranchAcrossATeardown() async throws {
@@ -2609,6 +2800,240 @@ final class IncrementalSyncCursorTests: XCTestCase {
         try await body()
     }
 
+    /// A recovery killed after its second page resumes at its third when the
+    /// expired cursor sends the next sync back to recovery: it fetches only
+    /// what it had not saved and advances, in the save that clears the
+    /// window and its progress, to the first attempt's pre-scan watermark.
+    ///
+    /// Revert-check: drop the `recoveryWindowCheckpointStore.stageFreeze`
+    /// call from the recovery page completion in
+    /// `IncrementalSyncOrchestrator.performHistoryRecoverySync` and the
+    /// second run lists and fetches "r1" and "r2" again.
+    /// Revert-check: advance to `profile.historyId` in place of
+    /// `cursorHistoryId` there and the cursor is "8888".
+    @MainActor
+    func testCancelledRecoveryResumesFromStagedPageTokenWithoutRefetchingSavedPages() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination(
+            [["r1"], ["r2"], ["r3"]],
+            pageTokens: ["page-2", "page-3", nil]
+        )
+        for id in ["r1", "r2", "r3"] {
+            apiClient.getMessageResponses[id] = makeFullMessage(id: id)
+        }
+        apiClient.listMessagesErrorsByPageToken["page-3"] = CancellationError()
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 3,
+            threadsTotal: 3,
+            historyId: "7777"
+        )
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Positive control: the first recovery dies before its third page")
+        } catch is CancellationError {
+            // Expected.
+        }
+        let historyAfterKill = await fetchAccountHistoryId()
+        XCTAssertEqual(historyAfterKill, Self.startingHistoryId)
+        let progress = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )?.progress
+        XCTAssertEqual(progress?.nextPageToken, "page-3")
+        XCTAssertEqual(progress?.watermarkHistoryId, "7777")
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 3,
+            threadsTotal: 3,
+            historyId: "8888"
+        )
+        let fetchedBefore = apiClient.getMessageCalledIds.count
+        let listedBefore = apiClient.listMessagesCallCount
+        await ModificationTracker.shared.reset()
+
+        let result = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertFalse(result.needsFollowUp)
+        XCTAssertEqual(Array(apiClient.getMessageCalledIds.dropFirst(fetchedBefore)), ["r3"])
+        XCTAssertEqual(apiClient.listMessagesCallCount - listedBefore, 1)
+        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-3")
+        for id in ["r1", "r2", "r3"] {
+            let stored = await messageExists(id: id)
+            XCTAssertTrue(stored, "\(id) is stored")
+        }
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777")
+        let cleared = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNil(cleared, "The advancing save clears the recovery window and its progress")
+    }
+
+    /// A recovery page failure, a kill, and a resumed attempt whose own page
+    /// is clean: the failure rode in the progress, so it is recorded in the
+    /// ledger and the cursor stays at the expired value.
+    ///
+    /// Revert-check: use `listedResult` alone in place of
+    /// `prior?.merging(into: listedResult)` in `performHistoryRecoverySync`
+    /// and the resumed recovery advances to "7777" with "r1" never stored.
+    @MainActor
+    func testRecoveryFailureBeforeAKillHoldsTheResumedRecovery() async throws {
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination([["r1"], ["r2"]], pageTokens: ["page-2", nil])
+        apiClient.getMessageResponses["r2"] = makeFullMessage(id: "r2")
+        apiClient.getMessageErrors["r1"] = APIError.timeout
+        apiClient.listMessagesErrorsByPageToken["page-2"] = CancellationError()
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 2,
+            threadsTotal: 2,
+            historyId: "7777"
+        )
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("Positive control: the first recovery dies before its second page")
+        } catch is CancellationError {
+            // Expected.
+        }
+
+        apiClient.listHistoryError = APIError.historyIdExpired
+        await ModificationTracker.shared.reset()
+        let result = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(result.needsFollowUp)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, Self.startingHistoryId)
+        let rows = await fetchLedgerRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["r1"])
+        let held = try await SyncWindowCheckpointStore.historyRecovery.load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertNotNil(held, "A held recovery keeps its window")
+        XCTAssertNil(held?.progress, "and lists it again from the first page")
+    }
+
+    /// A resumed recovery advances to its first attempt's watermark, so the
+    /// last-sync time it records is that listing's start. Recorded as the
+    /// time it finished, a recovery after the watermark's history expired
+    /// listed from then (less 10 minutes) and never listed the mail that
+    /// arrived between the attempts.
+    ///
+    /// Revert-check: call `failureTracker.commit(advancePlan)` without
+    /// `listingStartedAt` in `IncrementalSyncOrchestrator.performHistoryRecoverySync`
+    /// and the recorded time is now.
+    @MainActor
+    func testResumedRecoveryRecordsItsFirstAttemptsListingStartAsTheLastSync() async throws {
+        let now = Date().timeIntervalSince1970
+        let listingStartedAt = now - 2 * 3600
+        let context = coreDataStack.newBackgroundContext()
+        try await SyncWindowCheckpointStore.historyRecovery.stageFreeze(
+            windowStart: now - 3 * 3600,
+            progress: PagedSyncProgress(
+                watermarkHistoryId: "7777",
+                listingStartedAt: listingStartedAt,
+                nextPageToken: "page-2",
+                fetchFailedIds: [],
+                persistenceFailedIds: [],
+                resolvedTrackedIds: []
+            ),
+            accountEmail: Self.myEmail,
+            in: context
+        )
+        try await context.perform { try context.save() }
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination([["r1"], ["r2"]], pageTokens: ["page-2", nil])
+        apiClient.getMessageResponses["r2"] = makeFullMessage(id: "r2")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 2,
+            threadsTotal: 2,
+            historyId: "8888"
+        )
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-2", "Positive control: the recovery resumed")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777")
+        XCTAssertEqual(
+            defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey), listingStartedAt,
+            accuracy: 0.001
+        )
+    }
+
+    /// A resumed listing's start was read from the device's clock. With that clock
+    /// ahead of Gmail's, the recorded last-sync time is that start moved by the
+    /// clock's lead, never the start as read: recorded as read, it is a time Gmail
+    /// had not reached when the listing began.
+    ///
+    /// Revert-check: drop `- serverTime.deviceClockLead()` from
+    /// `SyncFailureTracker.recordResolvedProgress` and the recorded time is the
+    /// start as read.
+    @MainActor
+    func testResumedRecovery_withTheDeviceClockAhead_recordsItsListingStartMovedByTheLead() async throws {
+        let lead: TimeInterval = 3600
+        serverTime.serverOffsetFromDevice = -lead
+        let now = Date().timeIntervalSince1970
+        let listingStartedAt = now - 2 * 3600
+        let context = coreDataStack.newBackgroundContext()
+        try await SyncWindowCheckpointStore.historyRecovery.stageFreeze(
+            windowStart: now - 3 * 3600,
+            progress: PagedSyncProgress(
+                watermarkHistoryId: "7777",
+                listingStartedAt: listingStartedAt,
+                nextPageToken: "page-2",
+                fetchFailedIds: [],
+                persistenceFailedIds: [],
+                resolvedTrackedIds: []
+            ),
+            accountEmail: Self.myEmail,
+            in: context
+        )
+        try await context.perform { try context.save() }
+        apiClient.listHistoryError = APIError.historyIdExpired
+        apiClient.setMessageListWithPagination([["r1"], ["r2"]], pageTokens: ["page-2", nil])
+        apiClient.getMessageResponses["r2"] = makeFullMessage(id: "r2")
+        apiClient.profileResponse = GmailProfile(
+            emailAddress: Self.myEmail,
+            messagesTotal: 2,
+            threadsTotal: 2,
+            historyId: "8888"
+        )
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(apiClient.listMessagesLastPageToken, "page-2", "Positive control: the recovery resumed")
+        XCTAssertEqual(
+            defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey), listingStartedAt - lead,
+            accuracy: 0.001
+        )
+    }
+
     /// History has expired and recovery lists one fetchable message, "m-rec".
     private func configureCleanRecoveryListing() {
         apiClient.listHistoryError = APIError.historyIdExpired
@@ -2731,7 +3156,8 @@ final class IncrementalSyncCursorTests: XCTestCase {
         saveHTML: @escaping (String, String) -> HTMLSaveResult = { _, messageId in
             .savedWithoutWriting(messageId: messageId)
         },
-        makeSyncContext: (() -> NSManagedObjectContext)? = nil
+        makeSyncContext: (() -> NSManagedObjectContext)? = nil,
+        fetcherClock: FakeSyncClock = FakeSyncClock()
     ) -> IncrementalSyncOrchestrator {
         let conversationManager: ConversationManager
         if let conversationCreationError {
@@ -2752,7 +3178,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
             saveHTML: saveHTML,
             conversationManager: conversationManager
         )
-        let messageFetcher = MessageFetcher(apiClient: apiClient, clock: FakeSyncClock())
+        let messageFetcher = MessageFetcher(apiClient: apiClient, clock: fetcherClock)
         return IncrementalSyncOrchestrator(
             messageFetcher: messageFetcher,
             messagePersister: messagePersister,
@@ -3036,6 +3462,14 @@ final class IncrementalSyncCursorTests: XCTestCase {
                 )
             }
         }
+    }
+
+    /// The missed-message IDs kept for a later sync, oldest first.
+    private func deferredMissedIds() -> [String]? {
+        guard let data = defaults.data(forKey: SyncConfig.deferredMissedMessageIdsKey) else { return nil }
+        return try? JSONDecoder()
+            .decode([SyncReconciliation.DeferredMissedMessage].self, from: data)
+            .map(\.id)
     }
 
     private func messageExists(id: String) async -> Bool {

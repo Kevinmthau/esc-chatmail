@@ -16,6 +16,10 @@ struct SyncWindowCheckpoint: Equatable, Sendable {
 
     let accountEmail: String
     let windowStart: TimeInterval
+    /// How far the run inside this window had listed when it stopped; nil
+    /// before its first page, after a listing that ended held, and in rows
+    /// an earlier build wrote.
+    var progress: PagedSyncProgress?
 }
 
 /// Reads and stages the model-v3 `SyncCheckpoint` row that freezes a run's
@@ -26,14 +30,23 @@ struct SyncWindowCheckpoint: Equatable, Sendable {
 /// part-way. The clear is staged only into the save that advances the
 /// cursor, so a held or interrupted run resumes with the same bound.
 ///
+/// The same row carries the run's page progress (`PagedSyncProgress`, step 8),
+/// staged by each page's completion into that page's save. A held completion
+/// stages the window again without it (the retry lists the window again from
+/// its first page, its failures now in the ledger), and the advancing save
+/// clears the row.
+///
 /// `pendingMessageIdsJSON` is the kind-discriminated payload slot in the
-/// immutable v3 schema; `startHistoryId` and `pageToken` are always nil.
+/// immutable v3 schema; `startHistoryId` and `pageToken` are always nil, so
+/// the page token rides in the payload too. A payload without progress
+/// (version 1 as written before step 8) still decodes: the field is optional.
 struct SyncWindowCheckpointStore {
     private struct Payload: Codable, Equatable {
         static let currentVersion = 1
 
         let version: Int
         let windowStart: TimeInterval
+        let progress: PagedSyncProgress?
     }
 
     static let initialSync = SyncWindowCheckpointStore(kind: SyncWindowCheckpoint.initialSyncKind)
@@ -58,26 +71,29 @@ struct SyncWindowCheckpointStore {
                 guard row.accountEmail.caseInsensitiveCompare(accountEmail) == .orderedSame,
                       row.startHistoryId == nil,
                       row.pageToken == nil,
-                      let windowStart = Self.decodeWindowStart(from: row) else {
+                      let payload = Self.decodePayload(from: row) else {
                     continue
                 }
                 return SyncWindowCheckpoint(
                     accountEmail: row.accountEmail,
-                    windowStart: windowStart
+                    windowStart: payload.windowStart,
+                    progress: payload.progress
                 )
             }
             return nil
         }
     }
 
-    /// Stages exactly one row of this kind carrying `windowStart`.
+    /// Stages exactly one row of this kind carrying `windowStart` and
+    /// `progress`; nil progress drops any progress the row held.
     func stageFreeze(
         windowStart: TimeInterval,
+        progress: PagedSyncProgress? = nil,
         accountEmail: String,
         in context: NSManagedObjectContext
     ) async throws {
         let payloadData = try JSONEncoder().encode(
-            Payload(version: Payload.currentVersion, windowStart: windowStart)
+            Payload(version: Payload.currentVersion, windowStart: windowStart, progress: progress)
         )
         guard let payloadJSON = String(data: payloadData, encoding: .utf8) else {
             throw CocoaError(.fileWriteInapplicableStringEncoding)
@@ -115,7 +131,7 @@ struct SyncWindowCheckpointStore {
         }
     }
 
-    private static func decodeWindowStart(from row: SyncCheckpoint) -> TimeInterval? {
+    private static func decodePayload(from row: SyncCheckpoint) -> Payload? {
         guard let payloadJSON = row.pendingMessageIdsJSON,
               let payloadData = payloadJSON.data(using: .utf8),
               let payload = try? JSONDecoder().decode(Payload.self, from: payloadData),
@@ -123,7 +139,7 @@ struct SyncWindowCheckpointStore {
               payload.windowStart.isFinite else {
             return nil
         }
-        return payload.windowStart
+        return payload
     }
 
     private static func fetchRows(
