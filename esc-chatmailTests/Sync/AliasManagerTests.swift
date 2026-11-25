@@ -28,132 +28,157 @@ final class AliasManagerTests: XCTestCase {
         super.tearDown()
     }
 
-    func testGetAliasesMergesAccountAliasesWithSelfContactAliases() async throws {
+    /// The user's own addresses Contacts add come from the set the link store adopted,
+    /// decided by `SelfContactCards`: a household card {me, spouse} does not make the
+    /// spouse the user when the spouse has a card of their own.
+    ///
+    /// Revert-check: the `SelfContactCards.selfAddresses` call in
+    /// `ContactLinkedAddressStore.adoptSelfAddresses` (every address of a card listing
+    /// the account's address then counts, the spouse's included).
+    func testGetAliases_householdCard_excludesTheSpouse_andKeepsTheUsersOwnCard() async throws {
+        _ = AccountBuilder().withEmail("me@example.com").build(in: context)
+        try context.save()
+        let addressBook = AddressBookCards([
+            ["me@example.com", "spouse@example.com"],
+            ["spouse@example.com", "spouse@work.example"],
+            ["me@example.com", "me@icloud.com"]
+        ])
+        let store = makeStore(addressBook)
+        store.refreshIfNeeded(knownAddresses: ["me@example.com"])
+        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+
+        let aliases = await manager.getAliases(from: context)
+
+        XCTAssertEqual(aliases, ["me@example.com", "me@icloud.com"])
+    }
+
+    /// The alias set reads no Contacts: an edit to a card changes nothing until the
+    /// cleanup pass adopts it, and an address book that cannot be read changes nothing
+    /// either, so a hash never moves between two adoptions.
+    ///
+    /// Revert-check: the `cachedContactSelfAddresses ==` term of `AliasManager.getAliases`
+    /// (the cache keeps the set from before the adoption).
+    /// HONEST SCOPE: that the lookup reads no Contacts is structural (`AliasManager` has
+    /// no Contacts reader); the read count only shows that nothing else read meanwhile.
+    func testGetAliases_readsNoContacts_andKeepsItsSetUntilAdoption() async throws {
+        _ = AccountBuilder().withEmail("me@example.com").build(in: context)
+        try context.save()
+        let addressBook = AddressBookCards([["me@example.com", "me@icloud.com"]])
+        let store = makeStore(addressBook)
+        store.refreshIfNeeded(knownAddresses: ["me@example.com"])
+        let readsAfterAdoption = addressBook.readCount
+        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+
+        addressBook.cards = [["me@example.com", "me@icloud.com", "me@old.example"]]
+        let beforeAdoption = await manager.getAliases(from: context)
+        XCTAssertEqual(beforeAdoption, ["me@example.com", "me@icloud.com"])
+        XCTAssertEqual(addressBook.readCount, readsAfterAdoption, "Looking up aliases reads no Contacts")
+
+        addressBook.cards = nil
+        store.markContactsChanged()
+        store.refreshIfNeeded(knownAddresses: ["me@example.com"])
+        let afterAFailedRead = await manager.getAliases(from: context)
+        XCTAssertEqual(afterAFailedRead, ["me@example.com", "me@icloud.com"], "An unreadable address book is never an empty set")
+
+        addressBook.cards = [["me@example.com", "me@icloud.com", "me@old.example"]]
+        store.markContactsChanged()
+        store.refreshIfNeeded(knownAddresses: ["me@example.com"])
+        let afterAdoption = await manager.getAliases(from: context)
+        XCTAssertEqual(afterAdoption, ["me@example.com", "me@icloud.com", "me@old.example"])
+    }
+
+    /// A set decided for another account answers nothing: it never makes one account's
+    /// card addresses the next account's own.
+    ///
+    /// Revert-check: the `isDisjoint(with: known)` guard in
+    /// `ContactLinkedAddressStore.selfAddressesSnapshot`.
+    func testGetAliases_setDecidedForAnotherAccount_addsNothing() async throws {
+        _ = AccountBuilder().withEmail("next@example.com").build(in: context)
+        try context.save()
+        let store = makeStore(AddressBookCards([["me@example.com", "me@icloud.com"]]))
+        store.refreshIfNeeded(knownAddresses: ["me@example.com"])
+        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+
+        let aliases = await manager.getAliases(from: context)
+
+        XCTAssertEqual(aliases, ["next@example.com"])
+    }
+
+    func testGetAliasesPreservesAccountAliasesWhenNoSelfAddressesWereAdopted() async throws {
         _ = AccountBuilder()
             .withEmail("KM.Thau@googlemail.com")
             .withAliases(["alias+tag@gmail.com"])
             .build(in: context)
         try context.save()
 
-        let selfAliasProvider = StubSelfAliasProvider(aliases: ["kthau@me.com"])
-        let manager = AliasManager(selfAliasProvider: selfAliasProvider)
+        let manager = AliasManager(contactSelfAddresses: { _ in [] })
 
         let aliases = await manager.getAliases(from: context)
 
-        XCTAssertEqual(aliases, [
-            "alias@gmail.com",
-            "kmthau@gmail.com",
-            "kthau@me.com"
-        ])
-        XCTAssertTrue(selfAliasProvider.searchedEmails.contains("KM.Thau@googlemail.com"))
+        XCTAssertEqual(aliases, ["alias@gmail.com", "kmthau@gmail.com"])
     }
 
-    func testGetAliasesPreservesAccountAliasesWhenSelfContactAliasesUnavailable() async throws {
-        _ = AccountBuilder()
-            .withEmail("me@example.com")
-            .withAliases(["send-as@example.com"])
-            .build(in: context)
-        try context.save()
-
-        let manager = AliasManager(selfAliasProvider: StubSelfAliasProvider(aliases: []))
-
-        let aliases = await manager.getAliases(from: context)
-
-        XCTAssertEqual(aliases, [
-            "me@example.com",
-            "send-as@example.com"
-        ])
-    }
-
-    func testGetAliasesRecomputesSelfContactAliasesWhenContactDependenciesChange() async throws {
-        let selfAliasProvider = StubSelfAliasProvider(aliases: [])
+    func testGetCachedAliasesRecomputesWhenContactDependenciesChange() async throws {
+        let selfAddresses = SelfAddressesBox()
         let rollupDependencyTracker = StubRollupDependencyTracker()
         let manager = AliasManager(
-            selfAliasProvider: selfAliasProvider,
-            rollupDependencyTracker: rollupDependencyTracker
-        )
-
-        let cachedAliases = await manager.setAliases(["me@example.com"])
-
-        XCTAssertEqual(cachedAliases, ["me@example.com"])
-        XCTAssertEqual(selfAliasProvider.searchCount, 1)
-
-        selfAliasProvider.setAliases(["me@icloud.com"])
-        rollupDependencyTracker.simulateContactDependencyChange()
-
-        let refreshedAliases = await manager.getAliases(from: context)
-
-        XCTAssertEqual(refreshedAliases, [
-            "me@example.com",
-            "me@icloud.com"
-        ])
-        XCTAssertEqual(selfAliasProvider.searchCount, 2)
-        XCTAssertEqual(selfAliasProvider.searchedEmails, ["me@example.com"])
-    }
-
-    func testGetCachedAliasesRecomputesSelfContactAliasesWhenContactDependenciesChange() async throws {
-        let selfAliasProvider = StubSelfAliasProvider(aliases: [])
-        let rollupDependencyTracker = StubRollupDependencyTracker()
-        let manager = AliasManager(
-            selfAliasProvider: selfAliasProvider,
+            contactSelfAddresses: { _ in selfAddresses.value },
             rollupDependencyTracker: rollupDependencyTracker
         )
 
         _ = await manager.setAliases(["me@example.com"])
 
-        selfAliasProvider.setAliases(["me@icloud.com"])
+        selfAddresses.value = ["me@icloud.com"]
         rollupDependencyTracker.simulateContactDependencyChange()
 
         let refreshedAliases = await manager.getCachedAliases()
 
-        XCTAssertEqual(refreshedAliases, [
-            "me@example.com",
-            "me@icloud.com"
-        ])
-        XCTAssertEqual(selfAliasProvider.searchCount, 2)
+        XCTAssertEqual(refreshedAliases, ["me@example.com", "me@icloud.com"])
+    }
+
+    private func makeStore(_ addressBook: AddressBookCards) -> ContactLinkedAddressStore {
+        ContactLinkedAddressStore(
+            defaults: nil,
+            notificationCenter: NotificationCenter(),
+            contactsAuthorizationStatus: { .authorized },
+            loadContactAddressLists: { addressBook.read() },
+            loadMeCardAddresses: { nil }
+        )
     }
 }
 
-private final class StubSelfAliasProvider: SelfAliasProviding, @unchecked Sendable {
+/// An address book a test edits; counts its reads.
+private final class AddressBookCards: @unchecked Sendable {
+    /// `@unchecked Sendable`: `lock` guards `_cards` and `_readCount`.
     private let lock = NSLock()
-    private var aliases: Set<String>
-    private var _searchedEmails: [String] = []
-    private var _searchCount = 0
+    private var _cards: [[String]]?
+    private var _readCount = 0
 
-    init(aliases: Set<String>) {
-        self.aliases = aliases
+    init(_ cards: [[String]]?) { _cards = cards }
+
+    var cards: [[String]]? {
+        get { lock.withLock { _cards } }
+        set { lock.withLock { _cards = newValue } }
     }
 
-    func setAliases(_ aliases: Set<String>) {
-        lock.lock()
-        self.aliases = aliases
-        lock.unlock()
+    var readCount: Int { lock.withLock { _readCount } }
+
+    func read() -> [[String]]? {
+        lock.withLock {
+            _readCount += 1
+            return _cards
+        }
     }
+}
 
-    var searchedEmails: [String] {
-        lock.lock()
-        defer { lock.unlock() }
-        return _searchedEmails
-    }
+/// `@unchecked Sendable`: `lock` guards `_value`.
+private final class SelfAddressesBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: Set<String> = []
 
-    var searchCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return _searchCount
-    }
-
-    func aliases(knownEmails: [String]) async -> Set<String> {
-        recordAliasesRequest(knownEmails: knownEmails)
-    }
-
-    private func recordAliasesRequest(knownEmails: [String]) -> Set<String> {
-        lock.lock()
-        defer { lock.unlock() }
-
-        _searchedEmails = knownEmails
-        _searchCount += 1
-        let aliases = aliases
-        return aliases
+    var value: Set<String> {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
     }
 }
 

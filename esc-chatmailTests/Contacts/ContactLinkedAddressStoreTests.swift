@@ -240,6 +240,95 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
         #endif
     }
 
+    // MARK: - The user's own addresses
+
+    private static let me = "me@example.com"
+    private static let icloud = "me@icloud.example"
+
+    /// The self set is adopted with the links, kept in defaults, and read back by a
+    /// store a cold launch makes, before any read: it hashes as the last launch did.
+    ///
+    /// Revert-check: the `adoptedSelfDefaultsKey` read in `ContactLinkedAddressStore.init`.
+    func testSelfAddresses_adoptedAndKeptAcrossALaunch() {
+        addressBook.cards = [[Self.me, Self.icloud]]
+        makeStore().refreshIfNeeded(knownAddresses: [Self.me])
+
+        let relaunched = makeStore()
+
+        XCTAssertEqual(relaunched.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, Self.icloud])
+        XCTAssertEqual(addressBook.readCount, 1, "Answered from defaults, with no read")
+    }
+
+    /// An address book that cannot be read is never an empty self set; withdrawn access
+    /// drops it, here and in defaults.
+    ///
+    /// Revert-check: the `adoptedSelf = nil` in `ContactLinkedAddressStore.dropAdoptedLinks`.
+    func testSelfAddresses_unreadableKeepsTheSet_withdrawnDropsIt() {
+        addressBook.cards = [[Self.me, Self.icloud]]
+        let store = makeStore()
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        addressBook.cards = nil
+        store.markContactsChanged()
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [Self.me, Self.icloud])
+
+        addressBook.authorization = .denied
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [])
+        XCTAssertEqual(makeStore().selfAddressesSnapshot(forKnown: [Self.me]), [], "Nothing is kept in defaults")
+        XCTAssertEqual(store.legacySelfAddressesOfLastRead(), [], "Without access the old rule answered nothing too")
+    }
+
+    /// The set is decided for the account's addresses and read again when they change,
+    /// with no change in Contacts to report it (a send-as address added).
+    ///
+    /// Revert-check: the `adoptedSelf?.knownAddresses == known` term of
+    /// `ContactLinkedAddressStore.refreshIfNeeded`.
+    func testSelfAddresses_accountAddressesChange_readsAgain() {
+        let sendAs = "me@corp.example"
+        addressBook.cards = [[sendAs, Self.icloud]]
+        let store = makeStore()
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [])
+
+        store.refreshIfNeeded(knownAddresses: [Self.me, sendAs])
+
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me, sendAs]), [sendAs, Self.icloud])
+        XCTAssertEqual(addressBook.readCount, 2)
+    }
+
+    /// The first read also says what the rule before the adopted set took as the
+    /// user's: every address of a card listing the account's address.
+    func testSelfAddresses_legacySetOfTheRead_isEveryAddressOfACardListingTheAccount() {
+        addressBook.cards = [[Self.me, "partner@example.com"], ["partner@example.com", "partner@work.example"]]
+        let store = makeStore()
+        XCTAssertNil(store.legacySelfAddressesOfLastRead())
+
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        XCTAssertEqual(store.legacySelfAddressesOfLastRead(), [Self.me, "partner@example.com"])
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [], "The partner's own card disqualifies the household card")
+    }
+
+    #if os(iOS)
+    /// Limited access walks only the cards the user shared, so the card that would
+    /// disqualify a household card may be missing: no card counts.
+    ///
+    /// Revert-check: the `isLimitedAccess ? []` term of
+    /// `ContactLinkedAddressStore.adoptSelfAddresses`.
+    func testSelfAddresses_limitedAccess_admitsNoCard() throws {
+        guard #available(iOS 18.0, *) else { throw XCTSkip("Limited access is iOS 18") }
+        addressBook.cards = [[Self.me, Self.icloud]]
+        addressBook.authorization = .limited
+        let store = makeStore()
+
+        store.refreshIfNeeded(knownAddresses: [Self.me])
+
+        XCTAssertEqual(store.selfAddressesSnapshot(forKnown: [Self.me]), [])
+    }
+    #endif
+
     // MARK: - Helpers
 
     private func makeStore(addressBook: AddressBookStub? = nil) -> ContactLinkedAddressStore {
@@ -248,7 +337,8 @@ final class ContactLinkedAddressStoreTests: XCTestCase {
             defaults: defaults,
             notificationCenter: notificationCenter,
             contactsAuthorizationStatus: { addressBook.authorization },
-            loadContactAddressLists: { addressBook.read() }
+            loadContactAddressLists: { addressBook.read() },
+            loadMeCardAddresses: { nil }
         )
     }
 }

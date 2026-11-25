@@ -1,7 +1,7 @@
 import Foundation
 
 /// Which Contacts cards are the user's own, and so which of their addresses
-/// count as the user's (`ContactsSelfAliasProvider`).
+/// count as the user's (adopted by `ContactLinkedAddressStore`, read by `AliasManager`).
 ///
 /// The self set decides `isFromMe`, is removed before every participant hash
 /// and is filtered out of reply recipients, so a card that only lists the

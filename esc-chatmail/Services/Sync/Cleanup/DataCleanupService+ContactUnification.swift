@@ -45,14 +45,30 @@ extension DataCleanupService {
     /// address, mail from it opens a chat of its own again, but the messages
     /// already in the shared chat stay there: this pass moves conversations,
     /// not messages.
+    ///
+    /// The same read adopts the user's own addresses Contacts add
+    /// (`ContactLinkedAddressStore.selfAddressesSnapshot`), which every hash
+    /// leaves out, and the same pass brings the stored conversations onto them:
+    /// a conversation that names an address that came into or left the set is
+    /// given the hash the router now makes (`SelfAddressChange`). The set was
+    /// read live before; the first pass after that brings every conversation
+    /// naming an address either rule took as the user's onto the new one.
     func unifyConversationsByContactIfNeeded(in context: NSManagedObjectContext) async {
-        let links = contactLinkStore.refreshIfNeeded()
+        let known = await accountAddresses(in: context)
+        let links = contactLinkStore.refreshIfNeeded(knownAddresses: known)
         let applied = contactLinkStore.appliedToConversations()
-        // The steady state, and the whole pass without Contacts access: one
-        // comparison, and no conversation read.
-        guard links != applied else { return }
+        let selfAddresses = contactLinkStore.selfAddressesSnapshot(forKnown: known)
+        let selfChange = SelfAddressChange(
+            applied: contactLinkStore.appliedSelfAddresses(),
+            current: selfAddresses,
+            legacyOfLastRead: contactLinkStore.legacySelfAddressesOfLastRead()
+        )
+        // The steady state, and the whole pass without Contacts access: a few
+        // comparisons, and no conversation read.
+        guard links != applied || selfChange.needsPass else { return }
 
         let changedAddresses = links.addressesLinkedDifferently(from: applied)
+            .union(selfChange.changedAddresses)
         let outcome = await fixAndMergeIncorrectParticipantHashes(
             in: context,
             scope: .conversationsNaming(changedAddresses)
@@ -61,6 +77,9 @@ extension DataCleanupService {
         switch outcome {
         case .completed:
             contactLinkStore.markAppliedToConversations(links)
+            if selfChange.isRecordable {
+                contactLinkStore.markSelfAddressesApplied(selfAddresses)
+            }
             Log.info(
                 "Applied contact-linked addresses to conversations (\(changedAddresses.count) changed address(es))",
                 category: .coreData
@@ -75,6 +94,59 @@ extension DataCleanupService {
                 "Contact-linked addresses could not be applied to conversations; will retry next cleanup",
                 category: .coreData
             )
+        }
+    }
+
+    /// The account's address and its send-as addresses, normalized, read from
+    /// the stored `Account` row: what the user's own addresses Contacts add
+    /// are decided for. Empty without a row, which leaves that set as it is.
+    func accountAddresses(in context: NSManagedObjectContext) async -> Set<String> {
+        await context.perform {
+            let request = Account.fetchRequest()
+            request.fetchLimit = 1
+            guard let account = try? context.fetch(request).first else { return [] }
+            return Set(([account.email] + account.aliasesArray)
+                .map(EmailNormalizer.normalize)
+                .filter { !$0.isEmpty })
+        }
+    }
+
+    /// Which stored conversations a change in the user's own addresses moves.
+    struct SelfAddressChange: Equatable {
+        /// The addresses that came into or left the set: every conversation
+        /// with a participant row for one of them is given its hash again.
+        let changedAddresses: Set<String>
+        /// Whether the pass has anything to do for the self set.
+        let needsPass: Bool
+        /// Whether the current set may be recorded as applied once the pass
+        /// completes.
+        let isRecordable: Bool
+
+        /// - Parameters:
+        ///   - applied: The set the stored conversations were last brought
+        ///     in line with, or nil when none was ever recorded.
+        ///   - current: The adopted set, which the router hashes with now.
+        ///   - legacyOfLastRead: What the rule before the adopted set took as
+        ///     the user's, from this process's read; nil when nothing was read.
+        ///     Until a set is first recorded, the conversations were hashed
+        ///     with that one (or with less, on an install that never ran it),
+        ///     so every address either set names is in scope; giving a
+        ///     conversation the hash it already has changes nothing. With no
+        ///     read there is nothing to compare with: the pass waits.
+        init(applied: Set<String>?, current: Set<String>, legacyOfLastRead: Set<String>?) {
+            if let applied {
+                changedAddresses = applied.symmetricDifference(current)
+                needsPass = !changedAddresses.isEmpty
+                isRecordable = true
+            } else if let legacyOfLastRead {
+                changedAddresses = legacyOfLastRead.union(current)
+                needsPass = true
+                isRecordable = true
+            } else {
+                changedAddresses = []
+                needsPass = false
+                isRecordable = false
+            }
         }
     }
 }
