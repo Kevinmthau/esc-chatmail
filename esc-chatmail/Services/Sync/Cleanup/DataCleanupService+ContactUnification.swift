@@ -57,15 +57,22 @@ extension DataCleanupService {
     /// - Parameter knownAddresses: The account's addresses, when the caller
     ///   has them before the `Account` row is saved (the initial sync); nil
     ///   reads them from the row.
+    /// - Returns: Whether it ran a repair; false when nothing had changed or
+    ///   the account's addresses could not be read.
+    @discardableResult
     func unifyConversationsByContactIfNeeded(
         in context: NSManagedObjectContext,
         knownAddresses: Set<String>? = nil
-    ) async {
+    ) async -> Bool {
         let known: Set<String>
         if let knownAddresses {
             known = Set(knownAddresses.map(EmailNormalizer.normalize).filter { !$0.isEmpty })
+        } else if let stored = await accountAddresses(in: context) {
+            known = stored
         } else {
-            known = await accountAddresses(in: context)
+            // A failed read is not "no account addresses": deciding, or
+            // recording, a self set for none would drop this account's record.
+            return false
         }
         // What the router has hashed with until now, read before the adoption:
         // after a switch of accounts it is not the applied set.
@@ -73,7 +80,9 @@ extension DataCleanupService {
         let links = contactLinkStore.refreshIfNeeded(knownAddresses: known)
         let applied = contactLinkStore.appliedToConversations()
         let selfAddresses = contactLinkStore.selfAddressesSnapshot(forKnown: known)
-        let selfChange = SelfAddressChange(
+        // With no account addresses (no Account row yet) there is no self set
+        // to decide or record; the links are still applied.
+        let selfChange = known.isEmpty ? SelfAddressChange.none : SelfAddressChange(
             applied: contactLinkStore.appliedSelfAddresses(forKnown: known),
             routedBefore: routedBefore,
             current: selfAddresses,
@@ -82,7 +91,7 @@ extension DataCleanupService {
         )
         // The steady state, and the whole pass without Contacts access: a few
         // comparisons, and no conversation read.
-        guard links != applied || selfChange.needsPass else { return }
+        guard links != applied || selfChange.needsPass else { return false }
 
         let changedAddresses = links.addressesLinkedDifferently(from: applied)
             .union(selfChange.changedAddresses)
@@ -112,6 +121,7 @@ extension DataCleanupService {
                 category: .coreData
             )
         }
+        return true
     }
 
     /// Runs the adoption pass (`unifyConversationsByContactIfNeeded`) before a
@@ -127,23 +137,38 @@ extension DataCleanupService {
     /// the store, and the cleanup-sensitive gate is held here, so nothing
     /// routes or sends between the adoption and the repair. On a context of
     /// its own, never the run's: only the run's save points save that one.
+    ///
+    /// Announces the end of a cleanup only when it repaired something: in
+    /// steady state it is a few comparisons, and the run's own cleanup
+    /// announces at its end beside `.syncCompleted`.
     func adoptContactsBeforeRouting(knownAddresses: Set<String>? = nil) async {
         let context = coreDataStack.newBackgroundContext()
-        await conversationMutationSerializer.performCleanupSensitiveMutation { [self] in
-            await unifyConversationsByContactIfNeeded(in: context, knownAddresses: knownAddresses)
+        let repaired = await conversationMutationSerializer.performCleanupSensitiveMutation { [self] () async -> Bool in
+            let repaired = await unifyConversationsByContactIfNeeded(in: context, knownAddresses: knownAddresses)
             _ = await context.performSaveIfNeeded(caller: "DataCleanupService.adoptContactsBeforeRouting")
+            return repaired
         }
-        announceCleanupFinished()
+        if repaired {
+            announceCleanupFinished()
+        }
     }
 
     /// The account's address and its send-as addresses, normalized, read from
     /// the stored `Account` row: what the user's own addresses Contacts add
-    /// are decided for. Empty without a row, which leaves that set as it is.
-    func accountAddresses(in context: NSManagedObjectContext) async -> Set<String> {
+    /// are decided for. Empty without a row; nil when the read failed, which
+    /// is never "none".
+    func accountAddresses(in context: NSManagedObjectContext) async -> Set<String>? {
         await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
-            guard let account = try? context.fetch(request).first else { return [] }
+            let rows: [Account]
+            do {
+                rows = try context.fetch(request)
+            } catch {
+                Log.error("Failed to read the account's addresses for the self set", category: .coreData, error: error)
+                return nil
+            }
+            guard let account = rows.first else { return [] }
             return Set(([account.email] + account.aliasesArray)
                 .map(EmailNormalizer.normalize)
                 .filter { !$0.isEmpty })
@@ -160,6 +185,15 @@ extension DataCleanupService {
         /// Whether the current set may be recorded as applied once the pass
         /// completes.
         let isRecordable: Bool
+
+        /// Nothing to do for the self set.
+        static let none = SelfAddressChange(changedAddresses: [], needsPass: false, isRecordable: false)
+
+        private init(changedAddresses: Set<String>, needsPass: Bool, isRecordable: Bool) {
+            self.changedAddresses = changedAddresses
+            self.needsPass = needsPass
+            self.isRecordable = isRecordable
+        }
 
         /// - Parameters:
         ///   - applied: The set this account's stored conversations were last

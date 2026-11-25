@@ -755,7 +755,7 @@ final class ContactUnificationCleanupTests: XCTestCase {
     /// Revert-check: either `adoptContactsBeforeRouting` call.
     func testOrchestrators_adoptBeforeTheirAliasesAreRead() throws {
         let incremental = try repositorySource("esc-chatmail/Services/Sync/IncrementalSyncOrchestrator.swift")
-        let incrementalAdopt = try XCTUnwrap(incremental.range(of: "await dataCleanupService.adoptContactsBeforeRouting()"))
+        let incrementalAdopt = try XCTUnwrap(incremental.range(of: "await dataCleanupService.adoptContactsBeforeRouting("))
         let incrementalAliases = try XCTUnwrap(incremental.range(of: "myAliases = await AliasManager.shared.getAliases(from: context)"))
         XCTAssertLessThan(incrementalAdopt.lowerBound, incrementalAliases.lowerBound)
 
@@ -763,6 +763,31 @@ final class ContactUnificationCleanupTests: XCTestCase {
         let initialAdopt = try XCTUnwrap(initial.range(of: "await dataCleanupService.adoptContactsBeforeRouting(knownAddresses: accountAddresses)"))
         let initialAliases = try XCTUnwrap(initial.range(of: "myAliases = await AliasManager.shared.setAliases(accountAddresses)"))
         XCTAssertLessThan(initialAdopt.lowerBound, initialAliases.lowerBound)
+    }
+
+    /// A failed read of the account's addresses is never "none": the pass decides and
+    /// records nothing, so the account's applied record is not replaced by one for no
+    /// addresses.
+    ///
+    /// Revert-check: the `else { return false }` after `accountAddresses(in:)` in
+    /// `DataCleanupService.unifyConversationsByContactIfNeeded` (and read a failure as
+    /// empty, as `try?` did).
+    func testUnify_accountReadFails_decidesAndRecordsNothing() async throws {
+        _ = AccountBuilder().withEmail(Self.me).build(in: context)
+        try context.save()
+        let contacts = makeContacts(cards: [[Self.me, "me@icloud.example"]])
+        contacts.markSelfAddressesApplied([Self.me, "me@old.example"], knownAddresses: [Self.me])
+        let failing = EntityFetchFailingContext(
+            failingEntityName: "Account",
+            coordinator: try XCTUnwrap(stack.persistentContainer.persistentStoreCoordinator as NSPersistentStoreCoordinator?)
+        )
+
+        let repaired = await makeService(contacts: contacts, aliasesFromContacts: true)
+            .unifyConversationsByContactIfNeeded(in: failing)
+
+        XCTAssertFalse(repaired)
+        XCTAssertEqual(contacts.appliedSelfAddresses(forKnown: [Self.me]), [Self.me, "me@old.example"])
+        XCTAssertEqual(contacts.selfAddressesSnapshot(forKnown: [Self.me]), [], "Nothing adopted")
     }
 
     /// After a switch of accounts the router hashed with nothing from Contacts until

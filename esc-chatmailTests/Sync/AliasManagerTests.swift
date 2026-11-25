@@ -45,7 +45,10 @@ final class AliasManagerTests: XCTestCase {
         ])
         let store = makeStore(addressBook)
         store.refreshIfNeeded(knownAddresses: ["me@example.com"])
-        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+        let manager = AliasManager(
+            contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) },
+            rollupDependencyTracker: StubRollupDependencyTracker()
+        )
 
         let aliases = await manager.getAliases(from: context)
 
@@ -67,7 +70,10 @@ final class AliasManagerTests: XCTestCase {
         let store = makeStore(addressBook)
         store.refreshIfNeeded(knownAddresses: ["me@example.com"])
         let readsAfterAdoption = addressBook.readCount
-        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+        let manager = AliasManager(
+            contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) },
+            rollupDependencyTracker: StubRollupDependencyTracker()
+        )
 
         addressBook.cards = [["me@example.com", "me@icloud.com", "me@old.example"]]
         let beforeAdoption = await manager.getAliases(from: context)
@@ -97,7 +103,10 @@ final class AliasManagerTests: XCTestCase {
         try context.save()
         let store = makeStore(AddressBookCards([["me@example.com", "me@icloud.com"]]))
         store.refreshIfNeeded(knownAddresses: ["me@example.com"])
-        let manager = AliasManager(contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) })
+        let manager = AliasManager(
+            contactSelfAddresses: { store.selfAddressesSnapshot(forKnown: $0) },
+            rollupDependencyTracker: StubRollupDependencyTracker()
+        )
 
         let aliases = await manager.getAliases(from: context)
 
