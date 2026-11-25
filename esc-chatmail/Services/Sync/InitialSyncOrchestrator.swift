@@ -116,7 +116,12 @@ final class InitialSyncOrchestrator {
             let profileTimer = timing.start("profileAndAliases")
             let (profile, aliases, validSendAsAliases) = try await fetchProfileAndAliases()
             sendAsAliases = validSendAsAliases
-            myAliases = await AliasManager.shared.setAliases(Set([profile.emailAddress] + aliases))
+            // What Contacts say about the user's own addresses is adopted before
+            // any mail is routed, for this account's addresses: the Account row
+            // is not saved yet, so they are passed (`adoptContactsBeforeRouting`).
+            let accountAddresses = Set([profile.emailAddress] + aliases)
+            await dataCleanupService.adoptContactsBeforeRouting(knownAddresses: accountAddresses)
+            myAliases = await AliasManager.shared.setAliases(accountAddresses)
             await SendAsAliasManager.shared.setAliases(validSendAsAliases)
             // Load migration state before saveAccount stages a new Account:
             // only a previously committed matching account may import the

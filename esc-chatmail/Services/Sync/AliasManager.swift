@@ -7,20 +7,34 @@ import CoreData
 /// - InitialSyncOrchestrator (API fetch)
 /// - IncrementalSyncOrchestrator (Core Data load)
 /// - SyncEngine (Core Data load for background sync)
+///
+/// The user's own addresses are the account's and its send-as addresses, and
+/// those Contacts add as adopted by `ContactLinkedAddressStore`
+/// (`selfAddressesSnapshot(forKnown:)`). Contacts are never read here: read
+/// live, at every lookup, an edit to any card moved an address in or out of
+/// the set between two hashes, and the set every hash leaves out must change
+/// only where the stored conversations are brought onto it
+/// (`DataCleanupService.unifyConversationsByContactIfNeeded`).
 actor AliasManager {
     static let shared = AliasManager()
 
-    private let selfAliasProvider: any SelfAliasProviding
+    private let contactSelfAddresses: @Sendable (Set<String>) -> Set<String>
     private let rollupDependencyTracker: any ParticipantRollupDependencyTracking
     private var cachedAliases: Set<String>?
     private var cachedAccountAliases: AccountAliases?
+    private var cachedContactSelfAddresses: Set<String>?
     private var cachedDependencyFingerprint: ParticipantRollupDependencyFingerprint?
 
+    /// - Parameter contactSelfAddresses: The addresses Contacts add for an
+    ///   account with these normalized addresses; a synchronous read of the
+    ///   adopted set, never of Contacts.
     init(
-        selfAliasProvider: any SelfAliasProviding = ContactsSelfAliasProvider.shared,
+        contactSelfAddresses: @escaping @Sendable (Set<String>) -> Set<String> = {
+            ContactLinkedAddressStore.shared.selfAddressesSnapshot(forKnown: $0)
+        },
         rollupDependencyTracker: any ParticipantRollupDependencyTracking = ParticipantRollupDependencyTracker.shared
     ) {
-        self.selfAliasProvider = selfAliasProvider
+        self.contactSelfAddresses = contactSelfAddresses
         self.rollupDependencyTracker = rollupDependencyTracker
     }
 
@@ -34,6 +48,7 @@ actor AliasManager {
         if let cached = cachedAliases,
            let accountAliases = cachedAccountAliases,
            !cached.isEmpty,
+           cachedContactSelfAddresses == contactSelfAddresses(accountAliases.normalized),
            cachedDependencyFingerprint == rollupDependencyTracker.fingerprint(for: accountAliases.raw) {
             return cached
         }
@@ -56,6 +71,7 @@ actor AliasManager {
 
         if let cached = cachedAliases,
            !cached.isEmpty,
+           cachedContactSelfAddresses == contactSelfAddresses(accountAliases.normalized),
            cachedDependencyFingerprint == rollupDependencyTracker.fingerprint(for: accountAliases.raw) {
             return cached
         }
@@ -81,6 +97,7 @@ actor AliasManager {
     func invalidate() {
         cachedAliases = nil
         cachedAccountAliases = nil
+        cachedContactSelfAddresses = nil
         cachedDependencyFingerprint = nil
         rollupDependencyTracker.invalidateAll()
     }
@@ -98,13 +115,12 @@ actor AliasManager {
     }
 
     private func cacheAliases(for accountAliases: AccountAliases) async -> Set<String> {
-        let aliases = await aliasesIncludingSelfContactAliases(
-            normalizedAliases: accountAliases.normalized,
-            rawEmails: accountAliases.raw
-        )
+        let fromContacts = contactSelfAddresses(accountAliases.normalized)
+        let aliases = accountAliases.normalized.union(normalizeAliases(fromContacts))
         let previousAliases = cachedAliases
 
         cachedAccountAliases = accountAliases
+        cachedContactSelfAddresses = fromContacts
         cachedAliases = aliases
 
         if previousAliases != aliases {
@@ -129,14 +145,6 @@ actor AliasManager {
                 raw: rawAliases
             )
         }
-    }
-
-    private func aliasesIncludingSelfContactAliases(
-        normalizedAliases: Set<String>,
-        rawEmails: [String]
-    ) async -> Set<String> {
-        let selfContactAliases = await selfAliasProvider.aliases(knownEmails: rawEmails)
-        return normalizedAliases.union(normalizeAliases(selfContactAliases))
     }
 }
 

@@ -1329,7 +1329,7 @@ These do not lose data, but their cost grows with conversation size, mailbox siz
 - `esc-chatmail/Services/Sync/Persistence/MessagePersister+Creation.swift:204-207` invalidateEntry for self too
 - `esc-chatmail/Services/Sync/AliasManager.swift:34-38` fingerprint validity
 - `esc-chatmail/Services/Sync/AliasManager.swift:71-75` setAliases always recomputes
-- `esc-chatmail/Services/Sync/ContactsSelfAliasProvider.swift:103-111` full enumeration fallback
+- `esc-chatmail/Services/Sync/ContactsSelfAliasProvider.swift:103-111` full enumeration fallback (the provider was removed in the contacts-person#1 follow-up: the self set is adopted by `ContactLinkedAddressStore` in the cleanup pass and `AliasManager` reads no Contacts)
 - `esc-chatmail/Services/Contacts/ParticipantLoader.swift:430` awaited per participant load
 
 **Caveats.** Verifiers split between hygiene and degrades. It stays degrades because the read blocks visible row loads.
