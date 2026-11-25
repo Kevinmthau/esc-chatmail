@@ -16,8 +16,8 @@ Usage: ./Scripts/codex-build.sh [--for-testing] [xcodebuild args...]
 
 Environment:
   CONFIGURATION   Debug (default) or Release. Release is what Xcode Cloud archives;
-                  CI compiles it so a Release-only error or warning fails a PR, not
-                  the archive after the merge.
+                  CI compiles it so a Release-only error or warning on CI's toolchain
+                  fails a PR, not the archive after the merge.
 
 Examples:
   ./Scripts/codex-build.sh

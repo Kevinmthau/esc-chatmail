@@ -101,7 +101,9 @@ jobs:
   # The configuration Xcode Cloud archives and ships. Every other job builds Debug, so a
   # Release-only compile error or warning (wholemodule -O, `#if !DEBUG` branches;
   # warnings are errors in Release too) used to surface first as a failed archive after
-  # the merge (architecture review 2026-11, testing-ci-release#2). The app alone: the
+  # the merge (architecture review 2026-11, testing-ci-release#2). That holds on CI's
+  # toolchain (Xcode 26, simulator SDK) only: a warning that only Xcode Cloud's newer
+  # compiler raises still fails the archive first. The app alone: the
   # test target needs DEBUG-only seams. One architecture: Release builds every one it can
   # for a generic destination, and the archive is arm64 only. Then the built Info.plist is checked, because a
   # Release build with an empty GOOGLE_* value does not trap the way Debug does.
@@ -158,9 +160,22 @@ jobs:
 
       - name: Fast-forward testflight to this commit
         run: |
+          # True when testflight exists and already contains this commit. A failure to
+          # read it is not "absent": it stops the job, so nothing is pushed on a guess.
           already_shipped() {
-            git fetch --quiet origin +refs/heads/testflight:refs/remotes/origin/testflight 2>/dev/null \
-              && git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/testflight
+            local status=0
+            git ls-remote --exit-code --heads origin testflight >/dev/null || status=$?
+            if [ "${status}" -eq 2 ]; then
+              return 1
+            elif [ "${status}" -ne 0 ]; then
+              echo "::error::could not read origin's testflight branch (git ls-remote exit ${status}); nothing pushed"
+              exit 1
+            fi
+            if ! git fetch --quiet origin +refs/heads/testflight:refs/remotes/origin/testflight; then
+              echo "::error::could not fetch origin's testflight branch; nothing pushed"
+              exit 1
+            fi
+            git merge-base --is-ancestor "${GITHUB_SHA}" refs/remotes/origin/testflight
           }
           if already_shipped; then
             echo "testflight already contains ${GITHUB_SHA}; nothing to push"
@@ -174,7 +189,7 @@ jobs:
             echo "testflight moved past ${GITHUB_SHA} meanwhile; nothing to push"
             exit 0
           fi
-          echo "::error::testflight has diverged from main (moved by hand?): it does not contain ${GITHUB_SHA} and cannot be fast-forwarded to it. Reset it to a main commit by hand; this job never forces it."
+          echo "::error::testflight has diverged from main (moved by hand?): it does not contain ${GITHUB_SHA} and cannot be fast-forwarded to it. Point it by hand at the newest main commit whose CI passed, never an older one; this job never forces it."
           exit 1
 
   lint:

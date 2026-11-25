@@ -49,8 +49,13 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         let push = try XCTUnwrap(job.range(of: "git push origin"))
         let checkBefore = try XCTUnwrap(job.range(of: "if already_shipped; then"))
         XCTAssertLessThan(checkBefore.lowerBound, push.lowerBound)
-        let checkAfter = try XCTUnwrap(job.range(of: "if already_shipped; then", range: push.upperBound..<job.endIndex))
-        XCTAssertGreaterThan(checkAfter.lowerBound, push.upperBound)
+        XCTAssertNotNil(job.range(of: "if already_shipped; then", range: push.upperBound..<job.endIndex))
+        // The check reads testflight as it is now: without the forced fetch it reads the
+        // ref the checkout made at job start, and the check after a rejected push cannot
+        // see the newer run's push.
+        XCTAssertTrue(job.contains(
+            "git fetch --quiet origin +refs/heads/testflight:refs/remotes/origin/testflight"
+        ))
     }
 
     // Revert-check: fails if the Release job stops building Release or stops checking the
