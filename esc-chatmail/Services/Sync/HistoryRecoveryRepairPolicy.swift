@@ -1,0 +1,78 @@
+import Foundation
+
+/// The decisions of `HistoryRecoveryRepair`, as pure functions over values.
+///
+/// A history recovery lists only the mail after its window and only mail outside Spam
+/// and Trash, so a stored row it did not list keeps the state it had before the gap.
+/// The repair compares a batch of stored rows with three of Gmail's listings over the
+/// same span (everything outside Spam and Trash, the inbox, the unread mail) and asks
+/// Gmail about each row whose state the listings contradict. Only that answer changes a
+/// row: a listing is a search, and its date bounds are not the row's internal date to
+/// the second, so a row it leaves out proves nothing by itself.
+enum HistoryRecoveryRepairPolicy {
+    /// A stored row, as the comparison reads it.
+    struct StoredRow: Equatable, Sendable {
+        let messageId: String
+        let internalDate: Date
+        let hasInbox: Bool
+        let isUnread: Bool
+    }
+
+    /// Gmail's answer for one row.
+    enum Verdict: Equatable, Sendable {
+        /// Gone from Gmail (404), or in Trash or Spam (or a draft): the row goes, as a
+        /// history record of the same would have removed it.
+        case remove
+        /// Still in the mailbox: the row takes Gmail's inbox and unread state.
+        case keep(hasInbox: Bool, isUnread: Bool)
+    }
+
+    /// The rows the listings contradict, in the stored order (newest first).
+    static func candidates(
+        stored: [StoredRow],
+        listed: Set<String>,
+        inInbox: Set<String>,
+        unread: Set<String>
+    ) -> [StoredRow] {
+        stored.filter { row in
+            !listed.contains(row.messageId)
+                || row.hasInbox != inInbox.contains(row.messageId)
+                || row.isUnread != unread.contains(row.messageId)
+        }
+    }
+
+    /// Where the next batch starts once a batch is done with: `lowerBound` when every row
+    /// asked about was answered, otherwise just above the newest row that was not (its
+    /// internal date plus a millisecond, since the bound is exclusive and Gmail's dates
+    /// are milliseconds). The rows newer than it are done, so a batch with more rows to
+    /// ask about than one run's budget, or with a row Gmail keeps failing on, still moves
+    /// the repair forward, and the rows left are compared again next run.
+    static func nextUpperBound(
+        lowerBound: Date,
+        upperBound: Date,
+        candidatesNewestFirst: [StoredRow],
+        answered: Set<String>
+    ) -> Date {
+        guard let firstUnanswered = candidatesNewestFirst.first(where: { !answered.contains($0.messageId) }) else {
+            return lowerBound
+        }
+        return min(firstUnanswered.internalDate.addingTimeInterval(0.001), upperBound)
+    }
+
+    /// What Gmail's labels for a row say.
+    static func verdict(forLabelIds labelIds: [String]?) -> Verdict {
+        let labels = Set(labelIds ?? [])
+        if !labels.isDisjoint(with: MessagePersister.excludedMailboxLabelIDs) {
+            return .remove
+        }
+        return .keep(hasInbox: labels.contains("INBOX"), isUnread: labels.contains("UNREAD"))
+    }
+
+    /// The Gmail query for one span of internal dates, widened by a second at each end:
+    /// a row the widening adds is only asked about, never changed for it.
+    static func query(_ scope: String, from lowerBound: Date, before upperBound: Date) -> String {
+        let after = Int(lowerBound.timeIntervalSince1970.rounded(.down)) - 1
+        let before = Int(upperBound.timeIntervalSince1970.rounded(.up)) + 1
+        return "\(scope) after:\(after) before:\(before)"
+    }
+}

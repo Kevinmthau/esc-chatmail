@@ -1,0 +1,90 @@
+import XCTest
+@testable import esc_chatmail
+
+/// `HistoryRecoveryRepairPolicy`: which stored rows a history-recovery repair asks Gmail
+/// about, what Gmail's answer does to them, and where the next batch starts.
+final class HistoryRecoveryRepairPolicyTests: XCTestCase {
+    private typealias Row = HistoryRecoveryRepairPolicy.StoredRow
+
+    private static func at(_ seconds: TimeInterval) -> Date {
+        Date(timeIntervalSinceReferenceDate: 800_000_000 + seconds)
+    }
+
+    func testCandidates_areTheRowsTheListingsContradict() {
+        let rows = [
+            Row(messageId: "same", internalDate: Self.at(5), hasInbox: true, isUnread: true),
+            Row(messageId: "gone", internalDate: Self.at(4), hasInbox: false, isUnread: false),
+            Row(messageId: "archived", internalDate: Self.at(3), hasInbox: true, isUnread: false),
+            Row(messageId: "read", internalDate: Self.at(2), hasInbox: false, isUnread: true),
+            Row(messageId: "unarchived", internalDate: Self.at(1), hasInbox: false, isUnread: false)
+        ]
+
+        let candidates = HistoryRecoveryRepairPolicy.candidates(
+            stored: rows,
+            listed: ["same", "archived", "read", "unarchived"],
+            inInbox: ["same", "unarchived"],
+            unread: ["same"]
+        )
+
+        XCTAssertEqual(candidates.map(\.messageId), ["gone", "archived", "read", "unarchived"])
+    }
+
+    func testVerdict_trashSpamOrDraft_removes_elseTakesGmailsInboxAndUnread() {
+        XCTAssertEqual(HistoryRecoveryRepairPolicy.verdict(forLabelIds: ["TRASH"]), .remove)
+        XCTAssertEqual(HistoryRecoveryRepairPolicy.verdict(forLabelIds: ["SPAM", "INBOX"]), .remove)
+        XCTAssertEqual(HistoryRecoveryRepairPolicy.verdict(forLabelIds: ["DRAFT"]), .remove)
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.verdict(forLabelIds: ["INBOX", "UNREAD", "IMPORTANT"]),
+            .keep(hasInbox: true, isUnread: true)
+        )
+        XCTAssertEqual(HistoryRecoveryRepairPolicy.verdict(forLabelIds: nil), .keep(hasInbox: false, isUnread: false))
+    }
+
+    /// Every candidate answered: the next batch starts at this one's oldest row.
+    func testNextUpperBound_everyCandidateAnswered_isTheLowerBound() {
+        let candidates = [Row(messageId: "a", internalDate: Self.at(50), hasInbox: true, isUnread: false)]
+
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.nextUpperBound(
+                lowerBound: Self.at(10),
+                upperBound: Self.at(100),
+                candidatesNewestFirst: candidates,
+                answered: ["a"]
+            ),
+            Self.at(10)
+        )
+    }
+
+    /// A row left unanswered (budget or a failure) stays owed with everything older; the
+    /// rows newer than it are done, so the repair still moves.
+    ///
+    /// Revert-check: return `lowerBound` unconditionally from
+    /// `HistoryRecoveryRepairPolicy.nextUpperBound`.
+    func testNextUpperBound_unansweredRow_staysOwedWithEverythingOlder() {
+        let candidates = [
+            Row(messageId: "newest", internalDate: Self.at(90), hasInbox: true, isUnread: false),
+            Row(messageId: "failed", internalDate: Self.at(60), hasInbox: true, isUnread: false),
+            Row(messageId: "older", internalDate: Self.at(30), hasInbox: true, isUnread: false)
+        ]
+
+        let next = HistoryRecoveryRepairPolicy.nextUpperBound(
+            lowerBound: Self.at(10),
+            upperBound: Self.at(100),
+            candidatesNewestFirst: candidates,
+            answered: ["newest", "older"]
+        )
+
+        XCTAssertEqual(next.timeIntervalSince(Self.at(60)), 0.001, accuracy: 0.0001)
+    }
+
+    func testQuery_widensTheSpanByASecondAtEachEnd() {
+        XCTAssertEqual(
+            HistoryRecoveryRepairPolicy.query(
+                "in:inbox",
+                from: Date(timeIntervalSince1970: 1000.4),
+                before: Date(timeIntervalSince1970: 2000.2)
+            ),
+            "in:inbox after:999 before:2002"
+        )
+    }
+}

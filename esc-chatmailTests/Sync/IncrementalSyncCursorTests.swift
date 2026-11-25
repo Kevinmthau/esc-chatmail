@@ -2101,6 +2101,252 @@ final class IncrementalSyncCursorTests: XCTestCase {
         return Int(query[range.upperBound...].prefix { $0.isNumber })
     }
 
+    // MARK: - History-recovery repair
+
+    /// A recovery that advances the cursor owes the rows it did not visit a repair; one
+    /// that holds has moved nothing past them yet.
+    ///
+    /// Revert-check: the `recoveryRepairStore.stageOwed` call in
+    /// `IncrementalSyncOrchestrator.performHistoryRecoverySync`.
+    @MainActor
+    func testRecoveryThatAdvances_owesARepair_andOneThatHolds_doesNot() async throws {
+        configureCleanRecoveryListing()
+        apiClient.getMessageErrors["m-rec"] = APIError.timeout
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let afterHeld = try await fetchOwedRepair()
+        XCTAssertNil(afterHeld, "A held recovery owes nothing yet")
+
+        apiClient.getMessageErrors = [:]
+        configureCleanRecoveryListing()
+        await ModificationTracker.shared.reset()
+        let before = Date()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "7777")
+        let owedAfterAdvance = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedAfterAdvance, "The advancing save must owe a repair")
+        XCTAssertGreaterThanOrEqual(owed.upperBound, before)
+    }
+
+    /// The run after a recovery repairs the rows stored before its window: archived and
+    /// read elsewhere, deleted, trashed. It never asks about, or changes, the user's own
+    /// unsent row or a row a pending action names, and a row the listings agree with is
+    /// not asked about. The next run finds nothing left and clears the record.
+    ///
+    /// Revert-check: the `HistoryRecoveryRepair.apply` call in the final save's rollup
+    /// block of `IncrementalSyncOrchestrator.performSync` (nothing changes); the
+    /// `localOptimisticMessageID` term of `HistoryRecoveryRepair.excludedMessageIds` (the
+    /// unsent row is asked about and removed); its `pendingMessageIds` (the queued
+    /// archive is asked about and changed). The first run's bound and the second run's
+    /// clear also pin the batch bound kept as a `Date`: as seconds since 1970 it came back
+    /// a hair later and the second run compared the cut row again for ever.
+    @MainActor
+    func testOwedRepair_bringsStoredRowsInLineWithGmail_andLeavesLocalIntentAlone() async throws {
+        let base = Date().addingTimeInterval(-3 * 86_400)
+        try await seedRepairRow(id: "archived-elsewhere", date: base.addingTimeInterval(50), inbox: true, unread: true)
+        try await seedRepairRow(id: "deleted-elsewhere", date: base.addingTimeInterval(40), inbox: true, unread: false)
+        try await seedRepairRow(id: "trashed-elsewhere", date: base.addingTimeInterval(30), inbox: true, unread: false)
+        try await seedRepairRow(id: "queued-archive", date: base.addingTimeInterval(20), inbox: true, unread: false)
+        try await seedRepairRow(id: "agrees", date: base.addingTimeInterval(10), inbox: true, unread: true)
+        let optimisticID = UUID().uuidString
+        try await seedRepairRow(
+            id: optimisticID,
+            date: base.addingTimeInterval(60),
+            inbox: false,
+            unread: false,
+            optimistic: true
+        )
+        try await seedPendingAction(messageId: "queued-archive")
+        try await seedOwedRepair(upperBound: Date())
+        configureQuietHistory()
+        apiClient.listMessagesResponder = { query in
+            let ids: [String]
+            if query.hasPrefix("-in:spam -in:trash after:") {
+                ids = ["archived-elsewhere", "queued-archive", "agrees"]
+            } else if query.hasPrefix("in:inbox after:") || query.hasPrefix("is:unread after:") {
+                ids = ["agrees"]
+            } else {
+                return nil
+            }
+            return MessagesListResponse(
+                messages: ids.map { MessageListItem(id: $0, threadId: "t-\($0)") },
+                nextPageToken: nil,
+                resultSizeEstimate: ids.count
+            )
+        }
+        let asked = AskedIds()
+        apiClient.getMessageOperation = { id, format in
+            asked.insert(id, format: format)
+            switch id {
+            case "archived-elsewhere":
+                return GmailMessage(id: id, threadId: "t-\(id)", labelIds: ["IMPORTANT"], snippet: nil, historyId: nil, internalDate: nil, payload: nil, sizeEstimate: nil)
+            case "trashed-elsewhere":
+                return GmailMessage(id: id, threadId: "t-\(id)", labelIds: ["TRASH"], snippet: nil, historyId: nil, internalDate: nil, payload: nil, sizeEstimate: nil)
+            default:
+                throw APIError.notFound(id)
+            }
+        }
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(asked.ids, ["archived-elsewhere", "deleted-elsewhere", "trashed-elsewhere"])
+        XCTAssertEqual(asked.formats, ["metadata"])
+        let archived = try await fetchRepairRowState(id: "archived-elsewhere")
+        XCTAssertEqual(archived?.inbox, false)
+        XCTAssertEqual(archived?.unread, false)
+        let deletedExists = await messageExists(id: "deleted-elsewhere")
+        XCTAssertFalse(deletedExists)
+        let trashedExists = await messageExists(id: "trashed-elsewhere")
+        XCTAssertFalse(trashedExists)
+        let queued = try await fetchRepairRowState(id: "queued-archive")
+        XCTAssertEqual(queued?.inbox, true, "A pending action's row keeps the user's intent")
+        let optimisticExists = await messageExists(id: optimisticID)
+        XCTAssertTrue(optimisticExists, "The user's own unsent row is never removed")
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        XCTAssertLessThanOrEqual(owed.upperBound, base.addingTimeInterval(10))
+
+        await ModificationTracker.shared.reset()
+        configureQuietHistory()
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let afterSecondRun = try await fetchOwedRepair()
+        XCTAssertNil(afterSecondRun, "No stored row is left to compare")
+    }
+
+    /// An account-scoped failure ends the run, and nothing of the repair commits.
+    ///
+    /// Revert-check: the `rethrowIfRunAborting` call in `HistoryRecoveryRepair.askGmail`.
+    @MainActor
+    func testOwedRepair_accountScopedFailure_endsTheRunAndCommitsNothing() async throws {
+        let date = Date().addingTimeInterval(-3 * 86_400)
+        try await seedRepairRow(id: "archived-elsewhere", date: date, inbox: true, unread: true)
+        try await seedRepairRow(id: "deleted-elsewhere", date: date.addingTimeInterval(1), inbox: true, unread: false)
+        let upperBound = Date()
+        try await seedOwedRepair(upperBound: upperBound)
+        configureQuietHistory()
+        apiClient.getMessageOperation = { id, _ in
+            if id == "deleted-elsewhere" { throw APIError.notFound(id) }
+            throw APIError.authenticationError
+        }
+
+        do {
+            _ = try await makeOrchestrator().performSync(
+                progressHandler: { _, _ in },
+                initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+            )
+            XCTFail("An account-scoped failure must end the run")
+        } catch {}
+
+        let deletedExists = await messageExists(id: "deleted-elsewhere")
+        XCTAssertTrue(deletedExists, "Nothing of the repair may commit")
+        let owedNow = try await fetchOwedRepair()
+        let owed = try XCTUnwrap(owedNow)
+        XCTAssertEqual(owed.upperBound, upperBound)
+    }
+
+    private final class AskedIds: @unchecked Sendable {
+        /// `@unchecked Sendable`: `lock` guards both sets.
+        private let lock = NSLock()
+        private var _ids: Set<String> = []
+        private var _formats: Set<String> = []
+
+        func insert(_ id: String, format: String) {
+            lock.withLock {
+                _ids.insert(id)
+                _formats.insert(format)
+            }
+        }
+
+        var ids: Set<String> { lock.withLock { _ids } }
+        var formats: Set<String> { lock.withLock { _formats } }
+    }
+
+    private func configureQuietHistory() {
+        apiClient.listHistoryError = nil
+        apiClient.setHistoryResponsesByPageToken([
+            (pageToken: nil, response: HistoryResponse(history: nil, nextPageToken: nil, historyId: "2000"))
+        ])
+    }
+
+    private func seedOwedRepair(upperBound: Date) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await HistoryRecoveryRepairCheckpointStore().stageOwed(
+            upperBound: upperBound,
+            accountEmail: Self.myEmail,
+            in: context
+        )
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func fetchOwedRepair() async throws -> HistoryRecoveryRepairCheckpoint? {
+        try await HistoryRecoveryRepairCheckpointStore().load(
+            accountEmail: Self.myEmail,
+            in: coreDataStack.newBackgroundContext()
+        )
+    }
+
+    private func seedRepairRow(
+        id: String,
+        date: Date,
+        inbox: Bool,
+        unread: Bool,
+        optimistic: Bool = false
+    ) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        try await context.perform {
+            var builder = MessageBuilder().withId(id).withDate(date)
+            builder = unread ? builder.unread() : builder.read()
+            if optimistic { builder = builder.fromMe() }
+            let message = builder.build(in: context)
+            if optimistic {
+                message.messageId = MimeBuilder.messageId(forOptimisticMessageID: id)
+            }
+            if inbox {
+                let request = Label.fetchRequest()
+                request.predicate = NSPredicate(format: "id == %@", "INBOX")
+                let label = try context.fetch(request).first ?? {
+                    let label = context.insertTestObject(Label.self)
+                    label.id = "INBOX"
+                    label.name = "INBOX"
+                    return label
+                }()
+                message.addToLabels(label)
+            }
+        }
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func seedPendingAction(messageId: String) async throws {
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            _ = PendingActionBuilder().archive().forMessage(messageId).pending().build(in: context)
+        }
+        try await coreDataStack.saveAsync(context: context)
+    }
+
+    private func fetchRepairRowState(id: String) async throws -> (inbox: Bool, unread: Bool)? {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", id)
+            guard let message = try context.fetch(request).first else { return nil }
+            return (message.labels?.contains { $0.id == "INBOX" } ?? false, message.isUnread)
+        }
+    }
+
     /// Runs `body` with a 400-day-old install time, no
     /// `lastSuccessfulSyncTime`, and one stored received row
     /// `newestReceivedAgo` seconds old, in the suite's own defaults.
