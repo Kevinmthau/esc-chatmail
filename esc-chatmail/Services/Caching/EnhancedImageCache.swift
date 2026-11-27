@@ -62,10 +62,13 @@ actor EnhancedImageCache: MemoryWarningHandler {
         memoryCache.removeAllObjects()
     }
 
-    /// Clears both memory and disk cache
+    /// Clears both memory and disk cache, and the memory of failed URLs: a sign-out's
+    /// cleanup must leave the next account no verdict on a URL, and a URL that failed
+    /// for good under one account is tried once more under the next.
     func clearAll() async {
         memoryCache.removeAllObjects()
         await diskCache.clearAll()
+        await requestManager.clearFailedURLs()
     }
 
     /// Loads an image from URL with deduplication and two-tier caching
