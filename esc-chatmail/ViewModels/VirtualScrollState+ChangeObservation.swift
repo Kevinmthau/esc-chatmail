@@ -451,11 +451,12 @@ extension VirtualScrollState {
         return objectID
     }
 
-    /// Membership check that faults at most the message row. The destination objectID of
-    /// the to-one relationship is available without firing the Conversation's own fault,
-    /// and where the open conversation's objectID and the destination's are both
-    /// permanent it decides alone, as `transcriptPredicate` does: two permanent IDs that
-    /// differ name two stored rows. Until 2026-11-27 a destination that differed fell
+    /// Membership check that faults at most the message row where the open conversation's
+    /// objectID and the relationship's destination are both permanent, which is every
+    /// stored chat (`ChatViewModel.init` gives the conversation a permanent ID). The
+    /// destination objectID of the to-one relationship is available without firing the
+    /// Conversation's own fault, and with both IDs permanent it decides alone, as
+    /// `transcriptPredicate` does: two permanent IDs that differ name two stored rows. Until 2026-11-27 a destination that differed fell
     /// through to a KVC `id` read, which fired the foreign Conversation's fault, one row
     /// load per distinct other conversation in every merge while a chat was open
     /// (always, on the Mac; architecture review 2026-11,
