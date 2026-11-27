@@ -44,16 +44,20 @@ jobs:
           sysctl -n hw.ncpu hw.memsize
           xcrun simctl list devices available | grep -m 5 iPhone || true
 
-      # The device is the one the local wrappers pick (an installed iPhone 17 Pro on the
-      # newest iOS runtime, Scripts/default-simulator-destination.py), never the first
-      # iPhone simctl lists: that one comes from the oldest installed runtime, so a runner
-      # image that adds a runtime would silently move this job onto it (architecture
-      # review 2026-11, gap-ipad-and-os-floor#3). The runtime is printed so an image
-      # change shows as a changed line in the log.
-      - name: Pin the simulator (iPhone 17 Pro, newest installed runtime)
+      # The device is the one the local wrappers pick (an iPhone 17 Pro on the newest iOS
+      # runtime that has one installed, Scripts/default-simulator-destination.py), never the
+      # first iPhone simctl lists: that one comes from the oldest installed runtime, so a
+      # runner image that adds a runtime would silently move this job onto it (architecture
+      # review 2026-11, gap-ipad-and-os-floor#3). The runtime is printed so an image change
+      # shows as a changed line in the log. The UDID is assigned before it is written, never
+      # inside `echo "$(…)"`: under the shell's -e an echo discards the substitution's exit
+      # status, and a picker that failed would have written an empty SIMULATOR_ID, leaving
+      # prepare-simulator.sh to fall back to the first iPhone, unpinned, with the step green.
+      - name: Pin the simulator (the wrappers' iPhone 17 Pro, newest runtime with one)
         run: |
           python3 Scripts/default-simulator-destination.py --describe
-          echo "SIMULATOR_ID=$(python3 Scripts/default-simulator-destination.py --udid)" >> "$GITHUB_ENV"
+          SIMULATOR_ID="$(python3 Scripts/default-simulator-destination.py --udid)"
+          echo "SIMULATOR_ID=${SIMULATOR_ID}" >> "$GITHUB_ENV"
 
       # Boots the pinned simulator and pre-grants Contacts to the test host
       # app, exporting DESTINATION so both steps use that device. Without the

@@ -89,15 +89,19 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
     /// oldest installed runtime, so a runner image that added a runtime would move the job
     /// onto it with nothing in the diff.
     // Revert-check: fails if the test job stops exporting SIMULATOR_ID from
-    // default-simulator-destination.py before prepare-simulator.sh runs, stops printing the
-    // runtime, or if prepare-simulator.sh stops honouring SIMULATOR_ID.
+    // default-simulator-destination.py before prepare-simulator.sh runs, stops calling
+    // --describe (the line that names the runtime), goes back to `echo "$(…)"` (which
+    // swallows a failed picker's exit status), or if prepare-simulator.sh stops honouring
+    // SIMULATOR_ID.
     func testTestJob_pinsTheSimulatorToTheWrappersDevice_beforeBootingIt() throws {
         let job = try jobBlock(named: "test")
 
         let describe = try XCTUnwrap(job.range(of: "python3 Scripts/default-simulator-destination.py --describe"))
         let pin = try XCTUnwrap(job.range(
-            of: "echo \"SIMULATOR_ID=$(python3 Scripts/default-simulator-destination.py --udid)\" >> \"$GITHUB_ENV\""
+            of: "SIMULATOR_ID=\"$(python3 Scripts/default-simulator-destination.py --udid)\"\n"
+                + "          echo \"SIMULATOR_ID=${SIMULATOR_ID}\" >> \"$GITHUB_ENV\""
         ))
+        XCTAssertFalse(job.contains("echo \"SIMULATOR_ID=$("))
         let boot = try XCTUnwrap(job.range(of: "bash Scripts/prepare-simulator.sh >> \"$GITHUB_ENV\""))
         XCTAssertLessThan(describe.lowerBound, boot.lowerBound)
         XCTAssertLessThan(pin.lowerBound, boot.lowerBound)
