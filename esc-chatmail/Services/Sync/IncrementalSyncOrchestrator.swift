@@ -406,11 +406,12 @@ final class IncrementalSyncOrchestrator {
                 recoveredIds: abandonedOutcome.recoveredIds,
                 goneIds: abandonedOutcome.goneIds,
                 failedIds: abandonedOutcome.failedIds,
+                transientlyFailedIds: abandonedOutcome.transientlyFailedIds,
                 in: context
             )
             timing.finish(
                 abandonedRetryTimer,
-                detail: "recovered=\(abandonedOutcome.recoveredIds.count) gone=\(abandonedOutcome.goneIds.count) failed=\(abandonedOutcome.failedIds.count)"
+                detail: "recovered=\(abandonedOutcome.recoveredIds.count) gone=\(abandonedOutcome.goneIds.count) failed=\(abandonedOutcome.failedIds.count) transient=\(abandonedOutcome.transientlyFailedIds.count)"
             )
 
             // Phase 3: Process label changes (AFTER messages are fetched)
@@ -504,6 +505,18 @@ final class IncrementalSyncOrchestrator {
                 in: context
             )
             timing.finish(repairTimer, detail: recoveryRepairStep.map { "\($0.plan.progress)" } ?? "none")
+
+            // A row the drain gave up on leaves the ledger once its message is
+            // stored (by this run's history, its missed-message check or an
+            // earlier run), and with it the banner (sync-persist-path#6). Staged
+            // after reconciliation, so it commits with the messages this run
+            // stored. Not in an app refresh, which leaves the drain alone too.
+            if allowsDeferrableWork {
+                let cleared = await failureTracker.stageClearingStoredExhaustedMessages(in: context)
+                if let cleared, cleared > 0 {
+                    log.info("Cleared \(cleared) exhausted sync messages now stored")
+                }
+            }
 
             // Resolve this slice's ledger before advancing either continuation
             // or cursor. Below the failure threshold the current checkpoint is
@@ -768,9 +781,17 @@ final class IncrementalSyncOrchestrator {
     private struct AbandonedRetryOutcome {
         let recoveredIds: [String]
         let goneIds: [String]
+        /// Message-scoped: spends the row's retryCount.
         let failedIds: [String]
+        /// A timeout, network error, 5xx or 429: stamps the backoff only.
+        let transientlyFailedIds: [String]
 
-        static let empty = AbandonedRetryOutcome(recoveredIds: [], goneIds: [], failedIds: [])
+        static let empty = AbandonedRetryOutcome(
+            recoveredIds: [],
+            goneIds: [],
+            failedIds: [],
+            transientlyFailedIds: []
+        )
     }
 
     /// Makes one fetch attempt for messages previously abandoned by the failure
@@ -822,15 +843,21 @@ final class IncrementalSyncOrchestrator {
                 return AbandonedRetryOutcome(
                     recoveredIds: [],
                     goneIds: result.goneIds,
-                    failedIds: result.failedIds
+                    failedIds: result.failedIds,
+                    transientlyFailedIds: result.transientlyFailedIds
                 )
             }
         }
 
+        // A failed persist of a fetched message spends a retry, as it always
+        // did: the persistence report gives no cause, so a body part whose GET
+        // failed for a transient reason cannot be told from a row that will
+        // never store. Only the fetch's own transient failures are spared.
         return AbandonedRetryOutcome(
             recoveredIds: report.persistedIds + report.excludedIds,
             goneIds: result.goneIds,
-            failedIds: result.failedIds + report.failedIds + report.unprocessableIds
+            failedIds: result.failedIds + report.failedIds + report.unprocessableIds,
+            transientlyFailedIds: result.transientlyFailedIds
         )
     }
 

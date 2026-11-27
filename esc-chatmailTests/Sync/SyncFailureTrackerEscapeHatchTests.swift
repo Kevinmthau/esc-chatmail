@@ -357,6 +357,41 @@ final class SyncFailureTrackerEscapeHatchTests: XCTestCase {
         XCTAssertEqual(consecutive, 0)
     }
 
+    /// A clean advance deletes deferred rows only (the re-scan stored them); a
+    /// row the drain gave up on is not the re-scan's and stays, exhausted, for
+    /// the banner (architecture review 2026-11, sync-persist-path#6). So does
+    /// an exhausted row the hatch meets: it is not deferred, so it is not
+    /// abandoned again.
+    ///
+    /// Revert-check: the `state == deferred` predicate of
+    /// `SyncFailureTracker.deleteDeferredRows` widened to every row.
+    func testCleanAdvance_keepsExhaustedRows() async throws {
+        let seed = coreDataStack.newBackgroundContext()
+        try await seed.perform {
+            let row = AbandonedSyncMessage(context: seed)
+            row.id = UUID()
+            row.gmailMessageId = "given-up"
+            row.abandonedAt = Date()
+            row.retryCount = Int16(SyncConfig.maxAbandonedMessageRetries)
+            row.state = AbandonedSyncMessage.State.exhausted.rawValue
+            try seed.save()
+        }
+        try await recordFailingRuns(1, failedIds: ["recovered-on-rescan"])
+
+        let cleanRun = coreDataStack.newBackgroundContext()
+        let plan = await tracker.planHistoryAdvance(
+            hadFailures: false,
+            consecutiveFailureCount: 0,
+            in: cleanRun
+        )
+        try await coreDataStack.saveAsync(context: cleanRun)
+
+        XCTAssertEqual(plan.outcome, .advancedClean)
+        let rows = try await fetchAbandonedRows()
+        XCTAssertEqual(rows.map(\.gmailMessageId), ["given-up"], "Positive control: the deferred row went")
+        XCTAssertEqual(rows.first?.state, AbandonedSyncMessage.State.exhausted.rawValue)
+    }
+
     // MARK: - Helpers
 
     private struct AbandonedRow {

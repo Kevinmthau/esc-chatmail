@@ -13,6 +13,11 @@ import CoreData
 /// failed drain attempt stamps an exponential backoff via
 /// `SyncFailureTracker.stageAbandonedRetryOutcome`, enforced in the drain
 /// predicate. Re-capturing a row as deferred clears it.
+///
+/// `retryCount` counts the drain's message-scoped failures only (a 4xx, an
+/// undecodable or unprocessable payload, a failed persist). A timeout, a
+/// network error, a 5xx or a 429 says nothing about the message and only
+/// stamps the backoff.
 extension AbandonedSyncMessage {
     @NSManaged public var id: UUID
     @NSManaged public var gmailMessageId: String
@@ -36,6 +41,31 @@ extension AbandonedSyncMessage {
         case deferred = "deferred"
         /// The cursor advanced past it; only the drain can recover it.
         case abandoned = "abandoned"
+        /// The drain gave up on it: `SyncConfig.maxAbandonedMessageRetries`
+        /// message-scoped failures (`SyncFailureTracker.stageAbandonedRetryOutcome`).
+        /// Kept with `retryCount` at the cap, never deleted, so the
+        /// conversation list can say the message was not downloaded
+        /// (architecture review 2026-11, sync-persist-path#6). The drain's
+        /// `retryCount <` term excludes it, in earlier builds too, which read
+        /// an unknown state as not deferred. It leaves the ledger when a
+        /// Message with its ID is stored, or when the user's Retry gives it
+        /// back to the drain. Find these rows with `exhaustedPredicate`, never
+        /// by this state alone.
+        case exhausted = "exhausted"
+    }
+
+    /// The rows the drain has given up on: `retryCount` at the cap and not
+    /// deferred. Counted by the retry count, not by `state == exhausted`: a
+    /// re-scan can make an exhausted row deferred again, and the escape hatch
+    /// then abandoned, with its spent budget kept, so the drain never offers it
+    /// either. A deferred row is the frozen cursor's to retry. The `state ==
+    /// nil` disjunct is load-bearing on SQLite, where a legacy row has no state.
+    static var exhaustedPredicate: NSPredicate {
+        NSPredicate(
+            format: "retryCount >= %d AND (state == nil OR state != %@)",
+            SyncConfig.maxAbandonedMessageRetries,
+            State.deferred.rawValue
+        )
     }
 
     /// Why the message entered the ledger (coarse blocking-failure buckets).
