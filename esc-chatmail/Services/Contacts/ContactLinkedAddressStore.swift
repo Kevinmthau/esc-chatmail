@@ -12,9 +12,10 @@ import Contacts
 /// and must hash as the last launch did; hashing that launch's mail with
 /// nothing linked would fork every unified chat.
 ///
-/// A new map is adopted in one place only: `refreshIfNeeded()`, called by
-/// `DataCleanupService.unifyConversationsByContactIfNeeded` in a sync run's
-/// cleanup. There the run owns the store and the cleanup-sensitive gate is
+/// A new map is adopted by one function only, `refreshIfNeeded()`, called by
+/// `DataCleanupService.unifyConversationsByContactIfNeeded` as the first step
+/// of a sync run's cleanup and again before each run routes mail
+/// (`adoptContactsBeforeRouting`). There the run owns the store and the gate is
 /// held, so no sync and no optimistic send hashes between the adoption and
 /// the pass that moves the stored conversations onto the new hashes. Never
 /// adopt from anywhere else: a map adopted while mail is being routed routes
