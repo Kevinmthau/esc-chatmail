@@ -235,7 +235,14 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
             FileManager.default.fileExists(atPath: directory.path),
             "The directory is renamed away, not emptied file by file"
         )
-        let deadline = Date().addingTimeInterval(5)
+        // The removal is a detached `.background` task that `removeInBackground` hands to
+        // nobody, so it is polled, not awaited. A `.background` task can take seconds to run
+        // on CI's loaded runner (CLAUDE.md, Testing): with 5 s here the poll timed out twice
+        // on 2026-11-27 (the test took 8.4 s on one run, 7.8 s on another) and failed two
+        // PRs' default plans while every other test passed. The poll returns the moment the
+        // tombstone is gone, so a healthy run is no slower; 60 s stays inside CI's 120 s
+        // per-test allowance.
+        let deadline = Date().addingTimeInterval(60)
         while !RetiredAccountDirectory.tombstones(of: directory).isEmpty, Date() < deadline {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
