@@ -1925,6 +1925,12 @@ final class AuthSessionTests: XCTestCase {
     // 2. The tombstone policy of `AccountScopedMailboxFileInspector.hasStoredFiles` and
     //    `HTMLContentHandler.hasStoredHTMLFiles`. Count a tombstone as account data and
     //    the account preparation resets the store a second time.
+    // 3. `HTMLContentAccountBoundary.inspect` behind `hasStoredHTMLFiles`, which answers
+    //    while the boundary is closed. Answer `true` for a closed boundary instead (the
+    //    `perform(…) ?? true` of before) and the preparation, which the app runs before
+    //    the reopen, resets the store a second time (architecture review 2026-11,
+    //    account-boundary-auth#3). Until 2026-11-27 this test reopened the handler
+    //    before preparing, so it never took the app's path.
     // HONEST SCOPE: the cleanup closures here are built from the functions `AuthSession`'s
     // defaults call, over temporary directories, because the defaults themselves act on
     // the process's shared stores. That the defaults call them is not run by any test.
@@ -1994,9 +2000,10 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Attachments").path))
         XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Previews").path))
 
-        // The next sign-in, with the removal still not done. Its reopen makes the Messages
-        // directory again, as the app's does.
-        try handler.reopenAccountWork()
+        // The next sign-in, with the removal still not done, in the app's order: the
+        // preparation runs with the handler still closed (`signIn` reopens account work
+        // only after `prepareLocalStoreForAuthenticatedAccount` returns), and the reopen
+        // then makes the Messages directory again.
         try await session.prepareLocalStoreForAuthenticatedAccount(
             "next@example.com",
             entry: .interactiveSignIn
@@ -2007,6 +2014,7 @@ final class AuthSessionTests: XCTestCase {
             1,
             "Tombstones are not another account's mailbox: the sign-in must not reset the store again"
         )
+        try handler.reopenAccountWork()
         XCTAssertNil(handler.loadHTML(for: "message-0"))
         XCTAssertNotNil(handler.saveHTML("<p>next account</p>", for: "message-0"))
         XCTAssertEqual(handler.loadHTML(for: "message-0"), "<p>next account</p>")
