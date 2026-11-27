@@ -29,10 +29,11 @@ jobs:
   test:
     name: Build & Test (iOS Simulator)
     runs-on: macos-26
-    # A clean run is ~15 minutes (build ~4m + tests ~8m); 40 leaves headroom
-    # for runner variance. Per-test allowances below keep a single hung test
-    # from consuming the whole window (macOS minutes bill at 10x).
-    timeout-minutes: 40
+    # A clean run is ~15 minutes (build ~4m + tests ~8m) plus the ConcurrencyDebug
+    # plan's serial second pass over its suites; 50 leaves headroom for runner
+    # variance. Per-test allowances below keep a single hung test from consuming the
+    # whole window (macOS minutes bill at 10x).
+    timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -77,6 +78,31 @@ jobs:
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 120 \
             -maximum-test-execution-time-allowance 300
+
+      # A second pass over the suites of ConcurrencyDebug.xctestplan (a subset of the default
+      # plan, which has just run them without the flag), under Core Data's ConcurrencyDebug
+      # assertion (architecture review 2026-11, testing-ci-release#4): those suites were
+      # measured clean under `-com.apple.CoreData.ConcurrencyDebug 1`, which traps on a
+      # context touched off its queue. The default plan cannot carry the flag (its
+      # private-queue test contexts are touched off-queue by design), so this plan is the
+      # ratchet: a confinement regression in the code these suites cover fails here as a
+      # crashed test, where before it shipped as a rare crash or a lost save. Serial, so a
+      # crash names its host. Adding a suite is in CLAUDE.md (Testing).
+      - name: Run tests (ConcurrencyDebug test plan)
+        run: |
+          bash Scripts/run-tests.sh --concurrency-debug \
+            -resultBundlePath ConcurrencyDebugResults.xcresult \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 120 \
+            -maximum-test-execution-time-allowance 300
+
+      - name: Upload the ConcurrencyDebug result bundle on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ConcurrencyDebugResults.xcresult
+          path: ConcurrencyDebugResults.xcresult
+          retention-days: 7
 
       - name: Upload result bundle on failure
         if: failure()
