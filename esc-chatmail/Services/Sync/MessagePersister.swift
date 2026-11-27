@@ -601,7 +601,7 @@ actor MessagePersister {
             return .excluded
 
         case .unprocessable(let id):
-            Log.warning("Failed to process message: \(id)", category: .sync)
+            Log.warning("Failed to process message: \(Log.hashIdentifier(id))", category: .sync)
             return .unprocessable
 
         case .bodyFetchFailed(let id):

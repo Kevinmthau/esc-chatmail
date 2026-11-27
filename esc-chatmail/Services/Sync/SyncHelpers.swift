@@ -37,6 +37,52 @@ struct SyncPhaseTiming: Equatable {
     let detail: String?
 }
 
+/// How a sync run ended, for the run's timing summary. Built from counts, flags
+/// and `Log.redact(error:)`, never from an error's description: the summary goes
+/// through `Log`, which publishes the finished string (`%{public}@`), and a
+/// provider error's description can carry request details. The run outcome used
+/// to be a `String`, and six call sites interpolated `error.localizedDescription`
+/// into it past `LogRedactionTests`' scan, which reads `Log.` calls only
+/// (architecture review 2026-11, observability-errors#5, security-privacy#4).
+/// The summary is logged at info today, so nothing of it reaches a Release log;
+/// raising that level is safe only because of this type.
+enum SyncRunOutcome {
+    /// An incremental run that saved what it fetched.
+    case incrementalSuccess(newMessages: Int, labelRecords: Int, continuation: Bool, warnings: Bool)
+    /// An initial sync that saved what it fetched.
+    case initialSuccess(messages: Int, conversations: Int, warnings: Bool)
+    /// No cursor and no budget for the initial sync: handed to a processing task.
+    case initialFallbackDeferred
+    /// No cursor, so the run performed the initial sync instead.
+    case initialFallback(incomplete: Bool)
+    /// The history ID expired and the recovery was handed to a processing task.
+    case historyRecoveryDeferred
+    /// The history ID expired and the run recovered the mailbox.
+    case historyRecovery(warnings: Bool)
+    /// The run threw. Rendered as the error's domain and code, never its text.
+    case failed(Error)
+
+    /// The `outcome=` field of the summary line.
+    var summaryText: String {
+        switch self {
+        case let .incrementalSuccess(newMessages, labelRecords, continuation, warnings):
+            return "success newMessages=\(newMessages) labelRecords=\(labelRecords) continuation=\(continuation) warnings=\(warnings)"
+        case let .initialSuccess(messages, conversations, warnings):
+            return "success messages=\(messages) conversations=\(conversations) warnings=\(warnings)"
+        case .initialFallbackDeferred:
+            return "initialFallback deferred=true"
+        case let .initialFallback(incomplete):
+            return "initialFallback incomplete=\(incomplete)"
+        case .historyRecoveryDeferred:
+            return "historyRecovery deferred=true"
+        case let .historyRecovery(warnings):
+            return "historyRecovery warnings=\(warnings)"
+        case let .failed(error):
+            return "failed error=\(Log.redact(error: error))"
+        }
+    }
+}
+
 struct SyncTimingRecorder {
     let syncType: String
     let runStartedAt: CFAbsoluteTime
@@ -62,12 +108,12 @@ struct SyncTimingRecorder {
         Log.info(message, category: .sync)
     }
 
-    func finishRun(outcome: String) {
+    func finishRun(outcome: SyncRunOutcome) {
         let totalDuration = CFAbsoluteTimeGetCurrent() - runStartedAt
         Log.info(summary(totalDuration: totalDuration, outcome: outcome), category: .sync)
     }
 
-    func summary(totalDuration: TimeInterval, outcome: String) -> String {
+    func summary(totalDuration: TimeInterval, outcome: SyncRunOutcome) -> String {
         let phaseSummary = phases
             .map { phase in
                 var value = "\(phase.name)=\(Self.formatDuration(phase.duration))"
@@ -79,7 +125,7 @@ struct SyncTimingRecorder {
             .joined(separator: ", ")
 
         let suffix = phaseSummary.isEmpty ? "" : "; \(phaseSummary)"
-        return "Sync timing [\(syncType)] total=\(Self.formatDuration(totalDuration)) outcome=\(outcome)\(suffix)"
+        return "Sync timing [\(syncType)] total=\(Self.formatDuration(totalDuration)) outcome=\(outcome.summaryText)\(suffix)"
     }
 
     static func formatDuration(_ duration: TimeInterval) -> String {
