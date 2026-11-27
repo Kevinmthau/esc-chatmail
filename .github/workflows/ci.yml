@@ -44,11 +44,22 @@ jobs:
           sysctl -n hw.ncpu hw.memsize
           xcrun simctl list devices available | grep -m 5 iPhone || true
 
-      # Boots the same simulator run-tests.sh would pick and pre-grants
-      # Contacts to the test host app, exporting DESTINATION so both steps
-      # use that device. Without the grant, the first test to reach
-      # ContactsResolver blocks forever on CNContactStore.requestAccess's
-      # permission dialog — the hang that timed out every earlier run.
+      # The device is the one the local wrappers pick (an installed iPhone 17 Pro on the
+      # newest iOS runtime, Scripts/default-simulator-destination.py), never the first
+      # iPhone simctl lists: that one comes from the oldest installed runtime, so a runner
+      # image that adds a runtime would silently move this job onto it (architecture
+      # review 2026-11, gap-ipad-and-os-floor#3). The runtime is printed so an image
+      # change shows as a changed line in the log.
+      - name: Pin the simulator (iPhone 17 Pro, newest installed runtime)
+        run: |
+          python3 Scripts/default-simulator-destination.py --describe
+          echo "SIMULATOR_ID=$(python3 Scripts/default-simulator-destination.py --udid)" >> "$GITHUB_ENV"
+
+      # Boots the pinned simulator and pre-grants Contacts to the test host
+      # app, exporting DESTINATION so both steps use that device. Without the
+      # grant, the first test to reach ContactsResolver blocks forever on
+      # CNContactStore.requestAccess's permission dialog — the hang that timed
+      # out every earlier run.
       - name: Prepare simulator (boot + grant permissions)
         run: bash Scripts/prepare-simulator.sh >> "$GITHUB_ENV"
 

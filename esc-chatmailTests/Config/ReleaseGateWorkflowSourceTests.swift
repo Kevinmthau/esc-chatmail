@@ -83,6 +83,34 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertFalse(script.contains("-configuration Debug"))
     }
 
+    /// CI's simulator is the device the local wrappers pick, pinned before it is booted
+    /// (architecture review 2026-11, gap-ipad-and-os-floor#3). Unpinned,
+    /// `prepare-simulator.sh` takes the first iPhone simctl lists, which comes from the
+    /// oldest installed runtime, so a runner image that added a runtime would move the job
+    /// onto it with nothing in the diff.
+    // Revert-check: fails if the test job stops exporting SIMULATOR_ID from
+    // default-simulator-destination.py before prepare-simulator.sh runs, stops printing the
+    // runtime, or if prepare-simulator.sh stops honouring SIMULATOR_ID.
+    func testTestJob_pinsTheSimulatorToTheWrappersDevice_beforeBootingIt() throws {
+        let job = try jobBlock(named: "test")
+
+        let describe = try XCTUnwrap(job.range(of: "python3 Scripts/default-simulator-destination.py --describe"))
+        let pin = try XCTUnwrap(job.range(
+            of: "echo \"SIMULATOR_ID=$(python3 Scripts/default-simulator-destination.py --udid)\" >> \"$GITHUB_ENV\""
+        ))
+        let boot = try XCTUnwrap(job.range(of: "bash Scripts/prepare-simulator.sh >> \"$GITHUB_ENV\""))
+        XCTAssertLessThan(describe.lowerBound, boot.lowerBound)
+        XCTAssertLessThan(pin.lowerBound, boot.lowerBound)
+
+        let prepare = try repositorySource("Scripts/prepare-simulator.sh")
+        XCTAssertTrue(prepare.contains("DEVICE_ID=\"${SIMULATOR_ID:-}\""))
+
+        let picker = try repositorySource("Scripts/default-simulator-destination.py")
+        XCTAssertTrue(picker.contains("\"--udid\""))
+        XCTAssertTrue(picker.contains("\"--describe\""))
+        XCTAssertTrue(picker.contains("device[\"name\"] == \"iPhone 17 Pro\""))
+    }
+
     /// The lines of one job, from its key to the next job's.
     private func jobBlock(named name: String) throws -> String {
         let workflow = try repositorySource(".github/workflows/ci.yml")
