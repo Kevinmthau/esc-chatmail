@@ -64,7 +64,8 @@ actor EnhancedImageCache: MemoryWarningHandler {
 
     /// Clears both memory and disk cache, and the memory of failed URLs: a sign-out's
     /// cleanup must leave the next account no verdict on a URL, and a URL that failed
-    /// for good under one account is tried once more under the next.
+    /// for good under one account is tried once more under the next. A memory, not a
+    /// fence: a load in flight at the clear still records its verdict when it ends.
     func clearAll() async {
         memoryCache.removeAllObjects()
         await diskCache.clearAll()

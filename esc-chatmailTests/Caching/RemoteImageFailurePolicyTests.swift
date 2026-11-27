@@ -21,7 +21,8 @@ final class RemoteImageFailurePolicyTests: XCTestCase {
             RemoteImageFetchError.invalidStatusCode(302),
             RemoteImageFetchError.invalidStatusCode(403),
             RemoteImageFetchError.invalidStatusCode(404),
-            RemoteImageFetchError.invalidStatusCode(410)
+            RemoteImageFetchError.invalidStatusCode(410),
+            URLError(.httpTooManyRedirects)
         ]
         for error in definitive {
             XCTAssertTrue(RemoteImageFailurePolicy.isDefinitive(error), "\(error)")

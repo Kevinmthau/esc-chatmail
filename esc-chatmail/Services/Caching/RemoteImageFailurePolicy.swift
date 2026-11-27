@@ -10,12 +10,17 @@ enum RemoteImageFailurePolicy {
 
     /// Definitive: the URL itself is refused (invalid, a private or reserved host), the
     /// server answered 3xx (the guarding session refuses redirects to private addresses
-    /// and hands the 3xx back) or a 4xx that is not 408 or 429, the type is not an image,
-    /// the body is past the limit, or the bytes do not decode. Transient: a transport
-    /// error (offline, a timeout, cancellation), a 5xx, a 408 or a 429, a response that
-    /// was not HTTP, and anything this policy does not know, because a failure it cannot
+    /// and hands the 3xx back) or a 4xx that is not 408 or 429, the redirects loop
+    /// (`URLError.httpTooManyRedirects`: the URL's own doing, like a 3xx), the type is
+    /// not an image, the body is past the limit, or the bytes do not decode. Transient: a
+    /// transport error (offline, a timeout, cancellation), a 5xx, a 408 or a 429 (its
+    /// `Retry-After` is not read; the memory is a flat interval), a response that was
+    /// not HTTP, and anything this policy does not know, because a failure it cannot
     /// name must not blacklist a URL for the process.
     static func isDefinitive(_ error: Error) -> Bool {
+        if let urlError = error as? URLError, urlError.code == .httpTooManyRedirects {
+            return true
+        }
         guard let fetchError = error as? RemoteImageFetchError else {
             return false
         }
