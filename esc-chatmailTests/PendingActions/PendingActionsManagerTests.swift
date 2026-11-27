@@ -1874,6 +1874,63 @@ final class PendingActionsManagerTests: XCTestCase {
         XCTAssertEqual(action.retryCount, 1)
     }
 
+    // Through the real client: a refresh token revoked and found by the token
+    // preflight (the proactive refresh ahead of the request) is the same
+    // account-scoped verdict as a 401's failed refresh. The queue parks with
+    // the head untouched, an enqueue made meanwhile stays pending, and
+    // `authenticationDidRecover` releases both. Before, the preflight's raw
+    // `TokenManagerError` was an unknown error: the head spent one unit of its
+    // budget per run, and the row behind it was tried too.
+    // Revert-check: fails if `GmailAPIClient.apiError(forTokenAcquisitionFailure:)`
+    // or the catch around `getCurrentToken()` in `authenticatedRequest` goes:
+    // the head is then "failed" at retryCount 1 and the second action is
+    // executed (a second token is asked for, and a request is sent) before
+    // recovery.
+    func testRealClient_tokenPreflightRevocationParksTheQueueUntilRecovery() async throws {
+        StubURLProtocol.reset()
+        defer { StubURLProtocol.reset() }
+        StubURLProtocol.script = [.data(200, Data(#"{"id":"m1","threadId":"t1"}"#.utf8))]
+        let tokenManager = MockTokenManager()
+        tokenManager.getTokenError = TokenManagerError.invalidCredentials
+        let client = GmailAPIClient(
+            tokenManager: tokenManager,
+            retryStrategy: NetworkRetryStrategy(maxRetries: 3, initialDelay: 1, maxDelay: 2),
+            session: StubURLProtocol.makeSession(),
+            retryClock: FakeSyncClock()
+        )
+        let recorder = TransientRetryRecorder()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
+            actionExecutor: GmailActionExecutor(apiClientProvider: { client }),
+            networkMonitor: AlwaysConnectedNetworkMonitor(),
+            syncRunCoordinator: SyncRunCoordinator(),
+            transientRetrySleeper: { delay in await recorder.record(delay: delay) }
+        )
+
+        await manager.queueAction(type: .archive, messageId: "revoked-at-preflight")
+        await manager.waitUntilScheduledProcessingIsIdle()
+        await manager.queueAction(type: .markRead, messageId: "queued-while-parked")
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(tokenManager.getCurrentTokenCallCount, 1, "The parked queue asks for no second token")
+        XCTAssertEqual(StubURLProtocol.requestCount, 0, "Nothing is sent without a token")
+        let transientWaits = await recorder.scheduledDelays
+        XCTAssertEqual(transientWaits, [], "A revoked token is a park, not a transient failure's timer")
+        context.refreshAllObjects()
+        let request = PendingAction.fetchRequest()
+        request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+        let parked = try context.fetch(request)
+        XCTAssertEqual(parked.map(\.status), ["pending", "pending"])
+        XCTAssertEqual(parked.map(\.retryCount), [0, 0], "The head's budget is untouched")
+
+        await manager.authenticationDidRecover()
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        XCTAssertEqual(StubURLProtocol.requestCount, 2, "Both actions go out once the credentials are back")
+        context.refreshAllObjects()
+        XCTAssertTrue(try context.fetch(PendingAction.fetchRequest()).isEmpty)
+    }
+
     func testTransientRetryDelay_doublesFromOneMinuteToFifteen() {
         let delays = (0..<6).map {
             PendingActionsManager.transientRetryDelay(

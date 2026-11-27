@@ -236,7 +236,15 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             request.assumesHTTP3Capable = false
         }
 
-        let token = try await tokenManager.getCurrentToken()
+        // The preflight's failure leaves here as an `APIError`, never a raw
+        // `TokenManagerError`, which no caller classifies: see
+        // `apiError(forTokenAcquisitionFailure:)`.
+        let token: String
+        do {
+            token = try await tokenManager.getCurrentToken()
+        } catch {
+            throw Self.apiError(forTokenAcquisitionFailure: error)
+        }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         return request
@@ -622,6 +630,46 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             // accessNotConfigured, …) and reason-less bodies stay terminal.
             return .invalidData("Gmail API 403: \(message)")
         }
+    }
+
+    /// The token preflight's failure as the account-scoped `APIError` the
+    /// callers classify. `authenticatedRequest` runs ahead of every request,
+    /// and until 2026-11 it let `TokenManagerError` out raw: only the 401
+    /// branch mapped to `APIError`, so a refresh token revoked and found by
+    /// the proactive refresh (the cached token within five minutes of expiry)
+    /// was no `isAccountScopedSyncAbort`. `MessageFetcher` bucketed the IDs it
+    /// was fetching as permanently failed, which staged deferred rows and an
+    /// escape-hatch strike, and `PendingActionProcessor` spent one unit of the
+    /// head's budget where `.credentialsRevoked` parks the queue until
+    /// `authenticationDidRecover` (architecture review 2026-11, `networking#3`;
+    /// the first step of `concurrency-model#1`).
+    ///
+    /// `invalidCredentials` is `.credentialsRevoked`: `TokenManager` has
+    /// already published `requireReauthentication`, so the parked queue is
+    /// released by the sign-in that follows. Every other failure
+    /// (`noValidToken`, `tokenExpired`, `refreshFailed`, `networkUnavailable`,
+    /// an unknown error) is `.authenticationError`: an account-scoped abort
+    /// that sync records no verdicts for, and that the pending-action queue
+    /// retries behind its bounded authentication timer, never a park, because
+    /// nothing has asked the user to sign in again. Not `.networkError`:
+    /// `MessageFetcher` would run the refresh again on each of its retry
+    /// passes and still stage per-message failures. A `CancellationError` (a
+    /// refresh whose epoch a sign-out retired) passes through unchanged, and so
+    /// does an `APIError`. Mapped here, at the client's boundary, never inside
+    /// `TokenManager`, whose other callers (`AuthSession.withFreshToken`,
+    /// `WebKitPrewarmer`, `ChatViewModel`) read `TokenManagerError` itself.
+    /// The 401 branch of `performRetryingRequest` keeps its own mapping, which
+    /// does not pass cancellation through: a `CancellationError` there would
+    /// reach `isAmbiguousSendFailure`, and a send Gmail refused with 401 would
+    /// show as "Delivery unknown".
+    nonisolated static func apiError(forTokenAcquisitionFailure error: Error) -> Error {
+        if error is CancellationError || error is APIError {
+            return error
+        }
+        if case .invalidCredentials? = error as? TokenManagerError {
+            return APIError.credentialsRevoked
+        }
+        return APIError.authenticationError
     }
 
     private nonisolated func gmailErrorDetail(from data: Data) -> GmailErrorResponse.GmailErrorDetail? {
