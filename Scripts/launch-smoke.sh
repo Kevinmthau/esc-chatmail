@@ -27,7 +27,21 @@ if [[ -z "${APP}" || "${APP}" != *.app || ! -d "${APP}" ]]; then
 fi
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "${APP}/Info.plist")"
 EXECUTABLE="$(plutil -extract CFBundleExecutable raw -o - "${APP}/Info.plist")"
-UDID="${2:-$(python3 "$(dirname "${BASH_SOURCE[0]}")/default-simulator-destination.py" --udid)}"
+# The device: the second argument, or the one the wrappers pick, read out of the
+# `platform=iOS Simulator,id=<udid>` line default-simulator-destination.py prints (that
+# script prints a destination and nothing else; it is not asked for a bare UDID). Checked
+# for the shape of a UDID before anything is erased, so a picker that printed something
+# else fails here with its output, not inside simctl.
+if [[ -n "${2:-}" ]]; then
+  UDID="$2"
+else
+  DESTINATION_LINE="$(python3 "$(dirname "${BASH_SOURCE[0]}")/default-simulator-destination.py")"
+  UDID="${DESTINATION_LINE##*id=}"
+fi
+if ! [[ "${UDID}" =~ ^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$ ]]; then
+  echo "error: no simulator UDID to erase (got '${UDID}'${DESTINATION_LINE:+ from '${DESTINATION_LINE}'})" >&2
+  exit 2
+fi
 WAIT_SECONDS="${LAUNCH_SMOKE_WAIT_SECONDS:-20}"
 # The identifier ContentView gives the sign-in root and the line that records it
 # (LaunchRootScreen.signIn, LaunchRootScreenRecord); LaunchSmokeSourceTests pins the match.

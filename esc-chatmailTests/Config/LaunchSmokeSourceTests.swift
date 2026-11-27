@@ -27,6 +27,28 @@ final class LaunchSmokeSourceTests: XCTestCase {
         XCTAssertTrue(script.contains("if [[ ${failures} -gt 0 ]]; then"))
     }
 
+    /// With no second argument (how CI calls it) the device comes out of the destination
+    /// line `default-simulator-destination.py` prints, and is checked for a UDID's shape
+    /// before anything is erased. The first version asked the picker for `--udid`, a mode
+    /// it did not have on this branch, so `UDID` held the whole destination line and
+    /// `simctl erase` would have aborted the Release job, and with it `ship-gate`
+    /// (Codex review of PR 501). The local run had passed a UDID by hand.
+    // Revert-check: fails if the script asks the picker for a mode, stops parsing the
+    // `id=` tail, or erases before checking the UDID's shape.
+    func testLaunchSmoke_withNoDevice_readsTheUDIDOutOfThePickersDestinationLine_andChecksItsShape() throws {
+        let script = try repositorySource("Scripts/launch-smoke.sh")
+
+        XCTAssertTrue(script.contains("DESTINATION_LINE=\"$(python3 \"$(dirname \"${BASH_SOURCE[0]}\")/default-simulator-destination.py\")\""))
+        XCTAssertTrue(script.contains("UDID=\"${DESTINATION_LINE##*id=}\""))
+        XCTAssertFalse(script.contains("default-simulator-destination.py\" --"), "the picker takes no arguments here")
+        let check = try XCTUnwrap(script.range(of: "if ! [[ \"${UDID}\" =~ ^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$ ]]; then"))
+        let erase = try XCTUnwrap(script.range(of: "xcrun simctl erase \"${UDID}\""))
+        XCTAssertLessThan(check.lowerBound, erase.lowerBound)
+        // The picker on this branch prints the destination line and nothing else.
+        let picker = try repositorySource("Scripts/default-simulator-destination.py")
+        XCTAssertTrue(picker.contains("print(f\"platform=iOS Simulator,id={device_id}\")"))
+    }
+
     /// The script greps for the line `LaunchRootScreenRecord` writes for the sign-in root.
     // Revert-check: fails if either side spells the line differently.
     func testLaunchSmoke_grepsForTheLineTheAppRecordsForTheSignInRoot() throws {
