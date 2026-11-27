@@ -268,6 +268,30 @@ private enum ProductionParticipantCacheAccountTransition {
     }
 }
 
+/// The alias caches `AuthSession` drops with the store: `AliasManager` (the user's own
+/// addresses, which every participant hash leaves out) and `SendAsAliasManager` (the
+/// send-as addresses). Both are built from the stored `Account` row, so they are
+/// invalidated wherever that row goes: in `performDurableLocalCleanup`, right after
+/// `resetCoreDataStore`, which every store reset goes through, a sign-in over another
+/// account's store included, and at the four removal paths' own earlier call. Until
+/// 2026-11-27 only the removal paths invalidated them, inline, so a sign-in from the
+/// reconnect screen as another account published that account with the old one's
+/// addresses counted as its own until the first sync's profile fetch (architecture
+/// review 2026-11, account-boundary-auth#2, invariant-enforcement#1, di-modularity#3).
+/// After the reset, never before it: an unfenced reader
+/// (`ParticipantLoader.loadCurrentUserAliases`) can refill the old row's addresses
+/// across the managers' await points. A load already suspended in Core Data when this
+/// runs is answered by the managers' invalidation epochs, which let it return what it
+/// read and cache nothing. An `async` function, so that the default closure that calls
+/// it needs its `await` on every compiler (CLAUDE.md, Traps: a bare actor call in a
+/// default-argument closure compiles without one and fails the build with one).
+private enum ProductionAliasCacheAccountTransition {
+    static func invalidate() async {
+        await AliasManager.shared.invalidate()
+        await SendAsAliasManager.shared.invalidate()
+    }
+}
+
 /// AuthSession uses @unchecked Sendable because:
 /// - All state is @MainActor isolated
 /// - ObservableObject pattern requires class semantics with Sendable conformance
@@ -325,6 +349,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     private let resetPendingActionRetryState: @MainActor @Sendable () async -> Void
     private let pendingActionAuthenticationDidRecover: @MainActor @Sendable () async -> Void
     private let resetSyncStorageState: @MainActor @Sendable () -> Void
+    private let invalidateAccountAliasCaches: @Sendable () async -> Void
     private let cancelBackgroundTaskRequests: @MainActor @Sendable () -> Void
     private let resetCoreDataStore: @Sendable () async throws -> Void
     private let inspectLocalMailboxStore: @Sendable () async throws -> LocalMailboxStoreInspection
@@ -405,6 +430,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // `resetPendingActionRetryState` on every path, always inside quiescence, after the
             // run boundary has drained (`SyncEngine.resetStorageStateForAccountTransition`).
             SyncEngine.shared.resetStorageStateForAccountTransition()
+        },
+        invalidateAccountAliasCaches: @escaping @Sendable () async -> Void = {
+            await ProductionAliasCacheAccountTransition.invalidate()
         },
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {
             // A pending BGTask request re-arms itself at handler entry before
@@ -492,6 +520,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         self.resetPendingActionRetryState = resetPendingActionRetryState
         self.pendingActionAuthenticationDidRecover = pendingActionAuthenticationDidRecover
         self.resetSyncStorageState = resetSyncStorageState
+        self.invalidateAccountAliasCaches = invalidateAccountAliasCaches
         self.cancelBackgroundTaskRequests = cancelBackgroundTaskRequests
         self.resetCoreDataStore = resetCoreDataStore
         self.inspectLocalMailboxStore = inspectLocalMailboxStore
@@ -947,8 +976,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
-        await AliasManager.shared.invalidate()
-        await SendAsAliasManager.shared.invalidate()
+        await invalidateAccountAliasCaches()
 
         // Clear attachment downloader tracking data
         await cleanupDownloads()
@@ -1204,8 +1232,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
         // Clear conversation cache to prevent leaking previous user's data
         clearConversationCaches()
-        await AliasManager.shared.invalidate()
-        await SendAsAliasManager.shared.invalidate()
+        await invalidateAccountAliasCaches()
 
         // Clear attachment downloader tracking data
         await cleanupDownloads()
@@ -1840,6 +1867,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         } catch {
             firstError = firstError ?? error
         }
+        // The alias caches are built from the Account row the reset just removed, and
+        // every store reset comes through here: the removal paths and a sign-in over
+        // another account's store alike. After the reset, never before it
+        // (`ProductionAliasCacheAccountTransition`).
+        await invalidateAccountAliasCaches()
         do {
             try await deleteAttachmentFiles()
         } catch {
@@ -2002,8 +2034,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
         cancelBackgroundTaskRequests()
         clearConversationCaches()
-        await AliasManager.shared.invalidate()
-        await SendAsAliasManager.shared.invalidate()
+        await invalidateAccountAliasCaches()
         await cleanupDownloads()
         let cleanupSucceeded = await completeDurableLocalCleanupForAccountRemoval(
             failureMessage: "Failed to resume interrupted account cleanup"
@@ -2066,8 +2097,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         BackgroundSyncStateManager.clearContinuationState(in: userDefaults)
         cancelBackgroundTaskRequests()
         clearConversationCaches()
-        await AliasManager.shared.invalidate()
-        await SendAsAliasManager.shared.invalidate()
+        await invalidateAccountAliasCaches()
         await cleanupDownloads()
 
         let cleanupSucceeded: Bool
