@@ -143,8 +143,10 @@ final class AuthSessionTests: XCTestCase {
     }
 
     // The two crash-resume paths drop the alias caches through the same closure.
-    // Revert-check: fails if either resume path keeps an inline invalidation pair in place
-    // of the closure.
+    // Revert-check: fails if the credential-cleanup resume keeps an inline invalidation pair
+    // in place of the closure (it reaches no other call). The removal resume reaches
+    // `performDurableLocalCleanup`, whose own call records an event, so an inline pair
+    // there is caught only by `testAliasCacheInvalidation_goesThroughTheSeamOnly`.
     func testRestoreResumedCleanup_invalidatesAliasCachesThroughTheClosure() async throws {
         for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
             let keychain = MockKeychainService()

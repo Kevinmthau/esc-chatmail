@@ -272,8 +272,13 @@ private enum ProductionParticipantCacheAccountTransition {
 /// addresses, which every participant hash leaves out) and `SendAsAliasManager` (the
 /// send-as addresses). Both are built from the stored `Account` row, so they are
 /// invalidated wherever that row goes: in `performDurableLocalCleanup`, right after
-/// `resetCoreDataStore`, which every store reset goes through, a sign-in over another
-/// account's store included, and at the four removal paths' own earlier call. Until
+/// `resetCoreDataStore`, which every store reset of an account transition goes through
+/// (the removal paths and a sign-in over another account's store alike), and at the four
+/// removal paths' own earlier call. The launch-time resets go another way and invalidate
+/// nothing (the launch screen's Reset Mailbox, the recovery ladder's
+/// `resetStoreAfterLoadFailure`, the fresh-install cleanup's `destroyAndReloadAsync`):
+/// each runs before any session is published, in a process whose alias actors have loaded
+/// nothing yet, which is why one call site here is enough. Until
 /// 2026-11-27 only the removal paths invalidated them, inline, so a sign-in from the
 /// reconnect screen as another account published that account with the old one's
 /// addresses counted as its own until the first sync's profile fetch (architecture
@@ -1868,9 +1873,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             firstError = firstError ?? error
         }
         // The alias caches are built from the Account row the reset just removed, and
-        // every store reset comes through here: the removal paths and a sign-in over
-        // another account's store alike. After the reset, never before it
-        // (`ProductionAliasCacheAccountTransition`).
+        // every store reset of an account transition comes through here: the removal
+        // paths and a sign-in over another account's store alike (the launch-time
+        // resets run before any session, with nothing cached yet). After the reset,
+        // never before it (`ProductionAliasCacheAccountTransition`).
         await invalidateAccountAliasCaches()
         do {
             try await deleteAttachmentFiles()

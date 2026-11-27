@@ -6,6 +6,10 @@ import Foundation
 /// For a load that must be suspended in Core Data when something else happens (an
 /// invalidation that lands between the read and the cache write). Built like
 /// `EntityFetchFailingContext`; later fetches of the entity pass once released.
+///
+/// `@unchecked Sendable`: like `EntityFetchFailingContext`, the mutable state
+/// (`fetchReached`, `isReleased`, `reachedWaiters`) is guarded by `lock`, the release
+/// gate is a semaphore, and Core Data's own state stays on the context's private queue.
 final class FetchGatingContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private let gatedEntityName: String
