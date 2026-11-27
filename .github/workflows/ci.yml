@@ -1,8 +1,9 @@
 name: CI
 
-# Runs the default test plan (PerformanceRegressionTests excluded) on every PR
-# and push to main, plus an advisory SwiftLint pass. Mirrors the local
-# Scripts/ wrappers so CI and local runs stay in sync.
+# Runs the default test plan (PerformanceRegressionTests excluded) and then the scale
+# harness's two suites (advisory until they have passed on this runner's iOS runtime) on
+# every PR and push to main, plus an advisory SwiftLint pass. Mirrors the local Scripts/
+# wrappers so CI and local runs stay in sync.
 
 on:
   pull_request:

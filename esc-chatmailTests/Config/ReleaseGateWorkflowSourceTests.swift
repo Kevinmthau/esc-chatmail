@@ -87,10 +87,12 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
     /// 2026-11, testing-ci-release#5): both scale suites under the Performance plan, never
     /// PerformanceRegressionTests, and the default plan still skips all three.
     // Revert-check: fails if the step is removed, loses either scale suite, gains
-    // PerformanceRegressionTests, or if esc-chatmail.xctestplan stops skipping the scale
-    // suites (which would run them inside the default plan, where the process-wide plan
-    // recorder and the half-minute seed make them flaky).
-    func testTestJob_runsTheScaleHarnessAfterTheDefaultPlan_andTheDefaultPlanStillSkipsIt() throws {
+    // PerformanceRegressionTests, if `continue-on-error` leaves the scale step (on the job it
+    // would let ship-gate advance a commit whose default plan failed; gone, the step blocks
+    // before it has passed on this runner), or if esc-chatmail.xctestplan stops skipping the
+    // scale suites (which would run them inside the default plan, where the process-wide
+    // plan recorder and the half-minute seed make them flaky).
+    func testTestJob_runsTheScaleHarnessAfterTheDefaultPlan_advisory_andTheDefaultPlanStillSkipsIt() throws {
         let job = try jobBlock(named: "test")
 
         let defaultPlan = try XCTUnwrap(job.range(of: "bash Scripts/run-tests.sh \\\n            -resultBundlePath TestResults.xcresult"))
@@ -98,6 +100,12 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertLessThan(defaultPlan.lowerBound, scale.lowerBound)
         let scaleStep = String(job[scale.lowerBound...])
         XCTAssertTrue(scaleStep.contains("-parallel-testing-enabled NO"))
+        // `continue-on-error` once in the job, inside the scale step: between its name and
+        // its run, never on the job or another step.
+        let stepName = try XCTUnwrap(job.range(of: "      - name: Run the scale harness (Performance test plan, scale suites only)\n"))
+        let stepHead = String(job[stepName.upperBound..<scale.lowerBound])
+        XCTAssertTrue(stepHead.contains("        continue-on-error: true\n"), stepHead)
+        XCTAssertEqual(job.components(separatedBy: "continue-on-error").count - 1, 1)
         // Exactly the two scale suites: every -only-testing in the job, in order.
         let onlyTesting = job.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
