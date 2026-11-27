@@ -35,10 +35,15 @@ esac
 
 ARGS=()
 RUN_PERFORMANCE_TESTS=false
+USE_CI_MAC_HOST=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --performance)
       RUN_PERFORMANCE_TESTS=true
+      shift
+      ;;
+    --ci-mac-host)
+      USE_CI_MAC_HOST=true
       shift
       ;;
     -destination)
@@ -60,6 +65,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "${USE_CI_MAC_HOST}" == "true" && "${IS_MAC_DESTINATION}" != "true" ]]; then
+  echo "--ci-mac-host signs the Mac test host for CI; it has no meaning for an iOS destination." >&2
+  exit 1
+fi
 
 if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
   if [[ "${IS_MAC_DESTINATION}" == "true" ]]; then
@@ -86,6 +96,23 @@ if [[ "${IS_MAC_DESTINATION}" != "true" ]]; then
     -configuration "${CONFIGURATION}" \
     -destination "${DESTINATION}" \
     "${ARGS[@]}"
+fi
+
+# --ci-mac-host: the Mac test host signed for CI (architecture review 2026-11,
+# mac-platform#1, testing-ci-release#3). CI has no Mac development profile,
+# which the team's signature needs for keychain-access-groups, and an unsigned
+# host has no sandbox and is refused below. Configuration/CI-MacTestHost.xcconfig
+# signs the host ad hoc with entitlements that keep the App Sandbox and drop the
+# keychain group, under a .ci bundle ID (a container of its own, never the
+# installed MushMail's), so both sandbox checks admit it unchanged. With no
+# keychain group the data protection keychain refuses the host's items (-34018),
+# so KeychainServiceTests, the one Mac-plan suite that writes the real keychain,
+# is skipped here and nowhere else; every other suite injects its keychain. The
+# xcconfig goes to the build, the host lookup and the test run alike, through
+# the ARGS split below, so the host checked is the host launched.
+if [[ "${USE_CI_MAC_HOST}" == "true" ]]; then
+  ARGS+=("-xcconfig" "esc-chatmail/Configuration/CI-MacTestHost.xcconfig")
+  ARGS+=("-skip-testing:esc-chatmailTests/KeychainServiceTests")
 fi
 
 # macOS: a hosted test run launches the app itself as the test host. Outside the
@@ -154,6 +181,15 @@ for entry in json.load(sys.stdin):
 '
 )"
 bash "$(dirname "${BASH_SOURCE[0]}")/verify-mac-test-host.sh" "${TEST_HOST%/Contents/MacOS/*}"
+
+# What CI signed, for its log: the identifier (with its .ci suffix), the ad-hoc
+# signature (no team) and the entitlements the sandbox check just read.
+if [[ "${USE_CI_MAC_HOST}" == "true" ]]; then
+  HOST_APP="${TEST_HOST%/Contents/MacOS/*}"
+  echo "CI Mac test host: ${HOST_APP}" >&2
+  codesign -dvv "${HOST_APP}" 2>&1 | grep -E '^(Identifier|TeamIdentifier|Signature|Authority)' >&2 || true
+  codesign -d --entitlements - --xml "${HOST_APP}" 2>/dev/null | plutil -p - >&2 || true
+fi
 
 exec xcodebuild test-without-building \
   -scheme "${SCHEME}" \

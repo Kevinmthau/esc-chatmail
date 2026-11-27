@@ -22,7 +22,7 @@ Environment:
 Examples:
   ./Scripts/codex-build.sh
   DESTINATION='platform=macOS' ./Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO   # compile check; never launch it
-  DESTINATION='platform=macOS' ./Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO   # app and tests, as CI does
+  DESTINATION='platform=macOS' ./Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO   # app and tests, compile check only; CI runs the Mac plan through codex-test.sh --ci-mac-host
   CONFIGURATION=Release DESTINATION='generic/platform=iOS Simulator' ./Scripts/codex-build.sh CODE_SIGNING_ALLOWED=NO
 USAGE
   exit 0

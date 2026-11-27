@@ -71,33 +71,50 @@ jobs:
           path: TestResults.xcresult
           retention-days: 7
 
-  # The Mac destination of the esc-chatmail target (docs/mac-app-plan.md). It catches the
-  # UIKit-only call that every iOS change can now break on macOS, in the app and in the
-  # test target: build-for-testing compiles both. Before, only the app was built here, so
-  # a test that used UIKit without an `#if os(iOS)` guard broke the Mac test build with
-  # every check green.
+  # The Mac destination of the esc-chatmail target (docs/mac-app-plan.md): the app and the
+  # test target are built for testing, and Mac.xctestplan runs in the built app as its test
+  # host (architecture review 2026-11, mac-platform#1, testing-ci-release#3). Before, this job
+  # compiled both unsigned and ran nothing, so the AppKit-mounting Mac suites ran only when a
+  # developer ran them, and every merge shipped a Mac build to TestFlight that no test had run.
   #
-  # It compiles the tests and runs none. The build is unsigned, because the Mac
-  # entitlements' keychain-access-groups needs a provisioning profile that CI does not
-  # have, and an unsigned build carries no App Sandbox entitlement, so its test host must
-  # not launch (the Mac test plan runs locally, see CLAUDE.md). macOS runner minutes bill
-  # at 10x, so keep this job to the one build.
+  # The host is signed ad hoc by Configuration/CI-MacTestHost.xcconfig, which
+  # run-tests.sh --ci-mac-host passes and nothing else does: a team-signed build needs the Mac
+  # development profile for keychain-access-groups, which CI has not, and an unsigned build
+  # (CODE_SIGNING_ALLOWED=NO) has no App Sandbox entitlement, so its host must never launch
+  # (unsandboxed, the app's cleanup deletes the user's real ~/Documents/Messages). Ad-hoc
+  # signing keeps the sandbox, so verify-mac-test-host.sh and MacUnitTestHostGuard admit the
+  # host exactly as they admit a team-signed one, unchanged; the .ci bundle ID gives it a
+  # container of its own. KeychainServiceTests is skipped (with no access group the data
+  # protection keychain refuses its items); every other Mac-plan suite injects its keychain.
+  # macOS runner minutes bill at 10x, so this stays one build-and-test job.
   build-macos:
-    name: Build (macOS)
+    name: Build & Test (macOS)
     runs-on: macos-26
-    # The app alone took 2-4 minutes here. What the test target adds is not measured yet:
-    # check the first runs.
-    timeout-minutes: 20
+    # The unsigned compile of app and tests took 5 minutes here. What the plan's run adds
+    # is not measured yet: check the first runs.
+    timeout-minutes: 30
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
 
       - name: Show toolchain
-        run: xcodebuild -version
+        run: |
+          xcodebuild -version
+          sw_vers
 
-      - name: Build app and tests (macOS, unsigned, nothing launched)
-        run: DESTINATION='platform=macOS' bash Scripts/codex-build.sh --for-testing CODE_SIGNING_ALLOWED=NO
+      - name: Build and run the Mac test plan (ad-hoc-signed, sandboxed host)
+        run: |
+          DESTINATION='platform=macOS' bash Scripts/run-tests.sh --ci-mac-host \
+            -resultBundlePath MacTestResults.xcresult
+
+      - name: Upload result bundle on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: MacTestResults.xcresult
+          path: MacTestResults.xcresult
+          retention-days: 7
 
   # The configuration Xcode Cloud archives and ships. Every other job builds Debug, so a
   # Release-only compile error or warning (wholemodule -O, `#if !DEBUG` branches;

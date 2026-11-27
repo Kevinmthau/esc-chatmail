@@ -1,0 +1,35 @@
+// CI's signing of the Mac test host, and nothing else's (architecture review 2026-11,
+// mac-platform#1, testing-ci-release#3). Only `Scripts/run-tests.sh --ci-mac-host` passes it,
+// through -xcodebuild's -xcconfig, so no setting in the project changes; the host that runs
+// on a developer Mac is still signed with the team, and shares the installed MushMail's
+// container and keychain group as before.
+//
+// A team-signed Mac build needs the team's development profile, because the Mac entitlements'
+// keychain-access-groups must be backed by one, and CI has no profile. An unsigned build
+// (CODE_SIGNING_ALLOWED=NO) carries no entitlements at all, so its host is unsandboxed, and
+// verify-mac-test-host.sh and MacUnitTestHostGuard refuse it, rightly: unsandboxed, the app's
+// cleanup deletes the user's real ~/Documents/Messages. This signs ad hoc instead. The
+// signature carries the entitlements the project's ENABLE_* settings generate (the App
+// Sandbox among them) and the file below, which has no keychain-access-groups, so the sandbox
+// is kept and no profile is needed, and both checks admit the host unchanged.
+//
+// The bundle ID gets a .ci suffix, so the host's container is
+// ~/Library/Containers/com.esc.inboxchat.ci: on a developer Mac too, this host never opens the
+// installed MushMail's container. Without a keychain access group the data protection keychain
+// refuses the host's items (errSecMissingEntitlement, -34018), so the switch also skips
+// KeychainServiceTests, the one Mac-plan suite that writes the real keychain; every other suite
+// injects its keychain. Do not make KeychainService tolerate that error (a file-keychain
+// fallback, dropping kSecUseDataProtectionKeychain, an XCTSkip on -34018): each would hide the
+// bug where a signed-in session is gone after a relaunch (docs/mac-app-plan.md, PR C) in the
+// signed local run.
+//
+// The entitlements file is set for the app alone: a build setting cannot be scoped to a target
+// from here, so the setting is spelled through the product's name, which leaves the test
+// bundle's empty (the test bundle has no entitlements in the project either).
+CODE_SIGN_STYLE = Manual
+CODE_SIGN_IDENTITY = -
+DEVELOPMENT_TEAM =
+PROVISIONING_PROFILE_SPECIFIER =
+ESC_CI_MAC_HOST_ENTITLEMENTS_MushMail = esc-chatmail/Resources/esc_chatmail-macOS-CI.entitlements
+CODE_SIGN_ENTITLEMENTS[sdk=macosx*] = $(ESC_CI_MAC_HOST_ENTITLEMENTS_$(PRODUCT_NAME))
+PRODUCT_BUNDLE_IDENTIFIER = $(inherited).ci
