@@ -3308,6 +3308,80 @@ final class IncrementalSyncCursorTests: XCTestCase {
         )
     }
 
+    // MARK: - A quiet run commits nothing (background-energy#4)
+
+    /// A run that finds no change after a clean run stages only values the
+    /// store already holds, so its sync context has nothing to save: no store
+    /// commit and no persistent-history transaction for an idle minute. It
+    /// still records the sync, whose time is history recovery's floor and the
+    /// start of the missed-message window, and still posts the two
+    /// notifications other screens refresh on (architecture review 2026-11,
+    /// background-energy#4, first step).
+    ///
+    /// Revert-check: the `alreadyHolds` skip in
+    /// `SyncFailureCounterCheckpointStore.stage` (the counter's `updatedAt`
+    /// is restamped), and the `account.historyId != historyId` check in
+    /// `AccountPersister.setAccountHistoryId` (the equal cursor marks the
+    /// row updated). Either alone makes the second run save its context.
+    @MainActor
+    func testQuietRun_afterACleanRun_savesNothingYetRecordsTheSync() async throws {
+        configureQuietHistory()
+        let contexts = SyncContextRecorder(coreDataStack: coreDataStack)
+        _ = try await makeOrchestrator(makeSyncContext: contexts.make).performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        let firstRunHistoryId = await fetchAccountHistoryId()
+        XCTAssertEqual(firstRunHistoryId, "2000", "The first run moved the cursor and saved")
+        let counterAfterFirstRun = try await fetchFailureCounter()
+        XCTAssertEqual(counterAfterFirstRun, 0)
+        let earlierSync = Date().addingTimeInterval(-10 * 60)
+        defaults.set(earlierSync.timeIntervalSince1970, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+
+        let syncCompleted = expectation(forNotification: .syncCompleted, object: nil)
+        let cleanupFinished = expectation(forNotification: .conversationCleanupFinished, object: nil)
+        let saves = contexts.startRecordingSaves()
+        _ = try await makeOrchestrator(makeSyncContext: contexts.make).performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+        contexts.stopRecordingSaves()
+        await fulfillment(of: [syncCompleted, cleanupFinished], timeout: 5)
+
+        XCTAssertGreaterThan(contexts.madeSinceRecordingStarted, 0, "The run made its context through the seam")
+        XCTAssertEqual(saves.count, 0, "Nothing changed, so the sync context saved nothing: \(saves.summaries)")
+        let lastSync = await failureTracker.lastSuccessfulSyncTime
+        let recordedSync = try XCTUnwrap(lastSync)
+        XCTAssertGreaterThan(recordedSync, earlierSync.addingTimeInterval(60), "The sync is still recorded")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+        let counter = try await fetchFailureCounter()
+        XCTAssertEqual(counter, 0)
+    }
+
+    /// The skip is for an unchanged row only: a clean run after a held one
+    /// still resets the counter, and saves to do it.
+    ///
+    /// Revert-check: the payload comparison in
+    /// `SyncFailureCounterCheckpointStore.alreadyHolds` (made to compare the
+    /// account alone, the reset is skipped and the count stays 1).
+    @MainActor
+    func testCleanRun_afterAHeldRun_stillResetsTheCounter() async throws {
+        try await seedFailureCounter(1, lastStrikeAt: strikeClock.now())
+        configureQuietHistory()
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let strikes = try await fetchFailureStrikes()
+        XCTAssertEqual(strikes?.count, 0)
+        XCTAssertNil(strikes?.lastStrikeAt)
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+    }
+
     // MARK: - Fixture
 
     private func seedStoredMessage(id: String, internalDate: Date, isFromMe: Bool) async throws {
@@ -3695,5 +3769,77 @@ final class IncrementalSyncCursorTests: XCTestCase {
             request.includesPendingChanges = false
             return ((try? context.count(for: request)) ?? 0) > 0
         }
+    }
+}
+
+/// Makes each sync context as production does (`CoreDataStack.newBackgroundContext()`)
+/// and records the saves of the contexts made after recording starts.
+///
+/// `@unchecked Sendable`: `lock` guards `isRecording`, `recordedContexts` and
+/// `madeWhileRecording`, and each `Saves` its own entries; a context's save
+/// notification arrives on that context's queue.
+private final class SyncContextRecorder: @unchecked Sendable {
+    final class Saves: @unchecked Sendable {
+        fileprivate let lock = NSLock()
+        fileprivate var entries: [String] = []
+
+        var count: Int { lock.withLock { entries.count } }
+        var summaries: String { lock.withLock { entries.joined(separator: "; ") } }
+    }
+
+    private let coreDataStack: CoreDataStack
+    private let lock = NSLock()
+    private var isRecording = false
+    private var recordedContexts: [NSManagedObjectContext] = []
+    private var madeWhileRecording = 0
+    private var observer: NSObjectProtocol?
+
+    init(coreDataStack: CoreDataStack) {
+        self.coreDataStack = coreDataStack
+    }
+
+    var madeSinceRecordingStarted: Int { lock.withLock { madeWhileRecording } }
+
+    func make() -> NSManagedObjectContext {
+        let context = coreDataStack.newBackgroundContext()
+        lock.withLock {
+            if isRecording {
+                recordedContexts.append(context)
+                madeWhileRecording += 1
+            }
+        }
+        return context
+    }
+
+    func startRecordingSaves() -> Saves {
+        let saves = Saves()
+        lock.withLock { isRecording = true }
+        observer = NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextDidSave,
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            guard let self, let context = note.object as? NSManagedObjectContext else { return }
+            let isSyncContext = self.lock.withLock {
+                self.recordedContexts.contains { $0 === context }
+            }
+            guard isSyncContext else { return }
+            let changed = [NSInsertedObjectsKey, NSUpdatedObjectsKey, NSDeletedObjectsKey]
+                .flatMap { key in
+                    ((note.userInfo?[key] as? Set<NSManagedObject>) ?? []).map {
+                        "\(key):\($0.entity.name ?? "?")"
+                    }
+                }
+            saves.lock.withLock { saves.entries.append(changed.sorted().joined(separator: ",")) }
+        }
+        return saves
+    }
+
+    func stopRecordingSaves() {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        observer = nil
+        lock.withLock { isRecording = false }
     }
 }

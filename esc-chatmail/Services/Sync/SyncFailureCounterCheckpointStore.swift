@@ -147,6 +147,15 @@ struct SyncFailureCounterCheckpointStore {
     /// Stages an exact counter value in the supplied context. Existing identity
     /// and creation time are preserved; unexpected duplicates are removed.
     ///
+    /// A row that already holds exactly this value, alone, is left untouched
+    /// (`alreadyHolds`). Every incremental run stages the counter, and
+    /// restamping an unchanged row's `updatedAt` gave the sync context a change
+    /// to save on a run that found nothing: a store commit and a
+    /// persistent-history transaction every idle minute on the Mac
+    /// (architecture review 2026-11, background-energy#4). The check is made
+    /// before anything is assigned, because assigning an equal value still
+    /// marks the row updated.
+    ///
     /// - Parameter lastStrikeAt: When the last strike counted, which the
     ///   incremental slice path spaces the next one from. Nil (the default,
     ///   which initial sync and every reset to zero stage) makes the next
@@ -167,6 +176,15 @@ struct SyncFailureCounterCheckpointStore {
         let kind = self.kind
         try await context.perform {
             let rows = try Self.fetchRows(kind: kind, in: context)
+            if rows.count == 1,
+               Self.alreadyHolds(
+                   count: consecutiveFailureCount,
+                   lastStrikeAt: lastStrikeAt,
+                   accountEmail: accountEmail,
+                   rows[0]
+               ) {
+                return
+            }
             let now = Date()
             let checkpoint: SyncCheckpoint
             if let compatible = rows.first(where: {
@@ -191,6 +209,28 @@ struct SyncFailureCounterCheckpointStore {
             )
             Self.deleteDuplicates(except: checkpoint, from: rows, in: context)
         }
+    }
+
+    /// Whether `row` already reads as what `apply` would write, `updatedAt`
+    /// aside: the same account, spelled the same, no history position, and a
+    /// current-version payload with this count and strike time. A payload that
+    /// cannot be read, or a strike time that does not round-trip exactly, is
+    /// written again: the cost of a wrong "no" is one save, of a wrong "yes" a
+    /// lost count.
+    private static func alreadyHolds(
+        count: Int,
+        lastStrikeAt: Date?,
+        accountEmail: String,
+        _ row: SyncCheckpoint
+    ) -> Bool {
+        row.accountEmail == accountEmail &&
+            row.startHistoryId == nil &&
+            row.pageToken == nil &&
+            decodePayload(from: row) == Payload(
+                version: Payload.currentVersion,
+                consecutiveFailureCount: count,
+                lastStrikeAt: lastStrikeAt
+            )
     }
 
     private static func isCompatible(
