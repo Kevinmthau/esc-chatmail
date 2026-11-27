@@ -710,7 +710,7 @@ extension MessagePersister {
             // Keep the old nil List-Id and participant-keyed placement so a
             // later full refetch retries instead of persisting split identity.
             Log.error(
-                "Failed to reroute refetched list message \(processedMessage.id)",
+                "Failed to reroute refetched list message \(Log.hashIdentifier(processedMessage.id))",
                 category: .coreData,
                 error: error
             )

@@ -151,7 +151,12 @@ final class AttachmentDownloaderTests: XCTestCase {
     }
 
     @MainActor
-    func testDownloadFailureAfterRetryBudgetMarksFailedAndCleansInFlight() async throws {
+    // A failed download is one call of the client, whose retry engine is the single retry
+    // owner; the row goes `.failed` with the time, and the in-flight tracking is cleared.
+    // Until 2026-11-27 the downloader re-ran the whole download twice more itself.
+    // Revert-check: fails if `performAttachmentDownload` grows a retry loop again (two
+    // calls of `getAttachment` for one download).
+    func testDownloadFailure_isOneClientCall_marksFailedAndCleansInFlight() async throws {
         let message = MessageBuilder()
             .withId("message-download-retry-failure")
             .withAttachments()
@@ -167,9 +172,7 @@ final class AttachmentDownloaderTests: XCTestCase {
 
         let apiClient = MockGmailAPIClient()
         let downloader = AttachmentDownloader(
-            apiClient: apiClient,
-            maxRetryAttempts: 2,
-            baseRetryDelay: 0
+            apiClient: apiClient
         )
         let backgroundContext = testStack.newBackgroundContext()
         let beforeDownload = Date()
@@ -181,7 +184,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         )
 
         let persistedState = try await fetchAttachmentState(objectID: attachment.objectID)
-        XCTAssertEqual(apiClient.getAttachmentCallCount, 2)
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 1, "The client's retries are the only ones")
         XCTAssertEqual(persistedState.state, .failed)
         let failedAt = try XCTUnwrap(persistedState.lastDownloadFailedAt)
         XCTAssertGreaterThanOrEqual(failedAt, beforeDownload)
@@ -302,9 +305,7 @@ final class AttachmentDownloaderTests: XCTestCase {
         }
         let downloader = AttachmentDownloader(
             apiClient: apiClient,
-            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
-            maxRetryAttempts: 3,
-            baseRetryDelay: 0
+            coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer)
         )
 
         let manualDownloadTask = Task { @MainActor in
@@ -884,8 +885,6 @@ final class AttachmentDownloaderTests: XCTestCase {
             coreDataStack: CoreDataStack(
                 persistentContainerForTesting: testStack.persistentContainer
             ),
-            maxRetryAttempts: 1,
-            baseRetryDelay: 0,
             loadAttachmentData: { path in
                 path == legacyPath ? staleBytes : nil
             }
@@ -1014,9 +1013,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             apiClient: apiClient,
             coreDataStack: CoreDataStack(
                 persistentContainerForTesting: testStack.persistentContainer
-            ),
-            maxRetryAttempts: 1,
-            baseRetryDelay: 0
+            )
         )
 
         let firstTask = Task { @MainActor in
@@ -1203,9 +1200,7 @@ final class AttachmentDownloaderTests: XCTestCase {
             apiClient: apiClient,
             coreDataStack: CoreDataStack(
                 persistentContainerForTesting: testStack.persistentContainer
-            ),
-            maxRetryAttempts: 1,
-            baseRetryDelay: 0
+            )
         )
 
         let downloadTask = Task { @MainActor in
