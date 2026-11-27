@@ -1,9 +1,8 @@
 name: CI
 
 # Runs the default test plan (PerformanceRegressionTests excluded) and then the scale
-# harness's two suites (advisory until they have passed on this runner's iOS runtime) on
-# every PR and push to main, plus an advisory SwiftLint pass. Mirrors the local Scripts/
-# wrappers so CI and local runs stay in sync.
+# harness's two suites on every PR and push to main, plus an advisory SwiftLint pass.
+# Mirrors the local Scripts/ wrappers so CI and local runs stay in sync.
 
 on:
   pull_request:
@@ -79,14 +78,14 @@ jobs:
       # runs above, because the store is seeded once per process (about half a minute) and
       # the plan recorder is process-wide, so it runs here on its own, after the default
       # plan, reusing its build. PerformanceRegressionTests stays out of CI: it is timing
-      # sensitive and has no baseline (run-tests.sh). `continue-on-error` until the step
-      # has passed on this runner's iOS runtime: the plans and the strict XCTExpectFailure
-      # wrappers in ScaleHubFaultTests were measured on the iOS 27.0 simulator, and a wrapper
-      # comes off only in the change that fixes its item, never to make CI green. The
+      # sensitive and has no baseline (run-tests.sh). The step blocks: it was advisory until
+      # it had passed on this runner's iOS runtime, which it did on 2026-11-27 (PR 495's run,
+      # iOS 26.5: 14 tests, 134 s, every strict XCTExpectFailure wrapper in ScaleHubFaultTests
+      # held). The plans and those wrappers were first measured on the iOS 27.0 simulator; a
+      # wrapper comes off only in the change that fixes its item, never to make CI green. The
       # allowance covers the seed; the result bundle is uploaded on failure like the main one.
       - name: Run the scale harness (Performance test plan, scale suites only)
         id: scale
-        continue-on-error: true
         run: |
           bash Scripts/run-tests.sh --performance \
             -only-testing esc-chatmailTests/ScaleQueryPlanTests \
@@ -98,7 +97,7 @@ jobs:
             -maximum-test-execution-time-allowance 900
 
       - name: Upload the scale result bundle on failure
-        if: steps.scale.outcome == 'failure'
+        if: failure() && steps.scale.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
           name: ScaleResults.xcresult
