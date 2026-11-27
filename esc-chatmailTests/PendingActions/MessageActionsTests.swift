@@ -1689,6 +1689,327 @@ final class MessageActionsTests: XCTestCase {
         XCTAssertTrue(queuedActions.isEmpty)
     }
 
+    // MARK: - The action row commits in the save of the change it describes
+
+    // Until 2026-11-27 each action saved its change on a background context and
+    // the manager inserted the `PendingAction` row afterwards, on the view
+    // context, in a save of its own: a process killed between the two kept a
+    // change Gmail never received, which label reconciliation undid on recent
+    // mail once the 30-minute marker lapsed (architecture review 2026-11,
+    // outbound-and-actions#4). These tests read what each save committed from
+    // `NSManagedObjectContextDidSave` and what the store holds afterwards; the
+    // suite's mock manager inserts nothing, so a row in the store is the one
+    // `MessageActions` staged.
+
+    /// Archiving one message commits the INBOX removal and its `archive` row
+    /// in one save, the row dated no earlier than the message's marker, and
+    /// the manager is told of the row afterwards.
+    ///
+    /// Revert-check: committing the row in a second save after the first in
+    /// `MessageActions.performArchive` (the combined save split in two)
+    /// records two saves, the first without the row.
+    func testArchiveMessage_changeAndItsActionRow_commitInOneSave() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10], idPrefix: "one-save-archive")
+        let message = fixture.inboxMessages[0]
+        let recorder = SaveRecorder(coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator)
+
+        await messageActions.archive(message: message)
+        let saves = recorder.stop()
+
+        XCTAssertEqual(saves.count, 1, "The change and its action row are one save")
+        XCTAssertEqual(saves.first?.insertedEntityNames, ["PendingAction"])
+        XCTAssertEqual(saves.first?.updatedObjectIDs.contains(message.objectID), true)
+
+        let rows = try await storedPendingActions()
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.actionType, PendingAction.ActionType.archive.rawValue)
+        XCTAssertEqual(row.messageId, "one-save-archive-10")
+        XCTAssertEqual(row.status, "pending")
+        let stored = try await storedMessageState(of: message.objectID)
+        XCTAssertFalse(stored.labelIDs.contains("INBOX"))
+        let marker = try XCTUnwrap(stored.localModifiedAt)
+        XCTAssertGreaterThanOrEqual(row.createdAt, marker)
+
+        let queued = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queued.map(\.type), [.archive])
+        XCTAssertEqual(queued.map(\.messageId), ["one-save-archive-10"])
+    }
+
+    /// Marking one message unread commits the read state, the rollup and the
+    /// `markUnread` row in one save. This path saves with `saveOrLog`, not
+    /// the stack's save, so it is checked on its own.
+    ///
+    /// Revert-check: committing the row in a second save after the first in
+    /// `MessageActions.performReadStateMutation` records two saves, the first
+    /// without the row.
+    func testMarkAsUnread_changeAndItsActionRow_commitInOneSave() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10], idPrefix: "one-save-unread")
+        let message = fixture.inboxMessages[0]
+        let recorder = SaveRecorder(coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator)
+
+        await messageActions.markAsUnread(message: message)
+        let saves = recorder.stop()
+
+        XCTAssertEqual(saves.count, 1, "The change and its action row are one save")
+        XCTAssertEqual(saves.first?.insertedEntityNames, ["PendingAction"])
+        XCTAssertEqual(saves.first?.updatedObjectIDs.contains(message.objectID), true)
+        XCTAssertEqual(saves.first?.updatedObjectIDs.contains(fixture.conversation.objectID), true)
+
+        let rows = try await storedPendingActions()
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.actionType, PendingAction.ActionType.markUnread.rawValue)
+        XCTAssertEqual(row.messageId, "one-save-unread-10")
+        let stored = try await storedMessageState(of: message.objectID)
+        XCTAssertTrue(stored.isUnread)
+        let marker = try XCTUnwrap(stored.localModifiedAt)
+        XCTAssertGreaterThanOrEqual(row.createdAt, marker)
+
+        let queued = await pendingActionsManager.queuedSingleActions
+        XCTAssertEqual(queued.map(\.type), [.markUnread])
+    }
+
+    /// Opening a chat's unread mail marks the batch read and commits one
+    /// `markRead` row naming the marked messages in the same save as the
+    /// marks and the recount.
+    ///
+    /// Revert-check: committing the row in a second save after the first in
+    /// `MessageActions.performMarkMessagesAsReadBatch` records two saves, the
+    /// first without the row.
+    func testMarkConversationAsRead_batchAndItsActionRow_commitInOneSave() async throws {
+        let fixture = try makeInboxConversation(
+            inboxDates: [10, 20],
+            unreadDates: [10, 20],
+            idPrefix: "one-save-read"
+        )
+        let recorder = SaveRecorder(coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator)
+
+        await messageActions.markConversationAsRead(conversation: fixture.conversation)
+        let saves = recorder.stop()
+
+        XCTAssertEqual(saves.count, 1, "The batch and its action row are one save")
+        XCTAssertEqual(saves.first?.insertedEntityNames, ["PendingAction"])
+        for message in fixture.inboxMessages {
+            XCTAssertEqual(saves.first?.updatedObjectIDs.contains(message.objectID), true)
+        }
+
+        let rows = try await storedPendingActions()
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.actionType, PendingAction.ActionType.markRead.rawValue)
+        XCTAssertNil(row.messageId)
+        XCTAssertEqual(row.conversationId, fixture.conversation.id)
+        XCTAssertEqual(Set(row.payloadMessageIDs), ["one-save-read-10", "one-save-read-20"])
+        for message in fixture.inboxMessages {
+            let stored = try await storedMessageState(of: message.objectID)
+            XCTAssertFalse(stored.isUnread)
+            XCTAssertGreaterThanOrEqual(row.createdAt, try XCTUnwrap(stored.localModifiedAt))
+        }
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map(\.type), [.markRead])
+        XCTAssertEqual(Set(queued.first?.messageIds ?? []), ["one-save-read-10", "one-save-read-20"])
+    }
+
+    /// Archiving a conversation commits every message's change, the archived
+    /// rollup and the `archiveConversation` row in one save.
+    ///
+    /// Revert-check: committing the row in a second save after the first in
+    /// `MessageActions.applyConversationWideMutation` records two saves, the
+    /// first without the row; dating the row a second before the markers
+    /// there fails the `createdAt` check.
+    func testArchiveConversation_changeAndItsActionRow_commitInOneSave() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20], idPrefix: "one-save-conversation")
+        let recorder = SaveRecorder(coordinator: coreDataStack.persistentContainer.persistentStoreCoordinator)
+
+        await messageActions.archiveConversation(conversation: fixture.conversation)
+        let saves = recorder.stop()
+
+        XCTAssertEqual(saves.count, 1, "The change and its action row are one save")
+        XCTAssertEqual(saves.first?.insertedEntityNames, ["PendingAction"])
+        XCTAssertEqual(saves.first?.updatedObjectIDs.contains(fixture.conversation.objectID), true)
+
+        let rows = try await storedPendingActions()
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.actionType, PendingAction.ActionType.archiveConversation.rawValue)
+        XCTAssertEqual(row.conversationId, fixture.conversation.id)
+        let allMessages = fixture.inboxMessages + [fixture.otherMessage]
+        XCTAssertEqual(Set(row.payloadMessageIDs), Set(allMessages.map(\.id)))
+        for message in allMessages {
+            let stored = try await storedMessageState(of: message.objectID)
+            XCTAssertFalse(stored.labelIDs.contains("INBOX"))
+            XCTAssertGreaterThanOrEqual(row.createdAt, try XCTUnwrap(stored.localModifiedAt))
+        }
+
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertEqual(queued.map(\.type), [.archiveConversation])
+    }
+
+    /// A failed save keeps neither the archive nor its action row, and the
+    /// manager is told nothing. The save that failed held both, so the row
+    /// was not left for a later save to commit alone.
+    ///
+    /// Revert-check: staging the row after `save` in
+    /// `MessageActions.performArchive` leaves the failed save without it;
+    /// ignoring `save`'s result there tells the manager.
+    ///
+    /// HONEST SCOPE: the action's context is dropped when it returns, so the
+    /// `rollback()` after the failed save cannot be told apart from leaving
+    /// it out; what is pinned is that nothing was committed or announced.
+    func testArchiveMessage_failedSave_leavesNeitherTheChangeNorItsActionRow() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10], idPrefix: "failed-save-archive")
+        let message = fixture.inboxMessages[0]
+        let failingStack = RecordingFailingSaveCoreDataStack(wrapping: messageActionsStack)
+        let actions = MessageActions(
+            coreDataStack: failingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.archive(message: message)
+
+        let attempts = failingStack.attempts
+        XCTAssertEqual(attempts.count, 1)
+        XCTAssertEqual(attempts.first?.insertedEntityNames, ["PendingAction"])
+        XCTAssertEqual(attempts.first?.updatedObjectIDs.contains(message.objectID), true)
+
+        let rows = try await storedPendingActions()
+        XCTAssertTrue(rows.isEmpty)
+        let stored = try await storedMessageState(of: message.objectID)
+        XCTAssertTrue(stored.labelIDs.contains("INBOX"))
+        XCTAssertNil(stored.localModifiedAt)
+        let queued = await pendingActionsManager.queuedSingleActions
+        XCTAssertTrue(queued.isEmpty)
+    }
+
+    /// As the single-message case, for a conversation-wide action.
+    ///
+    /// Revert-check: staging the row after `save` in
+    /// `MessageActions.applyConversationWideMutation` leaves the failed save
+    /// without it.
+    ///
+    /// HONEST SCOPE: as above, the rollback itself is not observable.
+    func testArchiveConversation_failedSave_leavesNeitherTheChangeNorItsActionRow() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20], idPrefix: "failed-save-conversation")
+        let failingStack = RecordingFailingSaveCoreDataStack(wrapping: messageActionsStack)
+        let actions = MessageActions(
+            coreDataStack: failingStack,
+            pendingActionsManager: pendingActionsManager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.archiveConversation(conversation: fixture.conversation)
+
+        let attempts = failingStack.attempts
+        XCTAssertEqual(attempts.count, 1)
+        XCTAssertEqual(attempts.first?.insertedEntityNames, ["PendingAction"])
+        XCTAssertEqual(attempts.first?.updatedObjectIDs.contains(fixture.conversation.objectID), true)
+
+        let rows = try await storedPendingActions()
+        XCTAssertTrue(rows.isEmpty)
+        for message in fixture.inboxMessages {
+            let stored = try await storedMessageState(of: message.objectID)
+            XCTAssertTrue(stored.labelIDs.contains("INBOX"))
+            XCTAssertNil(stored.localModifiedAt)
+        }
+        let queued = await pendingActionsManager.queuedConversationActions
+        XCTAssertTrue(queued.isEmpty)
+    }
+
+    /// Once Gmail has the archive, the real manager's processor clears every
+    /// marker the row covers. `clearLocalModifications` clears only markers
+    /// no later than the row's `createdAt`, so a row dated before its markers
+    /// would leave the conversation's messages shielded from sync for 30
+    /// minutes after Gmail had the change. The row is dated with the markers.
+    ///
+    /// Revert-check: dating the row a second before the markers in
+    /// `MessageActions.applyConversationWideMutation` leaves every marker set;
+    /// not scheduling processing in
+    /// `PendingActionsManager.queueConversationAction(_:within:)` leaves the
+    /// action unexecuted, its row pending and every marker set.
+    func testArchiveConversation_actionCompletes_clearsEveryMarkerItCovers() async throws {
+        let fixture = try makeInboxConversation(inboxDates: [10, 20], idPrefix: "markers-cleared")
+        let executor = MockActionExecutor()
+        let manager = PendingActionsManager(
+            coreDataStack: CoreDataStack(persistentContainerForTesting: coreDataStack.persistentContainer),
+            actionExecutor: executor,
+            networkMonitor: ConnectedNetworkMonitorStub(),
+            syncRunCoordinator: syncRunCoordinator,
+            oneShotRepairDefaults: try makeIsolatedDefaults()
+        )
+        let actions = MessageActions(
+            coreDataStack: messageActionsStack,
+            pendingActionsManager: manager,
+            rollupMutationSerializer: rollupMutationSerializer,
+            syncRunCoordinator: syncRunCoordinator
+        )
+
+        await actions.archiveConversation(conversation: fixture.conversation)
+        await manager.waitUntilScheduledProcessingIsIdle()
+
+        let executed = await executor.executedActions
+        XCTAssertEqual(executed.map(\.type), [.archiveConversation])
+        for message in fixture.inboxMessages + [fixture.otherMessage] {
+            let stored = try await storedMessageState(of: message.objectID)
+            XCTAssertFalse(stored.labelIDs.contains("INBOX"))
+            XCTAssertNil(stored.localModifiedAt, "A completed action clears the markers it covers")
+        }
+        let rows = try await storedPendingActions()
+        XCTAssertTrue(rows.isEmpty, "The completed row is cleaned up")
+    }
+
+    /// Every `PendingAction` row in the store, oldest first, read on a
+    /// context of its own.
+    private func storedPendingActions() async throws -> [StoredPendingAction] {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            let request = PendingAction.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "createdAt", ascending: true)]
+            return try context.fetch(request).map { action in
+                var payloadMessageIDs: [String] = []
+                if let data = action.payload?.data(using: .utf8),
+                   let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                    payloadMessageIDs = payload["messageIds"] as? [String] ?? []
+                }
+                return StoredPendingAction(
+                    actionType: action.actionType,
+                    messageId: action.messageId,
+                    conversationId: action.conversationId,
+                    payloadMessageIDs: payloadMessageIDs,
+                    status: action.status,
+                    createdAt: action.createdAt
+                )
+            }
+        }
+    }
+
+    private func storedMessageState(of objectID: NSManagedObjectID) async throws -> StoredMessageState {
+        let context = coreDataStack.newBackgroundContext()
+        return try await context.perform {
+            guard let message = try context.existingObject(with: objectID) as? Message else {
+                throw MessageActionsTestError.messageMissing
+            }
+            return StoredMessageState(
+                labelIDs: Set((message.labels ?? []).map(\.id)),
+                isUnread: message.isUnread,
+                localModifiedAt: message.localModifiedAt
+            )
+        }
+    }
+
+    private func makeIsolatedDefaults() throws -> UserDefaults {
+        let suiteName = "MessageActionsTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+        }
+        return defaults
+    }
+
     /// Saves the suite's main-queue context directly; the test body is
     /// already on its queue. `TestCoreDataStack.saveViewContext()` would save
     /// the stack's private-queue context instead (see the type comment).
@@ -1810,12 +2131,10 @@ private actor BlockingReadStatePendingActionsManager: PendingActionsManagerProto
     // The `within:` witnesses are required (the protocol has no defaults); this
     // conformer gates them as it gates the acquiring overloads.
     func queueAction(
-        type: PendingAction.ActionType,
-        messageId: String,
-        payload: [String: Any]?,
+        _ action: PendingActionEnqueue.StagedMessageAction,
         within _: SyncRun
     ) async {
-        await queueAction(type: type, messageId: messageId, payload: payload)
+        await queueAction(type: action.type, messageId: action.messageId, payload: nil)
     }
 
     func queueConversationAction(
@@ -1827,15 +2146,13 @@ private actor BlockingReadStatePendingActionsManager: PendingActionsManagerProto
     }
 
     func queueConversationAction(
-        type: PendingAction.ActionType,
-        sourceConversationId: UUID,
-        messageIds: [String],
+        _ action: PendingActionEnqueue.StagedConversationAction,
         within _: SyncRun
     ) async {
         await queueConversationAction(
-            type: type,
-            sourceConversationId: sourceConversationId,
-            messageIds: messageIds
+            type: action.type,
+            sourceConversationId: action.sourceConversationId,
+            messageIds: action.messageIds
         )
     }
 
@@ -1856,6 +2173,131 @@ private actor BlockingReadStatePendingActionsManager: PendingActionsManagerProto
 
 private enum MessageActionsTestError: Error {
     case unreadCountFailed
+    case messageMissing
+}
+
+/// A pending action's row as the store has it.
+private struct StoredPendingAction: Sendable {
+    let actionType: String
+    let messageId: String?
+    let conversationId: UUID?
+    let payloadMessageIDs: [String]
+    let status: String
+    let createdAt: Date
+}
+
+/// A message's labels, read state and marker as the store has them.
+private struct StoredMessageState: Sendable {
+    let labelIDs: Set<String>
+    let isUnread: Bool
+    let localModifiedAt: Date?
+}
+
+/// What one save committed, or what a save that was refused held.
+private struct RecordedSave: Sendable {
+    /// The entity name of every inserted object, sorted.
+    let insertedEntityNames: [String]
+    let updatedObjectIDs: Set<NSManagedObjectID>
+}
+
+/// Records what each save on one coordinator committed, from
+/// `NSManagedObjectContextDidSave`, which is posted on the saving context's
+/// queue, where the saved objects may be read.
+///
+/// `@unchecked Sendable`: `lock` guards `saves` and `observer`.
+private final class SaveRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var saves: [RecordedSave] = []
+    private var observer: NSObjectProtocol?
+
+    init(coordinator: NSPersistentStoreCoordinator) {
+        let coordinatorID = ObjectIdentifier(coordinator)
+        let observer = NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextDidSave,
+            object: nil,
+            queue: nil
+        ) { [weak self] notification in
+            guard let context = notification.object as? NSManagedObjectContext,
+                  let saved = context.persistentStoreCoordinator,
+                  ObjectIdentifier(saved) == coordinatorID else {
+                return
+            }
+            let inserted = notification.userInfo?[NSInsertedObjectsKey] as? Set<NSManagedObject> ?? []
+            let updated = notification.userInfo?[NSUpdatedObjectsKey] as? Set<NSManagedObject> ?? []
+            self?.append(RecordedSave(
+                insertedEntityNames: inserted.compactMap { $0.entity.name }.sorted(),
+                updatedObjectIDs: Set(updated.map(\.objectID))
+            ))
+        }
+        lock.withLock { self.observer = observer }
+    }
+
+    /// Stops recording and returns every save recorded so far.
+    func stop() -> [RecordedSave] {
+        lock.withLock {
+            if let observer {
+                NotificationCenter.default.removeObserver(observer)
+            }
+            observer = nil
+            return saves
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func append(_ save: RecordedSave) {
+        lock.withLock { saves.append(save) }
+    }
+}
+
+/// Wraps a real test stack, records what each background save held, and
+/// refuses it without saving, as a store that failed the save would.
+///
+/// `@unchecked Sendable`: `lock` guards `recordedAttempts`.
+private final class RecordingFailingSaveCoreDataStack: MessageActionsCoreDataStacking, @unchecked Sendable {
+    private let wrapped: MainQueueMessageActionsCoreDataStack
+    private let lock = NSLock()
+    private var recordedAttempts: [RecordedSave] = []
+
+    init(wrapping wrapped: MainQueueMessageActionsCoreDataStack) {
+        self.wrapped = wrapped
+    }
+
+    var viewContext: NSManagedObjectContext { wrapped.viewContext }
+
+    /// Every refused save, in order.
+    var attempts: [RecordedSave] {
+        lock.withLock { recordedAttempts }
+    }
+
+    func newBackgroundContext() -> NSManagedObjectContext {
+        wrapped.newBackgroundContext()
+    }
+
+    func saveIfNeeded(context: NSManagedObjectContext, caller: String) -> Bool {
+        guard context !== wrapped.viewContext else {
+            return wrapped.saveIfNeeded(context: context, caller: caller)
+        }
+        let attempt = context.performAndWait {
+            RecordedSave(
+                insertedEntityNames: context.insertedObjects.compactMap { $0.entity.name }.sorted(),
+                updatedObjectIDs: Set(context.updatedObjects.map(\.objectID))
+            )
+        }
+        lock.withLock { recordedAttempts.append(attempt) }
+        return false
+    }
+}
+
+private final class ConnectedNetworkMonitorStub: NetworkMonitorProtocol {
+    var isConnected: Bool { true }
+    var onConnectivityChange: ((Bool) -> Void)?
+    func start() {}
+    func stop() {}
 }
 
 /// Wraps a real test stack but reports every `saveIfNeeded` as failed, to exercise the
@@ -1978,13 +2420,19 @@ actor MockPendingActionsManager: PendingActionsManagerProtocol {
         ))
     }
 
-    // The `within:` witnesses are required (the protocol has no defaults).
-    func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String : Any]?, within _: SyncRun) async {
-        await queueAction(type: type, messageId: messageId, payload: payload)
+    // The `within:` witnesses are required (the protocol has no defaults). They
+    // record what `MessageActions` committed; the rows themselves are in the
+    // test's store.
+    func queueAction(_ action: PendingActionEnqueue.StagedMessageAction, within _: SyncRun) async {
+        await queueAction(type: action.type, messageId: action.messageId, payload: nil)
     }
 
-    func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String], within _: SyncRun) async {
-        await queueConversationAction(type: type, sourceConversationId: sourceConversationId, messageIds: messageIds)
+    func queueConversationAction(_ action: PendingActionEnqueue.StagedConversationAction, within _: SyncRun) async {
+        await queueConversationAction(
+            type: action.type,
+            sourceConversationId: action.sourceConversationId,
+            messageIds: action.messageIds
+        )
     }
 
     func processAllPendingActions() async {}

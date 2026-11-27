@@ -715,28 +715,25 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         )
     }
 
+    /// The caller committed the row in its own save, with the change it
+    /// describes (`PendingActionEnqueue`), so there is nothing to insert or
+    /// save here, and a refusal below leaves the row queued: it only does not
+    /// start processing for a caller that no longer owns its run.
     func queueAction(
-        type: PendingAction.ActionType,
-        messageId: String,
-        payload: [String: Any]?,
+        _ action: PendingActionEnqueue.StagedMessageAction,
         within syncRun: SyncRun
     ) async {
         ensureInitialized()
 
         guard await syncRunCoordinator.isActiveRun(syncRun) else {
-            Log.error("Refusing pending action without its active account-work run", category: .sync)
+            Log.error("Not scheduling a committed pending action without its active account-work run", category: .sync)
             return
         }
 
-        let saveSucceeded = await persistAction(
-            type: type,
-            messageId: messageId,
-            payload: payload
-        )
         finishSingleActionEnqueue(
-            saveSucceeded: saveSucceeded,
-            type: type,
-            messageId: messageId
+            saveSucceeded: true,
+            type: action.type,
+            messageId: action.messageId
         )
     }
 
@@ -789,28 +786,23 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         )
     }
 
+    /// See `queueAction(_:within:)`: the row is already committed.
     func queueConversationAction(
-        type: PendingAction.ActionType,
-        sourceConversationId: UUID,
-        messageIds: [String],
+        _ action: PendingActionEnqueue.StagedConversationAction,
         within syncRun: SyncRun
     ) async {
         ensureInitialized()
 
         guard await syncRunCoordinator.isActiveRun(syncRun) else {
-            Log.error("Refusing conversation action without its active account-work run", category: .sync)
+            Log.error("Not scheduling a committed conversation action without its active account-work run", category: .sync)
             return
         }
 
-        let saveSucceeded = await persistConversationAction(
-            type: type,
-            sourceConversationId: sourceConversationId,
-            messageIds: messageIds
-        )
+        Log.info("Queued \(action.type.rawValue) for \(action.messageIds.count) messages", category: .sync)
         finishConversationActionEnqueue(
-            saveSucceeded: saveSucceeded,
-            type: type,
-            sourceConversationId: sourceConversationId
+            saveSucceeded: true,
+            type: action.type,
+            sourceConversationId: action.sourceConversationId
         )
     }
 
@@ -821,11 +813,12 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
     ) async -> Bool {
         let context = coreDataStack.viewContext
         return await context.perform {
-            self.createPendingAction(
-                in: context,
+            PendingActionEnqueue.stageMessageAction(
                 type: type,
                 messageId: messageId,
-                payload: payload
+                payload: payload,
+                createdAt: Date(),
+                in: context
             )
             return context.saveOrLog(operation: "queue pending action: \(type.rawValue)")
         }
@@ -841,13 +834,13 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
         Log.info("Queueing \(type.rawValue) for \(messageIds.count) messages", category: .sync)
 
         let context = coreDataStack.viewContext
-        let payload: [String: Any] = ["messageIds": messageIds]
         return await context.perform {
-            self.createPendingAction(
-                in: context,
+            PendingActionEnqueue.stageConversationAction(
                 type: type,
                 sourceConversationId: sourceConversationId,
-                payload: payload
+                messageIds: messageIds,
+                createdAt: Date(),
+                in: context
             )
             return context.saveOrLog(operation: "queue conversation action: \(type.rawValue)")
         }
@@ -878,29 +871,6 @@ actor PendingActionsManager: PendingActionsManagerProtocol {
             scheduleProcessing()
         } else if !saveSucceeded {
             Log.error("Failed to save conversation action \(type.rawValue) for conversation \(sourceConversationId) - action will not be queued", category: .sync)
-        }
-    }
-
-    private nonisolated func createPendingAction(
-        in context: NSManagedObjectContext,
-        type: PendingAction.ActionType,
-        messageId: String? = nil,
-        sourceConversationId: UUID? = nil,
-        payload: [String: Any]? = nil
-    ) {
-        let action = PendingAction(context: context)
-        action.setValue(UUID(), forKey: "id")
-        action.setValue(type.rawValue, forKey: "actionType")
-        action.setValue(messageId, forKey: "messageId")
-        action.setValue(sourceConversationId, forKey: "conversationId")
-        action.setValue(Date(), forKey: "createdAt")
-        action.setValue("pending", forKey: "status")
-        action.setValue(Int16(0), forKey: "retryCount")
-
-        if let payload = payload,
-           let payloadData = try? JSONSerialization.data(withJSONObject: payload),
-           let payloadString = String(data: payloadData, encoding: .utf8) {
-            action.setValue(payloadString, forKey: "payload")
         }
     }
 
