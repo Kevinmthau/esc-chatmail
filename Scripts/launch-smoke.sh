@@ -14,9 +14,20 @@
 #
 # CI runs it on the Release build after check-built-info-plist.sh: Release is what Xcode
 # Cloud archives, and before this the first launch of a Release build was the TestFlight
-# install after the merge. It is no test plan and no part of run-tests.sh. The simulator is
-# erased, so run it on a device of its own (CI's job has one; locally pass a udid you made),
-# never on the device another run is using. Nothing here reads mail or signs in: the app
+# install after the merge. It is no test plan and no part of run-tests.sh.
+#
+# The simulator is erased, so it must be a device of this run's own, never the one another
+# run is using: the device is the second argument, else SIMULATOR_ID, else the id in
+# DESTINATION (the wrappers' variables, so a developer's pinned device is honoured), and only
+# in CI (GITHUB_ACTIONS) the picker's default iPhone 17 Pro, whose job has it to itself.
+# Outside CI with none of those the script refuses: that default is the device
+# codex-test.sh resolves in another shell, and erasing it drops its Contacts grant, after
+# which that shell's next Contacts-touching test hangs (PR 501 review).
+#
+# The sign-in root is awaited, not sampled once: the process must be alive WAIT_SECONDS
+# after launch (default 20), and the root line is looked for until DEADLINE_SECONDS after
+# launch (default 90), because this step fails the job ship-gate needs and a cold Release
+# launch on a loaded runner is not timed. Nothing here reads mail or signs in: the app
 # starts signed out, as a fresh install does.
 set -euo pipefail
 
@@ -27,22 +38,34 @@ if [[ -z "${APP}" || "${APP}" != *.app || ! -d "${APP}" ]]; then
 fi
 BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw -o - "${APP}/Info.plist")"
 EXECUTABLE="$(plutil -extract CFBundleExecutable raw -o - "${APP}/Info.plist")"
-# The device: the second argument, or the one the wrappers pick, read out of the
-# `platform=iOS Simulator,id=<udid>` line default-simulator-destination.py prints (that
-# script prints a destination and nothing else; it is not asked for a bare UDID). Checked
-# for the shape of a UDID before anything is erased, so a picker that printed something
-# else fails here with its output, not inside simctl.
+# The device (see the header). The picker prints a `platform=iOS Simulator,id=<udid>` line
+# and nothing else (it is not asked for a bare UDID), so the id is read out of that line, as
+# it is out of DESTINATION. Whatever the source, the result is checked for the shape of a
+# UDID before anything is erased, so a wrong value fails here, naming itself, not in simctl.
+DEVICE_SOURCE=""
 if [[ -n "${2:-}" ]]; then
   UDID="$2"
-else
+  DEVICE_SOURCE="the second argument"
+elif [[ -n "${SIMULATOR_ID:-}" ]]; then
+  UDID="${SIMULATOR_ID}"
+  DEVICE_SOURCE="SIMULATOR_ID"
+elif [[ -n "${DESTINATION:-}" ]]; then
+  UDID="${DESTINATION##*id=}"
+  DEVICE_SOURCE="DESTINATION '${DESTINATION}'"
+elif [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
   DESTINATION_LINE="$(python3 "$(dirname "${BASH_SOURCE[0]}")/default-simulator-destination.py")"
   UDID="${DESTINATION_LINE##*id=}"
+  DEVICE_SOURCE="the picker's '${DESTINATION_LINE}'"
+else
+  echo "error: no device. Pass the UDID of a simulator of your own as the second argument, or set SIMULATOR_ID or DESTINATION to one; this script erases the device, so it never takes the wrappers' default outside CI." >&2
+  exit 2
 fi
 if ! [[ "${UDID}" =~ ^[0-9A-Fa-f]{8}(-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$ ]]; then
-  echo "error: no simulator UDID to erase (got '${UDID}'${DESTINATION_LINE:+ from '${DESTINATION_LINE}'})" >&2
+  echo "error: no simulator UDID to erase (got '${UDID}' from ${DEVICE_SOURCE})" >&2
   exit 2
 fi
 WAIT_SECONDS="${LAUNCH_SMOKE_WAIT_SECONDS:-20}"
+DEADLINE_SECONDS="${LAUNCH_SMOKE_DEADLINE_SECONDS:-90}"
 # The identifier ContentView gives the sign-in root and the line that records it
 # (LaunchRootScreen.signIn, LaunchRootScreenRecord); LaunchSmokeSourceTests pins the match.
 EXPECTED_LINE="Root screen published: launch.root.signIn"
@@ -95,13 +118,23 @@ if [[ -n "${NEW_REPORTS}" ]]; then
 fi
 rm -f "${MARKER}"
 
-# 3. The sign-in root was published (the whole launch path ran to ContentView).
-LAUNCH_LOG="$(xcrun simctl spawn "${UDID}" log show --style compact --start "${START}" \
-  --predicate "subsystem == \"${BUNDLE_ID}\" AND category == \"launch\"" 2>/dev/null || true)"
+# 3. The sign-in root was published (the whole launch path ran to ContentView): looked for
+#    until the deadline, so a slow cold launch is a late pass, not a failed job.
+launch_log() {
+  xcrun simctl spawn "${UDID}" log show --style compact --start "${START}" \
+    --predicate "subsystem == \"${BUNDLE_ID}\" AND category == \"launch\"" 2>/dev/null || true
+}
+LAUNCH_LOG="$(launch_log)"
+ELAPSED="${WAIT_SECONDS}"
+while ! printf '%s\n' "${LAUNCH_LOG}" | grep -qF "${EXPECTED_LINE}" && [[ "${ELAPSED}" -lt "${DEADLINE_SECONDS}" ]]; do
+  sleep 5
+  ELAPSED=$((ELAPSED + 5))
+  LAUNCH_LOG="$(launch_log)"
+done
 if printf '%s\n' "${LAUNCH_LOG}" | grep -qF "${EXPECTED_LINE}"; then
-  echo "root screen: ${EXPECTED_LINE}" >&2
+  echo "root screen: ${EXPECTED_LINE} (within ${ELAPSED}s)" >&2
 else
-  fail "no '${EXPECTED_LINE}' in the launch log since ${START}:"
+  fail "no '${EXPECTED_LINE}' in the launch log within ${DEADLINE_SECONDS}s of the launch:"
   printf '%s\n' "${LAUNCH_LOG}" | tail -20 >&2
 fi
 
