@@ -436,9 +436,11 @@ final class HTMLContentHandler: @unchecked Sendable {
     /// and stored again before the removal ran.
     ///
     /// The store is asked before the lock is taken, never with it held. Every HTML read and
-    /// write takes that lock, and so does every context's save, whose notification captures
-    /// the boundary's generation for `CacheCoordinator`; asked inside it, a fetch kept the
-    /// main thread's body loads and every save in the app waiting for as long as it took.
+    /// write takes that lock, and so does every context's save with something to invalidate,
+    /// whose notification captures the boundary's generation for `CacheCoordinator` (a save
+    /// with nothing to invalidate takes it no longer: `CacheCoordinator.savePlan`); asked
+    /// inside it, a fetch kept the main thread's body loads and every such save in the app
+    /// waiting for as long as it took.
     /// The answer can be older than the unlink, and that is covered by the file's date,
     /// which is read under the lock just before the unlink: every body write takes the lock,
     /// so a body written after the answer was written after the delete and is left. What
