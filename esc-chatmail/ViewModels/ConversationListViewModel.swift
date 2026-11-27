@@ -73,6 +73,11 @@ final class ConversationListViewModel: ObservableObject {
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
     private var hasLoadedAllConversationWindow = false
+    /// Set when a window fetch failed and the window on screen is the one from before
+    /// it: the next `.syncCompleted` reloads, and only then (`retryOwedWindowReload`),
+    /// never every sync, which would refetch the whole window on the main thread after
+    /// each one.
+    private var windowReloadOwed = false
     /// Emails already handed to the person/avatar prefetchers for the current
     /// window generation. Reset when the query changes or the store is
     /// invalidated wholesale, so a genuinely fresh window prefetches again.
@@ -124,6 +129,19 @@ final class ConversationListViewModel: ObservableObject {
         forwardChanges(from: resolvedFilterService, storing: &cancellables)
 
         bindFiltering()
+
+        // The retry of a window fetch that failed (`windowReloadOwed`): a sync's end,
+        // because nothing else refetches a whole window once the list is on screen
+        // (sync and pull-to-refresh reload nothing, live changes re-add only the rows
+        // they touch, and only a backfill after a merged save that leaves a slot open
+        // asks again before this), so the Mac's sidebar stayed wrong until a search or
+        // a relaunch.
+        resolvedDependencies.notificationCenter.publisher(for: .syncCompleted)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.retryOwedWindowReload()
+            }
+            .store(in: &cancellables)
     }
 
     // MARK: - Convenience Accessors (View Compatibility)
@@ -534,7 +552,7 @@ final class ConversationListViewModel: ObservableObject {
         // A different query rebuilds the window from scratch: forget the
         // prefetch ledger so the new window's rows warm again.
         prefetchedPersonEmails.removeAll()
-        reloadConversationWindowFromStore()
+        reloadConversationWindowFromStore(afterQueryChange: true)
     }
 
     // MARK: - Window Paging
@@ -559,8 +577,13 @@ final class ConversationListViewModel: ObservableObject {
         let pagingTriggerItems = filteredConversationItems.suffix(windowProvider.preloadThreshold)
         guard pagingTriggerItems.contains(where: { $0.id == item.id }) else { return }
 
+        let previousLimit = loadedConversationLimit
         loadedConversationLimit += windowProvider.pageSize
-        reloadConversationWindowFromStore()
+        if !reloadConversationWindowFromStore() {
+            // Left raised, `backfillConversationWindowIfNeeded` would run the failing
+            // full reload again after every relevant merged save.
+            loadedConversationLimit = previousLimit
+        }
     }
 
     private var conversationContext: NSManagedObjectContext {
@@ -571,20 +594,46 @@ final class ConversationListViewModel: ObservableObject {
         try? conversationContext.existingObject(with: objectID) as? Conversation
     }
 
-    private func reloadConversationWindowFromStore() {
+    /// Returns whether the window was read. A read that fails keeps the window on
+    /// screen, leaves paging open and owes a reload (`windowReloadOwed`): until
+    /// 2026-11-27 `fetchWindow` answered `[]` for a fetch error, the latch closed on it
+    /// (0 < limit) and a failure on a paging step replaced a populated list with
+    /// nothing that looked final (architecture review 2026-11, conversation-list-ui#6).
+    /// `afterQueryChange` says the window on screen answers another query (search text,
+    /// filter, contact set): then a failed read clears it, as a query that matched
+    /// nothing would, instead of showing rows the new query excludes.
+    @discardableResult
+    private func reloadConversationWindowFromStore(afterQueryChange: Bool = false) -> Bool {
         // A filter/contacts-cache/search callback can fire before onAppear(in:)
         // registers a context; the first onAppear reload picks that state up
         // (observedConversationContext is weak, so no assert).
-        guard observedConversationContext != nil else { return }
+        guard observedConversationContext != nil else { return false }
 
-        let window = windowProvider.fetchWindow(
-            in: conversationContext,
-            limit: loadedConversationLimit,
-            searchText: searchService.debouncedSearchText,
-            filter: filterService.currentFilter,
-            canMatchCurrentFilter: canCurrentFilterMatchConversations,
-            matchesVisibility: matchesVisibleConversation(_:)
-        )
+        let window: [Conversation]
+        do {
+            window = try windowProvider.fetchWindow(
+                in: conversationContext,
+                limit: loadedConversationLimit,
+                searchText: searchService.debouncedSearchText,
+                filter: filterService.currentFilter,
+                canMatchCurrentFilter: canCurrentFilterMatchConversations,
+                matchesVisibility: matchesVisibleConversation(_:)
+            )
+        } catch {
+            Log.error(
+                "Failed to fetch the conversation window; keeping the one on screen until the next sync",
+                category: .conversation,
+                error: error
+            )
+            windowReloadOwed = true
+            hasLoadedAllConversationWindow = false
+            if afterQueryChange {
+                listStore.replaceAll(with: [])
+                publishVisibleItems()
+            }
+            return false
+        }
+        windowReloadOwed = false
         hasLoadedAllConversationWindow = window.count < loadedConversationLimit
         // Captured before replaceAll so the prefetch below targets only the
         // rows entering the window on this reload (paging's appended tail, a
@@ -594,8 +643,31 @@ final class ConversationListViewModel: ObservableObject {
         publishVisibleItems()
         let newlyVisibleItems = listStore.visibleItems.filter { !previouslyVisibleIDs.contains($0.id) }
         prefetchPersonData(from: newlyVisibleItems)
+        return true
     }
 
+    /// The reload a failed fetch left owed, at a sync's end and only then.
+    private func retryOwedWindowReload() {
+        guard windowReloadOwed else { return }
+        reloadConversationWindowFromStore()
+    }
+
+    /// The observed context was reset wholesale (`NSInvalidatedAllObjectsKey`), so the
+    /// window is gone: paging reopens and a reload is owed. Nothing is fetched here: the
+    /// reset runs between the store's destroy and its reload, where a fetch traps;
+    /// `onAppear` or the next sync's end refetches. Internal (not private) for the
+    /// `+ChangeObservation` facet.
+    func noteWindowInvalidated() {
+        hasLoadedAllConversationWindow = false
+        windowReloadOwed = true
+    }
+
+    /// Returns whether the reload replaced and published the window. A backfill whose
+    /// fetch failed answers false, so the caller publishes the live changes it already
+    /// applied (a deletion or an archive that opened the slot) and the row leaves the
+    /// screen; the reload stays owed. Answering true there, as the first version of the
+    /// failure branch did, left the removed row visible and selectable until a later
+    /// reload (Codex's review of PR 503).
     @discardableResult
     private func backfillConversationWindowIfNeeded() -> Bool {
         guard observedConversationContext != nil,
@@ -604,8 +676,7 @@ final class ConversationListViewModel: ObservableObject {
             return false
         }
 
-        reloadConversationWindowFromStore()
-        return true
+        return reloadConversationWindowFromStore()
     }
 
     // MARK: - Visibility Predicates

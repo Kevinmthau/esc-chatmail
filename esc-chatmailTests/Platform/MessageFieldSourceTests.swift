@@ -10,7 +10,7 @@ import XCTest
 /// and each field draws its word as a separate text over an editor that has none of its own.
 ///
 /// HONEST SCOPE: this reads source text, as `ChatComposerStyleSourceTests` does, so it runs in
-/// the iOS suite, and in CI, which runs no Mac tests. It pins that each field asks the policy
+/// the iOS suite and in CI's iOS job (CI's Mac lane runs the two Mac suites named below). It pins that each field asks the policy
 /// and names its editor, and matches the spelling of each call. `MacChatReplyBarLayoutTests`
 /// and `MacReplyTextFieldTests` ask the Mac's real text view for its name. Nothing asks SwiftUI
 /// what it tells VoiceOver about the other fields, because a test host is told nothing: the

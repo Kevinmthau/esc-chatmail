@@ -24,6 +24,14 @@ actor AliasManager {
     private var cachedAccountAliases: AccountAliases?
     private var cachedContactSelfAddresses: Set<String>?
     private var cachedDependencyFingerprint: ParticipantRollupDependencyFingerprint?
+    /// Bumped by `invalidate()`. `getAliases` is the one entry that suspends (its Core
+    /// Data load), so a load that was in flight when the caches were invalidated (a
+    /// sign-in over another account's store resets the store between the read and the
+    /// write, and `AuthSession.performDurableLocalCleanup` invalidates after the reset)
+    /// returns what it read, since its caller asked under the old account, but caches
+    /// nothing: cached, the old row's addresses would be the new account's own until the
+    /// first sync's profile fetch (architecture review 2026-11, account-boundary-auth#2).
+    private var invalidationEpoch: UInt64 = 0
 
     /// - Parameter contactSelfAddresses: The addresses Contacts add for an
     ///   account with these normalized addresses; a synchronous read of the
@@ -57,7 +65,21 @@ actor AliasManager {
         if let cachedAccountAliases {
             accountAliases = cachedAccountAliases
         } else {
-            accountAliases = await loadFromCoreData(in: context)
+            let epoch = invalidationEpoch
+            guard let loaded = await loadFromCoreData(in: context) else {
+                // A failed read is not an account with no addresses (CLAUDE.md: a
+                // failed Core Data read is never "empty"). Cached, the empty set kept
+                // the user's own address in every hash until a sync's `setAliases`,
+                // and a send in that window forked its chat (architecture review
+                // 2026-11, observability-errors#6). Nothing is cached: the next call
+                // reads again.
+                return []
+            }
+            accountAliases = loaded
+            guard epoch == invalidationEpoch else {
+                // Invalidated while the load was suspended: answer, cache nothing.
+                return aliases(for: accountAliases)
+            }
         }
         return await cacheAliases(for: accountAliases)
     }
@@ -95,6 +117,7 @@ actor AliasManager {
     /// Clears the cached aliases.
     /// Call this on sign out or account change.
     func invalidate() {
+        invalidationEpoch &+= 1
         cachedAliases = nil
         cachedAccountAliases = nil
         cachedContactSelfAddresses = nil
@@ -114,6 +137,14 @@ actor AliasManager {
         let raw: [String]
     }
 
+    /// The user's own addresses for these account aliases: the account's and those
+    /// Contacts add, with nothing stored.
+    private func aliases(for accountAliases: AccountAliases) -> Set<String> {
+        accountAliases.normalized.union(
+            normalizeAliases(contactSelfAddresses(accountAliases.normalized))
+        )
+    }
+
     private func cacheAliases(for accountAliases: AccountAliases) async -> Set<String> {
         let fromContacts = contactSelfAddresses(accountAliases.normalized)
         let aliases = accountAliases.normalized.union(normalizeAliases(fromContacts))
@@ -130,12 +161,21 @@ actor AliasManager {
         return aliases
     }
 
-    private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases {
+    /// The stored account's addresses: an empty set for a store with no Account row,
+    /// and nil where the row could not be read, which is not the same thing.
+    private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases? {
         await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
 
-            guard let account = try? context.fetch(request).first else {
+            let storedAccount: Account?
+            do {
+                storedAccount = try context.fetch(request).first
+            } catch {
+                Log.error("Failed to read the account's aliases", category: .sync, error: error)
+                return nil
+            }
+            guard let account = storedAccount else {
                 return AccountAliases(normalized: [], raw: [])
             }
 

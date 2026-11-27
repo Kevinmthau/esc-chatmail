@@ -149,9 +149,11 @@ final class GmailAPIClientRetransmissionTests: XCTestCase {
             )
             XCTFail("Expected authentication preflight failure")
         } catch GmailMessageSendError.transmissionNotStarted(let underlying) {
-            guard let tokenError = underlying as? TokenManagerError,
-                  case .noValidToken = tokenError else {
-                return XCTFail("Expected noValidToken, got \(underlying)")
+            // The preflight's failure leaves the client as an `APIError`
+            // (`GmailAPIClient.apiError(forTokenAcquisitionFailure:)`), still
+            // before the barrier.
+            guard case .authenticationError? = underlying as? APIError else {
+                return XCTFail("Expected authenticationError, got \(underlying)")
             }
         } catch {
             XCTFail("Unexpected error: \(error)")
