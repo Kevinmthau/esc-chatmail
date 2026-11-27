@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     -testPlan)
       # Same hole from the other side: -testPlan esc-chatmail with a Mac
       # DESTINATION is the full iOS plan in a Mac test host.
-      echo "The test plan follows DESTINATION (and --performance); -testPlan cannot be passed." >&2
+      echo "The test plan follows DESTINATION (and --performance or --concurrency-debug); -testPlan cannot be passed." >&2
       exit 1
       ;;
     *)

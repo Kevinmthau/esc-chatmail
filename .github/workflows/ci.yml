@@ -64,10 +64,11 @@ jobs:
             -default-test-execution-time-allowance 120 \
             -maximum-test-execution-time-allowance 300
 
-      # The same suites a second time, under Core Data's ConcurrencyDebug assertion
-      # (architecture review 2026-11, testing-ci-release#4): ConcurrencyDebug.xctestplan is
-      # the suites measured clean under `-com.apple.CoreData.ConcurrencyDebug 1`, which traps
-      # on a context touched off its queue. The default plan cannot carry the flag (its
+      # A second pass over the suites of ConcurrencyDebug.xctestplan (a subset of the default
+      # plan, which has just run them without the flag), under Core Data's ConcurrencyDebug
+      # assertion (architecture review 2026-11, testing-ci-release#4): those suites were
+      # measured clean under `-com.apple.CoreData.ConcurrencyDebug 1`, which traps on a
+      # context touched off its queue. The default plan cannot carry the flag (its
       # private-queue test contexts are touched off-queue by design), so this plan is the
       # ratchet: a confinement regression in the code these suites cover fails here as a
       # crashed test, where before it shipped as a rare crash or a lost save. Serial, so a

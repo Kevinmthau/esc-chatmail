@@ -74,14 +74,20 @@ final class ConcurrencyDebugPlanTests: XCTestCase {
         XCTAssertTrue(try repositorySource("Scripts/codex-test.sh").contains("--concurrency-debug"))
     }
 
-    // Revert-check: fails if CI stops running the plan after the default plan, or if the
-    // scheme stops referencing it (Xcode would then not offer it).
-    func testCI_runsThePlanAfterTheDefaultPlan_andTheSchemeReferencesIt() throws {
+    // Revert-check: fails if CI stops running the plan after the default plan, makes the
+    // step advisory (`continue-on-error` anywhere in the step, which would let ship-gate
+    // advance a commit whose plan crashed), or if the scheme stops referencing the plan
+    // (Xcode would then not offer it).
+    func testCI_runsThePlanAfterTheDefaultPlan_blocking_andTheSchemeReferencesIt() throws {
         let workflow = try repositorySource(".github/workflows/ci.yml")
         let defaultPlan = try XCTUnwrap(workflow.range(of: "bash Scripts/run-tests.sh \\\n            -resultBundlePath TestResults.xcresult"))
-        let concurrencyDebug = try XCTUnwrap(workflow.range(of: "bash Scripts/run-tests.sh --concurrency-debug \\"))
-        XCTAssertLessThan(defaultPlan.lowerBound, concurrencyDebug.lowerBound)
-        XCTAssertFalse(String(workflow[concurrencyDebug.lowerBound...]).hasPrefix("bash Scripts/run-tests.sh --concurrency-debug \\\n        continue-on-error"))
+        let stepName = try XCTUnwrap(workflow.range(of: "      - name: Run tests (ConcurrencyDebug test plan)\n"))
+        XCTAssertLessThan(defaultPlan.lowerBound, stepName.lowerBound)
+        // The step is every line from its name to the next step's.
+        let rest = String(workflow[stepName.upperBound...])
+        let step = String(rest[..<(rest.range(of: "      - name: ")?.lowerBound ?? rest.endIndex)])
+        XCTAssertTrue(step.contains("bash Scripts/run-tests.sh --concurrency-debug \\"), step)
+        XCTAssertFalse(step.contains("continue-on-error"), step)
 
         let scheme = try repositorySource("esc-chatmail.xcodeproj/xcshareddata/xcschemes/esc-chatmail.xcscheme")
         XCTAssertTrue(scheme.contains("reference = \"container:ConcurrencyDebug.xctestplan\""))
