@@ -491,7 +491,7 @@ extension MessagePersister {
                 )
                 return (true, modifiedConversationIDs)
             } catch {
-                Log.error("Failed to delete excluded mailbox message \(id)", category: .coreData, error: error)
+                Log.error("Failed to delete excluded mailbox message \(Log.hashIdentifier(id))", category: .coreData, error: error)
                 return (false, [])
             }
         }
@@ -523,11 +523,11 @@ extension MessagePersister {
                 )
                 if !didPersistInlineData {
                     context.delete(attachment)
-                    Log.warning("Dropping inline attachment for message \(message.id) due to local persistence failure", category: .attachment)
+                    Log.warning("Dropping inline attachment for message \(Log.hashIdentifier(message.id)) due to local persistence failure", category: .attachment)
                 }
             }
         } catch {
-            Log.error("Failed to create attachment for message \(message.id): \(error)", category: .coreData)
+            Log.error("Failed to create attachment for message \(Log.hashIdentifier(message.id))", category: .coreData, error: error)
         }
     }
 
