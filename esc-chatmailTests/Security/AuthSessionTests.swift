@@ -107,6 +107,97 @@ final class AuthSessionTests: XCTestCase {
         }
     }
 
+    // Both sign-out paths drop the alias caches through the one injected closure, ahead of
+    // the store cleanup as before, and the cleanup drops them again after the store reset,
+    // as every store reset does.
+    // Revert-check: fails if a path keeps an inline `AliasManager.shared.invalidate()` pair
+    // in place of the closure (no event before the reset), or if
+    // `performDurableLocalCleanup` loses its call (no event after it).
+    func testSignOutPaths_invalidateAliasCachesThroughTheClosure_beforeAndAfterTheStoreReset() async {
+        for disconnects in [false, true] {
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                invalidateAccountAliasCaches: { cleanup.record("alias-caches-invalidated") },
+                resetCoreDataStore: { cleanup.record("store-reset") }
+            )
+            session.isAuthenticated = true
+
+            if disconnects {
+                // No user means no revocation token: disconnect throws after its local cleanup.
+                try? await session.signOutAndDisconnect()
+            } else {
+                let didSignOut = await session.signOut()
+                XCTAssertTrue(didSignOut)
+            }
+
+            let path = disconnects ? "signOutAndDisconnect" : "signOut"
+            let storeResetIndex = cleanup.events.firstIndex(of: "store-reset")
+            let invalidations = cleanup.events.indices.filter { cleanup.events[$0] == "alias-caches-invalidated" }
+            XCTAssertNotNil(storeResetIndex, "\(path) must reset the store")
+            XCTAssertEqual(invalidations.count, 2, "\(path): once at the path, once in the cleanup")
+            if let storeResetIndex, invalidations.count == 2 {
+                XCTAssertLessThan(invalidations[0], storeResetIndex, path)
+                XCTAssertGreaterThan(invalidations[1], storeResetIndex, path)
+            }
+        }
+    }
+
+    // The two crash-resume paths drop the alias caches through the same closure.
+    // Revert-check: fails if the credential-cleanup resume keeps an inline invalidation pair
+    // in place of the closure (it reaches no other call). The removal resume reaches
+    // `performDurableLocalCleanup`, whose own call records an event, so an inline pair
+    // there is caught only by `testAliasCacheInvalidation_goesThroughTheSeamOnly`.
+    func testRestoreResumedCleanup_invalidatesAliasCachesThroughTheClosure() async throws {
+        for key in [KeychainService.Key.localStoreResetRequired, .credentialCleanupRequired] {
+            let keychain = MockKeychainService()
+            try keychain.save(Data([1]), for: key.rawValue, withAccess: .afterFirstUnlockThisDeviceOnly)
+            let cleanup = AuthSessionCleanupRecorder()
+            let session = makeAuthSession(
+                keychainService: keychain,
+                invalidateAccountAliasCaches: { cleanup.record("alias-caches-invalidated") }
+            )
+
+            let outcome = await session.restorePreviousSignIn()
+
+            XCTAssertEqual(outcome, .terminalNoSession, key.rawValue)
+            XCTAssertFalse(
+                cleanup.events.filter { $0 == "alias-caches-invalidated" }.isEmpty,
+                "\(key.rawValue): the resumed cleanup drops the alias caches"
+            )
+        }
+    }
+
+    // In AuthSession.swift the alias caches are invalidated only through the injected
+    // closure, whose production default is `ProductionAliasCacheAccountTransition`: no
+    // path keeps an inline pair, which is how the sign-in over another account's store
+    // was missed. Comment lines are skipped.
+    // Revert-check: fails if an `AliasManager.shared.invalidate()` or
+    // `SendAsAliasManager.shared.invalidate()` is added to AuthSession.swift outside that
+    // namespace.
+    func testAliasCacheInvalidation_goesThroughTheSeamOnly() throws {
+        let source = try repositorySource("esc-chatmail/Services/Security/AuthSession.swift")
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        // With the `await`: the first spelling is also the tail of the second.
+        for call in ["await AliasManager.shared.invalidate()", "await SendAsAliasManager.shared.invalidate()"] {
+            XCTAssertEqual(source.components(separatedBy: call).count - 1, 1, call)
+        }
+        let namespace = try XCTUnwrap(source.range(of: "private enum ProductionAliasCacheAccountTransition {"))
+        let callSite = try XCTUnwrap(source.range(of: "await AliasManager.shared.invalidate()"))
+        XCTAssertLessThan(namespace.lowerBound, callSite.lowerBound)
+        XCTAssertLessThan(
+            source.distance(from: namespace.upperBound, to: callSite.lowerBound),
+            80,
+            "The one invalidation pair is the body of the production namespace"
+        )
+        XCTAssertGreaterThanOrEqual(
+            source.components(separatedBy: "await invalidateAccountAliasCaches()").count - 1,
+            5,
+            "The four removal paths and performDurableLocalCleanup call the closure"
+        )
+    }
+
     func testWithFreshToken_reusesSingleInjectedTokenManagerInstance() async throws {
         let factory = AuthSessionTokenManagerFactory()
         let session = makeAuthSession(tokenManagerProvider: { factory.makeDistinctTokenManager() })
@@ -1817,6 +1908,39 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // A sign-in over another account's store resets it through `performDurableLocalCleanup`,
+    // and the alias caches, built from the Account row the reset removes, are dropped
+    // there: after the reset and before account work reopens. Until 2026-11-27 only the
+    // four removal paths dropped them (inline), so a sign-in from the reconnect screen as
+    // another account kept the old account's addresses as the new one's own until the
+    // first sync's profile fetch (architecture review 2026-11, account-boundary-auth#2).
+    // Revert-check: fails if the `invalidateAccountAliasCaches()` call in
+    // `performDurableLocalCleanup` goes (no event), or moves ahead of `resetCoreDataStore()`
+    // (the order changes: before the reset an unfenced reader can refill the old row's
+    // addresses).
+    func testAccountPreparationInvalidatesAliasCachesAfterTheStoreResetBeforeReopening() async throws {
+        let cleanup = AuthSessionCleanupRecorder()
+        let registry = OutboundTaskRegistry(admissionOpen: true)
+        let transition = registry.closeAdmission()
+        let session = makeAuthSession(
+            clearParticipantCaches: { cleanup.record("participant-caches-cleared") },
+            invalidateAccountAliasCaches: { cleanup.record("alias-caches-invalidated") },
+            resetCoreDataStore: { cleanup.record("store-reset") },
+            fetchStoredAccountEmails: { ["first@example.com"] },
+            reopenHTMLContent: { cleanup.record("html-reopened") },
+            outboundTaskRegistry: registry
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("SECOND@example.com")
+        let reopenOutcome = await session.reopenAccountWork(after: transition)
+
+        XCTAssertEqual(reopenOutcome, .reopened)
+        XCTAssertEqual(
+            cleanup.events,
+            ["participant-caches-cleared", "store-reset", "alias-caches-invalidated", "html-reopened"]
+        )
+    }
+
     func testAccountPreparationKeepsAccountlessTrulyEmptyStore() async throws {
         let resetScript = AuthSessionStoreResetScript()
         let session = makeAuthSession(
@@ -1925,6 +2049,12 @@ final class AuthSessionTests: XCTestCase {
     // 2. The tombstone policy of `AccountScopedMailboxFileInspector.hasStoredFiles` and
     //    `HTMLContentHandler.hasStoredHTMLFiles`. Count a tombstone as account data and
     //    the account preparation resets the store a second time.
+    // 3. `HTMLContentAccountBoundary.inspect` behind `hasStoredHTMLFiles`, which answers
+    //    while the boundary is closed. Answer `true` for a closed boundary instead (the
+    //    `perform(…) ?? true` of before) and the preparation, which the app runs before
+    //    the reopen, resets the store a second time (architecture review 2026-11,
+    //    account-boundary-auth#3). Until 2026-11-27 this test reopened the handler
+    //    before preparing, so it never took the app's path.
     // HONEST SCOPE: the cleanup closures here are built from the functions `AuthSession`'s
     // defaults call, over temporary directories, because the defaults themselves act on
     // the process's shared stores. That the defaults call them is not run by any test.
@@ -1994,9 +2124,10 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Attachments").path))
         XCTAssertFalse(fileManager.fileExists(atPath: appSupport.appendingPathComponent("Previews").path))
 
-        // The next sign-in, with the removal still not done. Its reopen makes the Messages
-        // directory again, as the app's does.
-        try handler.reopenAccountWork()
+        // The next sign-in, with the removal still not done, in the app's order: the
+        // preparation runs with the handler still closed (`signIn` reopens account work
+        // only after `prepareLocalStoreForAuthenticatedAccount` returns), and the reopen
+        // then makes the Messages directory again.
         try await session.prepareLocalStoreForAuthenticatedAccount(
             "next@example.com",
             entry: .interactiveSignIn
@@ -2007,6 +2138,7 @@ final class AuthSessionTests: XCTestCase {
             1,
             "Tombstones are not another account's mailbox: the sign-in must not reset the store again"
         )
+        try handler.reopenAccountWork()
         XCTAssertNil(handler.loadHTML(for: "message-0"))
         XCTAssertNotNil(handler.saveHTML("<p>next account</p>", for: "message-0"))
         XCTAssertEqual(handler.loadHTML(for: "message-0"), "<p>next account</p>")
@@ -3481,6 +3613,7 @@ final class AuthSessionTests: XCTestCase {
         resetPendingActionRetryState: @escaping @MainActor @Sendable () async -> Void = {},
         pendingActionAuthenticationDidRecover: @escaping @MainActor @Sendable () async -> Void = {},
         resetSyncStorageState: @escaping @MainActor @Sendable () -> Void = {},
+        invalidateAccountAliasCaches: @escaping @Sendable () async -> Void = {},
         cancelBackgroundTaskRequests: @escaping @MainActor @Sendable () -> Void = {},
         resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
         fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = { [] },
@@ -3511,6 +3644,7 @@ final class AuthSessionTests: XCTestCase {
             resetPendingActionRetryState: resetPendingActionRetryState,
             pendingActionAuthenticationDidRecover: pendingActionAuthenticationDidRecover,
             resetSyncStorageState: resetSyncStorageState,
+            invalidateAccountAliasCaches: invalidateAccountAliasCaches,
             cancelBackgroundTaskRequests: cancelBackgroundTaskRequests,
             resetCoreDataStore: resetCoreDataStore,
             inspectLocalMailboxStore: {

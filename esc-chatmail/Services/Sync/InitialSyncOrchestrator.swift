@@ -298,9 +298,11 @@ final class InitialSyncOrchestrator {
                 conversationsUpdated: conversationCount,
                 totalDuration: totalDuration
             )
-            timing.finishRun(
-                outcome: "success messages=\(result.successfulCount) conversations=\(conversationCount) warnings=\(syncCompletedWithWarnings)"
-            )
+            timing.finishRun(outcome: .initialSuccess(
+                messages: result.successfulCount,
+                conversations: conversationCount,
+                warnings: syncCompletedWithWarnings
+            ))
 
             return InitialSyncResult(
                 messagesProcessed: result.successfulCount,
@@ -314,7 +316,7 @@ final class InitialSyncOrchestrator {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
             performanceLogger.endOperation("InitialSync", signpostID: signpostID)
-            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+            timing.finishRun(outcome: .failed(error))
             log.error("Initial sync failed", error: error)
             throw error
         }

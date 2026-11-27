@@ -38,6 +38,79 @@ final class VirtualScrollStateTests: XCTestCase {
         super.tearDown()
     }
 
+    // While chat A is open, a merged save of many messages into conversation B must not
+    // fire B's fault on the view context: with both objectIDs permanent, membership is
+    // decided by the relationship's destination objectID alone. Before, the UUID read
+    // through KVC on the foreign Conversation loaded its row, one per distinct other
+    // conversation in every merge (architecture review 2026-11,
+    // gap-change-propagation-pipeline#3, chat-transcript-ui#6). A SQLite store, so that
+    // the merged rows arrive as faults as they do in the app.
+    // Revert-check: the permanent-ID short-circuit in
+    // `VirtualScrollState.belongsToCurrentConversation` (`isCurrentConversation`): B is
+    // then loaded in the view context after the merge, `isFault` false.
+    func testMergedSaveIntoAnotherConversation_leavesThatConversationAFault() async throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let mergingContext = sqliteStack.makeMainQueueViewContext()
+        mergingContext.automaticallyMergesChangesFromParent = true
+        // Keeps the merged B registered, so the assertion sees the object the
+        // classification touched and not one released when the handler returned.
+        mergingContext.retainsRegisteredObjects = true
+        let conversationA = ConversationBuilder()
+            .visible()
+            .recentlyActive()
+            .build(in: mergingContext)
+        for index in 0..<3 {
+            _ = MessageBuilder()
+                .withId("chat-a-\(index)")
+                .withSubject("chat-a-\(index)")
+                .withDate(Date(timeIntervalSince1970: TimeInterval(index)))
+                .inConversation(conversationA)
+                .build(in: mergingContext)
+        }
+        try mergingContext.save()
+
+        let state = VirtualScrollState(
+            conversationId: conversationA.id.uuidString,
+            viewContext: mergingContext,
+            makeBackgroundContext: { sqliteStack.newBackgroundContext() }
+        )
+        defer { state.cleanup() }
+        await waitUntil {
+            state.initialLoadPhase == .loaded && state.visibleMessages.count == 3
+        }
+
+        let background = sqliteStack.newBackgroundContext()
+        let (conversationBID, lastMessageBID): (NSManagedObjectID, NSManagedObjectID) = try await background.perform {
+            let conversationB = ConversationBuilder()
+                .visible()
+                .recentlyActive()
+                .build(in: background)
+            var lastMessage: Message?
+            for index in 0..<50 {
+                lastMessage = MessageBuilder()
+                    .withId("chat-b-\(index)")
+                    .withSubject("chat-b-\(index)")
+                    .withDate(Date(timeIntervalSince1970: TimeInterval(100 + index)))
+                    .inConversation(conversationB)
+                    .build(in: background)
+            }
+            try background.save()
+            return (conversationB.objectID, lastMessage!.objectID)
+        }
+
+        await waitUntil {
+            mergingContext.registeredObjects.contains { $0.objectID == lastMessageBID }
+        }
+
+        let mergedConversationB = mergingContext.registeredObjects.first { $0.objectID == conversationBID }
+        XCTAssertTrue(
+            mergedConversationB?.isFault ?? true,
+            "Classifying another conversation's merged messages loaded that conversation's row"
+        )
+        XCTAssertEqual(state.visibleMessages.count, 3, "Chat A's window is untouched")
+        XCTAssertEqual(state.totalMessageCount, 3)
+    }
+
     func testLoadMessagePage_returnsOrderedObjectIDsFromBackgroundContext() async throws {
         let (conversation, messages) = try makeConversationWithMessages(count: 6)
         let page = await VirtualScrollState.loadMessagePage(

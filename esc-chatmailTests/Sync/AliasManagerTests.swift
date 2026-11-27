@@ -28,6 +28,44 @@ final class AliasManagerTests: XCTestCase {
         super.tearDown()
     }
 
+    /// An `invalidate()` that lands while a load is suspended in Core Data wins. A sign-in
+    /// over another account's store resets the store between the load's read and its cache
+    /// write (`AuthSession.performDurableLocalCleanup` invalidates after the reset), and
+    /// the old row's addresses, cached then, would be the new account's own until the
+    /// first sync's profile fetch. The load still answers its caller, who asked under the
+    /// old account; the next load reads the store again.
+    ///
+    /// Revert-check: the `invalidationEpoch` comparison in `AliasManager.getAliases`
+    /// (the suspended load's result is cached: `hasCachedAliases` is true after it
+    /// returns, and the next load answers the old account's address).
+    func testInvalidate_whileALoadIsSuspendedInCoreData_cachesNothing() async throws {
+        let account = AccountBuilder().withEmail("old@example.com").build(in: context)
+        try context.save()
+        let manager = AliasManager(
+            contactSelfAddresses: { _ in [] },
+            rollupDependencyTracker: StubRollupDependencyTracker()
+        )
+        let gated = FetchGatingContext(
+            gatedEntityName: "Account",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        let load = Task.detached { await manager.getAliases(from: gated) }
+        await gated.waitUntilFetchIsReached()
+
+        await manager.invalidate()
+        gated.releaseFetch()
+        let loaded = await load.value
+
+        XCTAssertEqual(loaded, ["old@example.com"], "The load still answers the caller that asked under the old account")
+        let cached = await manager.hasCachedAliases
+        XCTAssertFalse(cached, "Nothing the suspended load read is cached")
+
+        account.email = "new@example.com"
+        try context.save()
+        let afterwards = await manager.getAliases(from: stack.newBackgroundContext())
+        XCTAssertEqual(afterwards, ["new@example.com"], "The next load reads the store again")
+    }
+
     /// The user's own addresses Contacts add come from the set the link store adopted,
     /// decided by `SelfContactCards`: a household card {me, spouse} does not make the
     /// spouse the user when the spouse has a card of their own.

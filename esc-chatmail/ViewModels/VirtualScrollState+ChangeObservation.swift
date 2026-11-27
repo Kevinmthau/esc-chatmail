@@ -451,50 +451,73 @@ extension VirtualScrollState {
         return objectID
     }
 
-    /// Membership check that compares object IDs first: the destination objectID
-    /// of the to-one relationship is available without firing the Conversation's
-    /// own fault, so a message of this conversation costs the message row alone
-    /// (the earlier UUID-only comparison loaded the Conversation row for every
-    /// inserted message in every merge). A message of another conversation still
-    /// falls through to the UUID reads below, which fire that Conversation's
-    /// fault; settling two permanent IDs that differ without the read is left
-    /// open (architecture review 2026-11, gap-change-propagation-pipeline#3).
+    /// Membership check that faults at most the message row where the open conversation's
+    /// objectID and the relationship's destination are both permanent, which is every
+    /// stored chat (`ChatViewModel.init` gives the conversation a permanent ID). The
+    /// destination objectID of the to-one relationship is available without firing the
+    /// Conversation's own fault, and with both IDs permanent it decides alone, as
+    /// `transcriptPredicate` does: two permanent IDs that differ name two stored rows. Until 2026-11-27 a destination that differed fell
+    /// through to a KVC `id` read, which fired the foreign Conversation's fault, one row
+    /// load per distinct other conversation in every merge while a chat was open
+    /// (always, on the Mac; architecture review 2026-11,
+    /// gap-change-propagation-pipeline#3, chat-transcript-ui#6). The UUID is read only
+    /// where either ID is nil or temporary: a temporary objectID names no stored row
+    /// (CLAUDE.md's objectID rule; an optimistic conversation not yet saved), and the
+    /// read stays optional KVC, because the Swift `id` traps mid-merge. The committed
+    /// destination is always asked as well, never skipped after a mismatch on the
+    /// current one: Core Data may clear an inverse relationship before publishing the
+    /// deleted object in objectsDidChange, and its committed destination still identifies
+    /// which conversation's ordered dataset changed.
     func belongsToCurrentConversation(_ message: Message) -> Bool {
         let conversationObjectID = currentConversationObjectID()
         let conversationUUID = UUID(uuidString: conversationId)
 
-        if let messageConversation = message.conversation {
-            if messageConversation.objectID == conversationObjectID {
-                return true
-            }
-            // A sibling-context merge can publish the relationship before
-            // all required attributes on its destination are materialized.
-            // Reading the nonoptional Swift property in that window traps
-            // while bridging nil; optional KVC keeps the observer resilient.
-            if let messageConversationID =
-                messageConversation.value(forKey: "id") as? UUID,
-               messageConversationID == conversationUUID {
-                return true
-            }
+        if let messageConversation = message.conversation,
+           Self.isCurrentConversation(
+               messageConversation,
+               objectID: conversationObjectID,
+               uuid: conversationUUID
+           ) {
+            return true
         }
 
-        // Core Data may clear an inverse relationship before publishing the
-        // deleted object in objectsDidChange. Its committed destination still
-        // identifies which conversation's ordered dataset changed.
         if let committedConversation = message.committedValues(
             forKeys: ["conversation"]
-        )["conversation"] as? Conversation {
-            if committedConversation.objectID == conversationObjectID {
-                return true
-            }
-            if let committedConversationID =
-                committedConversation.value(forKey: "id") as? UUID,
-               committedConversationID == conversationUUID {
-                return true
-            }
+        )["conversation"] as? Conversation,
+           Self.isCurrentConversation(
+               committedConversation,
+               objectID: conversationObjectID,
+               uuid: conversationUUID
+           ) {
+            return true
         }
 
         return false
+    }
+
+    /// Whether `destination` is the open conversation: by objectID alone where both are
+    /// permanent, by UUID otherwise. See `belongsToCurrentConversation`.
+    private static func isCurrentConversation(
+        _ destination: Conversation,
+        objectID conversationObjectID: NSManagedObjectID?,
+        uuid conversationUUID: UUID?
+    ) -> Bool {
+        if destination.objectID == conversationObjectID {
+            return true
+        }
+        if let conversationObjectID,
+           !conversationObjectID.isTemporaryID,
+           !destination.objectID.isTemporaryID {
+            // Two permanent IDs that differ are two stored rows: no UUID read,
+            // which would fire the other conversation's fault.
+            return false
+        }
+        guard let conversationUUID else { return false }
+        // A sibling-context merge can publish the relationship before all
+        // required attributes on its destination are materialized. Reading the
+        // nonoptional Swift property in that window traps while bridging nil;
+        // optional KVC keeps the observer resilient.
+        return (destination.value(forKey: "id") as? UUID) == conversationUUID
     }
 
     private func hasVisibleInsertedMessageForCurrentConversation(in notification: Notification) -> Bool {

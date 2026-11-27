@@ -4,7 +4,27 @@ import UIKit
 #endif
 
 protocol RemoteImageFetching: Sendable {
-    func image(from urlString: String) async -> PlatformImage?
+    /// One fetch of a sender's image, with what its failure means for the caller's
+    /// memory of failed URLs (`ImageRequestManager`).
+    func fetchImage(from urlString: String) async -> RemoteImageFetchOutcome
+}
+
+/// What one fetch of a sender's image came to. The two failures are told apart because
+/// `ImageRequestManager` remembered every failure for the process: one offline or
+/// timed-out view left a card's hero image or a Drive thumbnail a placeholder until the
+/// process ended, days on the Mac (architecture review 2026-11, networking#6,
+/// caching-memory#2). `RemoteImageFailurePolicy` is the one definition of which is which.
+enum RemoteImageFetchOutcome {
+    case image(PlatformImage)
+    /// The URL will not yield an image: an invalid or private URL, a 3xx (a redirect the
+    /// guarding session refused), a 4xx other than 408 and 429, an unsupported type, a
+    /// body past the limit, bytes that do not decode. Remembered for the process.
+    case definitiveFailure
+    /// The fetch failed for now: a transport error (offline, a timeout, cancellation), a
+    /// 5xx, a 408 or a 429, or a response that was not HTTP. Remembered briefly.
+    case transientFailure
+    /// Remote image loading is switched off: nothing is remembered.
+    case disabled
 }
 
 enum RemoteImageFetchError: Error, Equatable {
@@ -40,9 +60,9 @@ actor RemoteImageFetcher: RemoteImageFetching {
         self.remoteConfig = remoteConfig
     }
 
-    func image(from urlString: String) async -> PlatformImage? {
+    func fetchImage(from urlString: String) async -> RemoteImageFetchOutcome {
         guard await remoteConfig.isEnabled(.remoteImageLoadingEnabled) else {
-            return nil
+            return .disabled
         }
 
         do {
@@ -51,11 +71,20 @@ actor RemoteImageFetcher: RemoteImageFetching {
             guard let image = await Self.decodedImage(from: data) else {
                 throw RemoteImageFetchError.undecodableImage
             }
-            return image
+            return .image(image)
         } catch {
             logFetchFailure(error, urlString: urlString)
-            return nil
+            return RemoteImageFailurePolicy.outcome(for: error)
         }
+    }
+
+    /// The image or nil, for a caller that remembers nothing of a failure
+    /// (`ProfilePhotoResolver`).
+    func image(from urlString: String) async -> PlatformImage? {
+        if case .image(let image) = await fetchImage(from: urlString) {
+            return image
+        }
+        return nil
     }
 
     func imageData(from urlString: String) async throws -> Data {

@@ -32,6 +32,49 @@ final class HTMLContentAccountBoundaryTests: XCTestCase {
         XCTAssertThrowsError(try handler.hasStoredHTMLFiles())
     }
 
+    // The state the account-isolation gate asks in: a sign-in after a sign-out in the
+    // same process prepares its store with the boundary still closed, because the
+    // reopen comes after the preparation.
+    //
+    // Revert-check: `HTMLContentHandler.hasStoredHTMLFiles` reading through
+    // `HTMLContentAccountBoundary.inspect`, which answers while the boundary is closed.
+    // Through `perform(…) ?? true`, as before, a closed boundary read as "stored HTML"
+    // whatever was on disk: the second assertion here fails, and `AuthSessionTests`'
+    // sign-out over real files resets the store a second time.
+    func testStoredHTMLInspection_whileClosed_answersWhatIsOnDisk() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("HTMLContentClosedInspection-\(UUID().uuidString)", isDirectory: true)
+        let held = HeldTombstone()
+        let handler = HTMLContentHandler(
+            messagesDirectory: directory,
+            deleteHTMLFiles: { directory in
+                held.set(try RetiredAccountDirectory.takeOutOfUse(directory))
+            }
+        )
+        defer {
+            try? handler.reopenAccountWork()
+            try? FileManager.default.removeItem(at: directory)
+            if let tombstone = held.url { RetiredAccountDirectory.remove(tombstone) }
+        }
+        XCTAssertNotNil(handler.saveHTML("<p>old account</p>", for: "legacy"))
+
+        handler.closeAccountWork()
+
+        XCTAssertTrue(
+            try handler.hasStoredHTMLFiles(),
+            "Closed with a body still on disk: another account's HTML, as before"
+        )
+        XCTAssertNil(handler.loadHTML(for: "legacy"), "Inspection opens the boundary to no reader")
+
+        try await handler.deleteAllHTMLFromClosedAccount()
+
+        XCTAssertFalse(
+            try handler.hasStoredHTMLFiles(),
+            "Closed with the directory renamed away: no files, whatever the boundary's state"
+        )
+        XCTAssertNil(handler.saveHTML("<p>blocked</p>", for: "blocked"), "Inspection opens the boundary to no writer")
+    }
+
     func testCloseIsSharedAcrossHandlersAndRejectsStaleGenerationAfterReopen() async throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("HTMLContentAccountBoundaryTests-\(UUID().uuidString)", isDirectory: true)

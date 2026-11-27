@@ -205,7 +205,7 @@ final class IncrementalSyncOrchestrator {
             accountData = try await fetchValidatedAccountData()
         } catch {
             timing.finish(accountTimer, detail: "failed=true")
-            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+            timing.finishRun(outcome: .failed(error))
             throw error
         }
         timing.finish(accountTimer, detail: "hasHistory=\(accountData?.historyId != nil)")
@@ -217,7 +217,7 @@ final class IncrementalSyncOrchestrator {
                 // follow-up intent so BackgroundSyncManager can hand the work
                 // to a processing task instead.
                 log.info("No account/historyId found; deferring initial sync to a processing task")
-                timing.finishRun(outcome: "initialFallback deferred=true")
+                timing.finishRun(outcome: .initialFallbackDeferred)
                 return IncrementalSyncResult(
                     newMessagesCount: 0,
                     labelChangesProcessed: 0,
@@ -239,12 +239,10 @@ final class IncrementalSyncOrchestrator {
                     fallbackTimer,
                     detail: "incomplete=\(initialSyncIncomplete)"
                 )
-                timing.finishRun(
-                    outcome: "initialFallback incomplete=\(initialSyncIncomplete)"
-                )
+                timing.finishRun(outcome: .initialFallback(incomplete: initialSyncIncomplete))
             } catch {
                 timing.finish(fallbackTimer, detail: "failed=true")
-                timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+                timing.finishRun(outcome: .failed(error))
                 throw error
             }
             return IncrementalSyncResult(
@@ -626,9 +624,12 @@ final class IncrementalSyncOrchestrator {
             // Publish only after cleanup has finished mutating the message
             // dataset so observers reconcile against the final sync state.
             NotificationCenter.default.post(name: .syncCompleted, object: nil)
-            timing.finishRun(
-                outcome: "success newMessages=\(fetchResult.successfulCount) labelRecords=\(historyResult.records.count) continuation=\(historyResult.wasTruncated) warnings=\(fetchResult.hasFailures)"
-            )
+            timing.finishRun(outcome: .incrementalSuccess(
+                newMessages: fetchResult.successfulCount,
+                labelRecords: historyResult.records.count,
+                continuation: historyResult.wasTruncated,
+                warnings: fetchResult.hasFailures
+            ))
 
             return IncrementalSyncResult(
                 newMessagesCount: fetchResult.successfulCount,
@@ -649,7 +650,7 @@ final class IncrementalSyncOrchestrator {
                 }
                 guard allowsExpensiveRecovery else {
                     log.info("History ID expired; deferring mailbox recovery to a processing task")
-                    timing.finishRun(outcome: "historyRecovery deferred=true")
+                    timing.finishRun(outcome: .historyRecoveryDeferred)
                     return IncrementalSyncResult(
                         newMessagesCount: 0,
                         labelChangesProcessed: 0,
@@ -666,10 +667,10 @@ final class IncrementalSyncOrchestrator {
                         progressHandler: progressHandler
                     )
                     timing.finish(recoveryTimer)
-                    timing.finishRun(outcome: "historyRecovery warnings=true")
+                    timing.finishRun(outcome: .historyRecovery(warnings: true))
                 } catch {
                     timing.finish(recoveryTimer, detail: "failed=true")
-                    timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+                    timing.finishRun(outcome: .failed(error))
                     throw error
                 }
                 return IncrementalSyncResult(
@@ -679,13 +680,13 @@ final class IncrementalSyncOrchestrator {
                     needsFollowUp: recoveryNeedsFollowUp
                 )
             }
-            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+            timing.finishRun(outcome: .failed(error))
             throw error
         } catch {
             if !committedModificationTransaction {
                 await ModificationTracker.shared.rollbackTransaction(modificationTransaction)
             }
-            timing.finishRun(outcome: "failed error=\(error.localizedDescription)")
+            timing.finishRun(outcome: .failed(error))
             throw error
         }
     }

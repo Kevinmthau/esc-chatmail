@@ -128,6 +128,11 @@ actor SendAsAliasManager {
     static let shared = SendAsAliasManager()
 
     private var cachedAliases: [SendAsAlias]?
+    /// Bumped by `invalidate()`: a load suspended in Core Data when the cache was
+    /// invalidated (a sign-in over another account's store resets the store between the
+    /// read and the write) returns what it read and caches nothing, as `AliasManager`'s
+    /// does (architecture review 2026-11, account-boundary-auth#2).
+    private var invalidationEpoch: UInt64 = 0
 
     @discardableResult
     func setAliases(_ aliases: [SendAsAlias]) -> [SendAsAlias] {
@@ -141,6 +146,7 @@ actor SendAsAliasManager {
             return cachedAliases
         }
 
+        let epoch = invalidationEpoch
         let aliases = await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
@@ -165,11 +171,16 @@ actor SendAsAliasManager {
             return SendAsAlias.deduplicated(fallbackAliases)
         }
 
+        guard epoch == invalidationEpoch else {
+            // Invalidated while the load was suspended: answer, cache nothing.
+            return aliases
+        }
         cachedAliases = aliases
         return aliases
     }
 
     func invalidate() {
+        invalidationEpoch &+= 1
         cachedAliases = nil
     }
 }
