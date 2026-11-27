@@ -2,7 +2,8 @@ import Foundation
 import SwiftUI
 
 /// When the app-scoped foreground sync session (`ForegroundSyncCoordinator`)
-/// starts and stops, and whether quitting waits for sends, on each platform.
+/// starts and stops, and whether quitting waits for sends and reply drafts,
+/// on each platform.
 ///
 /// - **iOS:** the scene going to the background stops the session and arms the
 ///   BGTask requests; the scene becoming active starts it again.
@@ -12,7 +13,8 @@ import SwiftUI
 ///   it. It pauses while the system sleeps (`NSWorkspace.willSleepNotification`)
 ///   and starts again, syncing at once, on wake and whenever the app becomes
 ///   active (`MacSystemLifecycleObserver`). Quitting waits up to
-///   `outstandingSendTerminationTimeout` for sends in flight.
+///   `outstandingWorkTerminationTimeout` for sends in flight and for reply-draft
+///   writes (`AppTerminationWait`).
 ///
 /// The `App` struct runs under no test plan, so these decisions live here
 /// (`AppLifecyclePolicyTests`) and the struct only carries them out.
@@ -39,15 +41,22 @@ enum AppLifecyclePolicy {
 
     enum TerminationDecision: Equatable, Sendable {
         case terminateNow
-        /// Answer `.terminateLater`, then reply once the outstanding sends
-        /// finish or `timeout` passes, whichever is first.
-        case terminateAfterOutstandingSends(timeout: TimeInterval)
+        /// Answer `.terminateLater`, then reply once the outstanding sends and
+        /// draft writes have all finished or `timeout` passes, whichever is
+        /// first.
+        case terminateAfterOutstandingWork(timeout: TimeInterval)
     }
 
-    /// How long quitting waits for sends in flight before it lets the app
-    /// quit anyway. A send cut off then is safe: cold recovery converts its
-    /// markers at the next launch and never resends.
-    static let outstandingSendTerminationTimeout: TimeInterval = 10
+    /// How long quitting waits for sends in flight and reply-draft writes,
+    /// together, before it lets the app quit anyway. A send cut off then is
+    /// safe: cold recovery converts its markers at the next launch and never
+    /// resends. A draft write cut off loses the text typed since the
+    /// composer's last save, which every quit lost before drafts were waited
+    /// for. What a draft write waits for is the cleanup gate, which a
+    /// maintenance pass holds for under a second on a Mac (measured at S3,
+    /// `docs/scalability-review.md`), so the deadline is the one the sends
+    /// already had.
+    static let outstandingWorkTerminationTimeout: TimeInterval = 10
 
     static func syncAction(
         forScenePhase phase: ScenePhase,
@@ -135,9 +144,16 @@ enum AppLifecyclePolicy {
         platform == .iOS && isApplicationInBackground
     }
 
-    static func terminationDecision(hasOutstandingSends: Bool) -> TerminationDecision {
-        hasOutstandingSends
-            ? .terminateAfterOutstandingSends(timeout: outstandingSendTerminationTimeout)
+    /// `hasOutstandingDraftWrites` is asked after the quit has started the
+    /// saves the on-screen composers' debounce still owed
+    /// (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`), so a
+    /// change typed within the last 350 ms counts.
+    static func terminationDecision(
+        hasOutstandingSends: Bool,
+        hasOutstandingDraftWrites: Bool
+    ) -> TerminationDecision {
+        hasOutstandingSends || hasOutstandingDraftWrites
+            ? .terminateAfterOutstandingWork(timeout: outstandingWorkTerminationTimeout)
             : .terminateNow
     }
 }

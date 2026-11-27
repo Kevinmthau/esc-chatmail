@@ -210,7 +210,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 - **Background-time leases.** `OutboundSendBackgroundLease` and `SceneBackgroundAssertionLatch` wrap `UIApplication.beginBackgroundTask`. macOS doesn't suspend apps, so on the Mac the lease becomes a `ProcessInfo.beginActivity`, which keeps App Nap and idle sleep from stalling a send, with no expiration.
   - That means `backgroundTimeExpiredWithoutTeardown` never fires on macOS.
   - Don't add a Mac substitute that rolls sends back.
-- **Quitting.** In `applicationShouldTerminate`, answer `.terminateLater` while an outbound send is between reservation and outcome. Wait at most about 10 s, then let the app quit. A forced quit is still safe, because cold recovery converts the markers and never resends.
+- **Quitting.** In `applicationShouldTerminate`, answer `.terminateLater` while an outbound send is between reservation and outcome. Wait at most about 10 s, then let the app quit. A forced quit is still safe, because cold recovery converts the markers and never resends. Since 2026-11-27 (architecture review 2026-11, mac-platform#3) it also waits, under the same 10 s, for reply-draft saves: it first starts the save each on-screen composer's 350 ms debounce still owes (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`), then waits for every draft write `ReplyDraftWriteTracker` counts. Not run in the app.
 - **Smaller pieces:**
   - Replace `@UIApplicationDelegateAdaptor` with `@NSApplicationDelegateAdaptor`.
   - The `UIApplication.shared.applicationState` check in `initializeApp()` treats the Mac as always in the foreground.

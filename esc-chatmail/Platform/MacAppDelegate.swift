@@ -16,30 +16,49 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
         mainWindowCloseObserver = observer
     }
 
-    /// Holds the quit while a send is between reservation and outcome, for at
-    /// most `AppLifecyclePolicy.outstandingSendTerminationTimeout`. Nothing is
-    /// cancelled or resent either way (`OutboundSendTerminationWait`).
+    /// Holds the quit while a send is between reservation and outcome, or a
+    /// reply-draft write has not finished, for at most
+    /// `AppLifecyclePolicy.outstandingWorkTerminationTimeout` for both
+    /// together. Nothing is cancelled or resent either way, and no draft is
+    /// written outside a composer's own save (`AppTerminationWait`).
+    ///
+    /// First it has each on-screen composer start the save its 350 ms
+    /// debounce still owes (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`),
+    /// so the decision counts the words typed just before Cmd-Q or the
+    /// window's close. The saves wait for the cleanup-sensitive gate like any
+    /// other.
     ///
     /// While the reply is pending AppKit runs the main run loop in
     /// `NSModalPanelRunLoopMode`, one of the common modes that drain the main
-    /// queue, so main-actor work, the sends' own included, keeps running.
+    /// queue, so main-actor work, the sends' and the draft saves' included,
+    /// keeps running. The reply comes from one main-actor task, once.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let outboundTaskRegistry = OutboundTaskRegistry.shared
+        let composerDirectory = ChatReplyComposerDirectory.shared
+        composerDirectory.flushPresentedDraftsForTermination()
+        let draftWriteTracker = composerDirectory.draftWriteTracker
         switch AppLifecyclePolicy.terminationDecision(
-            hasOutstandingSends: outboundTaskRegistry.hasOutstandingSends
+            hasOutstandingSends: outboundTaskRegistry.hasOutstandingSends,
+            hasOutstandingDraftWrites: draftWriteTracker.hasOutstandingWrites
         ) {
         case .terminateNow:
             return .terminateNow
-        case .terminateAfterOutstandingSends(let timeout):
-            Log.info("Quit waiting for sends in flight", category: .message)
+        case .terminateAfterOutstandingWork(let timeout):
+            Log.info("Quit waiting for sends in flight or reply drafts being saved", category: .message)
             Task { @MainActor in
-                let outcome = await OutboundSendTerminationWait.waitForOutstandingSends(
-                    in: outboundTaskRegistry,
+                let outcome = await AppTerminationWait.waitForOutstandingWork(
+                    sends: outboundTaskRegistry,
+                    draftWrites: draftWriteTracker,
                     timeout: timeout,
                     clock: SystemSyncClock()
                 )
-                if outcome == .timedOut {
-                    Log.warning("Quitting with a send still in flight", category: .message)
+                if case .timedOut(let sendsOutstanding, let draftWritesOutstanding) = outcome {
+                    if sendsOutstanding {
+                        Log.warning("Quitting with a send still in flight", category: .message)
+                    }
+                    if draftWritesOutstanding {
+                        Log.warning("Quitting with a reply draft not yet saved", category: .message)
+                    }
                 }
                 sender.reply(toApplicationShouldTerminate: true)
             }
