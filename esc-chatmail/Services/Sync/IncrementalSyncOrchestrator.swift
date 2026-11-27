@@ -522,7 +522,7 @@ final class IncrementalSyncOrchestrator {
                     log.info("Staged foreground history continuation for the next sync slice")
                 } else {
                     try await historyCheckpointStore.stageClear(in: context)
-                    await messagePersister.setAccountHistoryId(historyResult.latestHistoryId, in: context)
+                    try await messagePersister.setAccountHistoryId(historyResult.latestHistoryId, in: context)
                 }
             } else {
                 // Do not move the progress row: an existing continuation stays
@@ -988,7 +988,7 @@ final class IncrementalSyncOrchestrator {
                     accountEmail: accountEmail,
                     in: context
                 )
-                await messagePersister.setAccountHistoryId(cursorHistoryId, in: context)
+                try await messagePersister.setAccountHistoryId(cursorHistoryId, in: context)
             } else {
                 // A held recovery keeps its frozen window so the retry
                 // re-lists the same span, from its first page: its failures

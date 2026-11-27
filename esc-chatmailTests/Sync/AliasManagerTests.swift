@@ -28,6 +28,36 @@ final class AliasManagerTests: XCTestCase {
         super.tearDown()
     }
 
+    /// A failed Account read caches nothing (CLAUDE.md: a failed Core Data read is never
+    /// "empty"): cached, the empty set kept the user's own address in every hash until a
+    /// sync's `setAliases`, and a send in that window forked its chat. The next call reads
+    /// the store again.
+    ///
+    /// Revert-check: `AliasManager.loadFromCoreData` returning nil on a fetch error (as an
+    /// empty set it is cached, `getAliases` reuses it, and the second call answers nothing).
+    func testGetAliases_failedAccountRead_cachesNothingAndReadsAgain() async throws {
+        _ = AccountBuilder().withEmail("me@example.com").build(in: context)
+        try context.save()
+        let manager = AliasManager(
+            contactSelfAddresses: { _ in [] },
+            rollupDependencyTracker: StubRollupDependencyTracker()
+        )
+        let failing = EntityFetchFailingContext(
+            failingEntityName: "Account",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+
+        let failed = await manager.getAliases(from: failing)
+
+        XCTAssertEqual(failed, [])
+        XCTAssertEqual(failing.failedFetches, 1)
+        let cached = await manager.hasCachedAliases
+        XCTAssertFalse(cached, "A failed read is not an account with no addresses")
+
+        let afterwards = await manager.getAliases(from: stack.newBackgroundContext())
+        XCTAssertEqual(afterwards, ["me@example.com"], "The next call reads the store again")
+    }
+
     /// An `invalidate()` that lands while a load is suspended in Core Data wins. A sign-in
     /// over another account's store resets the store between the load's read and its cache
     /// write (`AuthSession.performDurableLocalCleanup` invalidates after the reset), and

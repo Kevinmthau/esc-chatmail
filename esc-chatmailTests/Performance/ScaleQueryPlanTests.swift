@@ -434,7 +434,7 @@ final class ScaleQueryPlanTests: XCTestCase {
 
             var window: [Conversation] = []
             let plans = try SQLiteQueryPlanRecorder.record {
-                window = provider.fetchWindow(
+                window = try provider.fetchWindow(
                     in: context,
                     limit: provider.initialLimit,
                     searchText: "",

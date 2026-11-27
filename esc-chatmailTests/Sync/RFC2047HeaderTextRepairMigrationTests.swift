@@ -43,6 +43,52 @@ final class RFC2047HeaderTextRepairMigrationTests: XCTestCase {
 
     // MARK: - Tests
 
+    // A failed read leaves the flag clear and commits nothing, and the next run decodes.
+    // Before, `(try? context.fetch(...)) ?? []` left nothing to change, the save of nothing
+    // "succeeded" and the flag latched for good (architecture review 2026-11,
+    // invariant-enforcement#6). The failing fetch is the second of the three, so the first
+    // has already staged a decoded name that the failed run must drop.
+    // Revert-check: the do/catch around each of the three fetches in
+    // `decodeRFC2047HeaderTextIfNeeded` and the rollback of a failed run: as `?? []` the
+    // flag is set after the failing run and the second run is skipped (the name stays
+    // garbled); without the rollback the first run commits the name with the flag clear.
+    func testFailedFetch_leavesTheFlagClear_commitsNothing_andTheNextRunDecodes() async throws {
+        PersonBuilder()
+            .withEmail("jose@example.com")
+            .withDisplayName("=?utf-8?B?Sm9zw6k=?=")
+            .build(in: context)
+        try context.save()
+        let failing = EntityFetchFailingContext(
+            failingEntityName: "Message",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+
+        await runRepair(in: failing)
+
+        XCTAssertEqual(failing.failedFetches, 1)
+        XCTAssertFalse(
+            migrationFlags.bool(forKey: DataCleanupService.rfc2047HeaderTextRepairKey),
+            "A failed read latches nothing"
+        )
+        // What the app's next save of this context would commit: the cleanup hold's settle
+        // or the full cleanup's final save, which never asked. Without the rollback the
+        // decoded name staged before the failing read would be committed here, with the
+        // flag clear and no PersonCache invalidation.
+        _ = await failing.performSaveIfNeeded(caller: "RFC2047HeaderTextRepairMigrationTests")
+        context.refreshAllObjects()
+        XCTAssertEqual(
+            try fetchPerson("jose@example.com").displayName,
+            "=?utf-8?B?Sm9zw6k=?=",
+            "The failed run commits nothing of what it had staged, even when the context is saved next"
+        )
+
+        await runRepair()
+
+        context.refreshAllObjects()
+        XCTAssertEqual(try fetchPerson("jose@example.com").displayName, "José")
+        XCTAssertTrue(migrationFlags.bool(forKey: DataCleanupService.rfc2047HeaderTextRepairKey))
+    }
+
     func testDecodesGarbledPersonMessageAndConversationFields() async throws {
         PersonBuilder()
             .withEmail("jose@example.com")

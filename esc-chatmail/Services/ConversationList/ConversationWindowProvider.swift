@@ -14,6 +14,12 @@ struct ConversationWindowProvider {
         self.contactFilterCandidateMultiplier = configuration.contactFilterCandidateMultiplier
     }
 
+    /// Throws when the store cannot be read. A failed read is not an empty mailbox
+    /// (CLAUDE.md): answered as `[]`, as until 2026-11-27, it was the same value as a
+    /// genuinely empty store, so the list latched "all loaded" on it, replaced a
+    /// populated window with nothing and paged no more (architecture review 2026-11,
+    /// conversation-list-ui#6). The two `[]` returns that stay are deliberate: nothing
+    /// asked for, and a filter that can match nothing.
     func fetchWindow(
         in context: NSManagedObjectContext,
         limit: Int,
@@ -21,7 +27,7 @@ struct ConversationWindowProvider {
         filter: ConversationFilter,
         canMatchCurrentFilter: Bool = true,
         matchesVisibility: (Conversation) -> Bool
-    ) -> [Conversation] {
+    ) throws -> [Conversation] {
         guard limit > 0 else { return [] }
         guard canMatchCurrentFilter else { return [] }
 
@@ -46,23 +52,18 @@ struct ConversationWindowProvider {
         // documented on ConversationFilter.needsInMemoryCandidateScan(hasSearchText:).
         let shouldFetchPastInvisibleCandidates = filter.needsInMemoryCandidateScan(hasSearchText: hasSearchText)
 
-        do {
-            if shouldFetchPastInvisibleCandidates {
-                return try fetchFilteredWindow(
-                    request: request,
-                    in: context,
-                    limit: limit,
-                    matchesVisibility: matchesVisibility
-                )
-            }
-
-            request.fetchLimit = limit
-            let candidates = try context.fetch(request)
-            return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
-        } catch {
-            Log.error("Failed to fetch conversation window", category: .conversation, error: error)
-            return []
+        if shouldFetchPastInvisibleCandidates {
+            return try fetchFilteredWindow(
+                request: request,
+                in: context,
+                limit: limit,
+                matchesVisibility: matchesVisibility
+            )
         }
+
+        request.fetchLimit = limit
+        let candidates = try context.fetch(request)
+        return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
     }
 
     private func fetchFilteredWindow(

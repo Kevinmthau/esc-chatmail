@@ -16,6 +16,7 @@ Examples:
   ./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/ParticipantLoaderTests'
   ./Scripts/codex-test.sh --concurrency-debug   # ConcurrencyDebug.xctestplan: its suites under -com.apple.CoreData.ConcurrencyDebug 1, serially
   DESTINATION='platform=macOS' ./Scripts/codex-test.sh   # Mac.xctestplan, sandboxed host only
+  DESTINATION='platform=macOS' ./Scripts/codex-test.sh --ci-mac-host   # as CI runs it: ad-hoc-signed host, .ci bundle ID, KeychainServiceTests skipped
 USAGE
   exit 0
 fi

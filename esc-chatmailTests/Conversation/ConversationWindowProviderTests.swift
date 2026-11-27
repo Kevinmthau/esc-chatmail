@@ -65,7 +65,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         let savedMatch = try XCTUnwrap(savedMatchCandidate)
         let matchingIDs = Set([pendingMatch.objectID, savedMatch.objectID])
 
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",
@@ -88,7 +88,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         }
         try saveViewContext()
 
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",
@@ -129,7 +129,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         viewContext.processPendingChanges()
 
         let newestSaved = try XCTUnwrap(newestSavedCandidate)
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",
@@ -155,7 +155,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         bob.archivedAt = Date(timeIntervalSince1970: 500)
         viewContext.processPendingChanges()
 
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",
@@ -180,7 +180,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         viewContext.delete(bob)
         viewContext.processPendingChanges()
 
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",
@@ -207,7 +207,7 @@ final class ConversationWindowProviderTests: XCTestCase {
         try saveViewContext()
 
         var visibilityChecks = 0
-        let window = makeProvider().fetchWindow(
+        let window = try makeProvider().fetchWindow(
             in: viewContext,
             limit: 2,
             searchText: "",

@@ -13,6 +13,9 @@ struct AccountData {
 enum AccountPersisterError: LocalizedError {
     case entityCreationFailed(String)
     case fetchFailed(Error)
+    /// The store has no `Account` row to stage the history cursor on: the run belongs to an
+    /// account that is no longer there, and its save must not commit without a cursor.
+    case accountMissing
 
     var errorDescription: String? {
         switch self {
@@ -20,6 +23,8 @@ enum AccountPersisterError: LocalizedError {
             return "Failed to create \(entityName) entity in Core Data"
         case .fetchFailed(let underlyingError):
             return "Failed to fetch account: \(underlyingError.localizedDescription)"
+        case .accountMissing:
+            return "No account row to stage the history cursor on"
         }
     }
 }
@@ -121,47 +126,29 @@ extension MessagePersister {
         }
     }
 
-    /// Updates account's history ID in the provided context WITHOUT saving
-    /// Use this for transactional updates where historyId should be saved with other changes
+    /// Stages the Account's history cursor into the caller's context and saves nothing: the
+    /// cursor commits with the run's final save or dies with it (CLAUDE.md, sync cursor).
+    /// A failed read is never "no account". It throws `AccountPersisterError.fetchFailed`, so the
+    /// run ends with no save and a ledger or counter that moved cannot commit beside a cursor that
+    /// did not. A store with no `Account` row throws `.accountMissing` for the same reason. Until
+    /// 2026-11-27 both were a logged warning, and the run committed with its cursor left where it
+    /// was (architecture review 2026-11, sync-engine#6 and observability-errors#6).
     /// - Parameters:
-    ///   - historyId: The new history ID to set
-    ///   - context: The Core Data context to update in (will not be saved)
-    func setAccountHistoryId(_ historyId: String, in context: NSManagedObjectContext) async {
-        await context.perform {
+    ///   - historyId: The new history ID to stage
+    ///   - context: The sync context to stage it in (not saved here)
+    func setAccountHistoryId(_ historyId: String, in context: NSManagedObjectContext) async throws {
+        try await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
-            if let account = try? context.fetch(request).first {
-                account.historyId = historyId
-                Log.debug("Set historyId to \(historyId) in context (pending save)", category: .sync)
-            } else {
-                Log.warning("No account found to set history ID", category: .sync)
+            let account: Account?
+            do {
+                account = try context.fetch(request).first
+            } catch {
+                throw AccountPersisterError.fetchFailed(error)
             }
-        }
-    }
-
-    /// Atomically finalizes a sync by setting the historyId and saving all pending changes in a single transaction.
-    /// This prevents data loss if the app crashes between setting historyId and saving messages.
-    /// - Parameters:
-    ///   - historyId: Optional new history ID to set (nil if historyId should not be updated)
-    ///   - context: The Core Data context containing all pending sync changes
-    /// - Throws: CoreDataError.saveFailed if the save fails
-    func finalizeSync(historyId: String?, in context: NSManagedObjectContext) async throws {
-        try await context.perform {
-            // Set historyId if provided
-            if let historyId = historyId {
-                let request = Account.fetchRequest()
-                request.fetchLimit = 1
-                if let account = try? context.fetch(request).first {
-                    account.historyId = historyId
-                    Log.debug("Finalizing sync with historyId: \(historyId)", category: .sync)
-                } else {
-                    Log.warning("No account found to set history ID during finalize", category: .sync)
-                }
-            }
-
-            // Atomic save of all changes (messages + historyId together)
-            guard context.hasChanges else { return }
-            try context.save()
+            guard let account else { throw AccountPersisterError.accountMissing }
+            account.historyId = historyId
+            Log.debug("Set historyId to \(historyId) in context (pending save)", category: .sync)
         }
     }
 }

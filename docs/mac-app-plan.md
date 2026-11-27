@@ -371,7 +371,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
   - A small `Mac.xctestplan` runs PR C's tests, the lifecycle policy, the shims, and the boundary and cursor suites (`AuthSessionTests`, `HTMLContentAccountBoundaryTests`, `IncrementalSyncCursorTests`). It shows that `Services/` behaves the same on macOS. The full suite stays on iOS.
 - **Three constraints on Mac tests:**
   - **Contacts.** Nothing can grant Contacts access to a Mac test host ahead of time, the way `prepare-simulator.sh` does on iOS. The Mac plan must keep away from the real Contacts store by injecting `accessRequester`, as CLAUDE.md already asks.
-  - **Signing.** On macOS, the `keychain-access-groups` entitlement must be backed by a provisioning profile, so running Mac tests in CI means setting up signing there. Until then, run the Mac test plan locally.
+  - **Signing.** On macOS, the `keychain-access-groups` entitlement must be backed by a provisioning profile, so running Mac tests in CI means setting up signing there. Until then, run the Mac test plan locally. (Done 2026-11-27 without a profile: CI signs the host ad hoc, with the team's entitlements minus the keychain group, under a `.ci` bundle ID, and skips `KeychainServiceTests`; `run-tests.sh --ci-mac-host`, `Scripts/CI-MacTestHost.xcconfig`, CLAUDE.md.)
   - **An unlocked screen.** With the Mac's screen locked, the data-protection keychain refuses a `whenUnlocked` item with `errSecInteractionNotAllowed` (-25308), and `KeychainServiceTests.testSave_updatesAccessibilityForDuplicateItem` fails. Seen on 2026-11-09: the same build passed with the screen unlocked.
 - **Done 2026-11-09:**
   - **Test target.** It gained macOS, with Kevin's permission to edit `project.pbxproj`. The same `-showBuildSettings` diff as Phase 0 showed the app target unchanged. On the test target, only `SUPPORTED_PLATFORMS`, `MACOSX_DEPLOYMENT_TARGET` and `SUPPORTS_MACCATALYST` changed; the last went from YES to NO, as on the app target.
@@ -388,7 +388,7 @@ Use the `hitTest` override for every non-interactive web view. Like `isUserInter
     - **Sync defaults.** The incremental sync path keeps its `UserDefaults` state in an injected store (`.standard` in production). `IncrementalSyncCursorTests` passes its own suite, so it no longer sets `installTimestamp`, `lastSuccessfulSyncTime` and `lastReconciliationTime` in the standard defaults, which in a Mac test host are the real app's.
     - **CI.** The Mac job compiles the test target as well as the app (`codex-build.sh --for-testing`), unsigned, and runs nothing.
     - **Mac test plan.** `Mac.xctestplan` is now 17 suites and 220 tests.
-  - **Not covered.** CI runs no Mac tests.
+  - **Not covered.** CI runs no Mac tests. (Covered since 2026-11-27: the "Build & Test (macOS)" job runs `Mac.xctestplan` in an ad-hoc-signed, sandboxed host; see Signing above.)
 
 **Phase 1 is done when** all of the following work on the Mac: sign in, initial sync, open a chat, send a reply, archive, sign out and sign back in. The iOS suite stays green, and the Mac CI build is green.
 

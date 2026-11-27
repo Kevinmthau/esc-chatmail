@@ -90,6 +90,51 @@ final class AccountPersisterTests: XCTestCase {
         XCTAssertEqual(savedHistoryId, "history-old")
     }
 
+    // Revert-check: `AccountPersister.setAccountHistoryId` throwing
+    // `AccountPersisterError.accountMissing`. With the earlier body, which logged
+    // "No account found" and returned, nothing is thrown and this test fails.
+    func testSetAccountHistoryId_withNoAccountRow_throwsAccountMissingAndStagesNothing() async throws {
+        let context = stack.newBackgroundContext()
+
+        var thrown: Error?
+        do {
+            try await sut.setAccountHistoryId("history-1", in: context)
+        } catch {
+            thrown = error
+        }
+
+        guard case .accountMissing? = thrown as? AccountPersisterError else {
+            return XCTFail("Expected AccountPersisterError.accountMissing, got \(String(describing: thrown))")
+        }
+        let hasChanges = await context.perform { context.hasChanges }
+        XCTAssertFalse(hasChanges, "A refused stage must leave the sync context clean")
+    }
+
+    // Revert-check: the stager writing `account.historyId` into the caller's
+    // context and nothing else; a `save()` inside it would make the second
+    // assertion fail, because the store would then carry the cursor.
+    func testSetAccountHistoryId_withAccountRow_stagesCursorWithoutSaving() async throws {
+        let seedContext = stack.makeMainQueueViewContext()
+        _ = AccountBuilder()
+            .withEmail("test@example.com")
+            .withHistoryId("history-old")
+            .build(in: seedContext)
+        try seedContext.save()
+
+        let context = stack.newBackgroundContext()
+        try await sut.setAccountHistoryId("history-staged", in: context)
+
+        let staged = await context.perform {
+            let request: NSFetchRequest<Account> = Account.fetchRequest()
+            request.fetchLimit = 1
+            return (try? context.fetch(request).first)?.historyId
+        }
+        XCTAssertEqual(staged, "history-staged")
+
+        let stored = await fetchAccountHistoryId(email: "test@example.com")
+        XCTAssertEqual(stored, "history-old", "The cursor commits with the run's save, never with the stager")
+    }
+
     private func fetchAccountHistoryId(email: String) async -> String? {
         let context = stack.newBackgroundContext()
         return await context.perform {

@@ -70,6 +70,7 @@ extension ConversationListViewModel {
             // The wholesale invalidation empties the window; whatever fills it
             // next is a fresh window generation and must prefetch again.
             prefetchedPersonEmails.removeAll()
+            noteWindowInvalidated()
             publishVisibleItems()
             return
         }

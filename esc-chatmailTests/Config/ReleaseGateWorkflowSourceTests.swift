@@ -72,6 +72,8 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertTrue(job.contains("CONFIGURATION=Release"))
         XCTAssertTrue(job.contains("bash Scripts/check-built-info-plist.sh"))
         XCTAssertTrue(job.contains("Release-iphonesimulator/esc-chatmail.app"))
+        // ... and launches it (LaunchSmokeSourceTests has the rest).
+        XCTAssertTrue(job.contains("bash Scripts/launch-smoke.sh"))
     }
 
     // Revert-check: fails if codex-build.sh goes back to a hard-coded `-configuration Debug`.
@@ -81,6 +83,44 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertTrue(script.contains("CONFIGURATION=\"${CONFIGURATION:-Debug}\""))
         XCTAssertTrue(script.contains("-configuration \"${CONFIGURATION}\""))
         XCTAssertFalse(script.contains("-configuration Debug"))
+    }
+
+    /// The scale harness runs in CI after the default plan, on its own (architecture review
+    /// 2026-11, testing-ci-release#5): both scale suites under the Performance plan, never
+    /// PerformanceRegressionTests, and the default plan still skips all three.
+    // Revert-check: fails if the step is removed, loses either scale suite, gains
+    // PerformanceRegressionTests, is made advisory again (`continue-on-error` anywhere in the
+    // job: on the step, a plan regression ships; on the job, ship-gate advances a commit whose
+    // default plan failed), or if esc-chatmail.xctestplan stops skipping the scale suites
+    // (which would run them inside the default plan, where the process-wide plan recorder and
+    // the half-minute seed make them flaky).
+    func testTestJob_runsTheScaleHarnessAfterTheDefaultPlan_blocking_andTheDefaultPlanStillSkipsIt() throws {
+        let job = try jobBlock(named: "test")
+
+        let defaultPlan = try XCTUnwrap(job.range(of: "bash Scripts/run-tests.sh \\\n            -resultBundlePath TestResults.xcresult"))
+        let scale = try XCTUnwrap(job.range(of: "bash Scripts/run-tests.sh --performance \\"))
+        XCTAssertLessThan(defaultPlan.lowerBound, scale.lowerBound)
+        let scaleStep = String(job[scale.lowerBound...])
+        XCTAssertTrue(scaleStep.contains("-parallel-testing-enabled NO"))
+        // Blocking since it passed on the runner's runtime (2026-11-27): no `continue-on-error`
+        // key anywhere in the job.
+        XCTAssertNotNil(job.range(of: "      - name: Run the scale harness (Performance test plan, scale suites only)\n"))
+        XCTAssertFalse(job.contains("continue-on-error:"), job)
+        // Exactly the two scale suites: every -only-testing in the job, in order.
+        let onlyTesting = job.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("-only-testing ") }
+        XCTAssertEqual(onlyTesting, [
+            "-only-testing esc-chatmailTests/ScaleQueryPlanTests \\",
+            "-only-testing esc-chatmailTests/ScaleHubFaultTests \\"
+        ])
+
+        let plan = try repositorySource("esc-chatmail.xctestplan")
+        let skipped = try XCTUnwrap(plan.range(of: "\"skippedTests\""))
+        let skippedBlock = String(plan[skipped.lowerBound...])
+        for suite in ["PerformanceRegressionTests", "ScaleHubFaultTests", "ScaleQueryPlanTests"] {
+            XCTAssertTrue(skippedBlock.contains("\"\(suite)\""), suite)
+        }
     }
 
     /// CI's simulator is the device the local wrappers pick, pinned before it is booted
