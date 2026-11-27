@@ -56,11 +56,15 @@ private final class HTMLContentAccountBoundary: @unchecked Sendable {
 
     /// A read of the directory that answers while the boundary is closed, for the
     /// account-isolation gate alone (`HTMLContentHandler.hasStoredHTMLFiles`). It
-    /// takes the lock, so it never overlaps a writer or the cleanup's rename, and
-    /// checks neither `acceptsWork` nor the generation: the question it answers is
-    /// what is on disk, which a closed boundary knows as well as an open one. Not
-    /// for any reader or writer of a body: those go through `perform`, whose nil
-    /// while closed is what keeps old-account content out of the next account.
+    /// takes the lock, so it never overlaps a body read or write, and checks
+    /// neither `acceptsWork` nor the generation: the question it answers is what is
+    /// on disk, which a closed boundary knows as well as an open one. The lock
+    /// orders nothing against the cleanup's rename, which
+    /// `deleteAllHTMLFromClosedAccount` runs in a detached task outside it: what
+    /// keeps the two apart is that both run only under the auth-transition gate, so
+    /// this is for a caller inside a transition and no other. Not for any reader or
+    /// writer of a body: those go through `perform`, whose nil while closed is what
+    /// keeps old-account content out of the next account.
     func inspect<T>(_ operation: () throws -> T) rethrows -> T {
         lock.lock()
         defer { lock.unlock() }
