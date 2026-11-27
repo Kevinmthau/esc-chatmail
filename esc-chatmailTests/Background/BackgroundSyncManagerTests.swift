@@ -1323,6 +1323,84 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(finalInvocationCount, 1)
     }
 
+    // The process services (the tombstone sweep, CacheCoordinator's start) run inside the
+    // persistence single flight, after persistence is ready and before the restore, so a
+    // background task's cold launch has them too: until 2026-11-27 they ran only from
+    // `initializeApp`, which only the loading view's task runs (architecture review
+    // 2026-11, di-modularity#4).
+    // Revert-check: fails if `preparePersistenceIfNeeded`'s task stops calling
+    // `startProcessServicesOperation` (no "services"), or runs it before the preparation or
+    // after the restore (the order changes).
+    func testStartupBootstrap_backgroundAloneStartsProcessServicesBetweenPersistenceAndRestore() async {
+        let recorder = BootstrapStepRecorder()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await recorder.record("persist")
+                return true
+            },
+            restoreAuthenticationOperation: {
+                await recorder.record("restore")
+                return .authenticated
+            },
+            startProcessServicesOperation: { await recorder.record("services") }
+        )
+
+        let ready = await bootstrap.prepareForBackgroundSync()
+
+        XCTAssertTrue(ready)
+        let steps = await recorder.steps
+        XCTAssertEqual(steps, ["persist", "services", "restore"])
+    }
+
+    // Revert-check: fails if the services start after a failed preparation (a "services"
+    // before the second "persist"), or more than once.
+    func testStartupBootstrap_processServicesStartOnceAfterTheFirstSuccessfulPreparation() async {
+        let recorder = BootstrapStepRecorder()
+        let script = BackgroundPersistencePreparationScript(outcomes: [false, true])
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await recorder.record("persist")
+                return await script.prepare()
+            },
+            startProcessServicesOperation: { await recorder.record("services") }
+        )
+
+        let first = await bootstrap.preparePersistenceIfNeeded()
+        let second = await bootstrap.preparePersistenceIfNeeded()
+        let third = await bootstrap.preparePersistenceIfNeeded()
+
+        XCTAssertFalse(first)
+        XCTAssertTrue(second)
+        XCTAssertTrue(third)
+        let steps = await recorder.steps
+        XCTAssertEqual(steps, ["persist", "persist", "services"])
+    }
+
+    // Revert-check: fails if the services leave the single flight: a foreground launch
+    // joining a background one would start them a second time.
+    func testStartupBootstrap_joinedPreparationsStartProcessServicesOnce() async {
+        let readinessGate = BackgroundSyncReadinessGate()
+        let recorder = BootstrapStepRecorder()
+        let bootstrap = AppStartupBootstrap(
+            preparePersistenceOperation: {
+                await readinessGate.waitUntilReleased()
+            },
+            startProcessServicesOperation: { await recorder.record("services") }
+        )
+        let background = Task { await bootstrap.prepareForBackgroundSync() }
+        await readinessGate.waitUntilStarted()
+        let foreground = Task { await bootstrap.preparePersistenceIfNeeded() }
+
+        await readinessGate.release(succeeded: true)
+        let backgroundResult = await background.value
+        let foregroundResult = await foreground.value
+
+        XCTAssertTrue(backgroundResult)
+        XCTAssertTrue(foregroundResult)
+        let steps = await recorder.steps
+        XCTAssertEqual(steps, ["services"])
+    }
+
     func testStartupBootstrap_failedPersistencePreparationRetries() async {
         let preparationScript = BackgroundPersistencePreparationScript(
             outcomes: [false, true]
@@ -1915,6 +1993,14 @@ private actor BackgroundAuthenticationRestoreScript {
 
     func invocationCount() -> Int {
         calls
+    }
+}
+
+private actor BootstrapStepRecorder {
+    private(set) var steps: [String] = []
+
+    func record(_ step: String) {
+        steps.append(step)
     }
 }
 

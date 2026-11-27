@@ -140,6 +140,83 @@ final class CacheCoordinatorDeletedRowCaptureTests: XCTestCase {
         await coordinator.closeAccountWorkAndAwait()
     }
 
+    // Revert-check: `CacheCoordinator.savePlan(forSave:captureGeneration:)` building the plan
+    // before it captures the generation. Capture first, as `start()` did until 2026-11-27, and
+    // the insert-only save captures once: every save in the process then took the HTML
+    // boundary's lock before it knew it had nothing to invalidate.
+    func testSavePlan_capturesTheGenerationOnlyForASaveWithSomethingToInvalidate() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CacheCoordinatorSavePlan-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let generation = try XCTUnwrap(HTMLContentHandler(messagesDirectory: directory).captureAccountGeneration())
+        var captures = 0
+        let capture: () -> HTMLContentAccountGeneration? = {
+            captures += 1
+            return generation
+        }
+
+        let insertOnly = try savePlanReadWhileSaving(capture) {
+            _ = MessageBuilder().withId("kept-\(UUID().uuidString)").build(in: context)
+        }
+        XCTAssertNil(insertOnly, "An insert asks nothing of the caches")
+        XCTAssertEqual(captures, 0, "A save with nothing to invalidate takes no generation, so no HTML lock")
+
+        let message = MessageBuilder().withId("deleted-\(UUID().uuidString)").build(in: context)
+        try context.save()
+        let deletion = try savePlanReadWhileSaving(capture) {
+            context.delete(message)
+        }
+        XCTAssertEqual(captures, 1)
+        XCTAssertEqual(deletion?.htmlContentGeneration, generation)
+        XCTAssertEqual(deletion?.plan.deletedHTMLArtifacts.count, 1)
+    }
+
+    // Revert-check: fails if `start()` builds its own plan again instead of going through
+    // `savePlan(forSave:captureGeneration:)`, whose order the test above pins.
+    func testStart_readsEverySaveThroughSavePlan() throws {
+        let source = try repositorySource("esc-chatmail/Services/Caching/CacheCoordinator.swift")
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+        let startBody = try XCTUnwrap(source.range(of: "func start(observing"))
+        let savePlanDeclaration = try XCTUnwrap(source.range(of: "nonisolated static func savePlan("))
+        let publisher = String(source[startBody.lowerBound..<savePlanDeclaration.lowerBound])
+        XCTAssertTrue(publisher.contains("CacheCoordinator.savePlan(forSave: notification)"))
+        XCTAssertEqual(
+            publisher.components(separatedBy: "HTMLContentHandler.shared.captureAccountGeneration()").count - 1,
+            1,
+            "In the publisher the generation is captured once, inside the closure handed to savePlan"
+        )
+        XCTAssertFalse(
+            publisher.contains("invalidationPlan(forSave:"),
+            "The publisher builds no plan of its own"
+        )
+    }
+
+    /// Saves `change` and returns what `CacheCoordinator.savePlan` makes of that save, read
+    /// as the coordinator reads it: synchronously, while the notification is being posted.
+    private func savePlanReadWhileSaving(
+        _ captureGeneration: @escaping () -> HTMLContentAccountGeneration?,
+        _ change: () -> Void
+    ) throws -> CacheCoordinator.AccountScopedSavePlan? {
+        var plan: CacheCoordinator.AccountScopedSavePlan?
+        var observed = false
+        let observer = NotificationCenter.default.addObserver(
+            forName: .NSManagedObjectContextDidSave,
+            object: context,
+            queue: nil
+        ) { notification in
+            observed = true
+            plan = CacheCoordinator.savePlan(forSave: notification, captureGeneration: captureGeneration)
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        change()
+        try context.save()
+        XCTAssertTrue(observed, "The save posted no notification")
+        return plan
+    }
+
     /// Saves `change` and returns the plan `CacheCoordinator` reads for that save, read as
     /// the coordinator reads it: synchronously, while the notification is being posted.
     private func planReadWhileSaving(

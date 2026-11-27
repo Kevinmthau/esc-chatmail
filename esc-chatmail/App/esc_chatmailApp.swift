@@ -205,15 +205,10 @@ struct esc_chatmailApp: App {
             logStartupTiming("Persistence bootstrap stopped before readiness")
             return
         }
-        logStartupTiming("Fresh-install and Core Data bootstrap complete")
-
-        // What a sign-out or a fresh-install cleanup renamed out of use and the last run of
-        // the app did not finish removing. In the background, and waited for by nothing.
-        RetiredAccountDirectory.sweepLeftovers()
-
-        // 2. Start cache coordinator for Core Data change notifications
-        CacheCoordinator.shared.start()
-        logStartupTiming("CacheCoordinator started")
+        // The tombstone sweep and CacheCoordinator's start are inside that single
+        // flight (`AppStartupBootstrap`'s process-services operation), so a cold
+        // background launch, which never reaches here, has them too.
+        logStartupTiming("Fresh-install, Core Data and process-services bootstrap complete")
 
         // Maintenance scheduling is fire-and-forget: the pending-request fetch
         // is an unbounded, uncancellable XPC round-trip (getPendingTaskRequests
@@ -226,7 +221,7 @@ struct esc_chatmailApp: App {
             logStartupTiming("Database maintenance scheduled")
         }
 
-        // 3. Restore auth session (after cleanup complete). A cold background
+        // 2. Restore auth session (after cleanup complete). A cold background
         // launch may already own this single-flight phase, in which case the UI
         // joins it instead of starting a second account transition.
         guard await AppStartupBootstrap.shared.restoreAuthenticationIfNeeded() else {
@@ -345,8 +340,8 @@ struct esc_chatmailApp: App {
         // conversation list lifecycle). Also process pending actions and
         // duplicate cleanup. Gated on `isInitialized`: with the observer
         // attached outside the gate, a pre-init activation could start
-        // foreground sync before `initializeApp` has started CacheCoordinator
-        // (a cold background launch's bootstrap can restore auth first) —
+        // foreground sync before the bootstrap has started CacheCoordinator and
+        // restored auth (a cold background launch's bootstrap can own both) —
         // init's completion starts sync itself once the startup order is
         // satisfied.
         let reason = newPhase == .background ? "sceneBackground" : "sceneActive"

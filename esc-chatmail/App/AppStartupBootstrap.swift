@@ -46,6 +46,26 @@ private func prepareProductionAppPersistence() async -> Bool {
     }
 }
 
+/// The process-wide services every entry into the app starts once persistence is ready
+/// and before authentication is restored: what a sign-out or a fresh-install cleanup
+/// renamed out of use and the last run did not finish removing is swept (in the
+/// background, waited for by nothing), and `CacheCoordinator` starts hearing saves. Until
+/// 2026-11-27 both ran from `initializeApp()`, which only `AppLoadingView`'s task runs,
+/// so a background task's cold launch synced in a process where no save built a
+/// reclamation plan: the bodies and attachments of the rows its sync deleted waited for
+/// the daily orphan sweep, and leftover tombstones for the next foreground launch
+/// (architecture review 2026-11, di-modularity#4, gap-change-propagation-pipeline#5).
+/// The order is kept: persistence (the fresh-install check, then the store load), these,
+/// then the restore, whose `reopenHTMLContent` closes `CacheCoordinator` first even at
+/// cold launch and so expects it started. Never in the unit-test host, where the shared
+/// coordinator would hear every test stack's save.
+@MainActor
+private func startProductionProcessServices() {
+    guard !RuntimeEnvironment.isRunningUnitTests else { return }
+    RetiredAccountDirectory.sweepLeftovers()
+    CacheCoordinator.shared.start()
+}
+
 @MainActor
 private func restoreProductionAuthentication() async -> AuthRestoreOutcome {
     await AuthSession.shared.restorePreviousSignIn()
@@ -69,6 +89,7 @@ actor AppStartupBootstrap {
     }
 
     private let preparePersistenceOperation: @Sendable () async -> Bool
+    private let startProcessServicesOperation: @Sendable () async -> Void
     private let restoreAuthenticationOperation: @Sendable () async -> AuthRestoreOutcome
     private var isPersistenceReady = false
     private var activePreparation: ActivePreparation?
@@ -81,20 +102,26 @@ actor AppStartupBootstrap {
         self.preparePersistenceOperation = {
             await prepareProductionAppPersistence()
         }
+        self.startProcessServicesOperation = {
+            await startProductionProcessServices()
+        }
         self.restoreAuthenticationOperation = {
             await restoreProductionAuthentication()
         }
     }
 
     /// Test seam for pinning single-flight launch behavior without touching
-    /// production credentials or persistence.
+    /// production credentials or persistence. The process services default to
+    /// nothing: the production ones are the shared coordinator and the disk.
     init(
         preparePersistenceOperation: @escaping @Sendable () async -> Bool,
         restoreAuthenticationOperation: @escaping @Sendable () async -> AuthRestoreOutcome = {
             .terminalNoSession
-        }
+        },
+        startProcessServicesOperation: @escaping @Sendable () async -> Void = {}
     ) {
         self.preparePersistenceOperation = preparePersistenceOperation
+        self.startProcessServicesOperation = startProcessServicesOperation
         self.restoreAuthenticationOperation = restoreAuthenticationOperation
     }
 
@@ -116,8 +143,15 @@ actor AppStartupBootstrap {
 
         let preparationID = UUID()
         let preparePersistenceOperation = self.preparePersistenceOperation
+        let startProcessServicesOperation = self.startProcessServicesOperation
         let task = Task<Bool?, Never> {
-            await preparePersistenceOperation()
+            guard await preparePersistenceOperation() else { return false }
+            // Once per process: an attempt that succeeds is the last one, and a
+            // waiter that is cancelled leaves this task running. Inside the single
+            // flight, so a foreground launch joining a background one neither starts
+            // the services twice nor restores authentication before they have started.
+            await startProcessServicesOperation()
+            return true
         }
         activePreparation = ActivePreparation(id: preparationID, task: task)
 

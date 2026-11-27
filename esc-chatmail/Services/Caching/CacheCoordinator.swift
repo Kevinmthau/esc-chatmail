@@ -8,10 +8,10 @@ import Combine
 /// relevant caches to prevent stale data.
 ///
 /// ## Usage
-/// Initialize once at app startup:
-/// ```swift
-/// CacheCoordinator.shared.start()
-/// ```
+/// Started once per process by `AppStartupBootstrap`'s process-services
+/// operation, after the store has loaded and before authentication is
+/// restored, never from a view and never in the unit-test host (where it
+/// would hear every test stack's save).
 ///
 /// The coordinator automatically invalidates:
 /// - PersonCache when Person entities are updated/deleted
@@ -29,7 +29,7 @@ final class CacheCoordinator {
     /// What one save asks of the caches, with the account that made it. Built on the
     /// posting context's queue and made of values only: no managed object and no
     /// notification leaves that queue.
-    private struct AccountScopedSavePlan: Sendable {
+    struct AccountScopedSavePlan: Sendable {
         let plan: CacheInvalidationPlan
         let htmlContentGeneration: HTMLContentAccountGeneration
     }
@@ -145,12 +145,9 @@ final class CacheCoordinator {
             // paths and no attachments, so a plan built after the hop was empty for every
             // delete and no file of a deleted message was ever removed.
             .compactMap { notification -> AccountScopedSavePlan? in
-                guard let generation = HTMLContentHandler.shared.captureAccountGeneration() else {
-                    return nil
+                CacheCoordinator.savePlan(forSave: notification) {
+                    HTMLContentHandler.shared.captureAccountGeneration()
                 }
-                let plan = CacheCoordinator.invalidationPlan(forSave: notification)
-                guard !plan.isEmpty else { return nil }
-                return AccountScopedSavePlan(plan: plan, htmlContentGeneration: generation)
             }
             .receive(on: DispatchQueue.main)
             .sink { [weak self] savePlan in
@@ -159,6 +156,25 @@ final class CacheCoordinator {
             .store(in: &cancellables)
 
         Log.debug("CacheCoordinator started", category: .coreData)
+    }
+
+    /// What one save asks of the caches, with the account that made it, or nil where it
+    /// asks nothing. The plan is built first and the generation captured only for a plan
+    /// that is not empty: the capture takes the HTML boundary's lock, which every body
+    /// read and write and every deletion chunk holds, and until 2026-11-27 every save in
+    /// the process took it before knowing it had nothing to invalidate, a main-queue save
+    /// of an optimistic row included (architecture review 2026-11,
+    /// gap-change-propagation-pipeline#5). Both still happen here, on the posting
+    /// context's queue inside the save (CLAUDE.md's post-time capture rule): the
+    /// generation names the account that made the save even when delivery to main is
+    /// delayed across a sign-out and reopen, and the deleted rows' values exist only here.
+    nonisolated static func savePlan(
+        forSave notification: Notification,
+        captureGeneration: () -> HTMLContentAccountGeneration?
+    ) -> AccountScopedSavePlan? {
+        let plan = invalidationPlan(forSave: notification)
+        guard !plan.isEmpty, let generation = captureGeneration() else { return nil }
+        return AccountScopedSavePlan(plan: plan, htmlContentGeneration: generation)
     }
 
     /// Stops listening for Core Data changes.
