@@ -130,10 +130,12 @@ final class ConversationListViewModel: ObservableObject {
 
         bindFiltering()
 
-        // The one retry of a window fetch that failed (`windowReloadOwed`): a sync's end,
-        // because nothing else refetches once the list is on screen (sync and
-        // pull-to-refresh reload nothing, and live changes re-add only the rows they
-        // touch), so the Mac's sidebar stayed wrong until a search or a relaunch.
+        // The retry of a window fetch that failed (`windowReloadOwed`): a sync's end,
+        // because nothing else refetches a whole window once the list is on screen
+        // (sync and pull-to-refresh reload nothing, live changes re-add only the rows
+        // they touch, and only a backfill after a merged save that leaves a slot open
+        // asks again before this), so the Mac's sidebar stayed wrong until a search or
+        // a relaunch.
         resolvedDependencies.notificationCenter.publisher(for: .syncCompleted)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in

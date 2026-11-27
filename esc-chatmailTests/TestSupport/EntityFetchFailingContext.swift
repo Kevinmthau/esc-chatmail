@@ -6,12 +6,13 @@ import CoreData
 /// test fail one specific read (e.g. the failure ledger) inside a full
 /// orchestrator run without failing the reads that come before it.
 ///
-/// `@unchecked Sendable`: like `ScriptedSaveContext`, the only mutable state
-/// is `_failedFetches`, guarded by `lock`; Core Data's own state stays on the
-/// context's private queue.
+/// `@unchecked Sendable`: like `ScriptedSaveContext`, the mutable state
+/// (`_failedFetches`, `_succeededFetches`, `_failsFetches`) is guarded by
+/// `lock`; Core Data's own state stays on the context's private queue.
 final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private var _failedFetches = 0
+    private var _succeededFetches = 0
     private var _failsFetches = true
     private let failingEntityName: String
 
@@ -55,10 +56,24 @@ final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendab
         return _failedFetches
     }
 
+    /// How many fetches of the entity went through to the store (`failsFetches` off):
+    /// a witness that a retry the code under test owed has run.
+    var succeededFetches: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return _succeededFetches
+    }
+
     /// `executeFetchRequest:error:` is `NS_REFINED_FOR_SWIFT`; the generic
     /// `fetch(_:)` overlay calls through to this underscored `__execute(_:)`.
     override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
-        guard request.entityName == failingEntityName, failsFetches else {
+        guard request.entityName == failingEntityName else {
+            return try super.__execute(request)
+        }
+        guard failsFetches else {
+            lock.lock()
+            _succeededFetches += 1
+            lock.unlock()
             return try super.__execute(request)
         }
         lock.lock()

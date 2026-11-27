@@ -114,8 +114,11 @@ final class ConversationListViewModelTests: XCTestCase {
         XCTAssertEqual(failing.failedFetches, 1)
 
         failing.failsFetches = false
+        let fetchesBeforeTheRetry = failing.succeededFetches
         notificationCenter.post(name: .syncCompleted, object: nil)
-        await waitUntil { failing.failedFetches == 1 && viewModel.filteredConversationItems.count == 2 }
+        // The retry is received on the main queue, so it runs after this turn: wait for
+        // its fetch, or the assertions below would read the window from before it.
+        await waitUntil { failing.succeededFetches > fetchesBeforeTheRetry }
 
         // The owed reload read the window again at the limit the failed page put back.
         XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
