@@ -656,8 +656,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// passes and still stage per-message failures. A `CancellationError` (a
     /// refresh whose epoch a sign-out retired) passes through unchanged, and so
     /// does an `APIError`. Mapped here, at the client's boundary, never inside
-    /// `TokenManager`, whose other callers (`AuthSession.withFreshToken`,
-    /// `WebKitPrewarmer`, `ChatViewModel`) read `TokenManagerError` itself.
+    /// `TokenManager`: its errors are its own contract (`GoogleTokenRefresher`
+    /// throws them, and a retired generation is a `CancellationError` that must
+    /// stay one), and the client is where `APIError` is the language every
+    /// caller classifies. Nothing else consumes `TokenManagerError`: the other
+    /// callers of `getCurrentToken` (`WebKitPrewarmer`, `ChatViewModel`) catch
+    /// generically or `try?`.
     /// The 401 branch of `performRetryingRequest` keeps its own mapping, which
     /// does not pass cancellation through: a `CancellationError` there would
     /// reach `isAmbiguousSendFailure`, and a send Gmail refused with 401 would

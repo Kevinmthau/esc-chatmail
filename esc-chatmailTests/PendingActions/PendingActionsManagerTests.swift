@@ -1883,9 +1883,9 @@ final class PendingActionsManagerTests: XCTestCase {
     // budget per run, and the row behind it was tried too.
     // Revert-check: fails if `GmailAPIClient.apiError(forTokenAcquisitionFailure:)`
     // or the catch around `getCurrentToken()` in `authenticatedRequest` goes:
-    // the head is then "failed" at retryCount 1 and the second action is
-    // executed (a second token is asked for, and a request is sent) before
-    // recovery.
+    // the raw error then takes the transient path, so the head is "failed" at
+    // retryCount 1 and a transient wait is recorded (the second action waits
+    // behind the head's timer rather than being parked).
     func testRealClient_tokenPreflightRevocationParksTheQueueUntilRecovery() async throws {
         StubURLProtocol.reset()
         defer { StubURLProtocol.reset() }
