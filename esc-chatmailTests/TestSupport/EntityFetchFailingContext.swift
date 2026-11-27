@@ -12,13 +12,36 @@ import CoreData
 final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private var _failedFetches = 0
+    private var _failsFetches = true
     private let failingEntityName: String
 
-    init(failingEntityName: String, coordinator: NSPersistentStoreCoordinator) {
+    /// `concurrencyType` is private-queue unless the code under test touches its context
+    /// directly from the main actor (`ConversationListViewModel` fetches on the context it
+    /// observes), which only a main-queue context allows.
+    init(
+        failingEntityName: String,
+        coordinator: NSPersistentStoreCoordinator,
+        concurrencyType: NSManagedObjectContextConcurrencyType = .privateQueueConcurrencyType
+    ) {
         self.failingEntityName = failingEntityName
-        super.init(concurrencyType: .privateQueueConcurrencyType)
+        super.init(concurrencyType: concurrencyType)
         persistentStoreCoordinator = coordinator
         mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    /// Whether fetches of the entity fail; a test turns it off to let the code under
+    /// test recover, and on to script one failure.
+    var failsFetches: Bool {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _failsFetches
+        }
+        set {
+            lock.lock()
+            defer { lock.unlock() }
+            _failsFetches = newValue
+        }
     }
 
     required init?(coder: NSCoder) {
@@ -35,7 +58,7 @@ final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendab
     /// `executeFetchRequest:error:` is `NS_REFINED_FOR_SWIFT`; the generic
     /// `fetch(_:)` overlay calls through to this underscored `__execute(_:)`.
     override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
-        guard request.entityName == failingEntityName else {
+        guard request.entityName == failingEntityName, failsFetches else {
             return try super.__execute(request)
         }
         lock.lock()
