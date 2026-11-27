@@ -66,7 +66,16 @@ actor AliasManager {
             accountAliases = cachedAccountAliases
         } else {
             let epoch = invalidationEpoch
-            accountAliases = await loadFromCoreData(in: context)
+            guard let loaded = await loadFromCoreData(in: context) else {
+                // A failed read is not an account with no addresses (CLAUDE.md: a
+                // failed Core Data read is never "empty"). Cached, the empty set kept
+                // the user's own address in every hash until a sync's `setAliases`,
+                // and a send in that window forked its chat (architecture review
+                // 2026-11, observability-errors#6). Nothing is cached: the next call
+                // reads again.
+                return []
+            }
+            accountAliases = loaded
             guard epoch == invalidationEpoch else {
                 // Invalidated while the load was suspended: answer, cache nothing.
                 return aliases(for: accountAliases)
@@ -152,12 +161,21 @@ actor AliasManager {
         return aliases
     }
 
-    private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases {
+    /// The stored account's addresses: an empty set for a store with no Account row,
+    /// and nil where the row could not be read, which is not the same thing.
+    private func loadFromCoreData(in context: NSManagedObjectContext) async -> AccountAliases? {
         await context.perform {
             let request = Account.fetchRequest()
             request.fetchLimit = 1
 
-            guard let account = try? context.fetch(request).first else {
+            let storedAccount: Account?
+            do {
+                storedAccount = try context.fetch(request).first
+            } catch {
+                Log.error("Failed to read the account's aliases", category: .sync, error: error)
+                return nil
+            }
+            guard let account = storedAccount else {
                 return AccountAliases(normalized: [], raw: [])
             }
 
