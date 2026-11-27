@@ -83,6 +83,38 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertFalse(script.contains("-configuration Debug"))
     }
 
+    /// The scale harness runs in CI after the default plan, on its own (architecture review
+    /// 2026-11, testing-ci-release#5): both scale suites under the Performance plan, never
+    /// PerformanceRegressionTests, and the default plan still skips all three.
+    // Revert-check: fails if the step is removed, loses either scale suite, gains
+    // PerformanceRegressionTests, or if esc-chatmail.xctestplan stops skipping the scale
+    // suites (which would run them inside the default plan, where the process-wide plan
+    // recorder and the half-minute seed make them flaky).
+    func testTestJob_runsTheScaleHarnessAfterTheDefaultPlan_andTheDefaultPlanStillSkipsIt() throws {
+        let job = try jobBlock(named: "test")
+
+        let defaultPlan = try XCTUnwrap(job.range(of: "bash Scripts/run-tests.sh \\\n            -resultBundlePath TestResults.xcresult"))
+        let scale = try XCTUnwrap(job.range(of: "bash Scripts/run-tests.sh --performance \\"))
+        XCTAssertLessThan(defaultPlan.lowerBound, scale.lowerBound)
+        let scaleStep = String(job[scale.lowerBound...])
+        XCTAssertTrue(scaleStep.contains("-parallel-testing-enabled NO"))
+        // Exactly the two scale suites: every -only-testing in the job, in order.
+        let onlyTesting = job.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { $0.hasPrefix("-only-testing ") }
+        XCTAssertEqual(onlyTesting, [
+            "-only-testing esc-chatmailTests/ScaleQueryPlanTests \\",
+            "-only-testing esc-chatmailTests/ScaleHubFaultTests \\"
+        ])
+
+        let plan = try repositorySource("esc-chatmail.xctestplan")
+        let skipped = try XCTUnwrap(plan.range(of: "\"skippedTests\""))
+        let skippedBlock = String(plan[skipped.lowerBound...])
+        for suite in ["PerformanceRegressionTests", "ScaleHubFaultTests", "ScaleQueryPlanTests"] {
+            XCTAssertTrue(skippedBlock.contains("\"\(suite)\""), suite)
+        }
+    }
+
     /// The lines of one job, from its key to the next job's.
     private func jobBlock(named name: String) throws -> String {
         let workflow = try repositorySource(".github/workflows/ci.yml")

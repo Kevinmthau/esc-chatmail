@@ -29,10 +29,11 @@ jobs:
   test:
     name: Build & Test (iOS Simulator)
     runs-on: macos-26
-    # A clean run is ~15 minutes (build ~4m + tests ~8m); 40 leaves headroom
-    # for runner variance. Per-test allowances below keep a single hung test
-    # from consuming the whole window (macOS minutes bill at 10x).
-    timeout-minutes: 40
+    # A clean run is ~15 minutes (build ~4m + tests ~8m) plus the scale harness's
+    # seed and two suites; 50 leaves headroom for runner variance. Per-test
+    # allowances below keep a single hung test from consuming the whole window
+    # (macOS minutes bill at 10x).
+    timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -69,6 +70,38 @@ jobs:
         with:
           name: TestResults.xcresult
           path: TestResults.xcresult
+          retention-days: 7
+
+      # The scale harness (docs/scalability-review.md, step 4; architecture review 2026-11,
+      # testing-ci-release#5): the query plans SQLite gives the hot fetches on a 120k-message
+      # store, and the hub reads a sync write makes. It stays out of the default plan, which
+      # runs above, because the store is seeded once per process (about half a minute) and
+      # the plan recorder is process-wide, so it runs here on its own, after the default
+      # plan, reusing its build. PerformanceRegressionTests stays out of CI: it is timing
+      # sensitive and has no baseline (run-tests.sh). `continue-on-error` until the step
+      # has passed on this runner's iOS runtime: the plans and the strict XCTExpectFailure
+      # wrappers in ScaleHubFaultTests were measured on the iOS 27.0 simulator, and a wrapper
+      # comes off only in the change that fixes its item, never to make CI green. The
+      # allowance covers the seed; the result bundle is uploaded on failure like the main one.
+      - name: Run the scale harness (Performance test plan, scale suites only)
+        id: scale
+        continue-on-error: true
+        run: |
+          bash Scripts/run-tests.sh --performance \
+            -only-testing esc-chatmailTests/ScaleQueryPlanTests \
+            -only-testing esc-chatmailTests/ScaleHubFaultTests \
+            -parallel-testing-enabled NO \
+            -resultBundlePath ScaleResults.xcresult \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 600 \
+            -maximum-test-execution-time-allowance 900
+
+      - name: Upload the scale result bundle on failure
+        if: steps.scale.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScaleResults.xcresult
+          path: ScaleResults.xcresult
           retention-days: 7
 
   # The Mac destination of the esc-chatmail target (docs/mac-app-plan.md). It catches the
