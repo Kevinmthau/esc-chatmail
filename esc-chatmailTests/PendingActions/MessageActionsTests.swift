@@ -1807,12 +1807,36 @@ private actor BlockingReadStatePendingActionsManager: PendingActionsManagerProto
         actionTypes.append(type)
     }
 
+    // The `within:` witnesses are required (the protocol has no defaults); this
+    // conformer gates them as it gates the acquiring overloads.
+    func queueAction(
+        type: PendingAction.ActionType,
+        messageId: String,
+        payload: [String: Any]?,
+        within _: SyncRun
+    ) async {
+        await queueAction(type: type, messageId: messageId, payload: payload)
+    }
+
     func queueConversationAction(
         type: PendingAction.ActionType,
         sourceConversationId: UUID,
         messageIds: [String]
     ) async {
         actionTypes.append(type)
+    }
+
+    func queueConversationAction(
+        type: PendingAction.ActionType,
+        sourceConversationId: UUID,
+        messageIds: [String],
+        within _: SyncRun
+    ) async {
+        await queueConversationAction(
+            type: type,
+            sourceConversationId: sourceConversationId,
+            messageIds: messageIds
+        )
     }
 
     func processAllPendingActions() async {}
@@ -1952,6 +1976,15 @@ actor MockPendingActionsManager: PendingActionsManagerProtocol {
             sourceConversationId: sourceConversationId,
             messageIds: messageIds
         ))
+    }
+
+    // The `within:` witnesses are required (the protocol has no defaults).
+    func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String : Any]?, within _: SyncRun) async {
+        await queueAction(type: type, messageId: messageId, payload: payload)
+    }
+
+    func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String], within _: SyncRun) async {
+        await queueConversationAction(type: type, sourceConversationId: sourceConversationId, messageIds: messageIds)
     }
 
     func processAllPendingActions() async {}
