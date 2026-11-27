@@ -21,11 +21,13 @@ protocol PendingActionsManagerProtocol: Actor {
     /// conversation counterpart below): until 2026-11-27 a default forwarded a
     /// missing or mistyped `within:` witness to the acquiring overload above,
     /// which calls `acquireRun`. `MessageActions` calls this while it holds a
-    /// conversation's turn, and sync waits on that turn, so the fallback would
-    /// have been a permanent hang that compiled, and the test conformers
-    /// implemented only the acquiring overloads (architecture review 2026-11,
-    /// invariant-enforcement#2). A conformer that forgets it now fails to
-    /// compile.
+    /// conversation's turn, so the fallback was a silent one that compiled:
+    /// with a sync in flight, `acquireRun` parks behind it while sync waits on
+    /// the turn, a hang; with none, it takes the exclusive run and skips the
+    /// caller's `isActiveRun` guard. The test conformers implemented only the
+    /// acquiring overloads, so no test ran the real witnesses (architecture
+    /// review 2026-11, invariant-enforcement#2). A conformer that forgets it
+    /// now fails to compile.
     func queueAction(
         type: PendingAction.ActionType,
         messageId: String,

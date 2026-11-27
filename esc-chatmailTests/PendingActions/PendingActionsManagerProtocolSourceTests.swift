@@ -9,22 +9,29 @@ import XCTest
 /// 2026-11, invariant-enforcement#2). Now a conformer that forgets one fails to compile,
 /// which no runtime test can show; this pins the absence of the defaults from source.
 final class PendingActionsManagerProtocolSourceTests: XCTestCase {
-    // Revert-check: fails if an `extension PendingActionsManagerProtocol` is added back to
-    // the protocol's file, or if either `within:` requirement leaves the protocol.
+    // Revert-check: fails if an `extension PendingActionsManagerProtocol` is added back
+    // anywhere in the app target, or if either `within:` requirement leaves the protocol.
     func testProtocol_hasNoExtensionDefaults_andRequiresBothWithinWitnesses() throws {
-        let source = try repositorySource("esc-chatmail/Services/PendingActions/PendingActionsManagerProtocol.swift")
-            .components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
-            .joined(separator: "\n")
+        for path in try repositorySwiftFilePaths(under: "esc-chatmail") {
+            let source = try strippedSource(path)
+            XCTAssertFalse(
+                source.contains("extension PendingActionsManagerProtocol"),
+                "\(path): a protocol-extension default turns a missing `within:` witness into the acquiring overload"
+            )
+        }
 
-        XCTAssertFalse(
-            source.contains("extension PendingActionsManagerProtocol"),
-            "A protocol-extension default turns a missing `within:` witness into the acquiring overload"
-        )
+        let protocolSource = try strippedSource("esc-chatmail/Services/PendingActions/PendingActionsManagerProtocol.swift")
         XCTAssertEqual(
-            source.components(separatedBy: "within syncRun: SyncRun").count - 1,
+            protocolSource.components(separatedBy: "within syncRun: SyncRun").count - 1,
             2,
             "Both `within:` members are requirements of the protocol"
         )
+    }
+
+    private func strippedSource(_ path: String) throws -> String {
+        try repositorySource(path)
+            .components(separatedBy: "\n")
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
     }
 }
