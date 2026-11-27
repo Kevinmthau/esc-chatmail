@@ -16,6 +16,16 @@ protocol PendingActionsManagerProtocol: Actor {
     /// Queues an action while the caller owns the shared account-work run.
     /// This keeps an optimistic local mutation and its durable enqueue inside
     /// one teardown boundary without recursively acquiring the coordinator.
+    ///
+    /// A required witness, with no protocol-extension default (neither has its
+    /// conversation counterpart below): until 2026-11-27 a default forwarded a
+    /// missing or mistyped `within:` witness to the acquiring overload above,
+    /// which calls `acquireRun`. `MessageActions` calls this while it holds a
+    /// conversation's turn, and sync waits on that turn, so the fallback would
+    /// have been a permanent hang that compiled, and the test conformers
+    /// implemented only the acquiring overloads (architecture review 2026-11,
+    /// invariant-enforcement#2). A conformer that forgets it now fails to
+    /// compile.
     func queueAction(
         type: PendingAction.ActionType,
         messageId: String,
@@ -82,28 +92,4 @@ protocol PendingActionsManagerProtocol: Actor {
 
     /// Dismisses (deletes) all abandoned actions permanently.
     func dismissAllAbandonedActions() async
-}
-
-extension PendingActionsManagerProtocol {
-    func queueAction(
-        type: PendingAction.ActionType,
-        messageId: String,
-        payload: [String: Any]?,
-        within _: SyncRun
-    ) async {
-        await queueAction(type: type, messageId: messageId, payload: payload)
-    }
-
-    func queueConversationAction(
-        type: PendingAction.ActionType,
-        sourceConversationId: UUID,
-        messageIds: [String],
-        within _: SyncRun
-    ) async {
-        await queueConversationAction(
-            type: type,
-            sourceConversationId: sourceConversationId,
-            messageIds: messageIds
-        )
-    }
 }
