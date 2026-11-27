@@ -121,7 +121,7 @@ enum SynthesizedInlineAttachmentRecovery {
                     isActive: isActive
                 )
                 Log.warning(
-                    "Full-message recovery did not contain synthesized inline attachment \(requestedAttachmentId)",
+                    "Full-message recovery did not contain synthesized inline attachment \(Log.hashIdentifier(requestedAttachmentId))",
                     category: .attachment
                 )
                 return nil
@@ -288,7 +288,7 @@ enum SynthesizedInlineAttachmentRecovery {
                 isActive: isActive
             )
             Log.warning(
-                "Full-message recovery did not contain synthesized inline attachment \(requestedAttachmentId)",
+                "Full-message recovery did not contain synthesized inline attachment \(Log.hashIdentifier(requestedAttachmentId))",
                 category: .attachment
             )
             return nil
@@ -300,7 +300,7 @@ enum SynthesizedInlineAttachmentRecovery {
                 isActive: isActive
             )
             Log.warning(
-                "Failed to recover synthesized inline attachment \(requestedAttachmentId)",
+                "Failed to recover synthesized inline attachment \(Log.hashIdentifier(requestedAttachmentId))",
                 category: .attachment
             )
             return nil
