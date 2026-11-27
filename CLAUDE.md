@@ -44,7 +44,7 @@ cd web && corepack pnpm test:e2e
 - Start with the narrowest suite; the full run is thousands of tests and slow.
 - `SWIFT_TREAT_WARNINGS_AS_ERRORS = YES` in Debug/Release xcconfigs: a new warning fails the build.
 - SwiftLint is advisory by design (`|| true`, no `severity: error`, size/complexity rules disabled, tests excluded). Do not reshape code to satisfy it, and do not make it blocking.
-- Skipping `prepare-simulator.sh` locally can hang the first Contacts-touching test forever (`CNContactStore.requestAccess` never returns on a headless runner). It honors `SIMULATOR_ID` and prints exactly one `DESTINATION=…` line on stdout.
+- Skipping `prepare-simulator.sh` locally can hang the first Contacts-touching test forever (`CNContactStore.requestAccess` never returns on a headless runner). It honors `SIMULATOR_ID` and prints exactly one `DESTINATION=…` line on stdout; unset, it takes the first iPhone simctl lists. CI sets `SIMULATOR_ID` first, from `default-simulator-destination.py --udid` (the wrappers' iPhone 17 Pro, on the newest installed runtime that has one; assigned, then written, so a failed picker fails the step instead of writing an empty pin), and prints `--describe` so a runner image that changes the runtime shows in the log (`ReleaseGateWorkflowSourceTests` pins both).
 - Web CI is zero-tolerance: `eslint --max-warnings 0` and `format:check` must be clean.
 
 ## Layout
