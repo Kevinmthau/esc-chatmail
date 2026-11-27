@@ -72,6 +72,8 @@ final class ReleaseGateWorkflowSourceTests: XCTestCase {
         XCTAssertTrue(job.contains("CONFIGURATION=Release"))
         XCTAssertTrue(job.contains("bash Scripts/check-built-info-plist.sh"))
         XCTAssertTrue(job.contains("Release-iphonesimulator/esc-chatmail.app"))
+        // ... and launches it (LaunchSmokeSourceTests has the rest).
+        XCTAssertTrue(job.contains("bash Scripts/launch-smoke.sh"))
     }
 
     // Revert-check: fails if codex-build.sh goes back to a hard-coded `-configuration Debug`.

@@ -113,7 +113,9 @@ jobs:
   build-release-ios:
     name: Build Release (iOS Simulator)
     runs-on: macos-26
-    timeout-minutes: 25
+    # The build took 9 minutes here; the smoke adds a simulator boot (3 minutes in the test
+    # job) and its 20 s wait.
+    timeout-minutes: 35
     env:
       DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
     steps:
@@ -132,6 +134,19 @@ jobs:
           bash Scripts/check-built-info-plist.sh \
             build/DerivedData/Build/Products/Release-iphonesimulator/esc-chatmail.app \
             esc-chatmail/Resources/Info.plist
+
+      # The real launch path, on the Release build just checked (testing-ci-release#2, part
+      # 2). Before this, a Release build was first launched by the TestFlight install after
+      # the merge, and the App struct's wiring (init, initializeApp, ContentView) runs under
+      # no test plan. The script erases the pinned simulator, installs and launches the app
+      # signed out, and fails unless the process is alive after 20 s, wrote no crash report,
+      # published the sign-in root (ContentView records it in the unified log) and created
+      # the store. No test hooks: the build is the one that ships. Not a test plan and not
+      # in run-tests.sh, which would erase the device a test run is using.
+      - name: Launch the Release build on an erased simulator (launch smoke)
+        run: |
+          bash Scripts/launch-smoke.sh \
+            build/DerivedData/Build/Products/Release-iphonesimulator/esc-chatmail.app
 
   # The gate between a merge and TestFlight (architecture review 2026-11,
   # testing-ci-release#1). Xcode Cloud's workflow is configured in App Store Connect,

@@ -17,6 +17,12 @@ struct ContentView: View {
     @StateObject private var settingsAppSignOut = SettingsAppSignOutController(showsFailuresOfOffScreenWindows: true)
 
     var body: some View {
+        // The same choice as the branches below, named so the root view can carry it and
+        // the launch smoke can read it (`LaunchRootScreen`). Keep the two in step.
+        let rootScreen = LaunchRootScreen.screen(
+            canAccessMailbox: authSession.canAccessMailbox,
+            hasHeldAccount: authSession.heldAccount != nil
+        )
         Group {
             if authSession.canAccessMailbox {
                 // A pushed list on iOS, a sidebar and chat column on the Mac.
@@ -31,6 +37,12 @@ struct ContentView: View {
             } else {
                 SignInView()
             }
+        }
+        // A Group hands its modifiers to whichever branch is shown, so the identifier is
+        // the shown root's and the record is made once as each root appears.
+        .accessibilityIdentifier(rootScreen.accessibilityIdentifier)
+        .onAppear {
+            LaunchRootScreenRecord.record(rootScreen)
         }
         .overlay {
             if settingsAppSignOut.isSigningOut {
