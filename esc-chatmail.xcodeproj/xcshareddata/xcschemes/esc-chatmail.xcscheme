@@ -52,6 +52,9 @@
          <TestPlanReference
             reference = "container:Mac.xctestplan">
          </TestPlanReference>
+         <TestPlanReference
+            reference = "container:ConcurrencyDebug.xctestplan">
+         </TestPlanReference>
       </TestPlans>
    </TestAction>
    <LaunchAction

@@ -14,6 +14,7 @@ Examples:
   ./Scripts/codex-test.sh
   ./Scripts/codex-test.sh -parallel-testing-enabled NO
   ./Scripts/codex-test.sh -only-testing 'esc-chatmailTests/ParticipantLoaderTests'
+  ./Scripts/codex-test.sh --concurrency-debug   # ConcurrencyDebug.xctestplan: its suites under -com.apple.CoreData.ConcurrencyDebug 1, serially
   DESTINATION='platform=macOS' ./Scripts/codex-test.sh   # Mac.xctestplan, sandboxed host only
 USAGE
   exit 0
