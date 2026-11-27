@@ -1,6 +1,10 @@
 // CI's signing of the Mac test host, and nothing else's (architecture review 2026-11,
 // mac-platform#1, testing-ci-release#3). Only `Scripts/run-tests.sh --ci-mac-host` passes it,
-// through -xcodebuild's -xcconfig, so no setting in the project changes; the host that runs
+// through xcodebuild's -xcconfig, so no setting in the project changes. It lives beside the
+// script and not under esc-chatmail/Configuration/: that folder is a filesystem-synchronized
+// group, and a file there that project.pbxproj's membershipExceptions do not name is copied
+// into every product, so the shipped MushMail.app would have carried this file in its
+// Resources (PR 498 review). Nothing reads it but -xcconfig <path>; the host that runs
 // on a developer Mac is still signed with the team, and shares the installed MushMail's
 // container and keychain group as before.
 //

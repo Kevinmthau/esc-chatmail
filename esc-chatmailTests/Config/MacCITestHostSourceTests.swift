@@ -31,7 +31,7 @@ final class MacCITestHostSourceTests: XCTestCase {
         XCTAssertTrue(script.contains(
             "if [[ \"${USE_CI_MAC_HOST}\" == \"true\" && \"${IS_MAC_DESTINATION}\" != \"true\" ]]; then"
         ))
-        XCTAssertTrue(script.contains("ARGS+=(\"-xcconfig\" \"esc-chatmail/Configuration/CI-MacTestHost.xcconfig\")"))
+        XCTAssertTrue(script.contains("ARGS+=(\"-xcconfig\" \"Scripts/CI-MacTestHost.xcconfig\")"))
         let skips = script.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { $0.contains("-skip-testing") }
@@ -48,7 +48,11 @@ final class MacCITestHostSourceTests: XCTestCase {
     // sandbox off, names an entitlements file other than the CI one, or drops the .ci suffix
     // (the host would then share the installed MushMail's container on a developer Mac).
     func testCIMacHostXcconfig_signsAdHocWithoutATeam_keepsTheSandbox_andSuffixesTheBundleID() throws {
-        let xcconfig = try repositorySource("esc-chatmail/Configuration/CI-MacTestHost.xcconfig")
+        // Outside esc-chatmail/, the filesystem-synchronized group: a file there that
+        // project.pbxproj's membershipExceptions do not name is copied into every product, and
+        // this one would have shipped inside MushMail.app's Resources (PR 498 review).
+        XCTAssertThrowsError(try repositorySource("esc-chatmail/Configuration/CI-MacTestHost.xcconfig"))
+        let xcconfig = try repositorySource("Scripts/CI-MacTestHost.xcconfig")
         let settings = xcconfig.components(separatedBy: "\n")
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty && !$0.hasPrefix("//") }

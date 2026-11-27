@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  The Mac test host's entitlements in CI only, chosen by Configuration/CI-MacTestHost.xcconfig
+  The Mac test host's entitlements in CI only, chosen by Scripts/CI-MacTestHost.xcconfig
   (architecture review 2026-11, mac-platform#1, testing-ci-release#3). The same as
   esc_chatmail-macOS.entitlements without keychain-access-groups, which needs a provisioning
   profile CI does not have. The App Sandbox is named here as well as generated from the

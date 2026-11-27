@@ -77,7 +77,7 @@ jobs:
   # compiled both unsigned and ran nothing, so the AppKit-mounting Mac suites ran only when a
   # developer ran them, and every merge shipped a Mac build to TestFlight that no test had run.
   #
-  # The host is signed ad hoc by Configuration/CI-MacTestHost.xcconfig, which
+  # The host is signed ad hoc by Scripts/CI-MacTestHost.xcconfig, which
   # run-tests.sh --ci-mac-host passes and nothing else does: a team-signed build needs the Mac
   # development profile for keychain-access-groups, which CI has not, and an unsigned build
   # (CODE_SIGNING_ALLOWED=NO) has no App Sandbox entitlement, so its host must never launch

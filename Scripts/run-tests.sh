@@ -101,7 +101,7 @@ fi
 # --ci-mac-host: the Mac test host signed for CI (architecture review 2026-11,
 # mac-platform#1, testing-ci-release#3). CI has no Mac development profile,
 # which the team's signature needs for keychain-access-groups, and an unsigned
-# host has no sandbox and is refused below. Configuration/CI-MacTestHost.xcconfig
+# host has no sandbox and is refused below. Scripts/CI-MacTestHost.xcconfig
 # signs the host ad hoc with entitlements that keep the App Sandbox and drop the
 # keychain group, under a .ci bundle ID (a container of its own, never the
 # installed MushMail's), so both sandbox checks admit it unchanged. With no
@@ -111,7 +111,7 @@ fi
 # xcconfig goes to the build, the host lookup and the test run alike, through
 # the ARGS split below, so the host checked is the host launched.
 if [[ "${USE_CI_MAC_HOST}" == "true" ]]; then
-  ARGS+=("-xcconfig" "esc-chatmail/Configuration/CI-MacTestHost.xcconfig")
+  ARGS+=("-xcconfig" "Scripts/CI-MacTestHost.xcconfig")
   ARGS+=("-skip-testing:esc-chatmailTests/KeychainServiceTests")
 fi
 

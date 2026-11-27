@@ -86,8 +86,8 @@ final class MacConversationSidebarSourceTests: XCTestCase {
     /// what the first native build did. The list's selection and its context menu carry the
     /// same type, or they would not compile against the rows.
     ///
-    /// This is the test of that which CI runs: the drawing tests
-    /// (`MacConversationSidebarRowIdentityTests`) are in the Mac plan, and CI runs no Mac tests.
+    /// The drawing tests (`MacConversationSidebarRowIdentityTests`) are in the Mac plan, which
+    /// CI's Mac lane runs since 2026-11-27; this pin runs in the default plan as well.
     ///
     /// Revert-check: giving the rows back their object IDs in `MacConversationSidebar.body`
     /// (`ForEach(viewModel.filteredConversationItems) { item in`, `List(selection: $selection)`
@@ -111,8 +111,8 @@ final class MacConversationSidebarSourceTests: XCTestCase {
     /// done at the first click on a row, inside SwiftUI's drawing of that row, which the first
     /// native build logged as a fault.
     ///
-    /// This is the test of that which CI runs: `MacConversationSidebarSelectionGuardTests`
-    /// mounts the sidebar, in the Mac plan, and CI runs no Mac tests.
+    /// `MacConversationSidebarSelectionGuardTests` mounts the sidebar, in the Mac plan, which
+    /// CI's Mac lane runs since 2026-11-27; this pin runs in the default plan as well.
     ///
     /// Revert-check: deleting the `.background { MacSidebarListSelectionGuard()… }` from the
     /// list in `MacConversationSidebar.body` makes this fail.
