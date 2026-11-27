@@ -6,11 +6,11 @@ import XCTest
 /// instead of leaving the first-run sign-in screen over an intact mailbox, and a real
 /// revocation still signs out (architecture review 2026-11, fix-order item 5).
 ///
-/// HONEST SCOPE: a restore that publishes needs a `GIDGoogleUser`, which no test can
-/// construct, so that publishing ends the hold (`publishAuthenticatedSession`) is not run
-/// here; `ContentView` checks `canAccessMailbox` first, and the retry coordinator checks
-/// `isAuthenticated`, so a hold left standing beside a session would show and retry
-/// nothing. The early return for a session an interactive sign-in published is run.
+/// A restore that publishes needs a `GIDGoogleUser`, which earlier suites took to be
+/// impossible to make in a test; `StubGoogleUser` makes one, and the one test that
+/// publishes (`testRestore_mailboxUncheckableThenCheckable_holdsThenPublishes`) runs that
+/// publishing ends the hold (`publishAuthenticatedSession`). The early return for a
+/// session an interactive sign-in published is run too.
 @MainActor
 final class AuthSessionHeldAccountTests: XCTestCase {
     private let storedEmail = "stored@example.com"
@@ -132,6 +132,57 @@ final class AuthSessionHeldAccountTests: XCTestCase {
         XCTAssertEqual(outcome, .retryableFailure)
         XCTAssertEqual(sdkRestores.value, 1, "The marker read failed before the SDK restore")
         XCTAssertEqual(session.heldAccount, HeldAccount(email: storedEmail, failure: .cannotConnect))
+    }
+
+    // A restore whose account preparation could not check the mailbox and changed nothing
+    // (the reset marker unreadable) keeps the credentials and holds the account
+    // (`AuthRestorePreparationPolicy`); the next attempt that can check it publishes the
+    // session with those credentials and ends the hold (architecture review 2026-11,
+    // `account-boundary-auth#4`).
+    // Revert-check: fails if the restore callback's preparation catch clears the session
+    // for a nothing-changed stage (the second restore then finds the signed-out verdict
+    // and ends terminal), or stops holding the account for it.
+    func testRestore_mailboxUncheckableThenCheckable_holdsThenPublishes() async {
+        let keychain = makeKeychain()
+        let tokenManager = MockTokenManager()
+        let sdkRestores = HeldAccountTestBox(0)
+        let recoveries = HeldAccountTestBox(0)
+        let email = storedEmail
+        let session = makeSession(
+            keychain: keychain,
+            tokenManager: tokenManager,
+            restore: { completion in
+                sdkRestores.value += 1
+                if sdkRestores.value == 1 {
+                    // The launch's own read of the marker has passed; the preparation's fails.
+                    keychain.failNextLoad(
+                        for: KeychainService.Key.localStoreResetRequired.rawValue,
+                        with: KeychainError.unhandledError(status: errSecInteractionNotAllowed)
+                    )
+                }
+                completion(StubGoogleUser(email: email), nil)
+            },
+            pendingActionAuthenticationDidRecover: { recoveries.value += 1 }
+        )
+
+        let firstOutcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(firstOutcome, .retryableFailure)
+        XCTAssertEqual(session.heldAccount, HeldAccount(email: storedEmail, failure: .couldNotRestore))
+        XCTAssertFalse(session.isAuthenticated)
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 0)
+        XCTAssertEqual(recoveries.value, 0)
+
+        let secondOutcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(secondOutcome, .authenticated)
+        XCTAssertEqual(sdkRestores.value, 2)
+        XCTAssertNil(session.heldAccount, "Publishing ends the hold")
+        XCTAssertTrue(session.isAuthenticated)
+        XCTAssertEqual(session.userEmail, storedEmail)
+        XCTAssertEqual(tokenManager.lastSavedAccessToken, "stub-access-token")
+        XCTAssertEqual(tokenManager.clearTokensCallCount, 0)
+        XCTAssertEqual(recoveries.value, 1, "Only a published session recovers pending actions")
     }
 
     // invalid_grant on a retry signs out exactly as it does at launch, and ends the hold.
