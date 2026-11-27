@@ -54,6 +54,19 @@ private final class HTMLContentAccountBoundary: @unchecked Sendable {
         operation()
     }
 
+    /// A read of the directory that answers while the boundary is closed, for the
+    /// account-isolation gate alone (`HTMLContentHandler.hasStoredHTMLFiles`). It
+    /// takes the lock, so it never overlaps a writer or the cleanup's rename, and
+    /// checks neither `acceptsWork` nor the generation: the question it answers is
+    /// what is on disk, which a closed boundary knows as well as an open one. Not
+    /// for any reader or writer of a body: those go through `perform`, whose nil
+    /// while closed is what keeps old-account content out of the next account.
+    func inspect<T>(_ operation: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try operation()
+    }
+
     func reopen(afterPreparing operation: () throws -> Void) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -154,11 +167,25 @@ final class HTMLContentHandler: @unchecked Sendable {
 
     /// Reports whether canonical message HTML survived without a corresponding
     /// account row, as can happen after sign-out on an older app version.
+    ///
+    /// Read through the boundary's `inspect`, which answers while the boundary is
+    /// closed. The account-isolation gate asks this during
+    /// `prepareLocalStoreForAuthenticatedAccount`, and a sign-in that follows a
+    /// sign-out in the same process prepares its store with the boundary still
+    /// closed: `signIn` reopens account work only after the preparation returns
+    /// (the fixed transition order), and nothing but that reopen opens the
+    /// boundary. Until 2026-11-27 this was `perform(…) ?? true`, so a closed
+    /// boundary read as "stored HTML" for an empty mailbox, the gate wrote its
+    /// reset marker again and the whole durable cleanup ran a second time over a
+    /// store that was already empty (architecture review 2026-11,
+    /// account-boundary-auth#3). A closed boundary admits no writer and the gate
+    /// runs under the auth-transition gate, so the listing is accurate. It lists
+    /// the live directory only: a sign-out's tombstone is a sibling of it, never
+    /// inside it, and is not another account's HTML. Only a missing directory is
+    /// "no files"; any other error throws, because an unreadable directory does
+    /// not prove another account's bodies are absent.
     func hasStoredHTMLFiles() throws -> Bool {
-        try accountBoundary.perform(
-            directoryKey: directoryKey,
-            expectedGeneration: nil
-        ) {
+        try accountBoundary.inspect {
             do {
                 let contents = try FileManager.default.contentsOfDirectory(
                     at: messagesDirectory,
@@ -173,7 +200,7 @@ final class HTMLContentHandler: @unchecked Sendable {
                 // another account's canonical HTML is absent.
                 throw error
             }
-        } ?? true
+        }
     }
 
     func captureAccountGeneration() -> HTMLContentAccountGeneration? {
