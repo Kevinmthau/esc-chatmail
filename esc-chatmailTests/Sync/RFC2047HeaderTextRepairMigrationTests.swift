@@ -70,11 +70,16 @@ final class RFC2047HeaderTextRepairMigrationTests: XCTestCase {
             migrationFlags.bool(forKey: DataCleanupService.rfc2047HeaderTextRepairKey),
             "A failed read latches nothing"
         )
+        // What the app's next save of this context would commit: the cleanup hold's settle
+        // or the full cleanup's final save, which never asked. Without the rollback the
+        // decoded name staged before the failing read would be committed here, with the
+        // flag clear and no PersonCache invalidation.
+        _ = await failing.performSaveIfNeeded(caller: "RFC2047HeaderTextRepairMigrationTests")
         context.refreshAllObjects()
         XCTAssertEqual(
             try fetchPerson("jose@example.com").displayName,
             "=?utf-8?B?Sm9zw6k=?=",
-            "The failed run commits nothing of what it had staged"
+            "The failed run commits nothing of what it had staged, even when the context is saved next"
         )
 
         await runRepair()
