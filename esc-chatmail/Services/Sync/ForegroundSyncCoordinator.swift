@@ -3,10 +3,12 @@ import Foundation
 @MainActor
 protocol ForegroundSyncPerforming: AnyObject {
     /// - Parameter completion: called once a started run has succeeded, with
-    ///   whether the run left work for a follow-up. It answers whether the
-    ///   caller queued that follow-up to run at once. The engine then leaves
-    ///   the run boundary to it and asks for nothing of its own after this
-    ///   run (`SyncEngine.runStoreMaintenanceAfterSync()`).
+    ///   whether the run staged a continuation of its history slice
+    ///   (`IncrementalSyncResult.hasDurableContinuation`; never true for a
+    ///   held run, which the periodic loop follows). It answers whether the
+    ///   caller queued that continuation to run at once. The engine then
+    ///   leaves the run boundary to it and asks for nothing of its own after
+    ///   this run (`SyncEngine.runStoreMaintenanceAfterSync()`).
     func triggerIncrementalSyncIfPossible(
         completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult
@@ -252,8 +254,8 @@ final class ForegroundSyncCoordinator {
         }
 
         switch await syncEngine.triggerIncrementalSyncIfPossible(
-            completion: { [weak self] needsFollowUp in
-                guard needsFollowUp, let self else { return false }
+            completion: { [weak self] hasDurableContinuation in
+                guard hasDurableContinuation, let self else { return false }
                 return self.scheduleImmediateFollowUp(
                     after: reason,
                     remainingImmediateFollowUps: remainingImmediateFollowUps
@@ -279,9 +281,8 @@ final class ForegroundSyncCoordinator {
 
     /// - Returns: whether a continuation was queued. False where the rest
     ///   is left to the periodic loop, and the engine reads that as the end
-    ///   of this chain of runs: a run that still needs a follow-up but gets
-    ///   none at once (a cursor held by a message that keeps failing asks
-    ///   for one after every run) must not keep the store maintenance
+    ///   of this chain of runs: a run that staged a continuation but gets
+    ///   none at once (the limit) must not keep the store maintenance
     ///   waiting for a continuation that is not coming.
     private func scheduleImmediateFollowUp(
         after reason: String,
