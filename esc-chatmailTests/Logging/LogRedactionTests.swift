@@ -225,7 +225,8 @@ final class LogRedactionTests: XCTestCase {
 
     /// Revert-check: fails if `logStatements` reads one line at a time again (the value on
     /// the second line is never seen), if `opensLogCall` goes back to `Log.` alone (the
-    /// `ScopedLogger` call is never seen), or if the `id` / `message.id` rule is dropped.
+    /// `ScopedLogger` call is never seen), if the `id` / `message.id` rule is dropped, or if
+    /// a hashed interpolation exempts its whole statement again.
     func testScan_readsCallsThatSpanLines_scopedLoggers_andMessageIDs() {
         let source = """
         Log.warning(
@@ -240,24 +241,27 @@ final class LogRedactionTests: XCTestCase {
             category: .coreData,
             error: error
         )
+        Log.warning("Body fetch failed for message \\(Log.hashIdentifier(gmailMessage.id)): \\(error)", category: .sync)
         let unrelated = (messageId)
         """
 
         let statements = Self.logStatements(in: source)
-        XCTAssertEqual(statements.count, 5, "\(statements)")
+        XCTAssertEqual(statements.count, 6, "\(statements)")
         XCTAssertEqual(
             statements[0],
             "Log.warning( \"Full-message recovery did not contain synthesized inline attachment \\(requestedAttachmentId)\", category: .attachment )"
         )
 
         let flagged = statements.filter(Self.containsSensitiveRawLogInterpolation)
-        XCTAssertEqual(flagged.count, 3, "\(flagged)")
+        XCTAssertEqual(flagged.count, 4, "\(flagged)")
         XCTAssertTrue(flagged.contains { $0.contains("requestedAttachmentId") })
         XCTAssertTrue(flagged.contains { $0.contains("Duplicate Message id") })
         XCTAssertTrue(flagged.contains { $0.contains("Failed to process message") })
-        // A hashed ID is not a finding, and neither is a transaction's own UUID.
-        XCTAssertFalse(flagged.contains { $0.contains("Log.hashIdentifier") })
+        // A hashed ID is not a finding, and neither is a transaction's own UUID; a raw error
+        // beside a hashed ID still is.
+        XCTAssertFalse(flagged.contains { $0.contains("Failed to create attachment") })
         XCTAssertFalse(flagged.contains { $0.contains("transaction.id") })
+        XCTAssertTrue(flagged.contains { $0.contains("Body fetch failed") })
     }
 
     /// Every `Log.…(` and `log.…(` call in a file, each as one line: a call that spans
@@ -311,9 +315,6 @@ final class LogRedactionTests: XCTestCase {
 
     private static func containsSensitiveRawLogInterpolation(_ line: String) -> Bool {
         guard Self.opensLogCall(line) else { return false }
-        guard !line.contains("Log.redact"), !line.contains("Log.hashIdentifier") else {
-            return false
-        }
 
         if line.contains("localizedDescription") {
             return true
@@ -332,6 +333,12 @@ final class LogRedactionTests: XCTestCase {
 
         return interpolationContents(in: line).contains { interpolation in
             let value = interpolation.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A redacted or hashed value is exempt on its own, never the whole call: the
+            // guard used to exempt the statement, so one hashed ID beside a raw `\(error)`
+            // silenced the error (PR 494 review).
+            if value.contains("Log.redact(") || value.contains("Log.hashIdentifier(") {
+                return false
+            }
             let lowercasedValue = value.lowercased()
             if lowercasedValue.hasSuffix(".count") {
                 return false
@@ -387,8 +394,10 @@ final class LogRedactionTests: XCTestCase {
     /// `logStatements` renders it (a call that spans lines is joined with single spaces).
     /// Fixing one removes its entry; a stale entry fails the test, so the list cannot
     /// drift. The warning- and error-level entries left here log local file names
-    /// (`FileSystemErrorHandler`, `BackupExclusion`), a blocked redirect's host and the
-    /// app's own `local_` optimistic message IDs, none of them a Gmail ID or an address.
+    /// (`FileSystemErrorHandler`, `BackupExclusion`; an avatar's file name is base64 of an
+    /// address, `AvatarStorage`, which security-privacy#4's stage 1 still asks to drop from
+    /// those warnings), a blocked redirect's host and the app's own `local_` optimistic
+    /// message IDs; none is a Gmail ID.
     private static let legacyRawSensitiveLogFingerprints: Set<String> = [
         "esc-chatmail/App/FreshInstallHandler.swift|Log.warning(\"Failed to clear Core Data: \\(error)\", category: .coreData)",
         "esc-chatmail/App/FreshInstallHandler.swift|Log.warning(\"Failed to clear keychain: \\(error)\", category: .auth)",

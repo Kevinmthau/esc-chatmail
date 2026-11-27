@@ -445,7 +445,7 @@ actor MessagePersister {
                 // FETCHES likewise record nothing — see MessageFetcher).
                 throw error
             }
-            Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(error)", category: .sync)
+            Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(Log.redact(error: error))", category: .sync)
             return .bodyFetchFailed(id: gmailMessage.id)
         }
 
