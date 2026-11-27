@@ -905,9 +905,11 @@ final class AttachmentDownloader: ObservableObject {
             // twice more, 2 s and 4 s apart, so a large attachment on a slow link made
             // up to six 60-second transfers before this write, and a failed card
             // started them again on its next appearance (architecture review 2026-11,
-            // attachments-storage-disk#2, first step). The row goes `.failed` with the
-            // time, which Retry and the next appearance read.
-            Log.warning("Attachment \(attachmentId) failed; the client's retries were the only ones", category: .attachment)
+            // attachments-storage-disk#2, first step). The row goes `.failed` and the
+            // time is recorded; nothing reads the time yet: the next appearance decides
+            // on the state alone (`downloadAttachmentIfNeeded`) and Retry sets
+            // `.queued`, so a failed card is tried again as soon as it is shown.
+            Log.warning("Attachment \(Log.hashIdentifier(attachmentId)) failed; the client's retries were the only ones", category: .attachment)
             await context.perform {
                 guard !generation.isCancelled else { return }
                 if let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment {
