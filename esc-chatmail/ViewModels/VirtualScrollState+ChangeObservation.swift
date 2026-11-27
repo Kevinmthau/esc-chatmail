@@ -451,10 +451,14 @@ extension VirtualScrollState {
         return objectID
     }
 
-    /// Membership check that faults at most the message row: the destination
-    /// objectID of the to-one relationship is available without firing the
-    /// Conversation's own fault (the previous UUID comparison loaded the
-    /// Conversation row for every inserted message in every merge).
+    /// Membership check that compares object IDs first: the destination objectID
+    /// of the to-one relationship is available without firing the Conversation's
+    /// own fault, so a message of this conversation costs the message row alone
+    /// (the earlier UUID-only comparison loaded the Conversation row for every
+    /// inserted message in every merge). A message of another conversation still
+    /// falls through to the UUID reads below, which fire that Conversation's
+    /// fault; settling two permanent IDs that differ without the read is left
+    /// open (architecture review 2026-11, gap-change-propagation-pipeline#3).
     func belongsToCurrentConversation(_ message: Message) -> Bool {
         let conversationObjectID = currentConversationObjectID()
         let conversationUUID = UUID(uuidString: conversationId)

@@ -391,7 +391,7 @@ final class InitialSyncOrchestrator {
         in context: NSManagedObjectContext
     ) async throws {
         try await windowCheckpointStore.stageClear(in: context)
-        await messagePersister.setAccountHistoryId(historyId, in: context)
+        try await messagePersister.setAccountHistoryId(historyId, in: context)
     }
 
     private func fetchAndProcessMessages(

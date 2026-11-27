@@ -62,8 +62,12 @@ struct MessageFetchPhase: SyncPhase {
             log.warning(
                 "\(result.failedIds.count) messages failed to fetch, \(result.persistence.failedIds.count) failed to persist"
             )
-            // Staged into the sync context, not saved: the deferred ledger rows
-            // commit with the run's final save, atomically with the frozen cursor.
+            // Staged into the sync context, not saved here. The deferred ledger rows
+            // commit at the orchestrator's next save point: the intermediate flush
+            // where the run admits one (`allowsIntermediateContextSaves`, the batch
+            // completion above and the rollup flush after label processing), else
+            // the final save. Either way they commit ahead of the strike the final
+            // save stages, and the cursor is staged only at that final save.
             await context.failureTracker.recordFailure(
                 fetchFailedIds: result.failedIds,
                 persistenceFailedIds: result.persistence.failedIds,

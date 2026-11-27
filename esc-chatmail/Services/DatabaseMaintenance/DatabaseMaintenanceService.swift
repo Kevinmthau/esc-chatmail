@@ -25,8 +25,6 @@ final class DatabaseMaintenanceService: ObservableObject {
     /// one release after the build that stopped scheduling it.
     static let retiredVacuumTaskIdentifier = "com.esc.inboxchat.database.vacuum"
 
-    @Published var lastMaintenanceDate: Date?
-
     // Internal for extension access
     let coreDataStack: CoreDataStack
     let taskRegistry: any BackgroundTaskRegistering
@@ -96,7 +94,6 @@ final class DatabaseMaintenanceService: ObservableObject {
         self.sweepOrphanedAttachmentFiles = sweepOrphanedAttachmentFiles
         self.makeDataCleanupService = makeDataCleanupService
         registerBackgroundTasks()
-        loadLastMaintenanceDate()
     }
 
     // MARK: - Background Task Registration
@@ -146,35 +143,5 @@ final class DatabaseMaintenanceService: ObservableObject {
             Self.analyzeTaskIdentifier,
             Self.cleanupTaskIdentifier
         ])
-    }
-
-    // MARK: - Persistence
-
-    func loadLastMaintenanceDate() {
-        lastMaintenanceDate = UserDefaults.standard.object(forKey: "LastDatabaseMaintenance") as? Date
-    }
-
-    func saveLastMaintenanceDate() {
-        UserDefaults.standard.set(lastMaintenanceDate, forKey: "LastDatabaseMaintenance")
-    }
-}
-
-// MARK: - Database Statistics
-
-struct DatabaseStatistics: Sendable {
-    let messageCount: Int
-    let conversationCount: Int
-    let attachmentCount: Int
-    let personCount: Int
-    let databaseSize: Int64
-    let lastMaintenanceDate: Date?
-
-    var formattedSize: String {
-        ByteCountFormatter.string(fromByteCount: databaseSize, countStyle: .file)
-    }
-
-    var needsMaintenance: Bool {
-        guard let lastDate = lastMaintenanceDate else { return true }
-        return Date().timeIntervalSince(lastDate) > 7 * 24 * 60 * 60 // 7 days
     }
 }
