@@ -442,7 +442,12 @@ extension DataCleanupService {
         // candidate rows and the decoder verifies the full "=?...?=" shape.
         let encodedWordMarker = "=?"
 
-        let result: (changedPersonEmails: Set<String>, personCount: Int, messageCount: Int, conversationCount: Int) = await context.perform {
+        // Each read either answers or ends the pass with nothing latched: as
+        // `(try? context.fetch(...)) ?? []` a failed read left nothing to change,
+        // the save of nothing "succeeded" and the flag latched for good
+        // (architecture review 2026-11, invariant-enforcement#6; CLAUDE.md: a
+        // failed Core Data read is never "empty").
+        let result: (changedPersonEmails: Set<String>, personCount: Int, messageCount: Int, conversationCount: Int)? = await context.perform {
             var changedPersonEmails: Set<String> = []
             var personCount = 0
             var messageCount = 0
@@ -451,7 +456,14 @@ extension DataCleanupService {
             let personRequest = Person.fetchRequest()
             personRequest.predicate = NSPredicate(format: "displayName CONTAINS %@", encodedWordMarker)
             personRequest.fetchBatchSize = 100
-            for person in (try? context.fetch(personRequest)) ?? [] {
+            let persons: [Person]
+            do {
+                persons = try context.fetch(personRequest)
+            } catch {
+                Log.error("RFC 2047 header text repair could not read persons; left for the next cleanup", category: .coreData, error: error)
+                return nil
+            }
+            for person in persons {
                 guard let garbled = person.displayName else { continue }
                 let decoded = EmailNormalizer.sanitizeDisplayName(garbled)
                 guard decoded != garbled else { continue }
@@ -466,7 +478,14 @@ extension DataCleanupService {
                 encodedWordMarker, encodedWordMarker
             )
             messageRequest.fetchBatchSize = 200
-            for message in (try? context.fetch(messageRequest)) ?? [] {
+            let messages: [Message]
+            do {
+                messages = try context.fetch(messageRequest)
+            } catch {
+                Log.error("RFC 2047 header text repair could not read messages; left for the next cleanup", category: .coreData, error: error)
+                return nil
+            }
+            for message in messages {
                 var changed = false
                 if let garbled = message.senderName {
                     let decoded = EmailNormalizer.sanitizeDisplayName(garbled)
@@ -491,7 +510,14 @@ extension DataCleanupService {
                 encodedWordMarker, encodedWordMarker
             )
             conversationRequest.fetchBatchSize = 100
-            for conversation in (try? context.fetch(conversationRequest)) ?? [] {
+            let conversations: [Conversation]
+            do {
+                conversations = try context.fetch(conversationRequest)
+            } catch {
+                Log.error("RFC 2047 header text repair could not read conversations; left for the next cleanup", category: .coreData, error: error)
+                return nil
+            }
+            for conversation in conversations {
                 var changed = false
                 if let garbled = conversation.displayName {
                     let decoded = RFC2047Decoder.decode(garbled)
@@ -512,6 +538,14 @@ extension DataCleanupService {
             }
 
             return (changedPersonEmails, personCount, messageCount, conversationCount)
+        }
+
+        guard let result else {
+            // A read failed after an earlier one may have staged decoded values:
+            // drop them, as the save-failure branch below does, and leave the flag
+            // clear so the next cleanup runs the pass again.
+            await context.perform { context.rollback() }
+            return
         }
 
         guard await context.performSaveIfNeeded(caller: "DataCleanupService.decodeRFC2047HeaderText") else {
