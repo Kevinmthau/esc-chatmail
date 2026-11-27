@@ -127,6 +127,58 @@ final class ConversationListViewModelTests: XCTestCase {
         )
     }
 
+    // A live deletion that opens a slot in a full window asks for a backfill; when that
+    // fetch fails, the deletion already applied to the window is still published, so the
+    // row leaves the screen, and the reload stays owed for the next sync. Codex's review of
+    // the first version of this change found the branch returning before the publish.
+    // Revert-check: fails if `backfillConversationWindowIfNeeded` answers true for a reload
+    // that failed (`applyConversationChanges` then skips its publish and Bob stays visible
+    // and selectable).
+    func testFailedBackfillAfterALiveDeletion_stillPublishesTheDeletion() async throws {
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+        try viewContext.save()
+        let failing = EntityFetchFailingContext(
+            failingEntityName: "Conversation",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator,
+            concurrencyType: .mainQueueConcurrencyType
+        )
+        failing.failsFetches = false
+        let notificationCenter = NotificationCenter()
+        let viewModel = ConversationListViewModel(
+            dependencies: .forTesting(stack: stack, viewContext: viewContext, notificationCenter: notificationCenter),
+            windowProvider: ConversationWindowProvider(
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
+                    pageSize: 1,
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
+                )
+            )
+        )
+        viewModel.onAppear(in: failing)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, bob.objectID])
+
+        failing.failsFetches = true
+        failing.delete(failing.object(with: bob.objectID))
+        failing.processPendingChanges()
+
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [alice.objectID],
+            "The deletion is published although the backfill's fetch failed"
+        )
+        // At least one: the deletion's own delete-propagation prefetch fetches Conversation
+        // on this context too, and fails the same way.
+        XCTAssertGreaterThanOrEqual(failing.failedFetches, 1, "The backfill was asked for and failed")
+
+        failing.failsFetches = false
+        notificationCenter.post(name: .syncCompleted, object: nil)
+
+        await waitForFilteredConversationIDs([alice.objectID, carol.objectID], in: viewModel)
+    }
+
     // The first fetch failing leaves the list empty but not final: no latch, and the next
     // sync's end fills it.
     // Revert-check: as above; with `[]` for the error the latch closed on the empty first

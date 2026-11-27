@@ -660,6 +660,12 @@ final class ConversationListViewModel: ObservableObject {
         windowReloadOwed = true
     }
 
+    /// Returns whether the reload replaced and published the window. A backfill whose
+    /// fetch failed answers false, so the caller publishes the live changes it already
+    /// applied (a deletion or an archive that opened the slot) and the row leaves the
+    /// screen; the reload stays owed. Answering true there, as the first version of the
+    /// failure branch did, left the removed row visible and selectable until a later
+    /// reload (Codex's review of PR 503).
     @discardableResult
     private func backfillConversationWindowIfNeeded() -> Bool {
         guard observedConversationContext != nil,
@@ -668,8 +674,7 @@ final class ConversationListViewModel: ObservableObject {
             return false
         }
 
-        reloadConversationWindowFromStore()
-        return true
+        return reloadConversationWindowFromStore()
     }
 
     // MARK: - Visibility Predicates
