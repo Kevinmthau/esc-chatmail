@@ -3839,6 +3839,7 @@ private final class RecordingTokenManager: TokenManagerProtocol, @unchecked Send
     func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {}
     func getCurrentToken() async throws -> String { "token" }
     func refreshToken() async throws -> String { "token" }
+    func refreshToken(rejecting rejectedAccessToken: String) async throws -> String { "token" }
     func clearTokens() throws { onClear() }
     func isAuthenticated() -> Bool { true }
 }

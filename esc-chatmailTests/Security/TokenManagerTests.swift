@@ -422,6 +422,128 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(replacementToken, "replacement")
     }
 
+    // MARK: - refreshToken(rejecting:) (architecture review 2026-11, gap-wall-clock-time#2)
+
+    // Revert-check: fails if `TokenRefreshCoordinator.getOrCreateTask` loses
+    // its `joinsOnlySamePurpose` term (the second look of
+    // `refreshToken(rejecting:)` would join the `.freshToken` refresh that had
+    // just handed the rejected token back), or stops letting a caller join an
+    // entry started for another purpose (a burst of 401s would start one
+    // refresh each).
+    func testRefreshCoordinator_joinRules_shareAcrossPurposesUntilASecondLookAsksForTheSameOne() async throws {
+        let coordinator = TokenRefreshCoordinator()
+        let replacing = TokenRefreshPurpose.replacing(rejectedAccessToken: "rejected")
+
+        let plain = await coordinator.getOrCreateTask(forGeneration: 1) {
+            Task<String, Error> { "rejected" }
+        }
+        let firstLook = await coordinator.getOrCreateTask(forGeneration: 1, purpose: replacing) {
+            Task<String, Error> { "unexpected" }
+        }
+        XCTAssertEqual(firstLook.id, plain.id, "A 401's first look joins the refresh in flight")
+        XCTAssertEqual(firstLook.purpose, .freshToken)
+
+        let secondLook = await coordinator.getOrCreateTask(
+            forGeneration: 1,
+            purpose: replacing,
+            joinsOnlySamePurpose: true
+        ) {
+            Task<String, Error> { "forced" }
+        }
+        XCTAssertNotEqual(secondLook.id, plain.id, "The second look never joins a plain refresh")
+        XCTAssertEqual(secondLook.purpose, replacing)
+        let forced = try await secondLook.task.value
+        XCTAssertEqual(forced, "forced")
+
+        let anotherForcingCaller = await coordinator.getOrCreateTask(
+            forGeneration: 1,
+            purpose: replacing,
+            joinsOnlySamePurpose: true
+        ) {
+            Task<String, Error> { "duplicate" }
+        }
+        XCTAssertEqual(anotherForcingCaller.id, secondLook.id, "Forcing callers for one token share one refresh")
+        let plainCaller = await coordinator.getOrCreateTask(forGeneration: 1) {
+            Task<String, Error> { "duplicate" }
+        }
+        XCTAssertEqual(plainCaller.id, secondLook.id, "A plain caller joins a forcing refresh")
+    }
+
+    // Revert-check: fails if `TokenManager.cachedReplacement(for:ifCacheEpochMatches:)`
+    // stops answering with a cached token other than the rejected one: a 401
+    // that arrives after another one's refresh already replaced the token
+    // would ask Google again.
+    // HONEST SCOPE: it is asked twice, by `refreshToken(rejecting:)` and again
+    // as `performTokenRefresh` starts, and either call alone answers this, so
+    // removing just one of them still passes.
+    func testRefreshTokenRejecting_cacheHoldsAnotherFreshToken_returnsItWithoutRefreshing() async throws {
+        try sut.saveTokens(access: "replacement", refresh: nil, expirationDate: Date().addingTimeInterval(3_600))
+
+        let token = try await sut.refreshToken(rejecting: "rejected")
+
+        XCTAssertEqual(token, "replacement")
+        XCTAssertEqual(mockRefresher.callCount, 0)
+        XCTAssertEqual(mockRefresher.forcedCallCount, 0)
+    }
+
+    // Revert-check: fails if `performTokenRefresh`'s opening
+    // `cachedReplacement(for:ifCacheEpochMatches:)` drops its `epochAtStart`:
+    // a refresh whose generation a replacement sign-in retired would return
+    // the replacement session's token instead of a `CancellationError`.
+    func testPerformTokenRefreshRejecting_retiredGeneration_isCancelledNotHandedTheReplacementToken() async throws {
+        let retiredEpoch = sut.cacheEpoch()
+        try sut.saveTokens(
+            access: "replacement-access",
+            refresh: "replacement-refresh",
+            expirationDate: Date().addingTimeInterval(3_600)
+        )
+
+        do {
+            let token = try await sut.performTokenRefresh(
+                ifCacheEpochMatches: retiredEpoch,
+                rejecting: "rejected"
+            )
+            XCTFail("Expected the retired refresh to be cancelled, got \(token)")
+        } catch is CancellationError {
+            // Expected.
+        }
+        XCTAssertEqual(mockRefresher.callCount, 0)
+        XCTAssertEqual(mockRefresher.forcedCallCount, 0)
+    }
+
+    // Revert-check: fails if `TokenManager.refreshToken(rejecting:)` returns
+    // what the refresh it joined returned without its second look (`guard
+    // token == rejectedAccessToken, joined.purpose != purpose`): a 401 caller
+    // that joins a plain refresh of the same stale token is handed that token.
+    // HONEST SCOPE: the plain refresh is held open for 0.3 s for the 401 caller
+    // to join it, which nothing outside the coordinator can confirm; a caller
+    // that arrives late starts its own refresh and gets the same answer, so a
+    // slow run can pass with the second look removed. The join rule itself is
+    // pinned deterministically by the coordinator test above.
+    func testRefreshTokenRejecting_joinsAPlainRefreshThatHandsBackTheRejectedToken_forcesANewOne() async throws {
+        try sut.saveTokens(access: "rejected", refresh: nil, expirationDate: Date().addingTimeInterval(3_600))
+        mockRefresher.accessToken = "rejected"
+        mockRefresher.forcedAccessToken = "forced"
+        mockRefresher.artificialDelay = 0.3
+
+        let manager = sut!
+        let plainRefresh = Task { try await manager.refreshToken() }
+        // The mock counts a call only after its delay, so the plain refresh's
+        // start is read from `isRefreshing`, which its task sets first.
+        let deadline = Date().addingTimeInterval(5)
+        while !sut.isRefreshing, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 5_000_000)
+        }
+        let rejecting = try await sut.refreshToken(rejecting: "rejected")
+        let plain = try await plainRefresh.value
+
+        XCTAssertEqual(plain, "rejected", "The plain refresh hands back what GoogleSignIn holds")
+        XCTAssertEqual(rejecting, "forced", "The 401 caller is never handed the rejected token")
+        XCTAssertEqual(mockRefresher.forcedCallCount, 1)
+        let current = try await sut.getCurrentToken()
+        XCTAssertEqual(current, "forced")
+    }
+
     func testRefreshToken_noValidTokenError_doesNotRetry() async {
         authSession.isAuthenticated = true
         mockRefresher.errorToThrow = TokenManagerError.noValidToken
@@ -564,6 +686,16 @@ private actor ControlledFailingTokenRefresher: TokenRefresherProtocol {
         while !didStart, Date() < deadline {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
+    }
+
+    /// Never asked for: these tests' refreshes reject no token.
+    func forceRefreshTokens() async throws -> (
+        accessToken: String,
+        refreshToken: String?,
+        expirationDate: Date
+    ) {
+        XCTFail("ControlledFailingTokenRefresher is not asked for a forced refresh")
+        throw TokenManagerError.noValidToken
     }
 
     func waitUntilCallCount(_ expectedCount: Int) async {

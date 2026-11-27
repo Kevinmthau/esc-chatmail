@@ -53,6 +53,64 @@ final class MockTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
         set { lock.withLock { _onRefresh = newValue } }
     }
 
+    // MARK: - Forced refresh (`forceRefreshTokens`)
+
+    private var _forcedAccessToken: String = "forced-access-token"
+    private var _forcedError: Error?
+    private var _forcedCallCount: Int = 0
+    private var _onForcedRefresh: (() -> Void)?
+    private var _forcedRefreshGate: (@Sendable () async -> Void)?
+
+    /// What a forced refresh returns, with `refreshToken` and `expirationDate`.
+    var forcedAccessToken: String {
+        get { lock.withLock { _forcedAccessToken } }
+        set { lock.withLock { _forcedAccessToken = newValue } }
+    }
+
+    var forcedErrorToThrow: Error? {
+        get { lock.withLock { _forcedError } }
+        set { lock.withLock { _forcedError = newValue } }
+    }
+
+    /// Forced refreshes only; `callCount` counts the plain ones.
+    var forcedCallCount: Int {
+        lock.withLock { _forcedCallCount }
+    }
+
+    /// As `onRefresh`, for a forced refresh: after its tokens are produced,
+    /// before they are returned.
+    var onForcedRefresh: (() -> Void)? {
+        get { lock.withLock { _onForcedRefresh } }
+        set { lock.withLock { _onForcedRefresh = newValue } }
+    }
+
+    /// Awaited after a forced refresh is counted and before it answers: holds
+    /// it open until the test's condition (deadline-bounded by the test).
+    var forcedRefreshGate: (@Sendable () async -> Void)? {
+        get { lock.withLock { _forcedRefreshGate } }
+        set { lock.withLock { _forcedRefreshGate = newValue } }
+    }
+
+    func forceRefreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
+        let gate: (@Sendable () async -> Void)? = lock.withLock {
+            _forcedCallCount += 1
+            return _forcedRefreshGate
+        }
+        if let gate {
+            await gate()
+        }
+
+        let result: (accessToken: String, refreshToken: String?, expirationDate: Date) = try lock.withLock {
+            if let error = _forcedError {
+                throw error
+            }
+            return (_forcedAccessToken, _refreshToken, _expirationDate)
+        }
+
+        onForcedRefresh?()
+        return result
+    }
+
     func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
         let delay = artificialDelay
         if delay > 0 {
