@@ -364,7 +364,6 @@ final class AttachmentDownloader: ObservableObject {
     private let apiClient: any GmailAPIClientProtocol
     private let coreDataStack: CoreDataStack
     private var cancellables = Set<AnyCancellable>()
-    private var retryAttempts: [AttachmentDownloadKey: Int] = [:]
     private struct DownloadOperation {
         let generation: AttachmentDownloadGenerationToken
         let task: Task<Void, Never>
@@ -390,8 +389,6 @@ final class AttachmentDownloader: ObservableObject {
         AttachmentDownloadKey: [UUID: CheckedContinuation<Void, Never>]
     ] = [:]
     private var acceptsNewDownloads = true
-    private let maxRetryAttempts: Int
-    private let baseRetryDelay: TimeInterval
     private let loadAttachmentData: @Sendable (String?) async -> Data?
     private let prepareDownloadDirectories: @Sendable () -> Void
     private let fetchAttachmentFileReferences: @Sendable (NSManagedObjectContext) throws -> [NSDictionary]
@@ -406,8 +403,6 @@ final class AttachmentDownloader: ObservableObject {
     init(
         apiClient: (any GmailAPIClientProtocol)? = nil,
         coreDataStack: CoreDataStack = .shared,
-        maxRetryAttempts: Int = 3,
-        baseRetryDelay: TimeInterval = 2.0,
         loadAttachmentData: @escaping @Sendable (String?) async -> Data? = { path in
             await Task.detached(priority: .utility) {
                 AttachmentPaths.loadData(from: path)
@@ -425,8 +420,6 @@ final class AttachmentDownloader: ObservableObject {
     ) {
         self.apiClient = apiClient ?? GmailAPIClient.shared
         self.coreDataStack = coreDataStack
-        self.maxRetryAttempts = maxRetryAttempts
-        self.baseRetryDelay = baseRetryDelay
         self.loadAttachmentData = loadAttachmentData
         self.prepareDownloadDirectories = prepareDownloadDirectories
         self.fetchAttachmentFileReferences = fetchAttachmentFileReferences
@@ -444,7 +437,6 @@ final class AttachmentDownloader: ObservableObject {
         )
         downloadProgressByKey.removeValue(forKey: key)
         activeDownloadKeys.remove(key)
-        retryAttempts.removeValue(forKey: key)
     }
 
     /// Cleans up all tracking data. Call on logout to prevent leaking previous user's data.
@@ -454,7 +446,6 @@ final class AttachmentDownloader: ObservableObject {
         let waiters = activeDownloadWaiters.values.flatMap { $0.values }
         activeDownloadWaiters.removeAll()
         waiters.forEach { $0.resume() }
-        retryAttempts.removeAll()
     }
 
     func isDownloading(messageId: String?, attachmentId: String?) -> Bool {
@@ -652,7 +643,7 @@ final class AttachmentDownloader: ObservableObject {
         guard isActive(generation) else { return }
         if didSkipLocal { return }
 
-        await downloadAttachmentWithRetry(
+        await performAttachmentDownload(
             attachmentId: attachmentId,
             attachmentObjectID: attachmentObjectID,
             messageId: messageId,
@@ -661,42 +652,37 @@ final class AttachmentDownloader: ObservableObject {
         )
     }
 
-    private func downloadAttachmentWithRetry(
+    private func performAttachmentDownload(
         attachmentId: String,
         attachmentObjectID: NSManagedObjectID,
         messageId: String,
         in context: NSManagedObjectContext,
-        generation: AttachmentDownloadGenerationToken,
-        isRetryContinuation: Bool = false
+        generation: AttachmentDownloadGenerationToken
     ) async {
         guard isActive(generation) else { return }
         let downloadKey = AttachmentDownloadKey(
             messageId: messageId,
             attachmentId: attachmentId
         )
-        if !isRetryContinuation && activeDownloadKeys.contains(downloadKey) {
+        if activeDownloadKeys.contains(downloadKey) {
             Log.debug("Download already in progress for attachment: \(attachmentId)", category: .attachment)
             await waitForActiveDownload(downloadKey)
             return
         }
 
-        if !isRetryContinuation {
-            activeDownloadKeys.insert(downloadKey)
-        }
+        activeDownloadKeys.insert(downloadKey)
         downloadProgressByKey[downloadKey] = 0.0
         defer {
-            if !isRetryContinuation {
-                // `Set.remove` of an absent key still publishes; a cancel may
-                // already have removed it.
-                if activeDownloadKeys.contains(downloadKey) {
-                    activeDownloadKeys.remove(downloadKey)
-                }
-                downloadProgressByKey.removeValue(forKey: downloadKey)
-                let waiters = activeDownloadWaiters
-                    .removeValue(forKey: downloadKey)
-                    .map { Array($0.values) } ?? []
-                waiters.forEach { $0.resume() }
+            // `Set.remove` of an absent key still publishes; a cancel may
+            // already have removed it.
+            if activeDownloadKeys.contains(downloadKey) {
+                activeDownloadKeys.remove(downloadKey)
             }
+            downloadProgressByKey.removeValue(forKey: downloadKey)
+            let waiters = activeDownloadWaiters
+                .removeValue(forKey: downloadKey)
+                .map { Array($0.values) } ?? []
+            waiters.forEach { $0.resume() }
         }
 
         if attachmentId.hasPrefix("local_inline_") {
@@ -732,8 +718,6 @@ final class AttachmentDownloader: ObservableObject {
                 requestedAttachmentObjectID: attachmentObjectID,
                 requestedAttachmentId: attachmentId
             )
-            guard isActive(generation) else { return }
-            retryAttempts.removeValue(forKey: downloadKey)
             return
         }
 
@@ -898,9 +882,6 @@ final class AttachmentDownloader: ObservableObject {
             }
 
             downloadProgressByKey[downloadKey] = 1.0
-            
-            // Clear retry attempts on success
-            retryAttempts.removeValue(forKey: downloadKey)
 
         } catch {
             if error is CancellationError || !isActive(generation) {
@@ -918,51 +899,32 @@ final class AttachmentDownloader: ObservableObject {
                 attachmentId: attachmentId
             )
 
-            // Check if we should retry
-            let attempts = (retryAttempts[downloadKey] ?? 0) + 1
-            retryAttempts[downloadKey] = attempts
-
-            if attempts < maxRetryAttempts {
-                // Calculate exponential backoff delay
-                let delay = baseRetryDelay * pow(2.0, Double(attempts - 1))
-                Log.debug("Retrying attachment \(attachmentId) in \(delay) seconds (attempt \(attempts)/\(maxRetryAttempts))", category: .attachment)
-
-                // Schedule retry; a cancelled task abandons the retry chain
-                // and unwinds into the outermost call's cleanup `defer`.
-                guard await Task.sleepUnlessCancelled(nanoseconds: UInt64(delay * 1_000_000_000)) else { return }
-                guard isActive(generation) else { return }
-
-                // Retry the download
-                await downloadAttachmentWithRetry(
-                    attachmentId: attachmentId,
-                    attachmentObjectID: attachmentObjectID,
-                    messageId: messageId,
-                    in: context,
-                    generation: generation,
-                    isRetryContinuation: true
-                )
-                return
-            } else {
-                // Immediate retry budget is exhausted; later callers may retry based on this timestamp.
-                Log.warning("Attachment \(attachmentId) failed after \(maxRetryAttempts) attempts", category: .attachment)
-                await context.perform {
-                    guard !generation.isCancelled else { return }
-                    if let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment {
-                        attachmentInContext.state = .failed
-                        attachmentInContext.lastDownloadFailedAt = Date()
-                        guard !generation.isCancelled else {
-                            context.rollback()
-                            return
-                        }
-                        do {
-                            try context.save()
-                        } catch {
-                            Log.error("Failed to save failed attachment state for \(attachmentId)", category: .attachment, error: error)
-                        }
+            // One call of the client, whose retry engine is the single retry owner
+            // (`performRetryingRequest`: the 401 refresh, the 429 pacing, the transport
+            // retries). Until 2026-11-27 a second loop here re-ran the whole download
+            // twice more, 2 s and 4 s apart, so a large attachment on a slow link made
+            // up to six 60-second transfers before this write, and a failed card
+            // started them again on its next appearance (architecture review 2026-11,
+            // attachments-storage-disk#2, first step). The row goes `.failed` and the
+            // time is recorded; nothing reads the time yet: the next appearance decides
+            // on the state alone (`downloadAttachmentIfNeeded`) and Retry sets
+            // `.queued`, so a failed card is tried again as soon as it is shown.
+            Log.warning("Attachment \(Log.hashIdentifier(attachmentId)) failed; the client's retries were the only ones", category: .attachment)
+            await context.perform {
+                guard !generation.isCancelled else { return }
+                if let attachmentInContext = try? context.existingObject(with: attachmentObjectID) as? Attachment {
+                    attachmentInContext.state = .failed
+                    attachmentInContext.lastDownloadFailedAt = Date()
+                    guard !generation.isCancelled else {
+                        context.rollback()
+                        return
+                    }
+                    do {
+                        try context.save()
+                    } catch {
+                        Log.error("Failed to save failed attachment state for \(attachmentId)", category: .attachment, error: error)
                     }
                 }
-                guard isActive(generation) else { return }
-                retryAttempts.removeValue(forKey: downloadKey)
             }
         }
     }
@@ -1065,17 +1027,9 @@ final class AttachmentDownloader: ObservableObject {
         generation: AttachmentDownloadGenerationToken
     ) async {
         guard isActive(generation) else { return }
-        guard let message = attachment.message,
-              let attachmentId = attachment.id else { return }
+        // A row with no id names no Gmail attachment to retry.
+        guard let message = attachment.message, attachment.id != nil else { return }
         let attachmentObjectID = attachment.objectID
-
-        // Reset retry counter for manual retry
-        retryAttempts.removeValue(
-            forKey: AttachmentDownloadKey(
-                messageId: message.id,
-                attachmentId: attachmentId
-            )
-        )
 
         let context = coreDataStack.newBackgroundContext()
         let saveSucceeded = await context.perform {
