@@ -119,13 +119,13 @@ actor ConversationCreationSerializer {
                     in: shellContext
                 )
             } catch {
-                Log.error("Failed to create conversation: \(error)", category: .coreData)
+                Log.error("Failed to create conversation", category: .coreData, error: error)
                 throw error
             }
             do {
                 try shellContext.save()
             } catch {
-                Log.error("Failed to save new conversation: \(error)", category: .coreData)
+                Log.error("Failed to save new conversation", category: .coreData, error: error)
                 throw error
             }
             return shell.objectID

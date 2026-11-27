@@ -35,10 +35,15 @@ esac
 
 ARGS=()
 RUN_PERFORMANCE_TESTS=false
+RUN_CONCURRENCY_DEBUG=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --performance)
       RUN_PERFORMANCE_TESTS=true
+      shift
+      ;;
+    --concurrency-debug)
+      RUN_CONCURRENCY_DEBUG=true
       shift
       ;;
     -destination)
@@ -51,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     -testPlan)
       # Same hole from the other side: -testPlan esc-chatmail with a Mac
       # DESTINATION is the full iOS plan in a Mac test host.
-      echo "The test plan follows DESTINATION (and --performance); -testPlan cannot be passed." >&2
+      echo "The test plan follows DESTINATION (and --performance or --concurrency-debug); -testPlan cannot be passed." >&2
       exit 1
       ;;
     *)
@@ -61,7 +66,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
+if [[ "${RUN_CONCURRENCY_DEBUG}" == "true" ]]; then
+  if [[ "${IS_MAC_DESTINATION}" == "true" || "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
+    echo "--concurrency-debug runs ConcurrencyDebug.xctestplan on the iOS simulator and cannot be combined with --performance." >&2
+    exit 1
+  fi
+  # ConcurrencyDebug test plan: the suites measured clean under Core Data's
+  # -com.apple.CoreData.ConcurrencyDebug 1, which the plan passes to the host
+  # and which traps on a context touched off its queue (architecture review
+  # 2026-11, testing-ci-release#4). Serial, so a crash names its host; the
+  # default plan cannot carry the flag, because its private-queue test contexts
+  # are touched off-queue by design. Adding a suite is in CLAUDE.md (Testing).
+  ARGS+=("-testPlan" "ConcurrencyDebug" "-parallel-testing-enabled" "NO")
+elif [[ "${RUN_PERFORMANCE_TESTS}" == "true" ]]; then
   if [[ "${IS_MAC_DESTINATION}" == "true" ]]; then
     echo "The performance test plan runs on the iOS simulator only." >&2
     exit 1

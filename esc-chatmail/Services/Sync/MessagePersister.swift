@@ -445,7 +445,7 @@ actor MessagePersister {
                 // FETCHES likewise record nothing — see MessageFetcher).
                 throw error
             }
-            Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(error)", category: .sync)
+            Log.warning("Body fetch failed for message \(Log.hashIdentifier(gmailMessage.id)): \(Log.redact(error: error))", category: .sync)
             return .bodyFetchFailed(id: gmailMessage.id)
         }
 
@@ -601,7 +601,7 @@ actor MessagePersister {
             return .excluded
 
         case .unprocessable(let id):
-            Log.warning("Failed to process message: \(id)", category: .sync)
+            Log.warning("Failed to process message: \(Log.hashIdentifier(id))", category: .sync)
             return .unprocessable
 
         case .bodyFetchFailed(let id):
