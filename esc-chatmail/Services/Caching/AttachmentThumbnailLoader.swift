@@ -33,7 +33,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
         case thumbnail(
             attachmentId: String,
             messageId: String?,
-            previewPath: String?
+            previewPath: String?,
+            decodeSize: ThumbnailDecodeSize?
         )
         case downsampled(
             attachmentId: String,
@@ -75,8 +76,14 @@ final class AttachmentThumbnailLoader: ObservableObject {
         loadTask?.cancel()
     }
 
-    /// Load thumbnail from preview path
-    func load(attachmentId: String?, messageId: String? = nil, previewPath: String?) {
+    /// Load thumbnail from preview path, decoded to cover `decodeSize`, the frame the view draws
+    /// it in (`ThumbnailDecodeSize`); nil decodes it at its own size.
+    func load(
+        attachmentId: String?,
+        messageId: String? = nil,
+        previewPath: String?,
+        decodeSize: ThumbnailDecodeSize? = nil
+    ) {
         guard let attachmentId else {
             reset()
             return
@@ -84,7 +91,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
         let request = LoadRequest.thumbnail(
             attachmentId: attachmentId,
             messageId: messageId,
-            previewPath: previewPath
+            previewPath: previewPath,
+            decodeSize: decodeSize
         )
         prepare(for: request)
         guard AttachmentPaths.isReadableStoragePath(
@@ -103,7 +111,8 @@ final class AttachmentThumbnailLoader: ObservableObject {
             let loadedImage = await cache.loadThumbnail(
                 for: attachmentId,
                 messageId: messageId,
-                from: previewPath
+                from: previewPath,
+                decodeSize: decodeSize
             )
             guard !Task.isCancelled else { return }
             await publish(loadedImage)

@@ -109,6 +109,16 @@ struct ImageProcessor {
         return CGSize(width: width, height: height)
     }
 
+    /// The first image's size in pixels as it is shown: `sourcePixelSize` with its axes swapped
+    /// for an EXIF orientation of 5 to 8, which turns the image a quarter turn. What a thumbnail
+    /// made with `kCGImageSourceCreateThumbnailWithTransform` comes out as.
+    static func orientedPixelSize(of source: CGImageSource) -> CGSize? {
+        guard let size = sourcePixelSize(of: source) else { return nil }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientation = (properties?[kCGImagePropertyOrientation] as? NSNumber)?.intValue ?? 1
+        return (5...8).contains(orientation) ? CGSize(width: size.height, height: size.width) : size
+    }
+
     static func generateThumbnail(from data: Data, mimeType: String) -> Data? {
         if mimeType.starts(with: "image/") {
             return generateImageThumbnail(from: data)

@@ -30,6 +30,9 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     // MARK: - Properties
 
     private var storage: [Key: CacheEntry] = [:]
+    /// The sum of every stored entry's `sizeBytes`, kept with `storage` at each insert and
+    /// removal so the budget is not summed again at every eviction.
+    private var storedBytes = 0
     private let config: CacheConfiguration
     private var stats = LRUCacheStatistics()
     private var accessSequenceCounter: UInt64 = 0
@@ -53,7 +56,7 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
         // Check TTL if configured
         if let ttl = config.ttlSeconds, entry.age > ttl {
-            storage.removeValue(forKey: key)
+            removeEntry(forKey: key)
             stats.recordMiss()
             stats.recordEviction()
             return nil
@@ -73,12 +76,13 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
     }
 
     func remove(_ key: Key) async {
-        storage.removeValue(forKey: key)
+        removeEntry(forKey: key)
         stats.currentItemCount = storage.count
     }
 
     func clear() async {
         storage.removeAll()
+        storedBytes = 0
         stats.currentItemCount = 0
     }
 
@@ -89,26 +93,20 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
     // MARK: - Extended API
 
-    /// Sets a value with optional size tracking for memory-based eviction
+    /// Sets a value with optional size tracking for memory-based eviction.
+    ///
+    /// The entry is stored first and the limits are then met by evicting the least recently
+    /// used entries other than this one: the cache never holds more than its budget after an
+    /// insert, as it did when the check ran before it, and an entry larger than the whole
+    /// budget stays, alone, rather than evicting itself and everything else (architecture
+    /// review 2026-11, caching-memory#1).
     func set(_ key: Key, value: Value, sizeBytes: Int?) {
         accessSequenceCounter &+= 1
         let entry = CacheEntry(value: value, accessSequence: accessSequenceCounter, sizeBytes: sizeBytes)
-        let isUpdate = storage[key] != nil
-
-        if !isUpdate {
-            // New entry - evict before to make room
-            evictIfNeeded()
-        }
-
-        // Set the entry
+        removeEntry(forKey: key)
         storage[key] = entry
-
-        // For updates with memory tracking, ensure we're still within limits
-        // (the new value might be larger than the old one)
-        if isUpdate && config.maxMemoryBytes != nil {
-            evictIfNeeded()
-        }
-
+        storedBytes += max(0, sizeBytes ?? 0)
+        fitWithinLimits(sparing: key)
         stats.currentItemCount = storage.count
     }
 
@@ -150,7 +148,7 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
         }
 
         for key in keysToRemove {
-            storage.removeValue(forKey: key)
+            removeEntry(forKey: key)
             stats.recordEviction()
         }
 
@@ -159,44 +157,43 @@ actor LRUCacheActor<Key: Hashable & Sendable, Value: Sendable>: CacheProtocol {
 
     // MARK: - Private Helpers
 
-    private func evictIfNeeded() {
-        // Check item count limit
-        while storage.count >= config.maxItems {
-            evictLeastRecentlyUsed()
-        }
-
-        // Check memory limit if configured
-        if let maxBytes = config.maxMemoryBytes {
-            while currentMemoryUsage() > maxBytes && !storage.isEmpty {
-                evictLeastRecentlyUsed()
-            }
+    /// Evicts least recently used entries, never `keptKey`, until the item count and the
+    /// byte budget both hold, or `keptKey` is all that is left.
+    private func fitWithinLimits(sparing keptKey: Key) {
+        while storage.count > config.maxItems || isOverByteBudget {
+            guard evictLeastRecentlyUsed(sparing: keptKey) else { return }
         }
     }
 
-    /// Finds and removes the entry with the oldest lastAccessedAt timestamp.
-    /// This is O(n) but only called during eviction when cache is full.
-    private func evictLeastRecentlyUsed() {
-        guard !storage.isEmpty else { return }
+    private var isOverByteBudget: Bool {
+        guard let maxBytes = config.maxMemoryBytes else { return false }
+        return storedBytes > maxBytes
+    }
 
+    /// Finds and removes the entry other than `keptKey` with the oldest access sequence; false
+    /// when there is none. O(n), and only called when the cache is over a limit.
+    private func evictLeastRecentlyUsed(sparing keptKey: Key) -> Bool {
         // Find the key with the oldest access sequence (deterministic).
         var lruKey: Key?
         var oldestSequence = UInt64.max
 
-        for (key, entry) in storage {
+        for (key, entry) in storage where key != keptKey {
             if entry.lastAccessSequence < oldestSequence {
                 oldestSequence = entry.lastAccessSequence
                 lruKey = key
             }
         }
 
-        if let keyToRemove = lruKey {
-            storage.removeValue(forKey: keyToRemove)
-            stats.recordEviction()
-            stats.currentItemCount = storage.count
-        }
+        guard let keyToRemove = lruKey else { return false }
+        removeEntry(forKey: keyToRemove)
+        stats.recordEviction()
+        stats.currentItemCount = storage.count
+        return true
     }
 
-    private func currentMemoryUsage() -> Int {
-        storage.values.compactMap(\.sizeBytes).reduce(0, +)
+    /// Removes an entry and its bytes from the running total.
+    private func removeEntry(forKey key: Key) {
+        guard let removed = storage.removeValue(forKey: key) else { return }
+        storedBytes -= max(0, removed.sizeBytes ?? 0)
     }
 }

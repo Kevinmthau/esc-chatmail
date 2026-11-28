@@ -37,6 +37,28 @@ struct ImageAttachmentBubble: View {
         _reservedPresentation = State(initialValue: presentation)
     }
 
+    /// What the preview is decoded to cover: on the Mac the style's fixed width and the largest
+    /// connected screen's scale, since a window can widen or move to a Retina display after the
+    /// bubble has loaded (`ImageAttachmentLayout.previewDecodeSize`).
+    private var previewDecodeSize: ThumbnailDecodeSize? {
+        #if os(macOS)
+        let widestMaxWidth = MessageBubbleStyle.mac.imageMaxWidth
+        let largestDisplayScale = PlatformScreen.scale
+        #else
+        let widestMaxWidth: CGFloat? = nil
+        let largestDisplayScale = displayScale
+        #endif
+        return ImageAttachmentLayout.previewDecodeSize(
+            pixelWidth: reservedPixelSize.width,
+            pixelHeight: reservedPixelSize.height,
+            maxWidth: maxWidth,
+            widestMaxWidth: widestMaxWidth,
+            displayScale: displayScale,
+            largestDisplayScale: largestDisplayScale,
+            presentation: reservedPresentation
+        )
+    }
+
     private var size: CGSize {
         ImageAttachmentLayout.size(
             pixelWidth: reservedPixelSize.width,
@@ -111,10 +133,14 @@ struct ImageAttachmentBubble: View {
                 isImage: true
             )
         } else {
+            // Decoded to cover the largest frame this bubble can take, not at the preview's own
+            // size (`ImageAttachmentLayout.previewDecodeSize`): a 1,600 px photo drawn 840 px
+            // wide decodes about 2.4 MB, not 7.7 MB.
             thumbnailLoader.load(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                previewPath: attachment.readablePreviewURLValue
+                previewPath: attachment.readablePreviewURLValue,
+                decodeSize: previewDecodeSize
             )
         }
     }
