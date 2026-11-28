@@ -5,8 +5,9 @@ import CoreData
 import UIKit
 @testable import esc_chatmail
 
-/// The chat transcript mounted as the app mounts it, in a window, over a seeded store, to see
-/// how its hidden initial-anchor pass ends (architecture review 2026-11, chat-transcript-ui#3).
+/// The chat transcript mounted as the iPhone's chat mounts it, in a `NavigationStack` in a window
+/// with the window's safe area, over a seeded store, to see how its hidden initial-anchor pass
+/// ends (architecture review 2026-11, chat-transcript-ui#3).
 ///
 /// The reveal rests on how SwiftUI's lazy stack realizes rows under the cover and where
 /// `scrollTo` lands. `ChatMessagesCoordinator` infers both from geometry and has bounded ways
@@ -14,19 +15,26 @@ import UIKit
 /// reveals the transcript anyway, so a change of that behaviour in an OS release would show
 /// only as warnings in the device log. Here it is a test: a pass over plain text rows must end
 /// `.confirmed`, which it does only with the bottom anchor on screen and the newest row's view
-/// in the hierarchy (`ChatTranscriptRealizationPolicy`). CI runs it on its iOS 26 runtime; it
-/// was written on the iOS 27.0 simulator.
+/// in the hierarchy (`ChatTranscriptRealizationPolicy`), after however many realization nudges
+/// (it prints the count). CI runs it on its iOS 26 runtime; it was written on the iOS 27.0
+/// simulator, where every run confirmed after one nudge.
 ///
 /// Hygiene, as the review lists it. The view context is main-queue: `VirtualScrollState` and
 /// the coordinator touch it on the main actor. The chat's appear marks unread mail read, so
 /// every row is read and the chat's `MessageActions` work on this test's store. Contacts are
 /// `NobodyContactsResolver`, for the bubbles' sender loads and the participant loader alike;
-/// bodies live in a temporary directory; the auth session is the test's own, with an empty
-/// keychain and a throwaway defaults suite. Waits are by wall-clock deadline.
+/// the chat's `HTMLContentHandler` is rooted in a temporary directory; the auth session is the
+/// test's own, with an empty keychain and a throwaway defaults suite; the message IDs carry a
+/// UUID, because they reach process-wide caches. Waits are by wall-clock deadline. Shared
+/// singletons remain: the bubble loader's `HTMLContentLoader.shared` and
+/// `HTMLContentRecoveryService.shared`, and `MessageActions`' `PendingActionsManager.shared`.
+/// With plain text rows, all read, none of them is asked to do anything.
 ///
-/// HONEST SCOPE: one OS runtime per run, a standard window and plain text rows. No HTML card,
-/// image or Mac transcript is mounted, and the pre-iOS 18 `.top` anchor branch cannot be run on
-/// a runtime that has `defaultScrollAnchor(_:for:)`.
+/// HONEST SCOPE: one OS runtime per run, an iPhone-sized window and plain text rows. Not
+/// `ChatView` itself: its header, sheets and draft wiring are left out, only its
+/// `NavigationStack` and title kept. No HTML card, image or Mac transcript is mounted, and the
+/// pre-iOS 18 `.top` anchor branch cannot be run on a runtime that has
+/// `defaultScrollAnchor(_:for:)`.
 @MainActor
 final class ChatTranscriptRevealHostedTests: XCTestCase {
     /// Sixty text rows, the window's last twenty published, revealed at the newest row.
@@ -38,7 +46,7 @@ final class ChatTranscriptRevealHostedTests: XCTestCase {
         let fixture = try makeFixture(messageCount: 60)
         var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
 
-        let host = try mountInTestWindow(
+        let host = try mountInNavigationStack(
             RevealHarness(
                 conversation: fixture.conversation,
                 viewModel: fixture.viewModel,
@@ -51,7 +59,15 @@ final class ChatTranscriptRevealHostedTests: XCTestCase {
 
         await waitUntil(timeout: 10) { !outcomes.isEmpty }
 
-        XCTAssertEqual(outcomes, [.confirmed])
+        // Confirmed, however many nudges it took: on the iOS 27.0 simulator every run took
+        // one, in this mount and in a bare window alike (2026-11-28), so the lazy stack leaves
+        // the newest row unrealized at the content end on each open there and the nudge is
+        // what realizes it. The count is printed so another runtime's shows in its log.
+        XCTAssertEqual(outcomes.count, 1, "\(outcomes)")
+        guard case .confirmed(let realizationNudges)? = outcomes.first else {
+            return XCTFail("The reveal was not confirmed: \(outcomes)")
+        }
+        print("ChatTranscriptRevealHostedTests: confirmed after \(realizationNudges) realization nudge(s)")
         let transcript = try XCTUnwrap(transcriptScrollView(in: host.view))
         let visibleBottom = transcript.contentOffset.y + transcript.bounds.height
             - transcript.adjustedContentInset.bottom
@@ -83,9 +99,10 @@ final class ChatTranscriptRevealHostedTests: XCTestCase {
             .asPersonal()
             .build(in: viewContext)
         let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let idSuffix = UUID().uuidString
         for index in 0..<messageCount {
             var builder = MessageBuilder()
-                .withId("reveal-\(String(format: "%03d", index))")
+                .withId("reveal-\(idSuffix)-\(String(format: "%03d", index))")
                 .withSubject("")
                 .withBody(Self.body(at: index))
                 .withSnippet(Self.body(at: index))
@@ -179,6 +196,25 @@ final class ChatTranscriptRevealHostedTests: XCTestCase {
             queue.append(contentsOf: next.subviews)
         }
         return scrollViews.max { $0.contentSize.height < $1.contentSize.height }
+    }
+
+    /// Mounts `rootView` in a `NavigationStack`, as the iPhone pushes a chat, in a window from
+    /// `makeTestHostWindow()` that keeps the window's safe area (`mountInTestWindow` strips
+    /// it), laid out once, and hides the window at teardown.
+    private func mountInNavigationStack<Content: View>(_ rootView: Content) throws -> UIViewController {
+        let host = UIHostingController(rootView: NavigationStack {
+            rootView
+                .navigationTitle("Reveal")
+                .navigationBarTitleDisplayMode(.inline)
+        })
+        let window = try makeTestHostWindow()
+        window.rootViewController = host
+        window.isHidden = false
+        addTeardownBlock { @MainActor in
+            window.isHidden = true
+        }
+        host.view.layoutIfNeeded()
+        return host
     }
 
     /// Takes the chat out of its window, so its `onDisappear` stops the scroll state and the

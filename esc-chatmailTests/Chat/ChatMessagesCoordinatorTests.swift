@@ -8073,7 +8073,9 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     func testRevealOutcome_confirmedPass_reportsConfirmedOnceAfterTheReveal() async throws {
         var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
         var wasReadyAtReport: [Bool] = []
-        var coordinatorForReport: ChatMessagesCoordinator?
+        // Weak: the coordinator holds this closure, and a strong box would keep it alive past
+        // the test.
+        weak var coordinatorForReport: ChatMessagesCoordinator?
         let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcome in
             outcomes.append(outcome)
             wasReadyAtReport.append(coordinatorForReport?.isReadyToShow ?? false)
@@ -8086,8 +8088,41 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(outcomes, [], "Nothing is reported before the reveal")
         await confirmInitialBottomAnchor(coordinator)
 
-        XCTAssertEqual(outcomes, [.confirmed])
+        XCTAssertEqual(outcomes, [.confirmed(realizationNudges: 0)])
         XCTAssertEqual(wasReadyAtReport, [true], "Reported once `isReadyToShow` is published")
+    }
+
+    /// A pass that had to nudge the newest row into the hierarchy before it
+    /// confirmed says so: a runtime that leaves the tail unrealized and is
+    /// rescued by the nudge reads differently from one that realizes it.
+    ///
+    /// Revert-check: `.confirmed(realizationNudges: 0)` in place of
+    /// `pass.realizationNudgesIssued` at the confirming call in
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` fails the
+    /// comparison.
+    func testRevealOutcome_confirmedAfterANudge_reportsOneNudge() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcomes.append($0) })
+        appear(coordinator, rows: rows) { _ in }
+
+        var geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(coordinator, contentMinY: Self.contentEndMinY) { _ in }
+        await waitUntil { coordinator.initialAnchorGeometryCheckID != geometryCheckID }
+        geometryCheckID = coordinator.initialAnchorGeometryCheckID
+        reportParkedTestGeometry(
+            coordinator,
+            isNewestRowRealized: false,
+            contentMinY: Self.contentEndMinY
+        ) { _ in }
+        await waitUntil { coordinator.initialAnchorGeometryCheckID != geometryCheckID }
+        await confirmInitialBottomAnchor(
+            coordinator,
+            contentMinY: Self.contentEndMinY,
+            contentHeight: Self.parkedTestContentHeight,
+            viewportHeight: Self.parkedTestViewportHeight
+        )
+
+        XCTAssertEqual(outcomes, [.confirmed(realizationNudges: 1)])
     }
 
     /// Offscreen reports with no growth spend the retry budget, and the
@@ -8225,7 +8260,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertFalse(coordinator.isReadyToShow, "The first message restarts a hidden pass")
         await confirmInitialBottomAnchor(coordinator)
 
-        XCTAssertEqual(outcomes, [.emptyConversation, .confirmed])
+        XCTAssertEqual(outcomes, [.emptyConversation, .confirmed(realizationNudges: 0)])
     }
 
     /// A top-anchored presentation reveals its rows without a pass and
@@ -8268,7 +8303,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             ProcessInfo.processInfo.systemUptime
         },
         watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep,
-        onInitialReveal: @escaping (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
+        onInitialReveal: @escaping @MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
     ) throws -> (ChatMessagesCoordinator, [ChatMessageRowModel]) {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -8394,7 +8429,7 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             _ in false
         },
         watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep,
-        onInitialReveal: @escaping (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
+        onInitialReveal: @escaping @MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },

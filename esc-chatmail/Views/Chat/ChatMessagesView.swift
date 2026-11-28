@@ -18,7 +18,7 @@ private final class ChatMessagesSession: ObservableObject {
         conversation: Conversation,
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
-        onInitialReveal: @escaping (ChatMessagesCoordinator.InitialRevealOutcome) -> Void
+        onInitialReveal: @escaping @MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void
     ) {
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
@@ -91,7 +91,7 @@ struct ChatMessagesView: View {
         composerStyle: ChatComposerStyle,
         isTextFieldFocused: ChatComposerFocus,
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
-        onInitialReveal: ((ChatMessagesCoordinator.InitialRevealOutcome) -> Void)? = nil
+        onInitialReveal: (@MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void)? = nil
     ) {
         self.conversation = conversation
         self.viewModel = viewModel
