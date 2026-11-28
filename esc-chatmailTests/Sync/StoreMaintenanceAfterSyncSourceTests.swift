@@ -60,12 +60,24 @@ final class StoreMaintenanceAfterSyncSourceTests: XCTestCase {
     // run first: the rest of the new mail waited for every store-wide pass.
     // What the completion answers is run for real in
     // `ForegroundSyncCoordinatorTests.testCompletion_answersWhetherAContinuationWasQueued`.
+    //
+    // Revert-check: `completion(result.hasDurableContinuation)` back to
+    // `completion(result.needsFollowUp)`. A held run then queues up to three
+    // forced runs at once, which spend the escape hatch's strikes in one
+    // chain (architecture review 2026-11, sync-engine#2). What the signal is
+    // for each kind of run is pinned in `IncrementalSyncCursorTests`
+    // (`testHeldRun_hasNoDurableContinuation_butStillNeedsFollowUp` and its
+    // neighbours).
     func testSyncEngine_foreground_leavesTheRunBoundaryToAQueuedContinuation() throws {
         let source = try repositorySource("esc-chatmail/Services/Sync/SyncEngine.swift")
         let foreground = try body(of: "func triggerIncrementalSyncIfPossible(", in: source)
 
+        XCTAssertFalse(
+            foreground.contains("needsFollowUp"),
+            "The foreground queues a continuation on a staged token, never on a held run"
+        )
         let completion = try XCTUnwrap(
-            foreground.range(of: "let continuationQueued = completion(result.needsFollowUp)")
+            foreground.range(of: "let continuationQueued = completion(result.hasDurableContinuation)")
         )
         let yield = try XCTUnwrap(foreground.range(of: "guard !continuationQueued else { return }"))
         let maintenance = try XCTUnwrap(foreground.range(of: "runStoreMaintenanceAfterSync()"))

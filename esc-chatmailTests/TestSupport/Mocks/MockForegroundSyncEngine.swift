@@ -45,7 +45,7 @@ final class MockForegroundSyncEngine: ForegroundSyncPerforming {
     /// - Returns: what the completion answered: whether the coordinator
     ///   queued a continuation to run at once.
     @discardableResult
-    func completeRequest(at index: Int, needsFollowUp: Bool) -> Bool {
-        completions[index](needsFollowUp)
+    func completeRequest(at index: Int, hasDurableContinuation: Bool) -> Bool {
+        completions[index](hasDurableContinuation)
     }
 }

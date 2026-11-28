@@ -269,7 +269,10 @@ final class SyncEngine: ObservableObject, Sendable {
                       let result = await resultRecorder.recordedResult() else {
                     return
                 }
-                let continuationQueued = completion(result.needsFollowUp)
+                // Only a staged continuation token is queued at once, never a
+                // held run (`hasDurableContinuation`, sync-engine#2): a held run
+                // waits for the periodic loop, as do its strikes.
+                let continuationQueued = completion(result.hasDurableContinuation)
                 // The continuation is the rest of the mail this run did not
                 // reach. Asked for now, the maintenance took the exclusive
                 // run ahead of it, and the continuation waited for every

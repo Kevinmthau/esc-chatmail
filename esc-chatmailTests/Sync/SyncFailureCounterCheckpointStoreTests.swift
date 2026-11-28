@@ -237,6 +237,55 @@ final class SyncFailureCounterCheckpointStoreTests: XCTestCase {
         XCTAssertEqual(durable.decodedPayload, Payload(version: 1, consecutiveFailureCount: 1))
     }
 
+    /// The strike time rides in the version-1 payload as an optional field
+    /// (architecture review 2026-11, sync-engine#2): it round-trips, the row
+    /// stays version 1, and a decoder that knows only the count (an earlier
+    /// build's) still reads it.
+    ///
+    /// Revert-check: `lastStrikeAt: payload.lastStrikeAt` in
+    /// `SyncFailureCounterCheckpointStore.load` set to nil. Revert-check:
+    /// `Payload.currentVersion` set to 2 fails the earlier decoder's read.
+    func testStagedStrikeTime_roundTripsInTheVersionOnePayload() async throws {
+        let strikeAt = Date(timeIntervalSince1970: 1_700_000_123.5)
+        let stageContext = coreDataStack.newBackgroundContext()
+        try await store.stage(
+            consecutiveFailureCount: 2,
+            lastStrikeAt: strikeAt,
+            accountEmail: Self.email,
+            in: stageContext
+        )
+        try await coreDataStack.saveAsync(context: stageContext)
+
+        let loaded = try await store.load(
+            accountEmail: Self.email,
+            in: coreDataStack.newBackgroundContext()
+        )
+        XCTAssertEqual(loaded.strikes, SyncFailureStrikes(count: 2, lastStrikeAt: strikeAt))
+        let row = try await onlyRawRow()
+        XCTAssertEqual(
+            row.decodedPayload, Payload(version: 1, consecutiveFailureCount: 2),
+            "An earlier build reads the count and ignores the time"
+        )
+    }
+
+    /// A row an earlier build wrote has no strike time: it loads with its count
+    /// and a nil time, which makes the next failing run a strike.
+    ///
+    /// HONEST SCOPE: no one-line revert both compiles and fails this. It pins
+    /// that a payload without the key still decodes, which a non-optional
+    /// `Payload.lastStrikeAt` (made to compile with a default at the writer)
+    /// would break by repairing every shipped row to zero.
+    func testRowWithoutStrikeTime_loadsItsCountWithNoStrikeTime() async throws {
+        try await seedRawCounter(accountEmail: Self.email, payloadJSON: payloadJSON(count: 2))
+
+        let loaded = try await store.load(
+            accountEmail: Self.email,
+            in: coreDataStack.newBackgroundContext()
+        )
+
+        XCTAssertEqual(loaded.strikes, SyncFailureStrikes(count: 2, lastStrikeAt: nil))
+    }
+
     func testCompatibleRowWinsAndDuplicateRowsAreCleanedUp() async throws {
         let selectedID = UUID()
         let selectedPayloadJSON = payloadJSON(count: 2)

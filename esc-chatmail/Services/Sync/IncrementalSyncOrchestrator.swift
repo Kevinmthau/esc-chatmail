@@ -7,8 +7,23 @@ struct IncrementalSyncResult: Sendable {
     let labelChangesProcessed: Int
     let hadWarnings: Bool
     /// True only when durable history progress remains intentionally held or
-    /// checkpointed and another sync should be scheduled promptly.
+    /// checkpointed and another sync should be scheduled promptly. What a
+    /// background task schedules its catch-up on, and what keeps a processing
+    /// task from running the store maintenance (`SyncEngine`). Never what the
+    /// foreground queues an immediate run on: that is `hasDurableContinuation`.
     let needsFollowUp: Bool
+    /// True only for a truncated history slice whose plan advanced: the run
+    /// staged the next page's token, and the rest of the new mail is waiting
+    /// behind it. What the foreground's immediate continuation is queued on
+    /// (`SyncEngine.triggerIncrementalSyncIfPossible`).
+    ///
+    /// False for a held run (architecture review 2026-11, sync-engine#2): a
+    /// held run is followed by the periodic loop, never at once. Chained back to
+    /// back, three held runs spent the escape hatch's three strikes within
+    /// seconds of one burst of 429s or 5xx, and each re-fetched the whole
+    /// frozen slice. False too on the initial-sync fallback, history recovery
+    /// and the app refresh's deferrals, which have no continuation token.
+    let hasDurableContinuation: Bool
 }
 
 enum IncrementalSyncAccountError: LocalizedError, Equatable {
@@ -73,6 +88,9 @@ final class IncrementalSyncOrchestrator {
     /// orchestrator run through a save-scripted context and pin what a failed
     /// final save must NOT commit (cursor, tracker success state, ledger rows).
     private let makeSyncContext: () -> NSManagedObjectContext
+    /// The time the slice path spaces the escape hatch's strikes by
+    /// (`SyncFailureStrikePolicy`), and stamps each strike with.
+    private let clock: any SyncClock
     private let log = LogCategory.sync.logger
 
     private var myAliases: Set<String> = []
@@ -122,7 +140,8 @@ final class IncrementalSyncOrchestrator {
         historyPageLimit: Int = SyncConfig.maxHistoryPagesPerForegroundSlice,
         historyPageSize: Int = SyncConfig.maxHistoryResultsPerRequest,
         authenticatedAccountEmail: (() -> String?)? = nil,
-        makeSyncContext: (() -> NSManagedObjectContext)? = nil
+        makeSyncContext: (() -> NSManagedObjectContext)? = nil,
+        clock: any SyncClock = SystemSyncClock()
     ) {
         self.messageFetcher = messageFetcher
         self.messagePersister = messagePersister
@@ -144,6 +163,7 @@ final class IncrementalSyncOrchestrator {
         self.historyPageSize = historyPageSize
         self.authenticatedAccountEmail = authenticatedAccountEmail
         self.makeSyncContext = makeSyncContext ?? { coreDataStack.newBackgroundContext() }
+        self.clock = clock
     }
 
     // MARK: - Public API
@@ -222,7 +242,8 @@ final class IncrementalSyncOrchestrator {
                     newMessagesCount: 0,
                     labelChangesProcessed: 0,
                     hadWarnings: true,
-                    needsFollowUp: true
+                    needsFollowUp: true,
+                    hasDurableContinuation: false
                 )
             }
             log.info("No account/historyId found, performing initial sync")
@@ -249,7 +270,8 @@ final class IncrementalSyncOrchestrator {
                 newMessagesCount: 0,
                 labelChangesProcessed: 0,
                 hadWarnings: initialSyncIncomplete,
-                needsFollowUp: initialSyncIncomplete
+                needsFollowUp: initialSyncIncomplete,
+                hasDurableContinuation: false
             )
         }
 
@@ -284,7 +306,7 @@ final class IncrementalSyncOrchestrator {
         )
 
         var activeHistoryCheckpoint: ForegroundHistoryCheckpoint?
-        var activeFailureCount = 0
+        var activeStrikes = SyncFailureStrikes.cleared
 
         do {
             // Phase 1: collect one bounded history slice. A compatible model-v3
@@ -300,11 +322,11 @@ final class IncrementalSyncOrchestrator {
                 log.info("Resuming foreground history from a durable checkpoint")
             }
             let legacyFailureCount = await failureTracker.consecutiveFailureCount
-            activeFailureCount = try await failureCounterStore.load(
+            activeStrikes = try await failureCounterStore.load(
                 accountEmail: accountData.email,
                 legacyConsecutiveFailureCount: legacyFailureCount,
                 in: context
-            ).consecutiveFailureCount
+            ).strikes
 
             let historyResult: HistoryCollectionResult
             do {
@@ -488,13 +510,24 @@ final class IncrementalSyncOrchestrator {
             // left untouched so the same slice is retried. Once every outcome
             // is clean or durably abandoned, a non-terminal slice advances only
             // its checkpoint; the Account cursor advances only at Gmail's end.
+            //
+            // A failing run spends a strike only once the spacing has passed
+            // since the last one (`SyncFailureStrikePolicy`, sync-engine#2), so
+            // three strikes take ten minutes at least, never one chain of runs.
             let historyAdvanceTimer = timing.start("historyAdvanceDecision")
-            let proposedFailureCount = fetchResult.hasFailures
-                ? Self.incrementedFailureCount(after: activeFailureCount)
-                : 0
+            let proposedStrikes = fetchResult.hasFailures
+                ? SyncFailureStrikePolicy.proposed(
+                    after: activeStrikes,
+                    now: clock.now(),
+                    spacing: SyncFailureStrikePolicy.slice
+                )
+                : .cleared
+            if fetchResult.hasFailures, proposedStrikes == activeStrikes {
+                log.info("Failing run within the strike spacing; holding at \(activeStrikes.count) strikes")
+            }
             let advancePlan = await failureTracker.planHistoryAdvance(
                 hadFailures: fetchResult.hasFailures,
-                consecutiveFailureCount: proposedFailureCount,
+                consecutiveFailureCount: proposedStrikes.count,
                 in: context
             )
             timing.finish(historyAdvanceTimer, detail: "advance=\(advancePlan.shouldAdvance)")
@@ -502,11 +535,16 @@ final class IncrementalSyncOrchestrator {
             // Stage the strike only after the optional intermediate flush.
             // It now commits with the final ledger transition and cursor or
             // continuation movement, eliminating the old one-high crash gap.
-            let durableFailureCount = advancePlan.shouldAdvance
-                ? 0
-                : (fetchResult.hasFailures ? proposedFailureCount : activeFailureCount)
+            // Its time goes in the same row and the same save.
+            let durableStrikes = SyncFailureStrikePolicy.staged(
+                prior: activeStrikes,
+                proposed: proposedStrikes,
+                hadFailures: fetchResult.hasFailures,
+                advanced: advancePlan.shouldAdvance
+            )
             try await failureCounterStore.stage(
-                consecutiveFailureCount: durableFailureCount,
+                consecutiveFailureCount: durableStrikes.count,
+                lastStrikeAt: durableStrikes.lastStrikeAt,
                 accountEmail: accountData.email,
                 in: context
             )
@@ -635,7 +673,8 @@ final class IncrementalSyncOrchestrator {
                 newMessagesCount: fetchResult.successfulCount,
                 labelChangesProcessed: historyResult.records.count,
                 hadWarnings: fetchResult.hasFailures || historyResult.wasTruncated,
-                needsFollowUp: historyResult.wasTruncated || !advancePlan.shouldAdvance
+                needsFollowUp: historyResult.wasTruncated || !advancePlan.shouldAdvance,
+                hasDurableContinuation: historyResult.wasTruncated && advancePlan.shouldAdvance
             )
 
         } catch let error as APIError {
@@ -655,7 +694,8 @@ final class IncrementalSyncOrchestrator {
                         newMessagesCount: 0,
                         labelChangesProcessed: 0,
                         hadWarnings: true,
-                        needsFollowUp: true
+                        needsFollowUp: true,
+                        hasDurableContinuation: false
                     )
                 }
                 let recoveryTimer = timing.start("historyRecovery")
@@ -663,7 +703,7 @@ final class IncrementalSyncOrchestrator {
                 do {
                     recoveryNeedsFollowUp = try await performHistoryRecoverySync(
                         accountEmail: accountData.email,
-                        priorFailureCount: activeFailureCount,
+                        priorStrikes: activeStrikes,
                         progressHandler: progressHandler
                     )
                     timing.finish(recoveryTimer)
@@ -677,7 +717,8 @@ final class IncrementalSyncOrchestrator {
                     newMessagesCount: 0,
                     labelChangesProcessed: 0,
                     hadWarnings: true,
-                    needsFollowUp: recoveryNeedsFollowUp
+                    needsFollowUp: recoveryNeedsFollowUp,
+                    hasDurableContinuation: false
                 )
             }
             timing.finishRun(outcome: .failed(error))
@@ -798,7 +839,7 @@ final class IncrementalSyncOrchestrator {
     /// Performs recovery sync when history ID has expired
     private func performHistoryRecoverySync(
         accountEmail: String,
-        priorFailureCount: Int,
+        priorStrikes: SyncFailureStrikes,
         progressHandler: @escaping (Double, String) -> Void
     ) async throws -> Bool {
         log.info("Starting history recovery sync")
@@ -955,18 +996,32 @@ final class IncrementalSyncOrchestrator {
             // Advance only to the PRE-SCAN watermark and only when failure
             // policy allows it — this prevents data loss when recovery
             // fetched a partial set of messages.
-            let proposedFailureCount = hadFailures
-                ? Self.incrementedFailureCount(after: priorFailureCount)
-                : 0
+            //
+            // Every failing recovery is a strike: a held recovery re-lists its
+            // whole window on its rerun, so spacing its strikes without spacing
+            // the reruns would multiply those listings (sync-engine#2). The
+            // strike is still stamped, as the slice path's are.
+            let proposedStrikes = hadFailures
+                ? SyncFailureStrikePolicy.proposed(
+                    after: priorStrikes,
+                    now: clock.now(),
+                    spacing: .everyFailingRun
+                )
+                : .cleared
             let advancePlan = await failureTracker.planHistoryAdvance(
                 hadFailures: hadFailures,
-                consecutiveFailureCount: proposedFailureCount,
+                consecutiveFailureCount: proposedStrikes.count,
                 in: context
             )
+            let durableStrikes = SyncFailureStrikePolicy.staged(
+                prior: priorStrikes,
+                proposed: proposedStrikes,
+                hadFailures: hadFailures,
+                advanced: advancePlan.shouldAdvance
+            )
             try await failureCounterStore.stage(
-                consecutiveFailureCount: advancePlan.shouldAdvance
-                    ? 0
-                    : (hadFailures ? proposedFailureCount : priorFailureCount),
+                consecutiveFailureCount: durableStrikes.count,
+                lastStrikeAt: durableStrikes.lastStrikeAt,
                 accountEmail: accountEmail,
                 in: context
             )
@@ -1199,14 +1254,6 @@ final class IncrementalSyncOrchestrator {
             : max(checkpoint.listedCount + SyncConfig.maxMessagesPerRequest, 1)
         let progress = Double(checkpoint.processedCount) / Double(denominator)
         return min(checkpoint.isComplete ? 1.0 : 0.98, progress)
-    }
-
-    /// Counts only as high as the escape threshold. Values above the threshold
-    /// carry no additional policy meaning, and saturation avoids overflow if a
-    /// future/corrupt payload somehow contains an unexpectedly large value.
-    nonisolated private static func incrementedFailureCount(after count: Int) -> Int {
-        let threshold = Swift.max(SyncConfig.maxConsecutiveSyncFailures, 1)
-        return Swift.min(Swift.max(count, 0), threshold - 1) + 1
     }
 
     /// Decides whether to skip label reconciliation for this sync.
