@@ -65,6 +65,29 @@ struct WarmedOriginalEmailHTML: Sendable, Equatable {
     let sourceKind: CanonicalEmailSourceKind
     let sourceLocation: CanonicalEmailSourceLocation
     let hasHTMLSource: Bool
+    /// `html`'s `ReaderContentFingerprint`, and the `cid:` Content-IDs it references, computed
+    /// where this is made, off the main actor, so the prepared payload, its keys and the reader's
+    /// render signature reuse them instead of hashing and scanning the whole HTML again on the main
+    /// actor at each warm, open and checkout (architecture review 2026-11,
+    /// `web-content-rendering#4`).
+    let htmlFingerprint: String
+    let referencedInlineContentIDs: Set<String>
+
+    init(
+        html: String,
+        sourceSignature: String,
+        sourceKind: CanonicalEmailSourceKind,
+        sourceLocation: CanonicalEmailSourceLocation,
+        hasHTMLSource: Bool
+    ) {
+        self.html = html
+        self.sourceSignature = sourceSignature
+        self.sourceKind = sourceKind
+        self.sourceLocation = sourceLocation
+        self.hasHTMLSource = hasHTMLSource
+        self.htmlFingerprint = ReaderContentFingerprint.make(html)
+        self.referencedInlineContentIDs = InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
+    }
 }
 
 protocol OriginalEmailSourceLoading: Sendable {

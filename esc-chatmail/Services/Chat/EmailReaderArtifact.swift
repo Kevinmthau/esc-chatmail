@@ -14,6 +14,32 @@ enum StableFingerprint {
     }
 }
 
+/// The one fingerprint of a reader body: `"<UTF-8 count>:<SHA-256 prefix>"`. Every key of the
+/// wrapped original HTML uses it (`FullEmailPreparedArtifactKey`, `FullEmailWebViewPreRenderKey`,
+/// `EmailReaderArtifact.renderSignature`), so a fingerprint computed once, off the main actor, by
+/// the warm (`WarmedOriginalEmailHTML`) can stand in for each of them byte for byte (architecture
+/// review 2026-11, `web-content-rendering#4`).
+enum ReaderContentFingerprint {
+    static func make(_ text: String) -> String {
+        countMainThreadComputationForTesting()
+        return "\(text.utf8.count):\(StableFingerprint.sha256Prefix(text))"
+    }
+
+    private static let mainThreadComputationLock = NSLock()
+    private static var mainThreadComputations = 0
+
+    /// How many fingerprints were computed on the main thread, for the test that pins an open and
+    /// a checkout computing none there.
+    static var mainThreadComputationCountForTesting: Int {
+        mainThreadComputationLock.withLock { mainThreadComputations }
+    }
+
+    private static func countMainThreadComputationForTesting() {
+        guard Thread.isMainThread else { return }
+        mainThreadComputationLock.withLock { mainThreadComputations += 1 }
+    }
+}
+
 struct OriginalEmailWarmRequest: Equatable, Sendable {
     let messageId: String
     let bodyStorageURI: String?
@@ -133,11 +159,14 @@ struct EmailReaderArtifact: Equatable, Sendable {
     let hasHTMLSource: Bool
     let producedAt: Date
 
+    /// `bodyFingerprint` is the body's `ReaderContentFingerprint`, when the caller already has it
+    /// (a prepared payload computed it off the main actor); without it, it is computed here.
     init(
         messageID: String,
         sourceSignature: String,
         renderSignature: String? = nil,
         body: Body,
+        bodyFingerprint: String? = nil,
         metadata: EmailMetadataSnapshot,
         inlineAttachmentAvailabilitySignature: String? = nil,
         sourceKind: CanonicalEmailSourceKind,
@@ -158,6 +187,7 @@ struct EmailReaderArtifact: Equatable, Sendable {
             messageID: messageID,
             sourceSignature: sourceSignature,
             body: body,
+            bodyFingerprint: bodyFingerprint ?? ReaderContentFingerprint.make(body.content),
             inlineAttachmentAvailabilitySignature: inlineAttachmentAvailabilitySignature,
             sourceKind: sourceKind,
             sourceLocation: sourceLocation,
@@ -212,6 +242,7 @@ struct EmailReaderArtifact: Equatable, Sendable {
         messageID: String,
         sourceSignature: String,
         body: Body,
+        bodyFingerprint: String,
         inlineAttachmentAvailabilitySignature: String?,
         sourceKind: CanonicalEmailSourceKind,
         sourceLocation: CanonicalEmailSourceLocation,
@@ -221,7 +252,7 @@ struct EmailReaderArtifact: Equatable, Sendable {
             "reader:v1",
             "message:\(messageID)",
             "source:\(sourceSignature)",
-            "body:\(body.kind):\(body.content.utf8.count):\(StableFingerprint.sha256Prefix(body.content))",
+            "body:\(body.kind):\(bodyFingerprint)",
             "cid:\(inlineAttachmentAvailabilitySignature ?? "untracked")",
             "kind:\(sourceKind.rawValue)",
             "location:\(sourceLocation.rawValue)",
