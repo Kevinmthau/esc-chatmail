@@ -97,8 +97,9 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
     /// because none of the cached ones is trusted after the chat was off
     /// screen. Found by the PR 529 review's probe.
     ///
-    /// Revert-check: dropping `resolvedRowsByID.removeAll()` from
-    /// `VirtualScrollState.cleanup()` keeps the old subject.
+    /// Revert-check: dropping both calls of
+    /// `VirtualScrollState.discardRowCacheNothingObserved()` (in `cleanup()` and
+    /// `resume()`) keeps the old subject; either one alone keeps this passing.
     func testResumeThenSlide_rowChangedWhileOffScreen_showsItsNewValue() async throws {
         let (state, messages) = try await makeLoadedState(messageCount: 10)
         defer { state.cleanup() }
@@ -119,8 +120,9 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
     /// The same with the slide started before `resume()`, as when a row's
     /// `onAppear` runs before the chat's.
     ///
-    /// Revert-check: dropping `resolvedRowsByID.removeAll()` from
-    /// `VirtualScrollState.cleanup()` keeps the old subject.
+    /// Revert-check: dropping both calls of
+    /// `VirtualScrollState.discardRowCacheNothingObserved()` (in `cleanup()` and
+    /// `resume()`) keeps the old subject; either one alone keeps this passing.
     func testSlideThenResume_rowChangedWhileOffScreen_showsItsNewValue() async throws {
         let (state, messages) = try await makeLoadedState(messageCount: 10)
         defer { state.cleanup() }
@@ -134,6 +136,52 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
         try await Task.sleep(nanoseconds: 300_000_000)
 
         XCTAssertEqual(state.visibleRangeStartIndex, 2)
+        XCTAssertEqual(state.visibleMessages.first?.objectID, messages[2].objectID)
+        XCTAssertEqual(state.visibleMessages.first?.subject, "changed while off screen")
+    }
+
+    /// A row read while the chat is off screen (a body pass's
+    /// `messageRow(absoluteIndex + 1)`) refills the cache `cleanup()` emptied,
+    /// and a change after that is not observed either: `resume()` drops the
+    /// cache again before the observation restarts, so the slide on return
+    /// re-maps it. Found by the review of PR 529's fix.
+    ///
+    /// Revert-check: dropping the `discardRowCacheNothingObserved()` call from
+    /// `VirtualScrollState.resume()` keeps the old subject.
+    func testRowRefilledWhileOffScreenThenChanged_resumeThenSlide_showsItsNewValue() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 10)
+        defer { state.cleanup() }
+        state.cleanup()
+        _ = state.rowForGrouping(atAbsoluteIndex: 2)
+        messages[2].subject = "changed while off screen"
+        try viewContext.save()
+
+        state.resume()
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 2)
+        XCTAssertEqual(state.visibleMessages.first?.objectID, messages[2].objectID)
+        XCTAssertEqual(state.visibleMessages.first?.subject, "changed while off screen")
+    }
+
+    /// A slide whose load lands before the chat resumes (a row's `onAppear`
+    /// before the chat's, and the page back first) publishes rows mapped then,
+    /// not the ones cached before the chat left the screen.
+    ///
+    /// Revert-check: dropping the `discardRowCacheNothingObserved()` call from
+    /// `VirtualScrollState.cleanup()` keeps the old subject.
+    func testSlideLandingBeforeResume_rowChangedWhileOffScreen_showsItsNewValue() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 10)
+        defer { state.cleanup() }
+        state.cleanup()
+        messages[2].subject = "changed while off screen"
+        try viewContext.save()
+
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+
         XCTAssertEqual(state.visibleMessages.first?.objectID, messages[2].objectID)
         XCTAssertEqual(state.visibleMessages.first?.subject, "changed while off screen")
     }
