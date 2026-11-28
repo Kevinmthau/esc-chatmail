@@ -695,15 +695,22 @@ final class VirtualScrollState: ObservableObject {
         viewContextChangesCancellable = nil
         syncCompletedCancellable?.cancel()
         syncCompletedCancellable = nil
-        // Nothing evicts a cached row while the chat is off screen (a full-screen Quick Look,
-        // a push), so none is trusted after it: an attachment that finished downloading or a
-        // send state that changed meanwhile would come back as the old row model wherever a
-        // load reuses cached rows. A scroll slide reuses them
-        // (`resolveRowsReusingCacheThrowing`) and can supersede the full re-map `resume()`
-        // schedules, which the slide's reuse then skipped. Dropped here rather than in
-        // `resume()`, so it holds whichever of the rows' `onAppear` and the chat's comes
-        // first. The published rows stay on screen; the first load after this re-maps every
-        // row it publishes.
+        discardRowCacheNothingObserved()
+    }
+
+    /// Drops every cached row and the index memo. Nothing evicts a cached row while the chat
+    /// is off screen (a full-screen Quick Look, a push: `cleanup()` stops the change
+    /// observation), so none cached then is trusted afterwards: an attachment that finished
+    /// downloading or a send state that changed meanwhile would come back as the old row model
+    /// wherever a load reuses cached rows. A scroll slide reuses them
+    /// (`resolveRowsReusingCacheThrowing`) and can supersede the full re-map `resume()`
+    /// schedules, which the slide's reuse then skipped. Called twice: by `cleanup()`, so a load
+    /// that lands before `resume()` (a row's `onAppear` before the chat's) re-maps, and by
+    /// `resume()` before the observation restarts, because the cache refills while the chat is
+    /// off screen (any `row(atAbsoluteIndex:)` or `rowForGrouping`, a body pass's included) and
+    /// what it refilled then was never observed either. The published rows stay on screen; the
+    /// first load after it re-maps every row it publishes.
+    private func discardRowCacheNothingObserved() {
         resolvedRowsByID.removeAll()
         resolvedRowsByAbsoluteIndex.removeAll()
     }
@@ -711,6 +718,9 @@ final class VirtualScrollState: ObservableObject {
     /// Restores observation and any interrupted initial load when the chat reappears.
     func resume() {
         let wasInactive = viewContextChangesCancellable == nil
+        if wasInactive {
+            discardRowCacheNothingObserved()
+        }
         startObservingViewContextChanges()
         guard wasInactive else { return }
 
