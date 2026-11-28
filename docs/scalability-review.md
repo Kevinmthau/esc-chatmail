@@ -1585,7 +1585,7 @@ Cheap fixes that stop permanent loss go first. A scale harness lands before the 
      - The sign-out still clears `EmailPreviewSnapshotCache`, `Documents/Avatars` and the image cache in place, with the gate held. They are smaller than the three directories that were renamed, and how much smaller was not measured.
      - `Attachment` has no index on `localURL` or `previewURL`, so the check for a row that still names a path reads `ZATTACHMENT` from one end for each 200 paths. An index is a model change and belongs to step 10, which added `byLocalURLIndex` and `byPreviewURLIndex` in model 8 (2026-11-25).
      - A removal that is cancelled stops between two chunks, not inside one, and the caches are still invalidated one message at a time from the main actor.
-     - The HTML orphan sweep still runs on the main actor (`html-orphan-sweep-main-actor`).
+     - The HTML orphan sweep ran on the main actor (`html-orphan-sweep-main-actor`). Built 2026-11-28 (architecture review `attachments-storage-disk#6`, PR 524): the daily body sweep is `nonisolated`, awaited in the maintenance run's task, lists `Messages` a chunk of 100 at a time with the HTML boundary's lock released while the store is asked, and stops between chunks when the run is cancelled or a chunk's read fails (`OrphanedBodySweepTests`).
      - Built 2026-11-27 (architecture review, di-modularity#4): the sweep and `CacheCoordinator.shared.start()` run from `AppStartupBootstrap`'s process-services operation, inside the persistence single flight, so a background task's cold launch sweeps tombstones and reclaims deleted rows' files too.
    - **Not measured or seen:**
      - Nothing was timed and none of it has run on a device. No large mailbox was signed out of: that a rename costs the same for 3 files as for 150,000 is how APFS works, not a number from this app. The tests assert that the awaited cleanup returns with every file still on disk.
@@ -1628,7 +1628,7 @@ Cheap fixes that stop permanent loss go first. A scale harness lands before the 
    - **Not built:**
      - `PRAGMA optimize` in place of the daily full ANALYZE, and a `wal_checkpoint(TRUNCATE)` after it. The scale harness's `.analyzed` template and the plans it pins assume ANALYZE's statistics, so the swap wants its own measurement.
      - The rest of `six-hour-maintenance-inside-sync-run`: grouped-count detection of duplicate hashes, and batching in `fixAndMergeIncorrectParticipantHashes` and `mergeActiveConversationDuplicates`. The passes are off the sync's path now and cost what they did.
-     - Cancellation inside a pass, and inside the HTML and attachment sweeps. A cancelled run stops at the next boundary between them.
+     - Cancellation inside a pass, and inside the attachment sweep. A cancelled run stops at the next boundary between them. The HTML sweep stops between its chunks since 2026-11-28 (PR 524).
      - The daily cleanup does not mark the 6-hour cadence when it has just run the same passes, so the next sync can run them again.
      - `participant-split-migration-walk`, which is still inside the sync's run.
    - **Not measured or seen:** nothing here was timed, and none of it has run on a device. No background task has expired under the new registry, no sign-out has been made during a maintenance run, and the retired identifier has not been launched by the system. CI's Swift 6.2 has not compiled it: `StoreMaintenanceCoordinator`'s operation is now `@escaping @Sendable`, which is where 6.2 and this Mac's 6.4 have disagreed before.

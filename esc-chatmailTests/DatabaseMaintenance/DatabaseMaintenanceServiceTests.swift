@@ -174,10 +174,11 @@ final class DatabaseMaintenanceServiceTests: XCTestCase {
         XCTAssertEqual(askedOnMainThread.values, [false])
     }
 
-    // HONEST SCOPE: nothing in the sweep can be removed to make this fail. It pins that the
-    // run's cancellation reaches the sweep through the task that awaits it, which a sweep
-    // moved into `Task.detached` (the review's warned-against way off the main actor) would
-    // no longer see: it would remove the body.
+    // Revert-check: the `guard !isCancelled()` before each chunk in
+    // `HTMLContentHandler.cleanupOrphanedFiles`. Without it the cancelled task's sweep unlinks
+    // the orphan and reports `.completed`. It also pins that the run's cancellation reaches the
+    // sweep through the task that awaits it, which a sweep moved into `Task.detached` (the
+    // review's warned-against way off the main actor) would no longer see.
     func testOrphanedHTMLCleanup_inACancelledTask_removesNothing() async throws {
         let stack = TestCoreDataStack()
         let directory = makeMessagesDirectory()
