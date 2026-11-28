@@ -16,18 +16,22 @@ final class TokenKeychainItemsSourceTests: XCTestCase {
     // Revert-check: fails if `TokenManager.adoptTokens(access:expirationDate:ifCacheEpochMatches:)`
     // saves the token again (`keychainService.saveCodable(…, for: KeychainService.Key.googleAccessToken.rawValue, …)`),
     // or if `getCurrentToken` reads the item again (`loadCodable(…, for: KeychainService.Key.googleAccessToken.rawValue)`).
+    // Also fails if `AuthSession.swift` names a key the probe's way outside the probe's own
+    // list (a `for key in [KeychainService.Key.googleAccessToken, .googleRefreshToken,]` loop
+    // that writes both items, say), which an allowance by line text alone let through.
     func testTokenKeychainItems_areOnlyDeletedOrProbedForPresence() throws {
         var offending: [String] = []
         var deleteSites = 0
         for path in try repositorySwiftFilePaths(under: "esc-chatmail") {
             let lines = try repositorySource(path).components(separatedBy: "\n")
+            let probeList = Self.probeListLines(in: lines, path: path)
             for (index, line) in lines.enumerated() {
                 let code = line.trimmingCharacters(in: .whitespaces)
                 guard !code.hasPrefix("///"), !code.hasPrefix("//"),
                       Self.tokenKeys.contains(where: { code.contains($0) }) else {
                     continue
                 }
-                if Self.isAllowed(code, in: path) {
+                if Self.isAllowed(code, in: path, insideProbeList: probeList.contains(index)) {
                     if code.contains("delete(for:") { deleteSites += 1 }
                     continue
                 }
@@ -45,7 +49,28 @@ final class TokenKeychainItemsSourceTests: XCTestCase {
         XCTAssertEqual(deleteSites, 4, "Both items are deleted by the sign-out and by the first adoption")
     }
 
-    private static func isAllowed(_ code: String, in path: String) -> Bool {
+    /// The line indexes of `hasPersistedBackgroundCredentialMaterial`'s key list in
+    /// `AuthSession.swift`, from its `for key in [` to the `] {` that closes it, and
+    /// none elsewhere: the probe reads presence only, and the same line anywhere else
+    /// in the file could be the argument of a write.
+    private static func probeListLines(in lines: [String], path: String) -> Range<Int> {
+        guard path == "esc-chatmail/Services/Security/AuthSession.swift",
+              let function = lines.firstIndex(where: {
+                  $0.contains("private func hasPersistedBackgroundCredentialMaterial()")
+              }),
+              let listStart = lines[function...].firstIndex(where: {
+                  $0.trimmingCharacters(in: .whitespaces) == "for key in ["
+              }),
+              let listEnd = lines[listStart...].firstIndex(where: {
+                  $0.trimmingCharacters(in: .whitespaces) == "] {"
+              }),
+              listStart - function < 4 else {
+            return 0..<0
+        }
+        return listStart..<listEnd
+    }
+
+    private static func isAllowed(_ code: String, in path: String, insideProbeList: Bool) -> Bool {
         if code.hasPrefix("try keychainService.delete(for: KeychainService.Key.googleAccessToken.rawValue)")
             || code.hasPrefix("try keychainService.delete(for: KeychainService.Key.googleRefreshToken.rawValue)") {
             return path == "esc-chatmail/Services/Security/TokenManager.swift"
@@ -56,7 +81,8 @@ final class TokenKeychainItemsSourceTests: XCTestCase {
             return code.hasPrefix("case googleAccessToken = ") || code.hasPrefix("case googleRefreshToken = ")
         case "esc-chatmail/Services/Security/AuthSession.swift":
             // `hasPersistedBackgroundCredentialMaterial`'s list, which reads presence only.
-            return code == "KeychainService.Key.googleAccessToken," || code == ".googleRefreshToken,"
+            return insideProbeList
+                && (code == "KeychainService.Key.googleAccessToken," || code == ".googleRefreshToken,")
         default:
             return false
         }

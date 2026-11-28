@@ -333,8 +333,8 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     /// request. A refresh it joined that was not started for this token may
     /// hand the rejected token back (a `.freshToken` refresh of the same
     /// stale token); then, and only then, it looks once more and joins only a
-    /// refresh for this token, or starts one. The token is saved only through
-    /// the epoch-gated save, so a sign-out during either look is a
+    /// refresh for this token, or starts one. The token is adopted only
+    /// through the epoch-gated adoption, so a sign-out during either look is a
     /// `CancellationError` like any retired refresh. The result can still be
     /// the rejected token, if Google itself handed it back; the caller decides
     /// what that means (`GmailAPIClient` sends nothing more).
