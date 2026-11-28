@@ -114,6 +114,9 @@ final class AttachmentSpaceRefusalTests: XCTestCase {
         XCTAssertEqual(indicator(.failed, id: "local_user_added"), .uploadFailed)
         XCTAssertEqual(indicator(.failed, id: "remote-id", refused: true), .refusedForSpace)
         XCTAssertEqual(indicator(.downloaded, id: "remote-id"), .none)
+        // Revert-check: `!isReady` in the refusal's condition. Without it a part a sibling's
+        // recovery stored after its refusal shows "Not enough storage" over a ready image.
+        XCTAssertEqual(indicator(.downloaded, id: "local_inline_part", refused: true), .none)
     }
 
     // MARK: - Out-of-space branches the first push left unpinned
@@ -175,6 +178,9 @@ final class AttachmentSpaceRefusalTests: XCTestCase {
             space: SpaceBox(nil),
             writeAttachmentData: { data, path in
                 path == previewPath ? .outOfSpace : AttachmentPaths.writeData(data, to: path)
+            },
+            storeAttachmentClone: { source, destination in
+                destination == previewPath ? .outOfSpace : AttachmentPaths.storeClone(ofFileAt: source, at: destination)
             }
         )
 
@@ -185,6 +191,10 @@ final class AttachmentSpaceRefusalTests: XCTestCase {
         )
 
         XCTAssertFalse(fileExists(originalPath))
+        // Revert-check: the `requestedFoundNoRoom` call in the recovery's persistence and the
+        // `recordSpaceRefusal` after it in `AttachmentDownloader.recoverSynthesizedInlineAttachments`.
+        // Without them the row stays queued with no badge and nothing to tap.
+        XCTAssertTrue(downloader.isRefusedForSpace(messageId: messageID, attachmentId: recovered.attachmentID))
         let state6 = try await fetchState(attachment.objectID)
         XCTAssertEqual(state6, .queued)
     }
@@ -204,6 +214,9 @@ final class AttachmentSpaceRefusalTests: XCTestCase {
             space: SpaceBox(nil),
             writeAttachmentData: { data, path in
                 path == previewPath ? .outOfSpace : AttachmentPaths.writeData(data, to: path)
+            },
+            storeAttachmentClone: { source, destination in
+                destination == previewPath ? .outOfSpace : AttachmentPaths.storeClone(ofFileAt: source, at: destination)
             }
         )
 
@@ -338,13 +351,17 @@ final class AttachmentSpaceRefusalTests: XCTestCase {
         space: SpaceBox,
         writeAttachmentData: @escaping @Sendable (Data, String) -> AttachmentWriteResult = { data, path in
             AttachmentPaths.writeData(data, to: path)
+        },
+        storeAttachmentClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
+            AttachmentPaths.storeClone(ofFileAt: source, at: destination)
         }
     ) -> AttachmentDownloader {
         AttachmentDownloader(
             apiClient: apiClient,
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
             availableStorageBytes: { space.value },
-            writeAttachmentData: writeAttachmentData
+            writeAttachmentData: writeAttachmentData,
+            storeAttachmentClone: storeAttachmentClone
         )
     }
 

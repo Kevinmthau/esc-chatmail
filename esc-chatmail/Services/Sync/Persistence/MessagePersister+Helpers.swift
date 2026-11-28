@@ -576,12 +576,21 @@ extension MessagePersister {
         }
 
         var savedPreviewPath: String?
-        if let thumbnailData = ImageProcessor.generateThumbnail(from: inlineData, mimeType: info.mimeType) {
+        if let preview = ImageProcessor.preview(from: inlineData, mimeType: info.mimeType) {
             let previewPath = AttachmentPaths.previewPath(
                 messageId: messageId,
                 attachmentId: attachmentId
             )
-            if AttachmentPaths.saveData(thumbnailData, to: previewPath) {
+            // A preview that is the original's own bytes is a clone of its file, not a second
+            // copy of them (`AttachmentPaths.storeClone`).
+            let saved: Bool
+            switch preview {
+            case .original:
+                saved = AttachmentPaths.storeClone(ofFileAt: originalPath, at: previewPath) == .saved
+            case .encoded(let thumbnailData):
+                saved = AttachmentPaths.saveData(thumbnailData, to: previewPath)
+            }
+            if saved {
                 savedPreviewPath = previewPath
             }
         }
