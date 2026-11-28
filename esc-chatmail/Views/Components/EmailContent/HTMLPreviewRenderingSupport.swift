@@ -180,35 +180,68 @@ enum HTMLPreviewSnapshotImageOutcomeScript {
                 var colon = source.indexOf(':');
                 return colon < 0 ? '' : source.slice(0, colon + 1).toLowerCase();
             }
+            // Each element's state (whether it or an ancestor is transparent, and the rect its
+            // clipping ancestors and itself leave visible) is worked out once and kept, top down
+            // from the nearest element already known, so a deep tree of many images costs each
+            // element one style read and one rect read. Read per image up its ancestors, 2,000
+            // images 300 levels deep took 1.8 s, and 5,000 at 500 levels took 12 s, past the
+            // render's timeout (measured on macOS in review).
+            var states = new Map();
+            var rootState = { transparent: false, left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+            function stateOf(element) {
+                var chain = [];
+                var node = element;
+                while (node && node.nodeType === 1 && !states.has(node)) {
+                    chain.push(node);
+                    node = node.parentElement;
+                }
+                var state = (node && states.has(node)) ? states.get(node) : rootState;
+                for (var index = chain.length - 1; index >= 0; index--) {
+                    var current = chain[index];
+                    var currentStyle = window.getComputedStyle(current);
+                    var next = {
+                        transparent: state.transparent || parseFloat(currentStyle.opacity) === 0,
+                        left: state.left, top: state.top, right: state.right, bottom: state.bottom
+                    };
+                    if (!next.transparent && (currentStyle.overflowX !== 'visible' || currentStyle.overflowY !== 'visible')) {
+                        var clip = current.getBoundingClientRect();
+                        if (currentStyle.overflowX !== 'visible') {
+                            next.left = Math.max(next.left, clip.left);
+                            next.right = Math.min(next.right, clip.right);
+                        }
+                        if (currentStyle.overflowY !== 'visible') {
+                            next.top = Math.max(next.top, clip.top);
+                            next.bottom = Math.min(next.bottom, clip.bottom);
+                        }
+                    }
+                    states.set(current, next);
+                    state = next;
+                }
+                return state;
+            }
+            function isInCapture(left, top, right, bottom) {
+                if (right - left <= 2 || bottom - top <= 2) { return false; }
+                if (bottom <= 0 || top >= captureHeight) { return false; }
+                if (right <= 0 || left >= captureWidth) { return false; }
+                return true;
+            }
             var images = document.images;
             for (var i = 0; i < images.length; i++) {
                 var image = images[i];
                 if (!image.getAttribute('src') && !image.currentSrc) { continue; }
-                var style = window.getComputedStyle(image);
-                if (style.visibility === 'hidden' || style.display === 'none') { continue; }
+                // The image's own rect first: one outside the capture reads no ancestor.
                 var rect = image.getBoundingClientRect();
-                var left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
-                var transparent = false;
-                for (var node = image; node && node.nodeType === 1; node = node.parentElement) {
-                    var nodeStyle = node === image ? style : window.getComputedStyle(node);
-                    if (parseFloat(nodeStyle.opacity) === 0) { transparent = true; break; }
-                    if (node === image) { continue; }
-                    if (nodeStyle.overflowX !== 'visible' || nodeStyle.overflowY !== 'visible') {
-                        var clip = node.getBoundingClientRect();
-                        if (nodeStyle.overflowX !== 'visible') {
-                            left = Math.max(left, clip.left);
-                            right = Math.min(right, clip.right);
-                        }
-                        if (nodeStyle.overflowY !== 'visible') {
-                            top = Math.max(top, clip.top);
-                            bottom = Math.min(bottom, clip.bottom);
-                        }
-                    }
-                }
-                if (transparent) { continue; }
-                if (right - left <= 2 || bottom - top <= 2) { continue; }
-                if (bottom <= 0 || top >= captureHeight) { continue; }
-                if (right <= 0 || left >= captureWidth) { continue; }
+                if (!isInCapture(rect.left, rect.top, rect.right, rect.bottom)) { continue; }
+                var style = window.getComputedStyle(image);
+                if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity) === 0) { continue; }
+                var parentState = image.parentElement ? stateOf(image.parentElement) : rootState;
+                if (parentState.transparent) { continue; }
+                if (!isInCapture(
+                    Math.max(rect.left, parentState.left),
+                    Math.max(rect.top, parentState.top),
+                    Math.min(rect.right, parentState.right),
+                    Math.min(rect.bottom, parentState.bottom)
+                )) { continue; }
                 var source = image.currentSrc || image.src;
                 var scheme = schemeOf(source);
                 if (scheme === 'cid:') { push(outcome.cids, source.length <= 2048 ? source : 'cid:'); }
@@ -257,13 +290,14 @@ struct HTMLPreviewSnapshotImageOutcome: Equatable, Sendable {
         )
     }
 
-    /// Whether an image that did not load was refused on purpose: a load of a private, loopback,
-    /// link-local, single-label or otherwise reserved host, which the web content rules refuse
-    /// (`EmailWebContentNetworkRuleSource`, built from the same `PrivateNetworkAddressDetector`).
-    /// Such an image will not load at any later render, so counting it kept the card off disk for
-    /// good and rendered it again every ten minutes: a NAS or router notification, or any mail with
-    /// an image on such a host. Any other blocking of image loads in the snapshot web view (an
-    /// image-consent gate, say) must be answered here too, or every card it blocks is incomplete.
+    /// Whether an image that did not load was on a host an email's web content is not to reach: a
+    /// private, loopback, link-local, single-label or otherwise reserved one, as
+    /// `PrivateNetworkAddressDetector` reads it (the same predicate a rule list refusing such
+    /// loads is built from). Such an image does not load at a later render either, so counting it
+    /// kept the card off disk for good and rendered it again every ten minutes: a NAS or router
+    /// notification, or any mail with an image on such a host. Any blocking of image loads in the
+    /// snapshot web view (a rule list, an image-consent gate) must be answered here too, or every
+    /// card it blocks is incomplete.
     static func isBlockedOnPurpose(_ source: String) -> Bool {
         guard let url = URL(string: source),
               let scheme = url.scheme?.lowercased(),

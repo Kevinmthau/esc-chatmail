@@ -259,6 +259,9 @@ final class CIDSchemeHandlerTests: XCTestCase {
     /// Revert-check: removing `recordUnavailableForNow` from the `.unavailableForNow` branch, or
     /// answering `.unavailableForNow` for `APIError.notFound` or for a `local_` attachment ID,
     /// fails this (each run alone).
+    /// HONEST SCOPE: the 404 is told apart only on the injected-client path this test takes. In
+    /// production the fetch goes through `AttachmentDownloader`, which answers data or nothing,
+    /// so a 404 there is recorded as for now.
     func testUnavailableContentIDs_recordTransientFailuresOnly() async throws {
         let message = MessageBuilder()
             .withId("message-cid-unavailable")

@@ -75,8 +75,8 @@ final class EmailPreviewSnapshotCompletenessTests: XCTestCase {
     /// or that asks for nothing (lazy-loader markup with only `data-src`), does not make the card
     /// incomplete.
     ///
-    /// Revert-check: dropping the ancestor walk, or the skip of an `<img>` with no `src`, from
-    /// `HTMLPreviewSnapshotImageOutcomeScript` fails this (each run alone).
+    /// Revert-check: applying no ancestor state (`stateOf`), or dropping the skip of an `<img>`
+    /// with no `src`, in `HTMLPreviewSnapshotImageOutcomeScript` fails this (each run alone).
     func testRender_brokenImageHiddenByAnAncestor_orWithNoSource_isComplete() async throws {
         let result = try await render(body: """
         <p>Card</p>
@@ -103,6 +103,57 @@ final class EmailPreviewSnapshotCompletenessTests: XCTestCase {
 
         XCTAssertFalse(inside.isComplete)
         XCTAssertTrue(below.isComplete)
+    }
+
+    /// The probe reads each element's style and rect once, however deep the tree and however many
+    /// images are in it: the depth and the image count are the sender's, and a probe that walked
+    /// every image's ancestors made the render outlast its timeout (5,000 images 500 levels deep
+    /// took 12 s in review), which fell back to a live web view. Counted rather than timed: the
+    /// page's `getComputedStyle` and `getBoundingClientRect` are wrapped before the probe runs.
+    ///
+    /// Revert-check: making `stateOf` in `HTMLPreviewSnapshotImageOutcomeScript` keep nothing
+    /// (each image then reads every ancestor) fails this.
+    func testImageOutcomeScript_deepTreeOfManyImages_readsEachElementOnce() async throws {
+        let depth = 300
+        let imageCount = 1_000
+        let images = String(repeating: #"<img src="data:image/png;base64,AAAA" width="4" height="4">"#, count: imageCount)
+        let html = "<html><body style=\"margin:0\">"
+            + String(repeating: #"<div style="overflow:hidden">"#, count: depth)
+            + images
+            + String(repeating: "</div>", count: depth)
+            + "</body></html>"
+        let (webView, delegate) = try makeLoadedWebView()
+        let finished = expectation(description: "loaded")
+        delegate.onFinish = { finished.fulfill() }
+        webView.loadHTMLString(html, baseURL: nil)
+        await fulfillment(of: [finished], timeout: 20)
+
+        _ = try await webView.evaluateJavaScript("""
+        window.__probeStyleReads = 0;
+        window.__probeRectReads = 0;
+        var originalStyle = window.getComputedStyle;
+        window.getComputedStyle = function(element, pseudo) {
+            window.__probeStyleReads++;
+            return originalStyle.call(window, element, pseudo);
+        };
+        var originalRect = Element.prototype.getBoundingClientRect;
+        Element.prototype.getBoundingClientRect = function() {
+            window.__probeRectReads++;
+            return originalRect.call(this);
+        };
+        true;
+        """)
+        let result = try await webView.evaluateJavaScript(
+            HTMLPreviewSnapshotImageOutcomeScript.script(captureWidth: 280, captureHeight: 600)
+        )
+        let countsResult = try await webView.evaluateJavaScript("[window.__probeStyleReads, window.__probeRectReads]")
+        let counts = try XCTUnwrap(countsResult as? [Int])
+
+        let outcome = try XCTUnwrap(HTMLPreviewSnapshotImageOutcome(scriptResult: result))
+        XCTAssertFalse(outcome.isComplete(unavailableContentIDs: []), "Precondition: the images are in the capture and broken")
+        let elements = depth + imageCount + 2
+        XCTAssertLessThanOrEqual(counts[0], elements, "Style reads")
+        XCTAssertLessThanOrEqual(counts[1], elements, "Rect reads")
     }
 
     // MARK: - Outcome
@@ -351,6 +402,22 @@ final class EmailPreviewSnapshotCompletenessTests: XCTestCase {
         )
     }
 
+    /// A web view in a shown window, with a delegate that reports the load's end.
+    private func makeLoadedWebView() throws -> (WKWebView, FinishReportingDelegate) {
+        let window = try makeTestHostWindow()
+        window.frame = CGRect(x: 0, y: 0, width: 280, height: 800)
+        window.isHidden = false
+        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 280, height: 800))
+        let delegate = FinishReportingDelegate()
+        webView.navigationDelegate = delegate
+        window.addSubview(webView)
+        addTeardownBlock { @MainActor in
+            webView.removeFromSuperview()
+            window.isHidden = true
+        }
+        return (webView, delegate)
+    }
+
     private func makeImage(side: CGFloat = 20) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
@@ -371,6 +438,18 @@ private final class TestClock: @unchecked Sendable {
     init(_ now: Date) {
         self.now = now
     }
+}
+
+@MainActor
+private final class FinishReportingDelegate: NSObject, WKNavigationDelegate {
+    var onFinish: (() -> Void)?
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        onFinish?()
+    }
+
+    /// A delegate the app's rule requires; a test view that dies reloads nothing.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {}
 }
 
 @MainActor
