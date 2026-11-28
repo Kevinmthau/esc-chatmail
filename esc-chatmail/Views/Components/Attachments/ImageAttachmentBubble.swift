@@ -67,7 +67,12 @@ struct ImageAttachmentBubble: View {
         }
         .buttonStyle(PlainButtonStyle())
         .opacity([.downloaded, .uploaded, .failed].contains(attachment.state) ? 1.0 : 0.7)
-        .disabled(!attachment.isReady && attachment.state != .failed)
+        // A refused download keeps the card tappable, or its "Not enough storage" Retry, in the
+        // overlay, could not be pressed.
+        .disabled(
+            !attachment.isReady && attachment.state != .failed
+                && !downloader.isRefusedForSpace(messageId: attachment.message?.id, attachmentId: attachment.id)
+        )
         .onAppear {
             loadThumbnail()
             // Download if queued, failed, or file is missing from disk
