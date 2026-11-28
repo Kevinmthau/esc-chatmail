@@ -286,12 +286,11 @@ struct BaseEmailWebView: WebViewRepresentable {
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Only allow initial load and reload for previews.
-            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
-                decisionHandler(.allow)
-            } else {
-                decisionHandler(.cancel)
-            }
+            let allows = EmailPreviewNavigationPolicy.allows(
+                navigationType: navigationAction.navigationType,
+                url: navigationAction.request.url
+            )
+            decisionHandler(allows ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
