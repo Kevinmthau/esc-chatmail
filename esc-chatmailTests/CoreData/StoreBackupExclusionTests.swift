@@ -32,6 +32,9 @@ final class StoreBackupExclusionTests: XCTestCase {
         assertEveryStoreFileIsLeftOutOfBackups(storeURL)
     }
 
+    // Revert-check: the `leaveStoreFilesOutOfBackups` call in
+    // `CoreDataStack.startClaimedStoreLoad`, which an asynchronously added store's load
+    // reaches as well. Without it none of the three files is marked.
     func testAsynchronouslyAddedLoad_leavesAllThreeFilesOutOfBackups() async throws {
         let storeURL = try makeStoreURL()
         let stack = CoreDataStack(
@@ -66,6 +69,9 @@ final class StoreBackupExclusionTests: XCTestCase {
 
     /// The recovery ladder's reset of a store that is not a database: backed up, removed, and
     /// reloaded empty through the same load branch, which marks the new files.
+    ///
+    /// Revert-check: the `leaveStoreFilesOutOfBackups` call in
+    /// `CoreDataStack.startClaimedStoreLoad`. Without it the reloaded store is backed up.
     func testCorruptStoreReset_marksTheStoreItReloads() async throws {
         let storeURL = try makeStoreURL()
         try Data(repeating: 0x5A, count: 8_192).write(to: storeURL)
@@ -97,25 +103,47 @@ final class StoreBackupExclusionTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// In the Mac plan too. On macOS below 27 the marks are under a strict `XCTExpectFailure`:
+    /// CI's macOS 26 lane read a file's mark false straight after `BackupExclusion.exclude`
+    /// returned true (`backup-mark-macos26`, `AttachmentFileExportTests`), so the store's marks
+    /// are very likely inert there. Nothing of it has been looked at on a macOS 26 machine; the
+    /// day macOS 26 keeps the mark, this fails with "no failure was recorded" and the wrapper
+    /// comes off.
     private func assertEveryStoreFileIsLeftOutOfBackups(
         _ storeURL: URL,
         file: StaticString = #filePath,
         line: UInt = #line
     ) {
-        for fileURL in CoreDataStack.storeFileURLs(for: storeURL) {
+        let fileURLs = CoreDataStack.storeFileURLs(for: storeURL)
+        for fileURL in fileURLs {
             XCTAssertTrue(
                 FileManager.default.fileExists(atPath: fileURL.path),
                 "\(fileURL.lastPathComponent) is not there",
                 file: file,
                 line: line
             )
-            XCTAssertTrue(
-                BackupExclusion.isExcluded(fileURL),
-                "\(fileURL.lastPathComponent) is backed up",
-                file: file,
-                line: line
-            )
         }
+        let assertMarks = {
+            for fileURL in fileURLs {
+                XCTAssertTrue(
+                    BackupExclusion.isExcluded(fileURL),
+                    "\(fileURL.lastPathComponent) is backed up",
+                    file: file,
+                    line: line
+                )
+            }
+        }
+        #if os(macOS)
+        if #unavailable(macOS 27) {
+            XCTExpectFailure("backup-mark-macos26: a file's mark reads false on macOS 26") {
+                assertMarks()
+            }
+        } else {
+            assertMarks()
+        }
+        #else
+        assertMarks()
+        #endif
     }
 
     /// The file's inode number, so a test can tell a file made again from the same one.

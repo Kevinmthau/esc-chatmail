@@ -224,10 +224,23 @@ struct SyncConfig {
     /// mail from before it (less a clock-drift buffer). The stored name is the
     /// key's first meaning, the app's first launch, which `FreshInstallHandler`
     /// still writes. `AuthSession` moves it to now whenever it wipes the local
-    /// mailbox and whenever an interactive sign-in lands on an empty store, so
-    /// a sign-out followed by a sign-in starts from the sign-in and brings no
-    /// earlier mail back (Kevin, 2026-11-16).
+    /// mailbox and whenever an interactive sign-in lands on an empty store that
+    /// was emptied on purpose (`mailboxStartsAtNextSignInKey`), so a sign-out
+    /// followed by a sign-in starts from the sign-in and brings no earlier mail
+    /// back (Kevin, 2026-11-16), while a store lost to a restore or a recovery
+    /// reset keeps its start.
     static let mailboxStartTimestampKey = "installTimestamp"
+
+    /// Whether an interactive sign-in that finds the store empty moves the mailbox's start to
+    /// now (`AuthSession.prepareLocalStoreForAuthenticatedAccount`). Three states, each read
+    /// apart: `true`, written where a mailbox is emptied on purpose (a sign-out's or an account
+    /// reset's `performDurableLocalCleanup`, a fresh install's `setupNewInstallation`), and
+    /// absent, a device an earlier build signed out, both move it; `false`, written at every
+    /// successful preparation, keeps it. So a mailbox the device lost while signed in (a restore
+    /// from a backup that leaves the store out, a recovery reset) keeps its start and re-lists up
+    /// to `initialSyncMaxWindow`. Never removed by `clearAccountScopedSyncDefaults` or
+    /// `clearFailedGoogleSession`.
+    static let mailboxStartsAtNextSignInKey = "mailboxStartsAtNextSignIn"
 
     /// Interval between forced label reconciliations even when history is empty (in seconds)
     /// Running reconciliation hourly ensures label drift is caught even without history changes

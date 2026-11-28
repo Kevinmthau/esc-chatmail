@@ -1397,13 +1397,21 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             } catch {
                 throw AuthError.localAccountIsolationFailed(.recoveryFileRemovalFailed, error)
             }
+            recordMailboxStart(movesAtNextSignIn: false)
             return
         }
 
         guard resetRequired else {
-            if foundEmptyStore, entry == .interactiveSignIn {
+            // Only where the mailbox was emptied on purpose, or by an earlier build that wrote
+            // no marker: a store the device lost while signed in (a restore that left the store
+            // out of the backup, then a sign-in after the restore could not publish) keeps its
+            // start and re-lists up to `initialSyncMaxWindow`. Until 2026-11-28 every
+            // interactive sign-in into an empty store moved it, and such a restore kept five
+            // minutes of mail (architecture review 2026-11, security-privacy#5's review).
+            if foundEmptyStore, entry == .interactiveSignIn, signInMovesMailboxStart {
                 restartMailboxStartTime()
             }
+            recordMailboxStart(movesAtNextSignIn: false)
             // The gate has decided this store: a marker left by a recovery
             // reset says nothing about any later one.
             StoreRecoveryResetMarker.clear(in: userDefaults)
@@ -1423,7 +1431,8 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         } catch {
             throw AuthError.localAccountIsolationFailed(.resetFailed, error)
         }
-
+        // The cleanup moved the start for this account; from here a lost store keeps it.
+        recordMailboxStart(movesAtNextSignIn: false)
     }
 
     /// Whether the empty store beside stored files is this account's mailbox
@@ -1949,6 +1958,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // sync list up to `SyncConfig.initialSyncMaxWindow` of the mail this
         // cleanup just removed.
         restartMailboxStartTime()
+        // And the next interactive sign-in into this empty store moves it again, to the
+        // sign-in (`SyncConfig.mailboxStartsAtNextSignInKey`).
+        recordMailboxStart(movesAtNextSignIn: true)
         if let removalRequest {
             // An earlier removal can complete its destructive work while a
             // later removal remains queued. The shared marker belongs to both;
@@ -2339,6 +2351,18 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// paths that keep the store for a same-account retry.
     private func restartMailboxStartTime() {
         userDefaults.set(Date().timeIntervalSince1970, forKey: SyncConfig.mailboxStartTimestampKey)
+    }
+
+    /// Whether an interactive sign-in into an empty store moves the start: unless the marker is
+    /// `false` (`SyncConfig.mailboxStartsAtNextSignInKey`), absent included, which is a device an
+    /// earlier build signed out and keeps today's rule.
+    private var signInMovesMailboxStart: Bool {
+        (userDefaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool) != false
+    }
+
+    /// Written, never removed: absent means an earlier build's state.
+    private func recordMailboxStart(movesAtNextSignIn: Bool) {
+        userDefaults.set(movesAtNextSignIn, forKey: SyncConfig.mailboxStartsAtNextSignInKey)
     }
 
     private var isAccountRemovalRequested: Bool {

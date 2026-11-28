@@ -228,8 +228,9 @@ final class ComposeAttachmentManager: ObservableObject {
             AttachmentPaths.setupDirectories()
             try FileManager.default.copyItem(at: originalURL, to: destinationURL)
             // The copy is this draft's own original now, and a copy carries the mark of the
-            // downloaded file it was made from (`BackupExclusion`). Without this a restored
-            // device would have the draft and not its attachment.
+            // downloaded file it was made from (`BackupExclusion`). The `Attachments`
+            // directory's mark keeps it out of backups either way; without this, a copy of it
+            // the user saves elsewhere would carry the downloaded file's mark out of the app.
             AttachmentPaths.applyBackupPolicy(toFileAt: newPath)
         } catch {
             AttachmentPaths.deleteFile(at: newPath)

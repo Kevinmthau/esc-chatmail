@@ -141,6 +141,9 @@ struct FreshInstallHandler {
         let installTimestamp = Date().timeIntervalSince1970
 
         userDefaults.set(installTimestamp, forKey: Self.installTimestampKey)
+        // A new install's mailbox is empty on purpose: its first sign-in starts it
+        // (`SyncConfig.mailboxStartsAtNextSignInKey`).
+        userDefaults.set(true, forKey: SyncConfig.mailboxStartsAtNextSignInKey)
         userDefaults.set(newID, forKey: Self.installationKey)
         userDefaults.set(true, forKey: Self.isFreshInstallKey)
         userDefaults.synchronize()
