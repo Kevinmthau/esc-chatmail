@@ -170,31 +170,19 @@ extension ConversationListViewModel {
         let deletedIDs = conversationSaveObjectIDs(forKey: NSDeletedObjectIDsKey, in: notification)
 
         context.performAndWait {
-            // One batch fetch instead of a per-ID existingObject(with:) loop:
-            // prefetching pulls the participants → person chain the snapshot
-            // build walks in the same round trip, rather than firing one
-            // to-many fault per row on the main queue. Rows a later save
-            // already deleted simply do not return — the same drop
-            // existingObject's throw produced; the delete's own notification
-            // removes the row.
+            // One batch fetch instead of a per-ID existingObject(with:) loop,
+            // materialized with the participants → person chain the snapshot
+            // build walks (`ConversationListChangeFetch.materializedConversations`
+            // says why each setting is what it is). Rows a later save already
+            // deleted simply do not return — the same drop existingObject's
+            // throw produced; the delete's own notification removes the row.
             let changedIDs = insertedIDs.union(updatedIDs)
             var updatedConversations: [Conversation] = []
             if !changedIDs.isEmpty {
-                let request = NSFetchRequest<Conversation>(entityName: "Conversation")
-                request.predicate = NSPredicate(format: "self IN %@", Array(changedIDs))
-                request.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
-                request.includesPendingChanges = true
-                // Materialize at fetch time, like existingObject did. Returned
-                // faults would leave a window before the snapshot build fires
-                // them, and a sibling delete landing in that window tombstones
-                // the row (shouldDeleteInaccessibleFaults defaults on) — the
-                // snapshot build then crashes reading its nil `id` UUID.
-                request.returnsObjectsAsFaults = false
-                // shouldRefreshRefetchedObjects stays default — forcing a
-                // refresh here would fight the automerge's registered-object
-                // merge ("whichever pipeline lands first" above).
                 do {
-                    updatedConversations = try context.fetch(request)
+                    updatedConversations = try context.fetch(
+                        ConversationListChangeFetch.savedConversations(withIDs: changedIDs)
+                    )
                 } catch {
                     Log.error("Failed to fetch sibling-save conversations", category: .conversation, error: error)
                 }
@@ -233,15 +221,85 @@ extension ConversationListViewModel {
         })
     }
 
+    /// The window's conversations whose rows a merged Person change can alter, read on
+    /// the observed context and bounded by the window.
+    ///
+    /// Until 2026-11-28 this walked each updated or refreshed Person's
+    /// `conversationParticipations` and returned every conversation the person ever
+    /// joined, archived rows and rows past the window included, each faulted and
+    /// snapshotted one at a time on the main thread before the trim dropped it: a few
+    /// thousand faults for a person in a few hundred conversations, for every merged save
+    /// that touched that Person (architecture review 2026-11, conversation-list-ui#4,
+    /// contacts-person#6, gap-message-shape-extremes#5, and the list half of
+    /// gap-change-propagation-pipeline#1).
+    ///
+    /// Now the window's own snapshots answer it. A Person whose change no row can show is
+    /// dropped (`ConversationListPersonChangePolicy`), with nothing fetched or faulted, and
+    /// the rows a change can reach are the ones whose snapshots show its address: every row
+    /// the Person is in shows it, and a row showing it through a duplicate Person is
+    /// snapshotted again for nothing. A Person change cannot bring a row into the window:
+    /// it changes no sort key, search reads only the conversation, and the contact filters
+    /// read the address, which no Person writer changes. Rows with unsaved changes in the
+    /// context (an optimistic send's conversation, which may hold a permanent ID before any
+    /// save) are taken from the context, because the store knows nothing of them; the
+    /// stored rest cost one fetch by key.
     private func conversationsAffectedByPersonChanges(in notification: Notification) -> [Conversation] {
-        contextObjects(
+        guard let context = observedConversationContext else { return [] }
+        let persons = contextObjects(
             forKeys: [NSUpdatedObjectsKey, NSRefreshedObjectsKey],
             in: notification
         )
         .compactMap { $0 as? Person }
-        .flatMap { person in
-            person.conversationParticipations?.compactMap(\.conversation) ?? []
+        let window = listStore.visibleItems
+        guard !persons.isEmpty, !window.isEmpty else { return [] }
+
+        // KVC, not `person.email`: a non-optional attribute traps on a tombstone, and a
+        // Person read here must cost one row fault at most.
+        let personEmails = persons.map { person in
+            (person, EmailNormalizer.normalize(person.value(forKey: "email") as? String ?? ""))
         }
+        let shownNames = ConversationListPersonChangePolicy.shownDisplayNamesByEmail(
+            in: window.map(\.snapshot.participantDisplayNames),
+            forEmails: Set(personEmails.map { $0.1 })
+        )
+        let changedEmails = Set(personEmails.compactMap { person, normalizedEmail in
+            ConversationListPersonChangePolicy.mayChangeWindowRows(
+                normalizedEmail: normalizedEmail,
+                displayName: person.displayName,
+                shownDisplayNamesByEmail: shownNames
+            ) ? normalizedEmail : nil
+        })
+        guard !changedEmails.isEmpty else { return [] }
+
+        var affected: [Conversation] = []
+        var storedIDs: [NSManagedObjectID] = []
+        for item in window
+        where item.snapshot.participantDisplayNames.contains(where: { changedEmails.contains($0.email) }) {
+            // An unsaved row always has changes, whatever its ID: an optimistic send gives
+            // its conversation a permanent ID before the list first sees it.
+            if let registered = context.registeredObject(for: item.id) as? Conversation,
+               registered.hasChanges {
+                // A pending delete is the deletion's own notification's to remove.
+                if !registered.isDeleted {
+                    affected.append(registered)
+                }
+            } else if !item.id.isTemporaryID {
+                storedIDs.append(item.id)
+            }
+        }
+
+        if !storedIDs.isEmpty {
+            do {
+                affected += try context.fetch(
+                    ConversationListChangeFetch.storedWindowConversations(withIDs: storedIDs)
+                )
+            } catch {
+                // Nothing to undo: the rows keep the snapshots they have, which is what a
+                // Person change that reached no row leaves too.
+                Log.error("Failed to fetch the window rows a Person change names", category: .conversation, error: error)
+            }
+        }
+        return affected
     }
 
     private func contextObjects(

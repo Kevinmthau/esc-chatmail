@@ -287,8 +287,9 @@ final class ConversationListStoreTests: XCTestCase {
             ConversationListItem.SortKey(conversation: $0) < ConversationListItem.SortKey(conversation: $1)
         }
         let sortedItems = conversations
-            .map(ConversationListItem.init(conversation:))
+            .compactMap(ConversationListItem.init(conversation:))
             .sorted(by: ConversationListStore.sortsBefore(_:_:))
+        XCTAssertEqual(sortedItems.count, conversations.count)
 
         XCTAssertEqual(sortedItems.map(\.id), sortedByKey.map(\.objectID))
         XCTAssertEqual(
@@ -351,6 +352,78 @@ final class ConversationListStoreTests: XCTestCase {
         store.removeAll()
         assertVisibleItemsSorted(store)
         XCTAssertTrue(store.visibleItems.isEmpty)
+    }
+
+    // MARK: - Rows the list cannot show
+
+    /// A tombstone, the fault of a row another context deleted from the store before it
+    /// fired, reads nil for every attribute, and the list item refuses it before the
+    /// snapshot reads its non-optional `id` and `type`.
+    // Revert-check: the KVC read in `ConversationListItem.listableID(of:)` (reading
+    // `conversation.id` traps this test's process on the nil UUID).
+    func testListItem_tombstone_isNil() throws {
+        let rows = try makeTombstoneOnSQLite()
+
+        XCTAssertNil(ConversationListItem(conversation: rows.tombstone))
+        XCTAssertNotNil(ConversationListItem(conversation: rows.live))
+    }
+
+    // Revert-check: `ConversationListItem.listableID(of:)`'s KVC read (with `conversation.id`
+    // the old non-failable item traps this test's process on the tombstone).
+    // HONEST SCOPE: `replaceAll`'s own `continue` has no mutation that compiles and keeps
+    // the row: with a failable item there is nothing to add.
+    func testReplaceAll_tombstone_isSkipped() throws {
+        let rows = try makeTombstoneOnSQLite()
+        var store = ConversationListStore()
+
+        store.replaceAll(with: [rows.tombstone, rows.live])
+
+        XCTAssertEqual(visibleIDs(of: store), [rows.live.objectID])
+    }
+
+    /// A live change carrying a row that has become a tombstone takes the row off the
+    /// screen: skipped, its earlier snapshot would stay, for a conversation that is gone.
+    // Revert-check: `upsertConversation`'s `removeConversation` for a nil item (a bare
+    // `return` leaves the stale row in the window).
+    func testApplyChanges_rowBecameATombstone_isRemoved() throws {
+        let rows = try makeTombstoneOnSQLite(windowBeforeDelete: true)
+        XCTAssertEqual(visibleIDs(of: rows.store), [rows.tombstone.objectID, rows.live.objectID])
+        var store = rows.store
+
+        _ = applyUpdate(&store, updated: [rows.tombstone])
+
+        XCTAssertEqual(visibleIDs(of: store), [rows.live.objectID])
+    }
+
+    /// Two saved rows on a SQLite store, where a deleted row is really gone. One is then
+    /// deleted from the store by another context while this suite's context holds it only
+    /// as a fault, so it becomes a tombstone when it fires. `windowBeforeDelete` first puts
+    /// both rows in a store, while both are alive.
+    private func makeTombstoneOnSQLite(
+        windowBeforeDelete: Bool = false
+    ) throws -> (tombstone: Conversation, live: Conversation, store: ConversationListStore) {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let sqliteContext = sqliteStack.makeMainQueueViewContext()
+        let doomed = ConversationBuilder().withDisplayName("Doomed").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 300)).build(in: sqliteContext)
+        let live = ConversationBuilder().withDisplayName("Live").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 200)).build(in: sqliteContext)
+        try sqliteContext.save()
+
+        var store = ConversationListStore()
+        if windowBeforeDelete {
+            store.replaceAll(with: [doomed, live])
+        }
+        sqliteContext.refresh(doomed, mergeChanges: false)
+        XCTAssertTrue(doomed.isFault, "Precondition: the row is held only as a fault")
+
+        let doomedID = doomed.objectID
+        let background = sqliteStack.newBackgroundContext()
+        try background.performAndWait {
+            background.delete(try background.existingObject(with: doomedID))
+            try background.save()
+        }
+        return (doomed, live, store)
     }
 
     // MARK: - Helpers
