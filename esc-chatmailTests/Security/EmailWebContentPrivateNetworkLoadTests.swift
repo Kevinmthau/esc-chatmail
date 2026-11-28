@@ -182,8 +182,7 @@ final class EmailWebContentPrivateNetworkLoadTests: XCTestCase {
         try await assertNoLoopbackConnection(after: webView)
     }
 
-    /// While the list compiles the reader loads nothing (`network-rules-pending`), and it loads,
-    /// with the list, once the list is ready.
+    /// While the list compiles the reader loads nothing (`network-rules-pending`).
     ///
     /// Revert-check: making `EmailWebViewLoadCoordination.loadReadiness` ignore
     /// `networkRulesPermitLoading` fails this.
@@ -208,6 +207,215 @@ final class EmailWebContentPrivateNetworkLoadTests: XCTestCase {
         )
         try await Task.sleep(nanoseconds: settleNanoseconds)
         XCTAssertEqual(recorder.connectionCount, 0)
+    }
+
+    /// A reader made while the list compiles loads once the compile ends, with the list.
+    ///
+    /// Revert-check: replacing `loadWhenNetworkRulesPermit(webView)` in
+    /// `FullEmailReaderWebView.Coordinator.loadContentIfReady` with nothing fails this: the reader
+    /// never loads.
+    func testReader_heldBehindTheCompile_loadsWithTheListOnceItEnds() async throws {
+        let (held, release) = try await heldCompileRules()
+        let reader = FullEmailReaderWebView(htmlContent: page, sourceSignature: nil, message: nil)
+        let coordinator = FullEmailReaderWebView.Coordinator(reader, networkRules: held)
+        let webView = makeHostedWebView(configuration: WKWebViewConfiguration())
+        webView.navigationDelegate = coordinator
+
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(coordinator.lastLoadedContent, "", "Precondition: deferred")
+
+        release()
+        await waitUntil { coordinator.lastLoadedContent == self.page }
+
+        XCTAssertTrue(held.isAttached(to: webView.configuration.userContentController))
+        try await assertNoLoopbackConnection(after: webView)
+    }
+
+    /// A preview made while the list compiles loads once the compile ends, with the list.
+    ///
+    /// Revert-check: replacing `loadWhenNetworkRulesPermit(webView)` in
+    /// `BaseEmailWebView.Coordinator.loadContentIfReady` with nothing fails this.
+    func testPreview_heldBehindTheCompile_loadsWithTheListOnceItEnds() async throws {
+        let (held, release) = try await heldCompileRules()
+        let preview = BaseEmailWebView(htmlContent: page, mode: .simplePreview)
+        let coordinator = BaseEmailWebView.Coordinator(preview, networkRules: held)
+        let webView = makeHostedWebView(configuration: WKWebViewConfiguration())
+        webView.navigationDelegate = coordinator
+
+        coordinator.loadContentIfReady(in: webView)
+        XCTAssertEqual(coordinator.lastLoadedContent, "", "Precondition: deferred")
+
+        release()
+        await waitUntil { coordinator.lastLoadedContent == self.page }
+
+        XCTAssertTrue(held.isAttached(to: webView.configuration.userContentController))
+        try await assertNoLoopbackConnection(after: webView)
+    }
+
+    /// A visible row's or an open's warm builds no web view while the list compiles, and keeps
+    /// the payload.
+    ///
+    /// Revert-check: removing the `canMakeEntryWithNetworkRules` guard from `warm` fails this.
+    func testWarm_whileTheListCompiles_buildsNoView() async throws {
+        let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "EmailWebContentPrivateNetworkLoadTests-\(UUID().uuidString)"
+        )
+        let contentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        defer { try? FileManager.default.removeItem(at: messagesDirectory) }
+        let messageId = "private-network-warm-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML("<html><body><p>Warm</p></body></html>", for: messageId)
+        let recovery = PrivateNetworkNoRecovery()
+        let loader = OriginalEmailSourceLoader(
+            canonicalContentLoader: CanonicalEmailContentLoader(contentHandler: contentHandler, recoveryService: recovery),
+            htmlContentLoader: HTMLContentLoader(
+                contentHandler: contentHandler,
+                sanitizer: .shared,
+                remoteImageAttachmentFallback: HTMLRemoteImageAttachmentFallback(
+                    requestExecutor: { _ in throw URLError(.unsupportedURL) }
+                ),
+                recoveryService: recovery
+            ),
+            renderedMessageCache: RenderedMessageCache()
+        )
+        let manager = FullEmailWebViewManager(loader: loader, networkRules: neverCompilingRules())
+        defer { manager.clear() }
+
+        await manager.warm(
+            request: OriginalEmailWarmRequest(
+                messageId: messageId,
+                bodyStorageURI: nil,
+                bodyText: nil,
+                senderEmail: "sender@example.com",
+                subject: "Subject"
+            ),
+            message: nil,
+            width: 390
+        )
+
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+    }
+
+    /// A pooled view made while the list could not be compiled loaded without it; once a retry
+    /// has compiled the list, the pool does not hand that view out, and drops it.
+    ///
+    /// Revert-check: making `FullEmailWebViewManager.isUsable` answer true fails this.
+    func testPool_viewMadeWithoutTheList_isNotHandedOutOnceTheListIsReady() async throws {
+        var clock = Date(timeIntervalSince1970: 1_000_000)
+        var calls = 0
+        let realCompile = EmailWebContentNetworkRules.storeCompiler(makeStore: EmailWebContentNetworkRules.temporaryStore)
+        let rules = EmailWebContentNetworkRules(
+            compile: { identifier, list, completion in
+                calls += 1
+                if calls <= 2 {
+                    completion(nil, CocoaError(.fileWriteOutOfSpace))
+                } else {
+                    realCompile(identifier, list, completion)
+                }
+            },
+            retryInterval: 60,
+            now: { clock }
+        )
+        _ = await rules.waitUntilLoadingPermitted(timeoutNanoseconds: 10_000_000_000)
+        XCTAssertEqual(rules.state, .unavailable, "Precondition: failed open")
+        let fixture = makePoolFixture(networkRules: rules)
+        defer { fixture.manager.clear() }
+        fixture.prepaint()
+        XCTAssertTrue(fixture.manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+        fixture.manager.markInitialLoadFinishedForTesting(messageId: fixture.messageId)
+
+        clock.addTimeInterval(61)
+        _ = await rules.waitUntilLoadingPermitted(timeoutNanoseconds: 10_000_000_000)
+        XCTAssertEqual(rules.state, .ready, "Precondition: the retry compiled the list")
+
+        let checkout = fixture.manager.checkout(
+            messageId: fixture.messageId,
+            sourceSignature: fixture.artifact.sourceSignature,
+            wrappedHTML: page,
+            message: fixture.message,
+            width: 390
+        )
+        XCTAssertNil(checkout)
+        XCTAssertFalse(fixture.manager.hasPrerenderedWebViewEntryForTesting(messageId: fixture.messageId))
+    }
+
+    // MARK: - Document navigations
+
+    /// A meta refresh to a loopback host, in markup the sanitizer did not see, makes no request
+    /// from the reader, while a sender on a `.local` domain still has its own document loaded
+    /// (its base URL is `https://<domain>/`, a private name). The control delegate, which allows
+    /// every `.other` navigation as the delegates did, does reach the listener.
+    ///
+    /// Revert-check: removing the `EmailDocumentNavigationGuard` check from
+    /// `FullInteractiveEmailWebView.navigationDecision` fails this.
+    func testReader_metaRefreshToALoopbackHost_isRefused_ownLocalDocumentStillLoads() async throws {
+        let refresh = """
+        <html><head><meta http-equiv="refresh" content="0;url=http://127.0.0.1:\(recorder.port)/refresh"></head>
+        <body><p>Hello</p></body></html>
+        """
+        let stack = TestCoreDataStack()
+        let message = MessageBuilder()
+            .withId("refresh-\(UUID().uuidString)")
+            .withSubject("Subject")
+            .withSender(email: "nas@storage.local", name: "NAS")
+            .withBody("Body")
+            .build(in: stack.viewContext)
+        let reader = FullEmailReaderWebView(htmlContent: refresh, sourceSignature: nil, message: message)
+        let coordinator = FullEmailReaderWebView.Coordinator(reader, networkRules: rules)
+        let webView = makeHostedWebView(configuration: FullInteractiveEmailWebView.makeConfiguration(
+            cidHandler: CIDSchemeHandler(message: nil),
+            networkRules: rules
+        ))
+        webView.navigationDelegate = coordinator
+
+        coordinator.loadContentIfReady(in: webView)
+
+        try await waitForCompleteDocument(in: webView)
+        XCTAssertEqual(webView.url?.host, "storage.local", "The .local sender's own document loaded")
+        try await Task.sleep(nanoseconds: settleNanoseconds)
+        XCTAssertEqual(recorder.connectionCount, 0)
+    }
+
+    func testControl_metaRefreshWithAnAllowingDelegate_reachesTheListener() async throws {
+        let refresh = """
+        <html><head><meta http-equiv="refresh" content="0;url=http://127.0.0.1:\(recorder.port)/refresh"></head>
+        <body><p>Hello</p></body></html>
+        """
+        let delegate = AllowingNavigationDelegate()
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+        rules.attach(to: configuration.userContentController)
+        let webView = makeHostedWebView(configuration: configuration)
+        webView.navigationDelegate = delegate
+
+        webView.loadHTMLString(refresh, baseURL: URL(string: "https://example.com/"))
+
+        let connected = try await waitForConnection(timeout: 10)
+        XCTAssertTrue(connected, "With the list alone, a refresh still reaches loopback")
+    }
+
+    private func heldCompileRules() async throws -> (EmailWebContentNetworkRules, () -> Void) {
+        var heldCompletion: (@Sendable (WKContentRuleList?, Error?) -> Void)?
+        let held = EmailWebContentNetworkRules(compile: { _, _, completion in heldCompletion = completion })
+        held.prepare()
+        let list = try await compileProductionList()
+        return (held, { heldCompletion?(list, nil) })
+    }
+
+    private func waitUntil(
+        timeout: TimeInterval = 10,
+        file: StaticString = #filePath,
+        line: UInt = #line,
+        condition: @escaping () -> Bool
+    ) async {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            guard Date() < deadline else {
+                XCTFail("Timed out waiting for condition", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
     }
 
     /// The pool makes no web view while the list compiles, so it never hands out a view warmed
@@ -401,6 +609,23 @@ final class EmailWebContentPrivateNetworkLoadTests: XCTestCase {
             artifact: artifact,
             stack: stack
         )
+    }
+}
+/// Allows every navigation, as the delegates allowed `.other` before the guard.
+private final class AllowingNavigationDelegate: NSObject, WKNavigationDelegate {
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        decisionHandler(.allow)
+    }
+}
+
+/// Recovers nothing: the warm test uses only HTML saved to its own directory.
+private struct PrivateNetworkNoRecovery: HTMLContentRecovering {
+    func recoverHTMLContent(messageId: String) async -> String? {
+        nil
     }
 }
 #endif

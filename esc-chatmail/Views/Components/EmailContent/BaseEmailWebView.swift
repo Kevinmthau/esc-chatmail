@@ -102,10 +102,11 @@ struct BaseEmailWebView: WebViewRepresentable {
         /// A load is deferred until the private-network rule list compiles, and a callback to load
         /// then is registered once (`loadWhenNetworkRulesPermit`).
         private var isAwaitingNetworkRules = false
-        /// Set once the rules have answered that this coordinator's web view may load, so later
-        /// updates do not ask again: `WKWebView.configuration` makes a copy on every read, and
-        /// `updateWebView` runs on every SwiftUI update.
-        private var networkRulesPermitLoading = false
+        /// Set once the rule list is attached to this coordinator's web view, so later updates do
+        /// not ask again: `WKWebView.configuration` makes a copy on every read, and `updateWebView`
+        /// runs on every SwiftUI update. A view allowed to load without the list (it could not be
+        /// compiled) is not marked, so it asks again and takes the list once a retry compiles it.
+        private var hasNetworkRulesAttached = false
 
         init(_ parent: BaseEmailWebView, networkRules: EmailWebContentNetworkRules? = nil) {
             self.parent = parent
@@ -168,10 +169,13 @@ struct BaseEmailWebView: WebViewRepresentable {
             let windowPresent = webView.window != nil
             let width = webView.bounds.width
             let height = webView.bounds.height
-            if !networkRulesPermitLoading {
-                networkRulesPermitLoading = networkRules.attach(
-                    to: webView.configuration.userContentController
-                )
+            let networkRulesPermitLoading: Bool
+            if hasNetworkRulesAttached {
+                networkRulesPermitLoading = true
+            } else {
+                let controller = webView.configuration.userContentController
+                networkRulesPermitLoading = networkRules.attach(to: controller)
+                hasNetworkRulesAttached = networkRules.isAttached(to: controller)
             }
 
             switch loadReadiness(
@@ -330,8 +334,13 @@ struct BaseEmailWebView: WebViewRepresentable {
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Only allow initial load and reload for previews.
-            if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+            // Only allow initial load and reload for previews, and neither to a private host other
+            // than the preview's own base host (a meta refresh: `EmailDocumentNavigationGuard`).
+            let isOwnLoad = navigationAction.navigationType == .other || navigationAction.navigationType == .reload
+            if isOwnLoad, !EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+                to: navigationAction.request.url,
+                documentBaseURL: deriveBaseURL(from: parent.message, senderEmail: parent.senderEmail)
+            ) {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)

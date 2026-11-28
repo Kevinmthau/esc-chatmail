@@ -80,6 +80,8 @@ final class EmailWebContentNetworkRuleSourceTests: XCTestCase {
             "http://metadata.internal/x",
             "http://a.b.corp/x",
             "http://site.onion/x",
+            "http://router.home.arpa/x",
+            "http://home.arpa/x",
             "http://[::1]/x",
             "http://[::ffff:127.0.0.1]:8080/x",
             "http://[2001:db8::1]/x",
@@ -102,6 +104,35 @@ final class EmailWebContentNetworkRuleSourceTests: XCTestCase {
         ]
         XCTAssertEqual(blocked.filter { !isBlocked($0) }, [])
         XCTAssertEqual(allowed.filter(isBlocked), [])
+    }
+
+    /// A navigation WebKit makes on its own (a meta refresh) to a private host is refused, unless
+    /// it is the document's own base host; public hosts and other schemes are left alone.
+    func testDocumentNavigationGuard_refusesPrivateHostsButTheDocumentsOwn() {
+        let base = URL(string: "https://storage.local/")
+        XCTAssertTrue(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: URL(string: "http://127.0.0.1:8080/x"), documentBaseURL: URL(string: "https://example.com/")
+        ))
+        XCTAssertTrue(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: URL(string: "https://router.local/"), documentBaseURL: base
+        ))
+        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: URL(string: "https://storage.local/"), documentBaseURL: base
+        ), "The document's own load")
+        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: URL(string: "https://example.com/next"), documentBaseURL: base
+        ))
+        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: URL(string: "about:blank"), documentBaseURL: nil
+        ))
+        XCTAssertEqual(
+            FullInteractiveEmailWebView.navigationDecision(
+                navigationType: .other,
+                url: URL(string: "http://127.0.0.1/x"),
+                documentBaseURL: URL(string: "https://example.com/")
+            ),
+            .blockedPrivateNetwork(URL(string: "http://127.0.0.1/x")!)
+        )
     }
 
     /// The list never names the document type, so the email documents the app loads itself (with

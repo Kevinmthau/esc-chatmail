@@ -206,6 +206,10 @@ final class PrivateNetworkAddressDetectorTests: XCTestCase {
         assertBlocked("http://gateway.internal/")
         assertBlocked("http://server.corp/")
         assertBlocked("http://something.home/")
+        // RFC 8375's residential domain, and every name under it.
+        assertBlocked("http://home.arpa/")
+        assertBlocked("http://router.home.arpa/")
+        assertBlocked("http://nas.lan.home.arpa./")
         assertBlocked("http://example.test/")
         assertBlocked("http://foo.invalid/")
         assertBlocked("http://secret.onion/")

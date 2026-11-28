@@ -70,8 +70,9 @@ struct esc_chatmailApp: App {
         if isRunningUnitTests {
             // The unit-test host waits for it (bounded), so no test sees a load deferred for a
             // compile still in flight: tests load web views synchronously and expect them ready.
-            // Before `UIApplicationMain` nothing else runs on the main queue, so this only lets
-            // the compile's callback in.
+            // `App.init` runs before the application's run loop starts (`UIApplicationMain` on
+            // iOS, `NSApplicationMain` on the Mac), so nothing else is on the main queue yet and
+            // this only lets the compile's callback in.
             let deadline = Date(timeIntervalSinceNow: 5)
             while !EmailWebContentNetworkRules.shared.permitsLoading, Date() < deadline {
                 RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))

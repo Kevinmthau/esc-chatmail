@@ -17,8 +17,9 @@ import Foundation
 /// - Every IPv6 literal. The detector refuses only the private ones, but an email's resources are
 ///   never on an address literal, and a bracketed host covers the IPv4-mapped spelling of a
 ///   private address (`[::ffff:127.0.0.1]`, measured) without a rule for each form.
-/// - `PrivateNetworkAddressDetector.reservedHostnames` and every name under
-///   `PrivateNetworkAddressDetector.reservedTLDs` (`localhost`, `.local`, `.internal`, …).
+/// - `PrivateNetworkAddressDetector.reservedHostnames`, every name under
+///   `PrivateNetworkAddressDetector.reservedTLDs` (`localhost`, `.local`, `.internal`, …) and
+///   every name in `PrivateNetworkAddressDetector.reservedDomains` (`home.arpa`).
 /// - Every single-label name (`http://printer/`), as the detector refuses them.
 ///
 /// Three things about WebKit's matcher shape the patterns, measured on the same simulator:
@@ -33,9 +34,17 @@ import Foundation
 /// - No rule names the `document` type: the documents the app loads are its own
 ///   `loadHTMLString` calls, whose base URL is the sender's domain, and a sender on a `.local`
 ///   domain must still be readable. Measured: a document loaded with a single-label base URL
-///   loads under this list. `popup` is left out too: a link the user taps is decided by the
-///   reader's navigation policy, which refuses private hosts itself and logs it
+///   loads under this list. So a top-level navigation the page starts itself is not this list's
+///   to stop: a `<meta http-equiv="refresh">` to `http://127.0.0.1`, with the list attached and no
+///   sanitizer, made its GET (measured on the iOS 27.0 simulator in review). The sanitizer strips
+///   `meta`, `iframe` and `link` from every wrapped email, and the delegates refuse such a
+///   navigation to a private host other than the document's own (`EmailDocumentNavigationGuard`).
+///   `popup` is left out too: a link the user taps is decided by the reader's navigation policy,
+///   which refuses private hosts itself and logs it
 ///   (`FullInteractiveEmailWebView.navigationDecision`).
+/// - WebKit checks a subresource's redirect target against the list too: an image at a public-
+///   looking host redirected to `127.0.0.1` was refused at the target (measured on the iOS 27.0
+///   simulator in review), so a redirect needs no rule of its own.
 ///
 /// It changes which images load only for those hosts. Which public images load, tracking pixels
 /// included, is the image-consent question, which is Kevin's to decide and is not here.
@@ -70,7 +79,7 @@ enum EmailWebContentNetworkRuleSource {
     /// The `url-filter` of every rule, in a fixed order.
     static var urlFilters: [String] {
         ipv4Filters + [ipv6LiteralFilter] + reservedHostnameFilters + reservedTLDFilters
-            + [singleLabelFilter]
+            + reservedDomainFilters + [singleLabelFilter]
     }
 
     static var ipv4Filters: [String] {
@@ -91,6 +100,13 @@ enum EmailWebContentNetworkRuleSource {
     static var reservedTLDFilters: [String] {
         PrivateNetworkAddressDetector.reservedTLDs.sorted().map { tld in
             authorityStart + #"[^/?#@:\[]*\."# + escaped(tld) + authorityEnd
+        }
+    }
+
+    /// A reserved domain and every name under it.
+    static var reservedDomainFilters: [String] {
+        PrivateNetworkAddressDetector.reservedDomains.sorted().map { domain in
+            authorityStart + #"([^/?#@:\[]*\.)?"# + escaped(domain) + authorityEnd
         }
     }
 

@@ -17,11 +17,16 @@ import WebKit
 ///
 /// A compile that fails twice leaves the list unavailable, and web views then load without it
 /// (logged at error). That fails open on purpose: the rules are fixed and a test compiles them on
-/// every OS CI runs, so what is left is a WebKit or a disk that refuses the compile, and failing
+/// both platforms CI runs (`EmailWebContentNetworkRulesTests` is in the default plan and in
+/// `Mac.xctestplan`), so what is left is a WebKit or a disk that refuses the compile, and failing
 /// closed there would leave every HTML email unreadable to stop requests whose answers no script
-/// can read. Such a refusal may pass (a disk that was full), so the next web view that asks at
-/// least `retryInterval` after it compiles again, and web views made after a success have the
-/// list; loading stays open while that retry runs.
+/// can read. A compile that does not answer within `compileTimeout` counts as failed, so a WebKit
+/// that never calls back cannot hold every web view for the rest of the process. A refusal may pass
+/// (a disk that was full), so the next web view that asks at least `retryInterval` after it
+/// compiles again; while that retry runs, loading is closed again (its callbacks re-drive the
+/// waiting loads when it ends, in milliseconds), so no view loads without the list in the window
+/// before it is ready. A view made while the list was unavailable keeps loading without it, and the
+/// pool does not hand out such a view once the list is ready (`FullEmailWebViewManager.checkout`).
 ///
 /// The list is the app's, not an account's, so it is no participant of the account boundary. A
 /// callback waiting for it holds its coordinator weakly, and an invalidated coordinator loads
@@ -62,7 +67,22 @@ final class EmailWebContentNetworkRules {
     private let encodedRuleList: String
     private let maximumCompileAttempts: Int
     private let retryInterval: TimeInterval
+    private let compileTimeout: TimeInterval
+    private let scheduleCompileTimeout: ScheduleTimeout
     private let now: @MainActor () -> Date
+    /// Bumped by every compile attempt, so an answer (or a timeout) of an attempt that already
+    /// ended is ignored.
+    private var compileAttemptToken = 0
+
+    /// Runs `action` once after `interval`; a seam so a test can fire the timeout itself.
+    typealias ScheduleTimeout = @MainActor (_ interval: TimeInterval, _ action: @escaping @MainActor () -> Void) -> Void
+
+    static let sleepingTimeout: ScheduleTimeout = { interval, action in
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(max(0, interval) * 1_000_000_000))
+            action()
+        }
+    }
     private(set) var state: State = .notStarted
     private var ruleList: WKContentRuleList?
     private var compileAttempts = 0
@@ -80,12 +100,16 @@ final class EmailWebContentNetworkRules {
         encodedRuleList: String = EmailWebContentNetworkRuleSource.encodedRuleList,
         maximumCompileAttempts: Int = 2,
         retryInterval: TimeInterval = 60,
+        compileTimeout: TimeInterval = 10,
+        scheduleCompileTimeout: ScheduleTimeout? = nil,
         now: @escaping @MainActor () -> Date = { Date() }
     ) {
         self.compileRuleList = compile
         self.encodedRuleList = encodedRuleList
         self.maximumCompileAttempts = max(1, maximumCompileAttempts)
         self.retryInterval = retryInterval
+        self.compileTimeout = compileTimeout
+        self.scheduleCompileTimeout = scheduleCompileTimeout ?? Self.sleepingTimeout
         self.now = now
     }
 
@@ -118,9 +142,10 @@ final class EmailWebContentNetworkRules {
         return WKContentRuleListStore(url: directory)
     }
 
-    /// True once a web view may load email HTML: the list is compiled, or it could not be.
+    /// True once a web view may load email HTML: the list is compiled, or it could not be and no
+    /// retry is running.
     var permitsLoading: Bool {
-        state == .ready || state == .unavailable
+        state == .ready || (state == .unavailable && !isRetryingAfterFailure)
     }
 
     /// Starts the compile, once, and again after a failure once `retryInterval` has passed. The
@@ -165,7 +190,7 @@ final class EmailWebContentNetworkRules {
             }
             return true
         case .unavailable:
-            return true
+            return !isRetryingAfterFailure
         case .notStarted, .compiling:
             return false
         }
@@ -217,16 +242,24 @@ final class EmailWebContentNetworkRules {
 
     private func startCompile() {
         compileAttempts += 1
+        compileAttemptToken &+= 1
+        let attempt = compileAttemptToken
         // A list of no rules compiles and blocks nothing, which would read as ready.
         guard encodedRuleList != "[]" else {
             compileDidFail(error: nil)
             return
         }
+        scheduleCompileTimeout(compileTimeout) { [weak self] in
+            guard let self, self.compileAttemptToken == attempt else { return }
+            Log.warning("Email web content network rules compile did not answer in time", category: .ui)
+            self.compileDidFail(error: nil)
+        }
         compileRuleList(Self.identifier, encodedRuleList) { [weak self] ruleList, error in
             // WebKit calls back on the main thread; the hop says so to the compiler instead of
             // trapping if a WebKit ever did not.
             Task { @MainActor [weak self] in
-                self?.compileDidEnd(ruleList: ruleList, error: error)
+                guard let self, self.compileAttemptToken == attempt else { return }
+                self.compileDidEnd(ruleList: ruleList, error: error)
             }
         }
     }
@@ -236,6 +269,7 @@ final class EmailWebContentNetworkRules {
             compileDidFail(error: error)
             return
         }
+        compileAttemptToken &+= 1
         self.ruleList = ruleList
         state = .ready
         isRetryingAfterFailure = false
@@ -253,6 +287,7 @@ final class EmailWebContentNetworkRules {
             startCompile()
             return
         }
+        compileAttemptToken &+= 1
         state = .unavailable
         lastFailureAt = now()
         isRetryingAfterFailure = false

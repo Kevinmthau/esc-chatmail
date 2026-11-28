@@ -26,6 +26,10 @@ enum PrivateNetworkAddressDetector {
             return true
         }
 
+        if reservedDomains.contains(where: { host == $0 || host.hasSuffix("." + $0) }) {
+            return true
+        }
+
         // A host can have two IPv4 readings (`ipv4Readings(of:)`). One private reading is enough
         // to refuse it, because the detector cannot know which one the consumer applies.
         let readings = ipv4Readings(of: host)
@@ -120,6 +124,13 @@ enum PrivateNetworkAddressDetector {
         "ip6-allnodes",
         "ip6-allrouters",
         "ip6-allhosts"
+    ]
+
+    /// Reserved domains of more than one label, refused with every name under them: RFC 8375's
+    /// `home.arpa`, the residential network's own domain. Not private for the same reason as
+    /// `reservedHostnames`.
+    static let reservedDomains: Set<String> = [
+        "home.arpa"
     ]
 
     // RFC 6761 / RFC 6762 / RFC 8375 — not resolvable to routable public

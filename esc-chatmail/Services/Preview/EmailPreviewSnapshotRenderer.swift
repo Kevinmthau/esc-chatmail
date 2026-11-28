@@ -689,7 +689,13 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+        // Its own load only, and not a meta refresh to a private host (`EmailDocumentNavigationGuard`).
+        let isOwnLoad = navigationAction.navigationType == .other || navigationAction.navigationType == .reload
+        let baseURL = EmailSenderBaseURLResolver.baseURL(from: request.message?.senderEmail ?? request.senderEmail)
+        if isOwnLoad, !EmailDocumentNavigationGuard.refusesAutomaticNavigation(
+            to: navigationAction.request.url,
+            documentBaseURL: baseURL
+        ) {
             decisionHandler(.allow)
         } else {
             decisionHandler(.cancel)

@@ -124,11 +124,13 @@ final class EmailWebContentNetworkRulesTests: XCTestCase {
 
     /// A compile that failed is tried again, at most once a `retryInterval`, by the next web view
     /// that asks, so a transient refusal (a full disk) does not leave the rest of the process
-    /// without the list. Web views keep loading meanwhile: the retry does not close them again.
+    /// without the list. While the retry runs, loading is closed again, so no view loads without
+    /// the list in the window before it is ready; its callbacks re-drive the waiting loads.
     ///
     /// Revert-check: removing `retryIfDue()` from `prepare()` leaves the provider unavailable after
-    /// the clock has moved and fails this.
-    func testFailedCompile_isRetriedOnceTheIntervalHasPassed_andWebViewsKeepLoadingMeanwhile() async {
+    /// the clock has moved and fails this; dropping `!isRetryingAfterFailure` from `attach(to:)`'s
+    /// `.unavailable` case fails the in-flight assertion.
+    func testFailedCompile_isRetriedOnceTheIntervalHasPassed_andClosesLoadingWhileItRuns() async {
         var clock = Date(timeIntervalSince1970: 1_000_000)
         var calls = 0
         let realCompile = EmailWebContentNetworkRules.storeCompiler(
@@ -158,10 +160,12 @@ final class EmailWebContentNetworkRulesTests: XCTestCase {
         XCTAssertEqual(calls, 2, "No retry before the interval")
 
         clock.addTimeInterval(31)
-        XCTAssertTrue(
+        var callbacks = 0
+        XCTAssertFalse(
             rules.attach(to: WKUserContentController()),
-            "A retry in flight does not close loading again"
+            "A retry in flight closes loading until it ends"
         )
+        rules.notifyWhenLoadingPermitted { callbacks += 1 }
         XCTAssertEqual(calls, 3)
 
         let deadline = Date().addingTimeInterval(10)
@@ -169,8 +173,59 @@ final class EmailWebContentNetworkRulesTests: XCTestCase {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         XCTAssertEqual(rules.state, .ready)
+        XCTAssertEqual(callbacks, 1, "The retry's end re-drives a load that waited for it")
         let controller = WKUserContentController()
         XCTAssertTrue(rules.attach(to: controller))
         XCTAssertTrue(rules.isAttached(to: controller))
+    }
+
+    /// A compile that never answers counts as failed once `compileTimeout` passes, so a WebKit
+    /// that never calls back cannot hold every web view for the rest of the process; a late answer
+    /// of an attempt already given up is ignored.
+    ///
+    /// Revert-check: removing the `scheduleCompileTimeout` call from `startCompile` leaves the
+    /// provider compiling and fails this.
+    func testCompileThatNeverAnswers_failsAtItsTimeout_andALateAnswerIsIgnored() async {
+        var completions: [@Sendable (WKContentRuleList?, Error?) -> Void] = []
+        var timeouts: [@MainActor () -> Void] = []
+        let rules = EmailWebContentNetworkRules(
+            compile: { _, _, completion in completions.append(completion) },
+            compileTimeout: 10,
+            scheduleCompileTimeout: { _, action in timeouts.append(action) }
+        )
+
+        rules.prepare()
+        XCTAssertEqual(rules.state, .compiling)
+        XCTAssertEqual(timeouts.count, 1)
+
+        timeouts[0]()
+        XCTAssertEqual(completions.count, 2, "The timed-out attempt counts; the second one starts")
+        XCTAssertEqual(rules.state, .compiling)
+        timeouts[1]()
+
+        XCTAssertEqual(rules.state, .unavailable)
+        XCTAssertTrue(rules.permitsLoading)
+
+        let lateList = try? await compileRealList()
+        completions[0](lateList, nil)
+        await Task.yield()
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(rules.state, .unavailable, "An answer of an attempt given up is ignored")
+    }
+
+    private func compileRealList() async throws -> WKContentRuleList {
+        let store = try XCTUnwrap(EmailWebContentNetworkRules.temporaryStore())
+        return try await withCheckedThrowingContinuation { continuation in
+            store.compileContentRuleList(
+                forIdentifier: "late-\(UUID().uuidString)",
+                encodedContentRuleList: EmailWebContentNetworkRuleSource.encodedRuleList
+            ) { list, error in
+                if let list {
+                    continuation.resume(returning: list)
+                } else {
+                    continuation.resume(throwing: error ?? CocoaError(.featureUnsupported))
+                }
+            }
+        }
     }
 }
