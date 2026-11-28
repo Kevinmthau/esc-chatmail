@@ -60,7 +60,8 @@ enum SynthesizedInlineAttachmentRecovery {
         },
         storeClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
             AttachmentPaths.storeClone(ofFileAt: source, at: destination)
-        }
+        },
+        requestedFoundNoRoom: @escaping @Sendable () -> Void = {}
     ) async -> Data? {
         guard requestedAttachmentId.hasPrefix("local_inline_"), isActive() else {
             return nil
@@ -277,6 +278,9 @@ enum SynthesizedInlineAttachmentRecovery {
                         // A full disk leaves the row as it was (`AttachmentWriteResult`).
                         attachment.state = .failed
                         attachment.lastDownloadFailedAt = Date()
+                    } else if result.objectID == requestedAttachmentObjectID {
+                        // Left as it was; the caller shows the refusal.
+                        requestedFoundNoRoom()
                     }
                 }
 
@@ -1070,6 +1074,7 @@ final class AttachmentDownloader: ObservableObject {
             let writeAttachmentData = self.writeAttachmentData
             let storeAttachmentClone = self.storeAttachmentClone
             guard let task = startDownloadOperation({ [weak self] recoveryGeneration in
+                let foundNoRoom = RecoveryRoomFlag()
                 _ = await SynthesizedInlineAttachmentRecovery.recover(
                     messageId: messageId,
                     requestedAttachmentObjectID: requestedAttachmentObjectID,
@@ -1082,8 +1087,14 @@ final class AttachmentDownloader: ObservableObject {
                         !recoveryGeneration.isCancelled && !Task.isCancelled
                     },
                     writeData: writeAttachmentData,
-                    storeClone: storeAttachmentClone
+                    storeClone: storeAttachmentClone,
+                    requestedFoundNoRoom: { foundNoRoom.set() }
                 )
+                // A recovery the floor admitted whose write then found no room shows the refusal
+                // too, or the row would stay `queued` with nothing to tap.
+                if foundNoRoom.isSet, !recoveryGeneration.isCancelled {
+                    self?.recordSpaceRefusal(messageId: messageId, attachmentId: requestedAttachmentId)
+                }
                 self?.finishSynthesizedInlineRecovery(
                     messageId: messageId,
                     operationID: operationID
