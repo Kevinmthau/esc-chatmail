@@ -1,6 +1,7 @@
 #if os(iOS)
 import UIKit
 #endif
+import CoreData
 import WebKit
 import XCTest
 @testable import esc_chatmail
@@ -13,9 +14,14 @@ import XCTest
 final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
     private var messagesDirectory: URL!
     private var contentHandler: HTMLContentHandler!
+    private var testStack: TestCoreDataStack!
+    /// Main-queue, so the suite's main-actor bodies touch it on its queue.
+    private var context: NSManagedObjectContext!
 
     override func setUp() {
         super.setUp()
+        testStack = TestCoreDataStack()
+        context = testStack.makeMainQueueViewContext()
         messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
             "FullEmailWebViewManagerIdleReleaseTests-\(UUID().uuidString)"
         )
@@ -23,6 +29,8 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
     }
 
     override func tearDown() {
+        context = nil
+        testStack = nil
         try? FileManager.default.removeItem(at: messagesDirectory)
         super.tearDown()
     }
@@ -33,7 +41,8 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
     ///
     /// Revert-check: removing `remoteImageFallbackBookkeeping.forgetWarmWidths()` from
     /// `releaseIdleWebViews` lets the second post rebuild the view and fails this; removing its
-    /// teardown loop leaves the view in place and fails it too.
+    /// teardown loop leaves the released view in the off-screen window with its delegate, and
+    /// fails it too (the entry is dropped either way, so only the view itself shows it).
     /// HONEST SCOPE: the absence after the second post is read over a bounded window
     /// (`absenceWindowNanoseconds`).
     func testReleaseIdleWebViews_keepsPayloads_andAFallbackPostRebuildsNoView() async throws {
@@ -54,9 +63,15 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
                 && manager.activeWarmOperationCountForTesting == 0
         }
 
+        let pooledView = try XCTUnwrap(manager.webViewForTesting(messageId: messageId))
+        XCTAssertNotNil(pooledView.superview, "Precondition: the pooled view is in the off-screen window")
+        XCTAssertNotNil(pooledView.navigationDelegate, "Precondition: the pool's delegate is set")
+
         manager.releaseIdleWebViews()
 
         XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+        XCTAssertNil(pooledView.superview, "The released view is torn down")
+        XCTAssertNil(pooledView.navigationDelegate, "The released view is torn down")
         XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
         XCTAssertTrue(manager.hasRemoteImageFallbackWarmContextForTesting(messageId: messageId))
 
@@ -88,7 +103,68 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
         XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
     }
 
+    /// An open's prewarm suspended in its warm when the release lands builds no view when it
+    /// resumes: its warm builds none, and neither may the prepaint after it, which a closed chat
+    /// or a backgrounded app would otherwise get as an off-screen view loading the email's remote
+    /// resources.
+    ///
+    /// Revert-check: dropping `releaseGeneration == self.idleReleaseGeneration` from
+    /// `prewarmOnOpen`'s guard fails this.
+    func testPrewarmOnOpenSuspendedAcrossARelease_buildsNoView() async throws {
+        let messageId = "idle-release-prewarm-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML(simpleHTML(title: "Prewarm"), for: messageId)
+        let message = try makeMessage(id: messageId)
+        let manager = makeManager()
+        defer { manager.clear() }
+
+        manager.prewarmOnOpen(message: message, width: 390)
+        await waitUntil(pollIntervalNanoseconds: 0) { manager.activeWarmOperationCountForTesting > 0 }
+        manager.releaseIdleWebViews()
+        await manager.waitForPrewarmTasksForTesting()
+
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId))
+    }
+
     #if os(iOS)
+    /// From the background notification until the app is about to return, nothing builds a web
+    /// view: not an open's prewarm that runs then, and not a reader left open behind the release
+    /// that prepaints on a content change. Back in the foreground the same prewarm builds one,
+    /// which is the control.
+    ///
+    /// Revert-check: dropping `!isAppInBackground` from `warm`'s web-view guard, or from
+    /// `prepaintAfterExplicitOpen`'s, or not clearing it on the foreground notification, fails
+    /// this (each run alone).
+    func testWhileInTheBackground_nothingBuildsAView_untilTheAppReturns() async throws {
+        let messageId = "idle-release-backgrounded-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML(simpleHTML(title: "Backgrounded"), for: messageId)
+        let message = try makeMessage(id: messageId)
+        let center = NotificationCenter()
+        let manager = makeManager(backgroundEventSource: AppBackgroundEventSource(notificationCenter: center))
+        defer { manager.clear() }
+
+        center.post(name: UIApplication.didEnterBackgroundNotification, object: nil)
+        manager.prewarmOnOpen(message: message, width: 390)
+        await manager.waitForPrewarmTasksForTesting()
+
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: messageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId), "The prewarm builds none")
+
+        let request = makeRequest(for: message)
+        let prepared = try XCTUnwrap(manager.preparedOpenArtifact(request: request, message: message, width: 390))
+        manager.prepaintAfterExplicitOpen(request: request, message: message, artifact: prepared.artifact, width: 390)
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId), "The reader's prepaint builds none")
+
+        center.post(name: UIApplication.willEnterForegroundNotification, object: nil)
+        manager.prewarmOnOpen(message: message, width: 390)
+        await manager.waitForPrewarmTasksForTesting()
+
+        XCTAssertTrue(
+            manager.hasPrerenderedWebViewEntryForTesting(messageId: messageId),
+            "Control: back in the foreground the same prewarm builds the view"
+        )
+    }
+
     /// The background notification, from the source the manager was given, releases idle views.
     /// The notification goes to a center of the test's own: posted to the default one it would
     /// reach every observer in the test host.
@@ -117,10 +193,20 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
     /// Revert-check: removing the `releaseIdleWebViews()` call from `ChatView`'s `onDisappear`
     /// fails this.
     func testChatView_releasesIdleViewsWhenItDisappears() throws {
-        let source = try repositorySource("esc-chatmail/Views/Chat/ChatView.swift")
-        let disappear = try XCTUnwrap(source.range(of: ".onDisappear {"))
-        let body = source[disappear.upperBound...].prefix(600)
-        XCTAssertTrue(body.contains("chatDependencies.fullEmailOpener.releaseIdleWebViews()"))
+        let path = "esc-chatmail/Views/Chat/ChatView.swift"
+        let source = try repositorySource(path)
+        // Every `onDisappear` block, read to its closing brace, so the call is found wherever in
+        // the block it moves and only inside one.
+        var blocks: [String] = []
+        var searchStart = source.startIndex
+        while let marker = source.range(of: ".onDisappear {", range: searchStart..<source.endIndex) {
+            let tail = String(source[marker.lowerBound...])
+            let body = try sourceBlockRange(after: ".onDisappear {", open: "{", close: "}", in: tail, path: path)
+            blocks.append(String(tail[body]))
+            searchStart = marker.upperBound
+        }
+        XCTAssertFalse(blocks.isEmpty, "\(path) no longer has an `.onDisappear` block")
+        XCTAssertTrue(blocks.contains { $0.contains("chatDependencies.fullEmailOpener.releaseIdleWebViews()") })
     }
 
     // MARK: - Fixtures
@@ -171,6 +257,26 @@ final class FullEmailWebViewManagerIdleReleaseTests: XCTestCase {
                 recoveryService: recoveryService
             ),
             renderedMessageCache: RenderedMessageCache()
+        )
+    }
+
+    /// A stored message for the open paths, which take one.
+    private func makeMessage(id: String) throws -> Message {
+        let message = MessageBuilder()
+            .withId(id)
+            .build(in: context)
+        try context.save()
+        return message
+    }
+
+    /// The request `prewarmOnOpen` builds from `message`.
+    private func makeRequest(for message: Message) -> OriginalEmailWarmRequest {
+        OriginalEmailWarmRequest(
+            messageId: message.id,
+            bodyStorageURI: message.bodyStorageURI,
+            bodyText: message.bodyText,
+            senderEmail: message.senderEmail,
+            subject: message.subject
         )
     }
 

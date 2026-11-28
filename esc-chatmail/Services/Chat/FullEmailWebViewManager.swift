@@ -1042,6 +1042,13 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// no web view when it resumes (its payload is still stored), or a chat closed during the
     /// warm, or the app backgrounded, would get a view the release was meant to free.
     private var idleReleaseGeneration: UInt64 = 0
+    /// Set from the app's entry into the background until it is about to return (iOS only;
+    /// `AppBackgroundEventSource`). While it is set no web view is built, by a warm or a prepaint:
+    /// the release frees the pool as the app leaves, and a reader left open behind it, or an open's
+    /// prewarm that resumes then, would otherwise build an off-screen view in the background and
+    /// load the email's remote resources there. Not set for a launch straight into the background,
+    /// in which nothing opens a reader.
+    private var isAppInBackground = false
     private let host = OffscreenWebViewHost()
     private var entries: [String: Entry] = [:]
     private var preparedPayloads = FullEmailPreparedOpenPayloadBookkeeping()
@@ -1088,9 +1095,15 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
         // Backgrounded on iOS, the pool holds up to four off-screen web views and their WebContent
         // processes for nothing; the prepared payloads stay, so a reopen still skips preparation.
-        backgroundEventSource.start { [weak self] in
-            self?.releaseIdleWebViews()
-        }
+        backgroundEventSource.start(
+            onBackground: { [weak self] in
+                self?.isAppInBackground = true
+                self?.releaseIdleWebViews()
+            },
+            onForeground: { [weak self] in
+                self?.isAppInBackground = false
+            }
+        )
 
         NotificationCenter.default.addObserver(
             forName: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification,
@@ -1199,7 +1212,8 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         guard EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
               let width,
               width > 1,
-              releaseGeneration == idleReleaseGeneration else {
+              releaseGeneration == idleReleaseGeneration,
+              !isAppInBackground else {
             return
         }
 
@@ -1282,6 +1296,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         )
 
         guard width > 1,
+              !isAppInBackground,
               request.messageId == message.id,
               artifact.messageID == request.messageId,
               EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption else {
@@ -1359,12 +1374,17 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             senderEmail: message.senderEmail,
             subject: message.subject
         )
+        // A release while the warm is suspended (the chat closed, the app left) means the prepaint
+        // after it must build nothing. The warm's own view-building step checks the same
+        // generation; the prepaint did not, and built the released view anyway.
+        let releaseGeneration = idleReleaseGeneration
         let task = Task { @MainActor [weak self] in
             guard let self else { return }
             defer { self.prewarmTasks.removeValue(forKey: taskID) }
             guard self.isCurrentAccountGeneration(generation) else { return }
             await self.warm(request: request, message: message, width: width)
-            guard self.isCurrentAccountGeneration(generation) else { return }
+            guard self.isCurrentAccountGeneration(generation),
+                  releaseGeneration == self.idleReleaseGeneration else { return }
             guard let prepared = self.preparedOpenArtifact(
                 request: request,
                 message: message,
@@ -2026,6 +2046,13 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     func finishWarmOperationForTesting(_ id: UUID) {
         finishWarmOperation(id)
+    }
+
+    /// Awaits every `prewarmOnOpen` task in flight.
+    func waitForPrewarmTasksForTesting() async {
+        for task in Array(prewarmTasks.values) {
+            await task.value
+        }
     }
 }
 
