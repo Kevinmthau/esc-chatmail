@@ -32,6 +32,10 @@ struct SendButton: View {
         // The arrow's symbol name is no name: VoiceOver and Voice Control read this one, on
         // every use (the chat's reply bar, New Message on both platforms).
         .accessibilityLabel("Send")
+        // The spinner's own value (its progress, a bare number) was read as the button's:
+        // "Send, 1, dimmed". Said as a word while the spinner is drawn, and nothing else.
+        .accessibilityValue(isSending && showsProgress ? "Sending" : "")
+        .macHelp("Send")
         .disabled(!isEnabled)
         .animation(.easeInOut(duration: 0.2), value: isEnabled)
     }

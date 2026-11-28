@@ -224,6 +224,9 @@ struct ConversationRowView: View {
                 isUnread: snapshot.inboxUnreadCount > 0,
                 isPinned: snapshot.pinned
             ))
+            // Voice Control matches what is said to the element's label, which is now the
+            // whole row (name, date and preview): "Tap Swift Evolution" needs the name alone.
+            .accessibilityInputLabels([Text(displayName)])
             .task(id: participantLoadKey) {
                 guard let participantLoadKey else { return }
                 await loadContactInfo(for: participantLoadKey)

@@ -52,6 +52,7 @@ struct DraftAttachmentThumbnail: View {
             // attachment (the chat's reply bar on both platforms, New Message, Forward) says
             // which file the X removes.
             .accessibilityLabel("Remove \(attachment.filenameValue)")
+            .macHelp("Remove \(attachment.filenameValue)")
             .offset(x: 4, y: -4)
         }
         .task(id: loadKey) {

@@ -70,6 +70,9 @@ struct ChatReplyBarHeaderRow: View {
             Image(systemName: "arrow.turn.up.left")
                 .font(.caption)
                 .foregroundColor(.secondary)
+                // Its symbol's name ("Arrow Turning Up Then Left") says nothing the label after
+                // it does not, as the Mac's hides it too (`MacReplyIndicator`).
+                .accessibilityHidden(true)
 
             if row.wraps {
                 boundedLabel(row.text, fillsWidth: true)

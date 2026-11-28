@@ -6,9 +6,10 @@ import XCTest
 /// (architecture review 2026-11, gap-accessibility-architecture#1 and #5). In the default plan
 /// and in `Mac.xctestplan`, since the Mac sidebar's rows say the same value.
 ///
-/// HONEST SCOPE: these pin the policy. That the row combines its texts and carries this value
-/// and these traits is pinned from source (`AccessibilityNameSourceTests`); a test host is told
-/// nothing of SwiftUI's accessibility tree, and VoiceOver has not been heard on either platform.
+/// HONEST SCOPE: these pin the policy. That the iOS row combines its texts and carries this value
+/// and these traits is read from its accessibility tree in `ConversationListAccessibilityHostedTests`;
+/// the Mac sidebar's tree cannot be read in its test host, and VoiceOver has not been heard on
+/// either platform.
 final class ConversationRowAccessibilityPolicyTests: XCTestCase {
     /// The unread dot and the pin have no words; the value says what they show.
     ///

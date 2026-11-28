@@ -158,6 +158,7 @@ struct ChatView: View {
                     Image(systemName: "ellipsis.circle")
                 }
                 .accessibilityLabel("More")
+                .macHelp("More")
                 .disabled(!allowsNavigationExit)
             }
         }
