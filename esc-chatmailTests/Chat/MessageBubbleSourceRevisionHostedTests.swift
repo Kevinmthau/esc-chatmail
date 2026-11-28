@@ -15,8 +15,16 @@ import CoreData
 /// loads, so no file or Contacts store is read.
 @MainActor
 final class MessageBubbleSourceRevisionHostedTests: XCTestCase {
+    /// Loads once when mounted, once more for the source change, and nothing else.
+    ///
     /// Revert-check: `sourceRevision: 0` in place of `viewModel.sourceRevision` in
-    /// `MessageBubble.loadSignature` leaves the load count at 1.
+    /// `MessageBubble.loadSignature` leaves the load count at 1. Revert-check:
+    /// `contactRefreshToken: contactRefreshToken + (viewModel.hasLoadedContent ? 1 : 0)` in
+    /// `MessageBubble.loadSignature`, which makes every mounted row load twice, fails the
+    /// first `assertLoadCountStays`.
+    ///
+    /// HONEST SCOPE: the quiet waits are bounded at half a second, so a second load that would
+    /// start later than that is not caught.
     func testMountedBubble_sourceChangeForItsMessage_reloadsIt() async throws {
         let stack = TestCoreDataStack()
         let viewContext = stack.makeMainQueueViewContext()
@@ -71,9 +79,30 @@ final class MessageBubbleSourceRevisionHostedTests: XCTestCase {
         defer { host.view.window?.rootViewController = nil }
 
         await waitUntilLoadCount(1, of: loader)
+        await assertLoadCountStays(1, of: loader)
         HTMLContentLoader.postContentSourceDidChange(messageId: messageID, sourceSignature: "sha256:recovered")
 
         await waitUntilLoadCount(2, of: loader)
+        await assertLoadCountStays(2, of: loader)
+    }
+
+    /// The load count is `expected` for all of `duration` (a bounded quiet wait).
+    private func assertLoadCountStays(
+        _ expected: Int,
+        of loader: MockMessageBubbleLoader,
+        for duration: TimeInterval = 0.5,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let deadline = Date().addingTimeInterval(duration)
+        while Date() < deadline {
+            let count = await loader.contentCallCount()
+            guard count == expected else {
+                XCTFail("Expected the load count to stay at \(expected); saw \(count)", file: file, line: line)
+                return
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
     }
 
     private func waitUntilLoadCount(

@@ -7,7 +7,10 @@ import CoreData
 /// 2026-11, chat-transcript-ui#4).
 ///
 /// The fixtures live on this suite's main-queue context, never `stack.viewContext`, which is
-/// private-queue: the mapper reads the message on the calling thread.
+/// private-queue: the mapper reads the message on the calling thread. In the default plan and in
+/// `Mac.xctestplan`, so its bubbles take inert services (`InertBubbleFullEmailOpener`,
+/// `InertBubbleSourceWarmer`) rather than the shared reader pool and source loader, whose loaders
+/// are the real container's on the Mac. No bubble is mounted, so none is called.
 @MainActor
 final class MessageBubbleInputsTests: XCTestCase {
     private var stack: TestCoreDataStack!
@@ -110,6 +113,37 @@ final class MessageBubbleInputsTests: XCTestCase {
         XCTAssertFalse(base == makeBubble(row: makeRow()))
     }
 
+    /// Everything `MessageBubble` stores is its inputs, its three services, its view model,
+    /// two environment values, three `@State`s and two closures, so a value added beside them
+    /// fails this. `==` compares `inputs` alone, and a value stored outside it would let a row
+    /// whose value changed keep its old body.
+    ///
+    /// The labels are compared without their leading underscores, as
+    /// `FullEmailEntryPointPresentationTests.storedPropertyNames` compares them: Xcode 26's
+    /// `@State` stores `_name` and Xcode 27's `__name`, and the other property wrappers `_name`.
+    ///
+    /// Revert-check: adding `private let probe = 0` to `MessageBubble` fails this.
+    func testBubble_storesOnlyItsInputsServicesStateAndClosures() {
+        let labels = Mirror(reflecting: makeBubble(row: makeRow())).children
+            .compactMap(\.label)
+            .map { String($0.drop { $0 == "_" }) }
+
+        XCTAssertEqual(labels.sorted(), [
+            "dynamicTypeSize",
+            "fullEmailOpener",
+            "htmlContentHandler",
+            "inputs",
+            "isSendingRevealDue",
+            "isShowingSendRecovery",
+            "layoutDirection",
+            "onOpenFullMessage",
+            "onSendRecoveryAction",
+            "originalEmailSourceWarmer",
+            "pendingSendRecoveryAction",
+            "viewModel"
+        ])
+    }
+
     // MARK: - Helpers
 
     private func makeRow() -> ChatMessageRowModel {
@@ -135,8 +169,8 @@ final class MessageBubbleInputsTests: XCTestCase {
             message: row,
             messageBubbleLoader: MockMessageBubbleLoader(senderResults: [], contentResults: []),
             htmlContentHandler: htmlContentHandler,
-            fullEmailOpener: FullEmailWebViewManager.shared,
-            originalEmailSourceWarmer: OriginalEmailSourceLoader.shared,
+            fullEmailOpener: InertBubbleFullEmailOpener(),
+            originalEmailSourceWarmer: InertBubbleSourceWarmer(),
             prefetchedSenderName: prefetchedSenderName,
             isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation,
             contactRefreshToken: contactRefreshToken,
@@ -148,4 +182,25 @@ final class MessageBubbleInputsTests: XCTestCase {
             onSendRecoveryAction: onSendRecoveryAction
         )
     }
+}
+
+/// A reader opener that opens nothing, for bubbles that are compared and never mounted.
+@MainActor
+private final class InertBubbleFullEmailOpener: FullEmailOpening {
+    func preparedOpenArtifact(
+        request: OriginalEmailWarmRequest,
+        message: Message?,
+        width: CGFloat?
+    ) -> EmailReaderPreparedArtifact? {
+        nil
+    }
+
+    func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {}
+
+    func prewarmOnOpen(message: Message, width: CGFloat?) {}
+}
+
+/// A source warmer that warms nothing, for bubbles that are compared and never mounted.
+private struct InertBubbleSourceWarmer: OriginalEmailSourceWarming {
+    func warmOriginalEmailSource(request: OriginalEmailWarmRequest) async {}
 }
