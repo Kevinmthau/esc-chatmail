@@ -340,7 +340,8 @@ struct EmailContentSection: View {
             isDarkMode: isDarkMode,
             senderEmail: message.senderEmail,
             message: messageForInlineAttachments,
-            messageId: message.id
+            messageId: message.id,
+            derivedValues: payload.derivedValues
         )
         .allowsHitTesting(false)
         .emailPreviewCardChrome()

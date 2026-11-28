@@ -24,10 +24,26 @@ enum EmailPreviewSnapshotCacheKey {
         containerWidth: CGFloat,
         isDarkMode: Bool
     ) -> String {
+        make(
+            previewCacheKey: previewCacheKey,
+            renderedHTMLFingerprint: contentFingerprint(for: renderedHTML),
+            containerWidth: containerWidth,
+            isDarkMode: isDarkMode
+        )
+    }
+
+    /// With the HTML's `contentFingerprint` already computed (`HTMLPreviewDerivedValues`): the same
+    /// key, byte for byte.
+    static func make(
+        previewCacheKey: String,
+        renderedHTMLFingerprint: String,
+        containerWidth: CGFloat,
+        isDarkMode: Bool
+    ) -> String {
         let roundedWidth = max(1, Int(containerWidth.rounded()))
         return [
             previewCacheKey,
-            "html:\(contentFingerprint(for: renderedHTML))",
+            "html:\(renderedHTMLFingerprint)",
             "width:\(roundedWidth)",
             "dark:\(isDarkMode)",
             "renderer:\(rendererVersion)"
@@ -40,10 +56,25 @@ enum EmailPreviewSnapshotCacheKey {
             .joined()
     }
 
-    private static func contentFingerprint(for html: String) -> String {
-        SHA256.hash(data: Data(html.utf8))
+    /// The full SHA-256 hex of the HTML, as the key embeds it. Counted when it runs on the main
+    /// thread, for the test that pins a card's key computing none there.
+    static func contentFingerprint(for html: String) -> String {
+        countMainThreadComputationForTesting()
+        return SHA256.hash(data: Data(html.utf8))
             .map { String(format: "%02x", $0) }
             .joined()
+    }
+
+    private static let mainThreadComputationLock = NSLock()
+    private static var mainThreadComputations = 0
+
+    static var mainThreadComputationCountForTesting: Int {
+        mainThreadComputationLock.withLock { mainThreadComputations }
+    }
+
+    private static func countMainThreadComputationForTesting() {
+        guard Thread.isMainThread else { return }
+        mainThreadComputationLock.withLock { mainThreadComputations += 1 }
     }
 }
 

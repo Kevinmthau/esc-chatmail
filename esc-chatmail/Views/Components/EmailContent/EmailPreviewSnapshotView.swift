@@ -10,6 +10,10 @@ struct EmailPreviewSnapshotView: View {
     let senderEmail: String?
     let message: Message?
     let messageId: String?
+    /// The pipeline's values of `htmlContent` (`HTMLPreviewPayload.derivedValues`). With them the
+    /// card's task identity, evaluated at every body evaluation, hashes nothing; without them it
+    /// hashes the whole HTML on the main actor each time, as before.
+    let derivedValues: HTMLPreviewDerivedValues?
 
     @StateObject private var viewModel: EmailPreviewSnapshotViewModel
 
@@ -20,6 +24,7 @@ struct EmailPreviewSnapshotView: View {
         senderEmail: String?,
         message: Message?,
         messageId: String? = nil,
+        derivedValues: HTMLPreviewDerivedValues? = nil,
         cache: EmailPreviewSnapshotCache = .shared,
         renderer: (any EmailPreviewSnapshotRendering)? = nil
     ) {
@@ -29,6 +34,7 @@ struct EmailPreviewSnapshotView: View {
         self.senderEmail = senderEmail
         self.message = message
         self.messageId = messageId
+        self.derivedValues = derivedValues
         self._viewModel = StateObject(
             wrappedValue: EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
         )
@@ -73,6 +79,7 @@ struct EmailPreviewSnapshotView: View {
                     senderEmail: senderEmail,
                     message: message,
                     messageId: messageId,
+                    derivedValues: derivedValues,
                     containerWidth: effectiveWidth
                 )
             }
@@ -106,9 +113,10 @@ struct EmailPreviewSnapshotView: View {
             return "pending-width"
         }
 
-        return EmailPreviewSnapshotCacheKey.make(
+        return EmailPreviewSnapshotViewModel.cacheKey(
             previewCacheKey: previewCacheKey,
-            renderedHTML: htmlContent,
+            htmlContent: htmlContent,
+            derivedValues: derivedValues,
             containerWidth: width,
             isDarkMode: isDarkMode
         )
@@ -178,6 +186,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         senderEmail: String?,
         message: Message?,
         messageId: String?,
+        derivedValues: HTMLPreviewDerivedValues? = nil,
         containerWidth: CGFloat
     ) async {
         guard containerWidth > 1 else {
@@ -185,9 +194,10 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
         }
         let diagnosticMessageId = messageId ?? message?.id
 
-        let cacheKey = EmailPreviewSnapshotCacheKey.make(
+        let cacheKey = Self.cacheKey(
             previewCacheKey: previewCacheKey,
-            renderedHTML: htmlContent,
+            htmlContent: htmlContent,
+            derivedValues: derivedValues,
             containerWidth: containerWidth,
             isDarkMode: isDarkMode
         )
@@ -310,7 +320,8 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                     containerWidth: containerWidth,
                     isDarkMode: isDarkMode,
                     senderEmail: senderEmail,
-                    message: message
+                    message: message,
+                    derivedValues: derivedValues
                 ),
                 expectedAccountGeneration: accountGenerations.snapshotRenderer
             )
@@ -403,6 +414,25 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
             didFail = true
             recordFailedAttempt(for: cacheKey)
         }
+    }
+
+    /// The snapshot's cache key, from the pipeline's digest of the HTML where there is one
+    /// (byte-identical to the key made from the HTML), so neither the card's task identity nor a
+    /// load hashes the whole HTML on the main actor.
+    nonisolated static func cacheKey(
+        previewCacheKey: String,
+        htmlContent: String,
+        derivedValues: HTMLPreviewDerivedValues?,
+        containerWidth: CGFloat,
+        isDarkMode: Bool
+    ) -> String {
+        EmailPreviewSnapshotCacheKey.make(
+            previewCacheKey: previewCacheKey,
+            renderedHTMLFingerprint: derivedValues?.contentFingerprint
+                ?? EmailPreviewSnapshotCacheKey.contentFingerprint(for: htmlContent),
+            containerWidth: containerWidth,
+            isDarkMode: isDarkMode
+        )
     }
 
     private func beginRequest(cacheKey: String, containerWidth: CGFloat) -> Int {

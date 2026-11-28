@@ -9,10 +9,23 @@ enum HTMLPreviewScaleCalculator {
     private static let widthSafetyPadding: CGFloat = 24
 
     static func previewScale(defaultScale: CGFloat, containerWidth: CGFloat, html: String) -> CGFloat {
+        previewScale(
+            defaultScale: defaultScale,
+            containerWidth: containerWidth,
+            estimatedLayoutWidth: estimatedLayoutWidth(from: html)
+        )
+    }
+
+    /// With the HTML's `estimatedLayoutWidth` already worked out (`HTMLPreviewDerivedValues`).
+    static func previewScale(
+        defaultScale: CGFloat,
+        containerWidth: CGFloat,
+        estimatedLayoutWidth: CGFloat?
+    ) -> CGFloat {
         let clampedDefault = max(minimumScale, min(defaultScale, 1.0))
 
         guard containerWidth > 0,
-              let estimatedWidth = estimatedLayoutWidth(from: html),
+              let estimatedWidth = estimatedLayoutWidth,
               estimatedWidth > 0 else {
             return clampedDefault
         }
