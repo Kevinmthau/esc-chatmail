@@ -47,6 +47,7 @@
         "ChatTranscriptRunPolicyTests",
         "ChatViewExitTests",
         "ContactsAppLinkTests",
+        "ConversationRowAccessibilityPolicyTests",
         "ConversationRowMetricsTests",
         "ConversationRowTrailingSwipeActionsMacTests",
         "DraftFileDropPolicyTests",

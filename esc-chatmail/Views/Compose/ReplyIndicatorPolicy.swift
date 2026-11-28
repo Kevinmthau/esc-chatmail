@@ -5,6 +5,13 @@ import Foundation
 /// above its text field, per the house convention that view decisions live in
 /// `enum XPolicy` static-function namespaces (see `MessageDisplayPolicy`).
 enum ReplyIndicatorPolicy {
+    /// The name of the X that drops the quote, for VoiceOver, Voice Control and the Mac's
+    /// tooltip, on both platforms' header rows (`ChatReplyBarHeaderRow`, `MacReplyIndicator`).
+    /// One constant, so the two say the same and neither is left nameless again: the iPhone's
+    /// X had no name, only its symbol's (architecture review 2026-11,
+    /// gap-accessibility-architecture#5).
+    static let dropQuoteLabel = "Don’t quote this message"
+
     /// The text fields of the message being replied to that can label it.
     struct ReplyTarget: Equatable {
         let subject: String?

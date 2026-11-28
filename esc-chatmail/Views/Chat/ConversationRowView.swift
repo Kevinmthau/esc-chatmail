@@ -132,6 +132,8 @@ struct ConversationRowView: View {
                     }
                 }
                 .frame(width: metrics.unreadIndicatorDiameter, height: metrics.unreadIndicatorDiameter)
+                // Said in the row's value (`ConversationRowAccessibilityPolicy`).
+                .accessibilityHidden(true)
 
                 // Avatar stack
                 AvatarStackView(
@@ -143,6 +145,8 @@ struct ConversationRowView: View {
                     groupColors: palette.groupAvatar
                 )
                     .frame(width: metrics.avatarDiameter, height: metrics.avatarDiameter)
+                    // Initials or a photo; the name beside it says who it is.
+                    .accessibilityHidden(true)
             }
 
             VStack(alignment: .leading, spacing: metrics.titleToPreviewSpacing) {
@@ -153,6 +157,8 @@ struct ConversationRowView: View {
                             Image(systemName: "pin.fill")
                                 .font(.footnote)
                                 .foregroundColor(palette.pin)
+                                // Said in the row's value.
+                                .accessibilityHidden(true)
                         }
 
                         Text(displayName)
@@ -184,6 +190,7 @@ struct ConversationRowView: View {
                             Image(systemName: "chevron.right")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundColor(palette.chevron)
+                                .accessibilityHidden(true)
                         }
                     }
                 }
@@ -206,6 +213,17 @@ struct ConversationRowView: View {
         .alignmentGuide(.listRowSeparatorLeading) { $0[Self.textColumnLeading] }
 
         rowContent
+            // One element for VoiceOver: the name, the date and the preview, as drawn, and
+            // the unread and pinned state the dot and the pin show
+            // (`ConversationRowAccessibilityPolicy`; architecture review 2026-11,
+            // gap-accessibility-architecture#1). Modifiers only, always applied: they change
+            // neither the row's layout nor its structure. The iOS list adds its traits at its
+            // call site; the Mac sidebar's table row is selectable by itself.
+            .accessibilityElement(children: .combine)
+            .accessibilityValue(ConversationRowAccessibilityPolicy.value(
+                isUnread: snapshot.inboxUnreadCount > 0,
+                isPinned: snapshot.pinned
+            ))
             .task(id: participantLoadKey) {
                 guard let participantLoadKey else { return }
                 await loadContactInfo(for: participantLoadKey)

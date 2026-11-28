@@ -105,15 +105,21 @@ struct ConversationListView: View {
                     }
                     conversationRow(for: item)
                         .contentShape(Rectangle())
-                        .onTapGesture {
-                            if viewModel.isSelecting {
-                                viewModel.toggleSelection(for: item.id)
-                            } else {
-                                isSearchFieldFocused = false
-                                selectedConversation = resolveConversation(with: item.id)
-                            }
-                        }
+                        .onTapGesture { activateRow(item.id) }
                 }
+                // One element for VoiceOver and Voice Control: the row's own (its texts, and
+                // its unread and pinned state as its value), a button that does what a tap does,
+                // selected while it is in the selection; the checkbox is hidden, since the row
+                // says the same (architecture review 2026-11, gap-accessibility-architecture#5).
+                // Values passed to modifiers that are always applied, as the selection mode is,
+                // never a Button around the row: its tint would recolor the name, whose standard
+                // color is left to the row's surroundings.
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(ConversationRowAccessibilityPolicy.listRowTraits(
+                    isSelecting: viewModel.isSelecting,
+                    isSelected: viewModel.selectedConversationIDs.contains(item.id)
+                ))
+                .accessibilityAction { activateRow(item.id) }
                 // A row whose archive or report is running stays until its save lands; dimmed,
                 // it shows the action was taken (`conversationIDsLeavingList`).
                 .opacity(ConversationRowSwipePolicy.rowOpacity(isLeavingList: isLeavingList))
@@ -219,6 +225,17 @@ struct ConversationListView: View {
         }
     }
 
+    /// What a tap on a row does, and its accessibility default action: toggles its selection
+    /// while the list is selecting, else opens its chat.
+    private func activateRow(_ objectID: NSManagedObjectID) {
+        if viewModel.isSelecting {
+            viewModel.toggleSelection(for: objectID)
+        } else {
+            isSearchFieldFocused = false
+            selectedConversation = resolveConversation(with: objectID)
+        }
+    }
+
     private func selectionButton(for objectID: NSManagedObjectID) -> some View {
         Button {
             viewModel.toggleSelection(for: objectID)
@@ -230,6 +247,9 @@ struct ConversationListView: View {
         .buttonStyle(.plain)
         .padding(.leading, 16)
         .padding(.trailing, 8)
+        // The row it sits in is a button that toggles the same selection and says whether it
+        // is selected (`ConversationRowAccessibilityPolicy.listRowTraits`).
+        .accessibilityHidden(true)
     }
 
     // MARK: - Toolbar

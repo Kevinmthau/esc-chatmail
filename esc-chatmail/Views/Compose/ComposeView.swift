@@ -104,7 +104,6 @@ struct ComposeView: View {
                                 DraftAttachmentThumbnail(attachment: attachment) {
                                     viewModel.removeAttachment(attachment)
                                 }
-                                .accessibilityLabel("Remove \(attachment.filenameValue)")
                                 Text(attachment.filenameValue)
                                     .font(.caption2)
                                     .lineLimit(2)

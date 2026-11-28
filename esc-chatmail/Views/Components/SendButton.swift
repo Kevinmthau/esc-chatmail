@@ -29,6 +29,9 @@ struct SendButton: View {
                 }
             }
         }
+        // The arrow's symbol name is no name: VoiceOver and Voice Control read this one, on
+        // every use (the chat's reply bar, New Message on both platforms).
+        .accessibilityLabel("Send")
         .disabled(!isEnabled)
         .animation(.easeInOut(duration: 0.2), value: isEnabled)
     }

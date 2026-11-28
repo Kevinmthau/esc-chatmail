@@ -103,6 +103,7 @@ struct ChatReplyBarHeaderRow: View {
                     .font(.subheadline)
                     .foregroundColor(.secondary)
             }
+            .accessibilityLabel(ReplyIndicatorPolicy.dropQuoteLabel)
             .disabled(!allowsDraftMutation)
         }
         .padding(.horizontal, 16)

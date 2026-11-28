@@ -16,6 +16,7 @@ struct RecipientChip: View {
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Remove \(recipient.display)")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)

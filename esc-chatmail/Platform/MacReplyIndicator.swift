@@ -30,8 +30,8 @@ struct MacReplyIndicator: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(!allowsDraftMutation)
-                .help("Don’t quote this message")
-                .accessibilityLabel("Don’t quote this message")
+                .help(ReplyIndicatorPolicy.dropQuoteLabel)
+                .accessibilityLabel(ReplyIndicatorPolicy.dropQuoteLabel)
             }
         case .recoveredEnvelope(let label):
             capsule {

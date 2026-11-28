@@ -48,6 +48,10 @@ struct DraftAttachmentThumbnail: View {
                     .foregroundColor(.white)
                     .background(Circle().fill(Color.black.opacity(0.5)))
             }
+            // Named here, in the shared component, so every composer that shows a draft's
+            // attachment (the chat's reply bar on both platforms, New Message, Forward) says
+            // which file the X removes.
+            .accessibilityLabel("Remove \(attachment.filenameValue)")
             .offset(x: 4, y: -4)
         }
         .task(id: loadKey) {
