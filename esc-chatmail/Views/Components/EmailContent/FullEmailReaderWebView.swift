@@ -88,7 +88,10 @@ struct FullEmailReaderWebView: WebViewRepresentable {
     }
 
     static func dismantleWebView(_ webView: WKWebView, coordinator: Coordinator) {
+        // An adopted view goes back to the pool; a view this reader rendered live is offered to it,
+        // so the next open of the email adopts what the user just saw instead of rendering again.
         let wasRehosted = coordinator.reclaimPrerenderedWebViewIfNeeded(webView)
+            || coordinator.handOverLiveWebViewIfPossible(webView)
         if wasRehosted {
             coordinator.detachAfterSuccessfulCheckin()
         } else {
@@ -353,6 +356,38 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             }
             adoptedPrerenderedMessageId = nil
             return parent.webViewAdoptionProvider?.checkin(messageId: messageId, webView: webView) == true
+        }
+
+        /// Offers this reader's own web view to the pool as the reader closes
+        /// (`FullEmailWebViewAdopting.adoptClosedReaderWebView`). Only a view this reader rendered
+        /// live, whose current content's paint was confirmed and which needs no reload (an
+        /// attachment that arrived after the load would change its key), and only with the
+        /// reader's width, message and source signature known. True when the pool took it: the
+        /// caller then detaches this coordinator without scrubbing the view, which is the pool's.
+        @discardableResult
+        func handOverLiveWebViewIfPossible(_ webView: WKWebView) -> Bool {
+            guard !isInvalidated,
+                  adoptedPrerenderedMessageId == nil,
+                  hasConfirmedPaintForCurrentLoad,
+                  !isLoading,
+                  !needsReload,
+                  let layoutAwareWebView = webView as? LayoutAwareWKWebView,
+                  let message = parent.message,
+                  let sourceSignature = parent.sourceSignature,
+                  parent.readerWidth > 1,
+                  let cidHandler,
+                  let provider = parent.webViewAdoptionProvider else {
+                return false
+            }
+            return provider.adoptClosedReaderWebView(
+                messageId: message.id,
+                sourceSignature: sourceSignature,
+                wrappedHTML: parent.htmlContent,
+                message: message,
+                width: parent.readerWidth,
+                webView: layoutAwareWebView,
+                cidHandler: cidHandler
+            )
         }
 
         func completeAdoptionCallbacksIfActive() {
