@@ -358,6 +358,57 @@ struct AttachmentPaths {
         }
     }
     
+    /// Stores at `destinationPath` a file with the bytes of the one at `sourcePath`, as a clone
+    /// where the volume makes one (`clonefile`, APFS), which shares the source's blocks and costs
+    /// no second copy of them, and as a copy where it does not. For a preview that is its
+    /// original's own bytes (`ImageProcessor.Preview.original`): until 2026-11-28 such a preview
+    /// was written again from memory, every image of 1,600 px or less stored twice (architecture
+    /// review 2026-11, attachments-storage-disk#3). `FileManager.copyItem`, the fallback, makes a
+    /// clone on APFS too (measured on the iOS 27.0 simulator, through `EF_MAY_SHARE_BLOCKS`); the
+    /// explicit `clonefile` says what is wanted rather than leaning on that.
+    ///
+    /// Made under a staging name beside the destination and renamed over it, so the destination
+    /// is never a file cut short: readers take a file's presence as its validity. A staging file
+    /// a killed process left starts with `.clone-`, never `remote_` or `local_`, so it is no
+    /// attachment by its name, and the orphan sweep removes it. The result is classified as a
+    /// write's is, and the destination gets its backup mark (`applyBackupPolicy`).
+    static func storeClone(ofFileAt sourcePath: String, at destinationPath: String) -> AttachmentWriteResult {
+        guard let source = fullURL(for: sourcePath),
+              let destination = fullURL(for: destinationPath) else {
+            return .failed
+        }
+        let staging = destination.deletingLastPathComponent()
+            .appendingPathComponent(".clone-\(UUID().uuidString)", isDirectory: false)
+        defer { try? FileManager.default.removeItem(at: staging) }
+
+        if clonefile(source.path, staging.path, 0) != 0 {
+            let cloneError = errno
+            guard cloneError == ENOTSUP || cloneError == EXDEV else {
+                return storeCloneFailure(posixCode: cloneError)
+            }
+            // Not a volume that clones: an ordinary copy, still made under the staging name.
+            do {
+                try FileManager.default.copyItem(at: source, to: staging)
+            } catch {
+                let result = AttachmentWriteResult(classifying: error)
+                Log.error("Failed to store a copy of an attachment file", category: .attachment, error: error)
+                return result
+            }
+        }
+        guard rename(staging.path, destination.path) == 0 else {
+            return storeCloneFailure(posixCode: errno)
+        }
+        applyBackupPolicy(toFileAt: destinationPath)
+        return .saved
+    }
+
+    private static func storeCloneFailure(posixCode: Int32) -> AttachmentWriteResult {
+        let error = NSError(domain: NSPOSIXErrorDomain, code: Int(posixCode))
+        let result = AttachmentWriteResult(classifying: error)
+        Log.error("Failed to store a clone of an attachment file", category: .attachment, error: error)
+        return result
+    }
+
     static func loadData(from relativePath: String?) -> Data? {
         guard let url = fullURL(for: relativePath) else { return nil }
         return FileSystemErrorHandler.loadData(from: url, category: .attachment)

@@ -109,13 +109,36 @@ struct ImageProcessor {
         return CGSize(width: width, height: height)
     }
 
-    static func generateThumbnail(from data: Data, mimeType: String) -> Data? {
+    /// What an attachment's preview is.
+    enum Preview: Equatable {
+        /// The original's own bytes: an image within `maxThumbnailDimension`. A caller that has
+        /// stored the original stores the preview as a clone of its file
+        /// (`AttachmentPaths.storeClone`), which costs no second copy of the bytes on APFS.
+        case original
+        /// Bytes made for the preview: a downsampled image, or a PDF's first page.
+        case encoded(Data)
+    }
+
+    /// The preview of an attachment of `mimeType`, or nil where it has none (`generateThumbnail`
+    /// says the same, as bytes).
+    static func preview(from data: Data, mimeType: String) -> Preview? {
         if mimeType.starts(with: "image/") {
-            return generateImageThumbnail(from: data)
+            return imagePreview(from: data)
         } else if mimeType == "application/pdf" {
-            return generatePDFThumbnail(from: data)
+            return generatePDFThumbnail(from: data).map(Preview.encoded)
         }
         return nil
+    }
+
+    static func generateThumbnail(from data: Data, mimeType: String) -> Data? {
+        switch preview(from: data, mimeType: mimeType) {
+        case .original:
+            return data
+        case .encoded(let bytes):
+            return bytes
+        case nil:
+            return nil
+        }
     }
 
     /// An image attachment's preview. The size is read from the header first, so an image past
@@ -127,6 +150,22 @@ struct ImageProcessor {
         from data: Data,
         maxSourcePixelCount: CGFloat = maxThumbnailSourcePixelCount
     ) -> Data? {
+        switch imagePreview(from: data, maxSourcePixelCount: maxSourcePixelCount) {
+        case .original:
+            return data
+        case .encoded(let bytes):
+            return bytes
+        case nil:
+            return nil
+        }
+    }
+
+    /// An image attachment's preview, as `generateImageThumbnail` makes it, saying where it is
+    /// the original's own bytes rather than handing them back as if they were new.
+    static func imagePreview(
+        from data: Data,
+        maxSourcePixelCount: CGFloat = maxThumbnailSourcePixelCount
+    ) -> Preview? {
         guard !data.isEmpty,
               let source = CGImageSourceCreateWithData(
                   data as CFData,
@@ -147,9 +186,9 @@ struct ImageProcessor {
         case .original:
             // As before: the bytes are kept only where the platform can make an image of them.
             guard PlatformImage(data: data) != nil else { return nil }
-            return data
+            return .original
         case .downsampled:
-            return downsampledImageThumbnail(from: source)
+            return downsampledImageThumbnail(from: source).map(Preview.encoded)
         }
     }
 

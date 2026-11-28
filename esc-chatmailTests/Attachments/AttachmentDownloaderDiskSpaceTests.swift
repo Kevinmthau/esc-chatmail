@@ -164,6 +164,7 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
     // Revert-check: the `guard previewWrite != .outOfSpace` after the image preview's write in
     // `AttachmentDownloader.performAttachmentDownload`. Without it the original is kept and the
     // row ends downloaded with no preview, which `AttachmentThumbnailLoader.load` never draws.
+    // The PNG is its own preview, so it is the preview's clone that finds no room.
     @MainActor
     func testDownload_whosePreviewFindsNoRoom_removesTheOriginalAndLeavesTheRowQueued() async throws {
         let fixture = try makeQueuedPNG(byteSize: 4_096)
@@ -176,6 +177,9 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
             availableBytes: nil,
             writeAttachmentData: { data, path in
                 path == previewPath ? .outOfSpace : AttachmentPaths.writeData(data, to: path)
+            },
+            storeAttachmentClone: { source, destination in
+                destination == previewPath ? .outOfSpace : AttachmentPaths.storeClone(ofFileAt: source, at: destination)
             }
         )
 
@@ -309,13 +313,17 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
         availableBytes: Int64?,
         writeAttachmentData: @escaping @Sendable (Data, String) -> AttachmentWriteResult = { data, path in
             AttachmentPaths.writeData(data, to: path)
+        },
+        storeAttachmentClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
+            AttachmentPaths.storeClone(ofFileAt: source, at: destination)
         }
     ) -> AttachmentDownloader {
         AttachmentDownloader(
             apiClient: apiClient,
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
             availableStorageBytes: { availableBytes },
-            writeAttachmentData: writeAttachmentData
+            writeAttachmentData: writeAttachmentData,
+            storeAttachmentClone: storeAttachmentClone
         )
     }
 

@@ -57,6 +57,9 @@ enum SynthesizedInlineAttachmentRecovery {
         isActive: @escaping @Sendable () -> Bool = { !Task.isCancelled },
         writeData: @escaping @Sendable (Data, String) -> AttachmentWriteResult = { data, path in
             AttachmentPaths.writeData(data, to: path)
+        },
+        storeClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
+            AttachmentPaths.storeClone(ofFileAt: source, at: destination)
         }
     ) async -> Data? {
         guard requestedAttachmentId.hasPrefix("local_inline_"), isActive() else {
@@ -177,11 +180,18 @@ enum SynthesizedInlineAttachmentRecovery {
                                 width = persisted.width
                                 height = persisted.height
                             }
-                            if let thumbnail = ImageProcessor.generateThumbnail(
+                            if let preview = ImageProcessor.preview(
                                 from: candidate.payload.data,
                                 mimeType: candidate.payload.mimeType
                             ), isActive() {
-                                let previewWrite = writeData(thumbnail, potentialPreviewPath)
+                                let previewWrite: AttachmentWriteResult
+                                switch preview {
+                                case .original:
+                                    // The original's own bytes: a clone of its file.
+                                    previewWrite = storeClone(originalPath, potentialPreviewPath)
+                                case .encoded(let thumbnail):
+                                    previewWrite = writeData(thumbnail, potentialPreviewPath)
+                                }
                                 savedPreview = previewWrite == .saved
                                 outOfSpace = previewWrite == .outOfSpace
                             }
@@ -409,6 +419,9 @@ final class AttachmentDownloader: ObservableObject {
     private let availableStorageBytes: @Sendable () async -> Int64?
     /// The writer of a download's original and preview: `AttachmentPaths.writeData`.
     private let writeAttachmentData: @Sendable (Data, String) -> AttachmentWriteResult
+    /// The writer of a preview that is its original's own bytes, as a clone of the original's
+    /// file (source path, destination path): `AttachmentPaths.storeClone`.
+    private let storeAttachmentClone: @Sendable (String, String) -> AttachmentWriteResult
 
     /// Orphans younger than this survive the sweep and are judged by a later
     /// one. Every writer (a download, CID persistence, inline recovery) writes
@@ -441,6 +454,9 @@ final class AttachmentDownloader: ObservableObject {
         },
         writeAttachmentData: @escaping @Sendable (Data, String) -> AttachmentWriteResult = { data, path in
             AttachmentPaths.writeData(data, to: path)
+        },
+        storeAttachmentClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
+            AttachmentPaths.storeClone(ofFileAt: source, at: destination)
         }
     ) {
         self.apiClient = apiClient ?? GmailAPIClient.shared
@@ -450,6 +466,7 @@ final class AttachmentDownloader: ObservableObject {
         self.fetchAttachmentFileReferences = fetchAttachmentFileReferences
         self.availableStorageBytes = availableStorageBytes
         self.writeAttachmentData = writeAttachmentData
+        self.storeAttachmentClone = storeAttachmentClone
         prepareDownloadDirectories()
     }
 
@@ -824,6 +841,7 @@ final class AttachmentDownloader: ObservableObject {
             // Detached work does not inherit parent cancellation, so explicitly
             // forward it and await unwinding before account cleanup continues.
             let writeAttachmentData = self.writeAttachmentData
+            let storeAttachmentClone = self.storeAttachmentClone
             let processingTask: Task<(savedOriginal: Bool, width: Int16?, height: Int16?, pageCount: Int16?, savedPreview: Bool, outOfSpace: Bool), Never> = Task.detached {
                 guard !Task.isCancelled, !generation.isCancelled else {
                     return (false, nil, nil, nil, false, false)
@@ -855,9 +873,20 @@ final class AttachmentDownloader: ObservableObject {
                     }
 
                     if !generation.isCancelled,
-                       let thumbnailData = ImageProcessor.generateThumbnail(from: data, mimeType: mimeType),
+                       let preview = ImageProcessor.preview(from: data, mimeType: mimeType),
                        !generation.isCancelled {
-                        let previewWrite = writeAttachmentData(thumbnailData, previewPath)
+                        let previewWrite: AttachmentWriteResult
+                        switch preview {
+                        case .original:
+                            // An image of 1,600 px or less is its own preview: a clone of the
+                            // original's file, which shares its blocks, never its bytes written
+                            // a second time (`AttachmentPaths.storeClone`).
+                            previewWrite = savedOriginal
+                                ? storeAttachmentClone(originalPath, previewPath)
+                                : .failed
+                        case .encoded(let thumbnailData):
+                            previewWrite = writeAttachmentData(thumbnailData, previewPath)
+                        }
                         guard previewWrite != .outOfSpace else {
                             return (false, nil, nil, nil, false, true)
                         }
@@ -1039,6 +1068,7 @@ final class AttachmentDownloader: ObservableObject {
             let apiClient = self.apiClient
             let coreDataStack = self.coreDataStack
             let writeAttachmentData = self.writeAttachmentData
+            let storeAttachmentClone = self.storeAttachmentClone
             guard let task = startDownloadOperation({ [weak self] recoveryGeneration in
                 _ = await SynthesizedInlineAttachmentRecovery.recover(
                     messageId: messageId,
@@ -1051,7 +1081,8 @@ final class AttachmentDownloader: ObservableObject {
                     isActive: {
                         !recoveryGeneration.isCancelled && !Task.isCancelled
                     },
-                    writeData: writeAttachmentData
+                    writeData: writeAttachmentData,
+                    storeClone: storeAttachmentClone
                 )
                 self?.finishSynthesizedInlineRecovery(
                     messageId: messageId,
