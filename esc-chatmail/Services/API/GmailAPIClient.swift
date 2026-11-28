@@ -69,8 +69,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     @MainActor static let shared = GmailAPIClient(tokenManager: TokenManager.shared)
 
     let session: URLSession
-    /// Carries only messages.send (`sendMessage`); every read, sync, and
-    /// label request stays on `session`. See `createSendSession(basedOn:)`.
+    /// Carries only messages.send (`sendMessage`); every other read, sync, and
+    /// label request stays on `session`, except a received attachment's download to a file,
+    /// on `transferSession`. See `createSendSession(basedOn:)`.
     let sendSession: URLSession
     /// Carries only a received attachment's download to a file
     /// (`downloadAttachmentFile`), for the downloader. See `createTransferSession(basedOn:)`.
@@ -203,7 +204,10 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Derived from `session`'s configuration, as `sendSession` is, so an injected
     /// `StubURLProtocol` session keeps its protocol classes and no test reaches the network. Its
     /// idle timer is `NetworkConfig.attachmentTransferIdleTimeout` and its whole-transfer cap
-    /// `attachmentTransferResourceTimeout`; it does not wait for connectivity, so an attachment
+    /// `attachmentTransferResourceTimeout`, one number, not one scaled to the attachment's size as
+    /// the review proposed: a resource timeout belongs to a session's configuration, so scaling
+    /// it would take a session, and its connection pool, for every download. It does not wait
+    /// for connectivity, so an attachment
     /// shown offline fails at once and is asked for again at its next showing. Never a
     /// background configuration: a sign-out drains every download
     /// (`AttachmentDownloader.cancelAndAwaitAllDownloads`) before it removes `Attachments`, and
@@ -410,13 +414,19 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// upload of that file (`URLSession.upload(for:fromFile:)`), never a data
     /// task: the request's own `httpBody` is not sent.
     ///
-    /// With a `downloadFile` every attempt is a download task
-    /// (`URLSession.download(for:)`) whose body is moved to `downloadFile` as soon as it has
-    /// arrived, replacing what an earlier attempt left there, so a large body never passes
-    /// through memory. `handleStatus` is then given an empty body for a 2xx, whose bytes are
-    /// the file's, and for any other status the file's first 64 KB, which is all an error
-    /// body's message needs (`classify403`, `gmailErrorMessage`). Only `downloadAttachmentFile`
-    /// passes one. A body and a download file are never both given.
+    /// With a `downloadFile` every attempt streams its body (`URLSession.bytes(for:)`): a 2xx's
+    /// straight into `downloadFile`, 64 KB at a time, replacing what an earlier attempt left
+    /// there, so a large body never passes through memory; any other status's first 64 KB into
+    /// memory, which is all an error body's message needs (`classify403`, `gmailErrorMessage`),
+    /// and `handleStatus` is given an empty body for a 2xx, whose bytes are the file's. Never
+    /// `download(for:)`: it writes the body into URLSession's own `CFNetworkDownload_*.tmp` in the
+    /// temporary directory until the attempt completes, and a process killed mid-transfer left
+    /// up to the whole attachment's JSON there, account data that no sign-out, sweep or drain
+    /// removed (measured on macOS 27.2: a SIGKILL left 5.9 MB). Streamed, a kill leaves only
+    /// `downloadFile`, in `Attachments`, which a sign-out takes out of use whole and the orphan
+    /// sweep removes after its grace period. A write to the file that fails (a full disk) ends
+    /// the request at once and is never retried (`DownloadFileWriteError`). Only
+    /// `downloadAttachmentFile` passes one. A body and a download file are never both given.
     nonisolated func performRetryingRequest<T>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
@@ -459,13 +469,15 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 if let bodyFile {
                     (data, response) = try await transport.upload(for: currentRequest, fromFile: bodyFile)
                 } else if let downloadFile {
-                    let (downloaded, downloadResponse) = try await transport.download(for: currentRequest)
-                    try Self.moveDownloadedBody(at: downloaded, to: downloadFile)
-                    response = downloadResponse
-                    let statusCode = (downloadResponse as? HTTPURLResponse)?.statusCode ?? 0
-                    data = (200..<300).contains(statusCode)
-                        ? Data()
-                        : Self.leadingBytes(ofFileAt: downloadFile, maxCount: 64 * 1024)
+                    let (bytes, streamResponse) = try await transport.bytes(for: currentRequest)
+                    response = streamResponse
+                    let statusCode = (streamResponse as? HTTPURLResponse)?.statusCode ?? 0
+                    if (200..<300).contains(statusCode) {
+                        try await Self.writeStreamedBody(bytes, to: downloadFile)
+                        data = Data()
+                    } else {
+                        data = try await Self.leadingBytes(of: bytes, maxCount: 64 * 1024)
+                    }
                 } else {
                     (data, response) = try await transport.data(for: currentRequest)
                 }
@@ -626,6 +638,11 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 if behavior.thrownAPIErrorsAbortImmediately, let apiError = error as? APIError {
                     throw apiError
                 }
+                // The download's own file could not be written (a full disk): no attempt can
+                // write it either, and the caller classifies the cause.
+                if let writeFailure = error as? DownloadFileWriteError {
+                    throw writeFailure.underlying
+                }
 
                 lastError = error
                 Log.error("\(behavior.logContext) failed (attempt \(attempt)/\(allowedAttempts)): \(Log.redact(error: error))", category: .api)
@@ -666,27 +683,46 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         throw lastError ?? URLError(.unknown)
     }
 
-    /// Moves a download task's body from URLSession's temporary file to `destination`, replacing
-    /// what an earlier attempt left there. Done before anything else is awaited: the temporary
-    /// file is URLSession's, in a directory sign-out does not drain.
-    private nonisolated static func moveDownloadedBody(at temporary: URL, to destination: URL) throws {
-        let fileManager = FileManager.default
-        if fileManager.fileExists(atPath: destination.path) {
-            try fileManager.removeItem(at: destination)
-        }
+    /// A failed write of a streamed body to its file, told apart from the transfer's own errors
+    /// so the engine does not retry it.
+    struct DownloadFileWriteError: Error {
+        let underlying: Error
+    }
+
+    /// Streams a 2xx body into `destination`, a new file that replaces an earlier attempt's,
+    /// 64 KB at a time. Errors of the stream (a dropped connection, cancellation) pass as they
+    /// are; errors of the file are `DownloadFileWriteError`.
+    private nonisolated static func writeStreamedBody(_ bytes: URLSession.AsyncBytes, to destination: URL) async throws {
+        let output: FileHandle
         do {
-            try fileManager.moveItem(at: temporary, to: destination)
+            try Data().write(to: destination)
+            output = try FileHandle(forWritingTo: destination)
         } catch {
-            try? fileManager.removeItem(at: temporary)
-            throw error
+            throw DownloadFileWriteError(underlying: error)
+        }
+        defer { try? output.close() }
+        var buffer = Data()
+        buffer.reserveCapacity(64 * 1024)
+        for try await byte in bytes {
+            buffer.append(byte)
+            if buffer.count >= 64 * 1024 {
+                do { try output.write(contentsOf: buffer) } catch { throw DownloadFileWriteError(underlying: error) }
+                buffer.removeAll(keepingCapacity: true)
+            }
+        }
+        if !buffer.isEmpty {
+            do { try output.write(contentsOf: buffer) } catch { throw DownloadFileWriteError(underlying: error) }
         }
     }
 
-    /// At most `maxCount` bytes from the start of the file at `url`; empty where it cannot be read.
-    private nonisolated static func leadingBytes(ofFileAt url: URL, maxCount: Int) -> Data {
-        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
-        defer { try? handle.close() }
-        return (try? handle.read(upToCount: maxCount)) ?? Data()
+    /// At most `maxCount` bytes from the start of an error body.
+    private nonisolated static func leadingBytes(of bytes: URLSession.AsyncBytes, maxCount: Int) async throws -> Data {
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count >= maxCount { break }
+        }
+        return data
     }
 
     private nonisolated func sleepBeforeRetry(

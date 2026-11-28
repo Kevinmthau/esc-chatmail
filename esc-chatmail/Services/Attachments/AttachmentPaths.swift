@@ -424,7 +424,9 @@ struct AttachmentPaths {
     static func storeDownloadedFile(at downloadedFile: URL, as relativePath: String) -> AttachmentWriteResult {
         guard let destination = fullURL(for: relativePath) else { return .failed }
         guard rename(downloadedFile.path, destination.path) == 0 else {
-            return storeCloneFailure(posixCode: errno)
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            Log.error("Failed to move a downloaded attachment into place", category: .attachment, error: error)
+            return AttachmentWriteResult(classifying: error)
         }
         applyBackupPolicy(toFileAt: relativePath)
         return .saved

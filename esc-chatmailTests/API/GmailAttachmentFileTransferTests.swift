@@ -201,6 +201,158 @@ final class GmailAttachmentFileTransferTests: XCTestCase {
         XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
     }
 
+    // MARK: - Review fixes
+
+    func testDecoder_anEscapedQuoteInAKey_isNotTheDataKey() throws {
+        XCTAssertEqual(try decode(#"{"a\"data": "QQ", "data": "QUJD"}"#, chunkSize: 3), Data("ABC".utf8))
+    }
+
+    // Revert-check: the `statedSize` comparison in `GmailAttachmentBodyDecoder.decodeDataField`.
+    // Without it a response whose bytes are not as many as its own `size` is taken as the file.
+    func testDecoder_bytesThatAreNotAsManyAsTheStatedSize_areRefused() {
+        XCTAssertThrowsError(try decode(#"{"size": 5, "data": "QUJD"}"#, chunkSize: 4)) { error in
+            XCTAssertEqual(error as? GmailAttachmentBodyDecoder.DecodeError, .sizeMismatch)
+        }
+        XCTAssertEqual(try? decode(#"{"size" : 3 , "data": "QUJD"}"#, chunkSize: 2), Data("ABC".utf8))
+    }
+
+    // Revert-check: the `.truncated` case in `GmailAPIClient.downloadAttachmentFile`'s decode.
+    // Without it a body cut short is `invalidData`, which reads as the sender's undecodable bytes.
+    func testDownloadAttachmentFile_aBodyCutShort_isANetworkError_andLeavesNothing() async throws {
+        StubURLProtocol.script = [.data(200, Data(#"{"size": 3, "data": "QUJD"#.utf8))]
+        let client = makeClient()
+
+        do {
+            _ = try await client.downloadAttachmentFile(messageId: "m", attachmentId: "a", into: directory)
+            XCTFail("Expected a network error")
+        } catch APIError.networkError {
+        }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [])
+    }
+
+    func testDownloadAttachmentFile_aRefreshedTokenAfterA401_downloads() async throws {
+        let bytes = Data("after the refresh".utf8)
+        StubURLProtocol.script = [.status(401), .data(200, Self.response(for: bytes))]
+        let client = makeClient()
+
+        let file = try await client.downloadAttachmentFile(messageId: "m", attachmentId: "a", into: directory)
+
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+        XCTAssertEqual(StubURLProtocol.requestCount, 2)
+    }
+
+    func testDownloadAttachmentFile_aServerErrorThenSuccess_keepsOnlyTheLastAttemptsBytes() async throws {
+        let bytes = Data((0..<10_000).map { UInt8($0 % 200) })
+        StubURLProtocol.script = [.data(503, Data("unavailable".utf8)), .data(200, Self.response(for: bytes))]
+        let client = makeClient()
+
+        let file = try await client.downloadAttachmentFile(messageId: "m", attachmentId: "a", into: directory)
+
+        XCTAssertEqual(try Data(contentsOf: file), bytes)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path), [file.lastPathComponent])
+    }
+
+    // Revert-check: the `DownloadFileWriteError` rethrow in the catch of
+    // `GmailAPIClient.performRetryingRequest`. Without it the file's own error leaves wrapped, so
+    // a full disk (here a directory that is not there, a write failing the same way) cannot be
+    // classified by the downloader (`StorageErrorClassifier.isOutOfSpace`), which then marks the
+    // row failed. The file is never fetched again either way: one request.
+    func testDownloadAttachmentFile_whoseFileCannotBeWritten_isNotRetried_andThrowsTheFilesError() async throws {
+        StubURLProtocol.script = [.data(200, Self.response(for: Data("bytes".utf8)))]
+        let client = makeClient()
+        let missing = directory.appendingPathComponent("not-there", isDirectory: true)
+
+        do {
+            _ = try await client.downloadAttachmentFile(messageId: "m", attachmentId: "a", into: missing)
+            XCTFail("Expected the write to fail")
+        } catch {
+            XCTAssertFalse(error is URLError)
+            XCTAssertFalse(error is GmailAPIClient.DownloadFileWriteError, "The file's own error, unwrapped")
+            XCTAssertEqual((error as NSError).domain, NSCocoaErrorDomain)
+        }
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+    }
+
+    // The kill case: a transfer's file left by an earlier process (`incoming_…` in
+    // `Attachments`, where the stream writes it) is removed by the next orphan sweep once its
+    // grace period has passed, as every account file is; a sign-out takes `Attachments` out of
+    // use whole. Before the stream, `download(for:)` left it in URLSession's temporary file,
+    // which nothing removed. HONEST SCOPE: a kill cannot be made inside a test; this pins only
+    // that the file the stream leaves is one the sweep removes.
+    @MainActor
+    func testAKilledTransfersFile_isRemovedByTheNextOrphanSweep() async throws {
+        AttachmentPaths.setupDirectories()
+        let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
+        let leftover = attachments.appendingPathComponent("incoming_\(UUID().uuidString).json")
+        try Data(#"{"data": "QUJD"#.utf8).write(to: leftover)
+        let stale = Date().addingTimeInterval(-2 * AttachmentDownloader.orphanSweepRecentFileGracePeriod)
+        try FileManager.default.setAttributes(
+            [.modificationDate: stale, .creationDate: stale],
+            ofItemAtPath: leftover.path
+        )
+        let stack = TestCoreDataStack()
+        let downloader = AttachmentDownloader(
+            apiClient: MockGmailAPIClient(),
+            coreDataStack: CoreDataStack(persistentContainerForTesting: stack.persistentContainer),
+            fetchAttachmentFileReferences: { _ in [] }
+        )
+
+        await downloader.cleanupOrphanedFiles()
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: leftover.path))
+    }
+
+    @MainActor
+    func testCancelAndAwaitAllDownloads_whileATransferRuns_leavesNoStagedFile() async throws {
+        let stack = TestCoreDataStack()
+        let context = stack.makeMainQueueViewContext()
+        AttachmentPaths.setupDirectories()
+        let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
+        let stagedBefore = try Set(FileManager.default.contentsOfDirectory(atPath: attachments.path).filter { $0.hasPrefix("incoming_") })
+        let messageID = "transfer-cancel-\(UUID().uuidString)"
+        let message = MessageBuilder().withId(messageID).withAttachments().build(in: context)
+        let attachment = AttachmentBuilder()
+            .withId("transfer-cancel-attachment")
+            .withFilename("large.pdf")
+            .withMimeType("application/pdf")
+            .withByteSize(4_096)
+            .queued()
+            .forMessage(message)
+            .build(in: context)
+        try context.save()
+        let started = DispatchSemaphore(value: 0)
+        let release = DispatchSemaphore(value: 0)
+        let body = Self.response(for: Data("bytes".utf8))
+        StubURLProtocol.responder = { _ in
+            started.signal()
+            _ = release.wait(timeout: .now() + 5)
+            return .data(200, body)
+        }
+        let downloader = AttachmentDownloader(
+            apiClient: makeClient(),
+            coreDataStack: CoreDataStack(persistentContainerForTesting: stack.persistentContainer),
+            availableStorageBytes: { nil }
+        )
+        let backgroundContext = stack.newBackgroundContext()
+
+        let download = Task {
+            await downloader.downloadAttachment(attachmentObjectID: attachment.objectID, messageId: messageID, in: backgroundContext)
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().async {
+                _ = started.wait(timeout: .now() + 5)
+                continuation.resume()
+            }
+        }
+        await downloader.cancelAndAwaitAllDownloads()
+        release.signal()
+        await download.value
+        XCTAssertTrue(downloader.reopenAdmission())
+
+        let stagedAfter = try Set(FileManager.default.contentsOfDirectory(atPath: attachments.path).filter { $0.hasPrefix("incoming_") })
+        XCTAssertEqual(stagedAfter, stagedBefore)
+    }
+
     // MARK: - The downloader
 
     // HONEST SCOPE: the downloader's own retry loop is already gone (phase A); this pins that the

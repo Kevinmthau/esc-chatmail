@@ -27,6 +27,8 @@ enum GmailAttachmentBodyDecoder {
         case invalidBase64
         /// The response ends before its object does.
         case truncated
+        /// The bytes decoded are not as many as the response's own `size` says.
+        case sizeMismatch
     }
 
     /// Decodes the `data` field of the JSON file at `source` into a new file at `destination`
@@ -40,9 +42,9 @@ enum GmailAttachmentBodyDecoder {
     ) throws -> Int64 {
         let input = try FileHandle(forReadingFrom: source)
         defer { try? input.close() }
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+        // A write that throws keeps its cause (an ENOSPC is classified as a full disk), where
+        // `FileManager.createFile` answered a bare Bool.
+        try Data().write(to: destination)
         let output = try FileHandle(forWritingTo: destination)
         defer { try? output.close() }
 
@@ -63,6 +65,9 @@ enum GmailAttachmentBodyDecoder {
         if !scanner.output.isEmpty {
             try output.write(contentsOf: scanner.output)
             written += Int64(scanner.output.count)
+        }
+        if let statedSize = scanner.statedSize, statedSize != written {
+            throw DecodeError.sizeMismatch
         }
         return written
     }
@@ -87,10 +92,16 @@ enum GmailAttachmentBodyDecoder {
 
         private static let dataKey = Array("data".utf8)
 
+        private static let sizeKey = Array("size".utf8)
+
         var output: [UInt8] = []
+        /// The object's own `size`, the attachment's length in bytes, where it states one.
+        private(set) var statedSize: Int64?
         private var state: State = .beforeObject
         private var key: [UInt8] = []
         private var keyIsData = false
+        private var keyIsSize = false
+        private var sizeDigits: [UInt8] = []
         private var foundData = false
         private var base64 = Base64URLDecoder()
 
@@ -134,6 +145,7 @@ enum GmailAttachmentBodyDecoder {
                     state = .inKey(escaped: true)
                 } else if byte == UInt8(ascii: "\"") {
                     keyIsData = key == Self.dataKey
+                    keyIsSize = key == Self.sizeKey
                     state = .expectingColon
                 } else if key.count <= Self.dataKey.count {
                     key.append(byte)
@@ -155,6 +167,7 @@ enum GmailAttachmentBodyDecoder {
                 } else if byte == UInt8(ascii: "{") || byte == UInt8(ascii: "[") {
                     state = .inSkippedContainer(depth: 1, inString: false, escaped: false)
                 } else {
+                    sizeDigits = keyIsSize ? [byte] : []
                     state = .inSkippedLiteral
                 }
 
@@ -168,10 +181,11 @@ enum GmailAttachmentBodyDecoder {
                 }
 
             case .inSkippedLiteral:
-                if byte == UInt8(ascii: ",") {
-                    state = .expectingKey
-                } else if byte == UInt8(ascii: "}") {
-                    state = .done
+                if byte == UInt8(ascii: ",") || byte == UInt8(ascii: "}") {
+                    recordStatedSize()
+                    state = byte == UInt8(ascii: ",") ? .expectingKey : .done
+                } else if keyIsSize {
+                    sizeDigits.append(byte)
                 }
 
             case .inSkippedContainer(let depth, let inString, let escaped):
@@ -241,6 +255,14 @@ enum GmailAttachmentBodyDecoder {
                 if Self.isWhitespace(byte) { return }
                 throw DecodeError.malformedJSON
             }
+        }
+
+        /// Records `size`'s value where it is a whole number; anything else states nothing.
+        private mutating func recordStatedSize() {
+            guard keyIsSize else { return }
+            let text = String(decoding: sizeDigits, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            statedSize = Int64(text)
+            sizeDigits = []
         }
 
         private static func hexValue(_ byte: UInt8) -> UInt32? {

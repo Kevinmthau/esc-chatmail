@@ -87,6 +87,11 @@ extension GmailAPIClient {
         let decoded = directory.appendingPathComponent("incoming_\(UUID().uuidString)")
         do {
             try GmailAttachmentBodyDecoder.decodeDataField(ofJSONFileAt: response, into: decoded)
+        } catch GmailAttachmentBodyDecoder.DecodeError.truncated {
+            // A body cut short is a transfer that ended early, never an attachment that cannot
+            // be decoded: a dropped connection, not the sender's bytes.
+            try? FileManager.default.removeItem(at: decoded)
+            throw APIError.networkError(URLError(.networkConnectionLost))
         } catch let error as GmailAttachmentBodyDecoder.DecodeError {
             try? FileManager.default.removeItem(at: decoded)
             throw APIError.invalidData("Failed to decode attachment data from base64: \(error)")

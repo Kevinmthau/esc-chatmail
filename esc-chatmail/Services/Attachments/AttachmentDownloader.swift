@@ -417,7 +417,9 @@ final class AttachmentDownloader: ObservableObject {
     /// The volume's free space (`StoreVolumeFreeSpace`), read before each download and off
     /// the main actor: the volume query was never timed. Nil when it could not be read.
     private let availableStorageBytes: @Sendable () async -> Int64?
-    /// The writer of a download's original and preview: `AttachmentPaths.writeData`.
+    /// The writer of a download's encoded preview, and of the inline recovery's originals:
+    /// `AttachmentPaths.writeData`. A download's original is the downloaded file, renamed into
+    /// place (`storeDownloadedFile`).
     private let writeAttachmentData: @Sendable (Data, String) -> AttachmentWriteResult
     /// The writer of a preview that is its original's own bytes, as a clone of the original's
     /// file (source path, destination path): `AttachmentPaths.storeClone`.
@@ -869,10 +871,20 @@ final class AttachmentDownloader: ObservableObject {
                 let savedOriginal = originalWrite == .saved
                 // Read through a mapping of the stored file, so a large original is paged in as
                 // the dimensions and the preview read it, never held whole on the heap.
-                let data = savedOriginal
-                    ? (AttachmentPaths.fullURL(for: originalPath)
-                        .flatMap { try? Data(contentsOf: $0, options: .alwaysMapped) } ?? Data())
-                    : Data()
+                var data = Data()
+                if savedOriginal {
+                    if let mapped = AttachmentPaths.fullURL(for: originalPath)
+                        .flatMap({ try? Data(contentsOf: $0, options: .alwaysMapped) }) {
+                        data = mapped
+                    } else {
+                        // The original is stored but could not be read back: the row is saved
+                        // downloaded with no preview, which its next showing does not repair.
+                        Log.warning(
+                            "Attachment \(Log.hashIdentifier(attachmentId)) was stored but could not be read for its preview",
+                            category: .attachment
+                        )
+                    }
+                }
 
                 var width: Int16?
                 var height: Int16?
