@@ -349,7 +349,7 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 messageId: diagnosticMessageId,
                 duration: CFAbsoluteTimeGetCurrent() - renderStart,
                 displayHeight: result.displayHeight,
-                cacheStored: cached != nil,
+                storedTier: EmailPreviewSnapshotStoredTier(stored: cached != nil, isComplete: result.isComplete),
                 isComplete: result.isComplete
             )
             if let cached {

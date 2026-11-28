@@ -18,8 +18,8 @@ struct EmailPreviewSnapshotResult {
     let displayHeight: CGFloat
     let pixelScale: CGFloat
     let cacheKey: String
-    /// Every image in the capture loaded (`HTMLPreviewSnapshotImageOutcomeScript`) and every
-    /// `cid:` image was supplied (`CIDSchemeHandler.unavailableImageCount`). An incomplete
+    /// Every image in the capture loaded or was blocked on purpose, and every `cid:` image in the
+    /// capture was supplied or will never be (`HTMLPreviewSnapshotImageOutcome`). An incomplete
     /// snapshot is shown like any other and is never a failure, which would swap the card for a
     /// live web view; it is only not kept on disk (`EmailPreviewSnapshotCache.store`), so a later
     /// view, after images can load, renders it again (architecture review 2026-11,
@@ -565,7 +565,7 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
 
             // No wait for images: `didFinish` already waited for the ones the page loads eagerly,
             // and a longer wait would only delay a card whose images will not come.
-            let incompleteImages = await countIncompleteImages(displayHeight: displayHeight)
+            let imageOutcome = await readImageOutcome(displayHeight: displayHeight)
             guard !didComplete else { return }
 
             let image = try await snapshot(displayHeight: displayHeight)
@@ -583,7 +583,9 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
                         displayHeight: displayHeight,
                         pixelScale: image.scale,
                         cacheKey: request.cacheKey,
-                        isComplete: incompleteImages == 0 && cidHandler.unavailableImageCount == 0
+                        isComplete: imageOutcome?.isComplete(
+                            unavailableContentIDs: cidHandler.unavailableContentIDs
+                        ) ?? false
                     )
                 )
             )
@@ -592,20 +594,20 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
         }
     }
 
-    /// The images in the capture that did not load; a probe that fails counts as one, so a render
+    /// The images in the capture; nil when the probe fails, which reads as incomplete, so a render
     /// whose outcome cannot be read is not stored.
-    private func countIncompleteImages(displayHeight: CGFloat) async -> Int {
+    private func readImageOutcome(displayHeight: CGFloat) async -> HTMLPreviewSnapshotImageOutcome? {
         let script = HTMLPreviewSnapshotImageOutcomeScript.script(
             captureWidth: request.containerWidth,
             captureHeight: displayHeight
         )
         return await withCheckedContinuation { continuation in
             webView.evaluateJavaScript(script) { result, error in
-                guard error == nil, let count = (result as? NSNumber)?.intValue else {
-                    continuation.resume(returning: 1)
+                guard error == nil else {
+                    continuation.resume(returning: nil)
                     return
                 }
-                continuation.resume(returning: count)
+                continuation.resume(returning: HTMLPreviewSnapshotImageOutcome(scriptResult: result))
             }
         }
     }

@@ -249,49 +249,95 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertGreaterThan(failedAt, staleFailureDate)
     }
 
-    /// A failed on-demand fetch is answered with the transparent stand-in and counted, so a
-    /// snapshot render knows its capture is missing that image; a Content-ID no attachment names is
-    /// answered the same way and not counted, because it will never load
-    /// (architecture review 2026-11, `web-content-rendering#3`).
+    /// An image the handler could not supply now is answered with the transparent stand-in and
+    /// recorded, so a snapshot render knows its capture is missing it; one no later render will
+    /// have is answered the same way and not recorded, because counting it kept its card off disk
+    /// for good, with a Gmail request at each render (architecture review 2026-11,
+    /// `web-content-rendering#3`): a Content-ID no attachment names, a `local_` attachment whose
+    /// file is gone, and an attachment Gmail answered 404 for.
     ///
-    /// Revert-check: removing `recordUnavailableImage()` after the failed fetch fails this.
-    func testUnavailableImageCount_countsAFailedFetch_notAContentIDWithNoAttachment() async throws {
+    /// Revert-check: removing `recordUnavailableForNow` from the `.unavailableForNow` branch, or
+    /// answering `.unavailableForNow` for `APIError.notFound` or for a `local_` attachment ID,
+    /// fails this (each run alone).
+    func testUnavailableContentIDs_recordTransientFailuresOnly() async throws {
         let message = MessageBuilder()
-            .withId("message-cid-unavailable-count")
+            .withId("message-cid-unavailable")
             .withAttachments()
             .build(in: context)
-        _ = AttachmentBuilder()
-            .withId("att-cid-unavailable-count")
-            .withFilename("missing.png")
-            .withMimeType("image/png")
-            .withContentId("missing@example.com")
-            .forMessage(message)
-            .build(in: context)
+        for (id, contentID) in [
+            ("att-cid-transient", "transient@example.com"),
+            ("att-cid-gone", "gone@example.com"),
+            ("local_\(UUID().uuidString)", "added@example.com")
+        ] {
+            _ = AttachmentBuilder()
+                .withId(id)
+                .withFilename("image.png")
+                .withMimeType("image/png")
+                .withContentId(contentID)
+                .forMessage(message)
+                .build(in: context)
+        }
         try saveViewContext()
         let stack = testStack!
+        let apiClient = MockGmailAPIClient()
         let handler = CIDSchemeHandler(
             message: message,
+            apiClient: apiClient,
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+
+        apiClient.getAttachmentError = APIError.serverError(503)
+        let transient = try await start("cid:transient@example.com", on: handler)
+        let gone = try await start("cid:gone@example.com", on: handler)
+        let added = try await start("cid:added@example.com", on: handler)
+        let unmatched = try await start("cid:nobody@example.com", on: handler)
+
+        for task in [transient, gone, added, unmatched] {
+            XCTAssertEqual(task.response?.mimeType, "image/gif", "Every one is answered with the stand-in")
+        }
+        XCTAssertEqual(apiClient.getAttachmentCallCount, 2, "Only the two Gmail attachments are asked for")
+        XCTAssertEqual(handler.unavailableContentIDs, ["transient@example.com"])
+    }
+
+    /// A read of the message that fails or cannot be made is not an absent attachment: it is
+    /// recorded, so the snapshot is not stored for seven days with a stand-in where an image of
+    /// the message belongs.
+    ///
+    /// Revert-check: removing `recordUnavailableForNow` from the `.failed` branch fails this.
+    func testUnavailableContentIDs_recordAFailedLookup() async throws {
+        let unsaved = MessageBuilder()
+            .withId("message-cid-unsaved")
+            .withAttachments()
+            .build(in: context)
+        XCTAssertTrue(unsaved.objectID.isTemporaryID, "Precondition: the message has no stored row")
+        let stack = testStack!
+        let withTemporaryID = CIDSchemeHandler(
+            message: unsaved,
+            apiClient: MockGmailAPIClient(),
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+        let withNoMessage = CIDSchemeHandler(
+            message: nil,
             apiClient: MockGmailAPIClient(),
             makeBackgroundContext: { stack.newBackgroundContext() }
         )
 
-        let unmatchedFinished = expectation(description: "unmatched Content-ID answered")
-        let unmatched = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:nobody@example.com"))) {
-            unmatchedFinished.fulfill()
-        }
-        handler.webView(WKWebView(), start: unmatched)
-        await fulfillment(of: [unmatchedFinished], timeout: 2.0)
-        XCTAssertEqual(unmatched.response?.mimeType, "image/gif")
-        XCTAssertEqual(handler.unavailableImageCount, 0)
+        _ = try await start("cid:logo@example.com", on: withTemporaryID)
+        _ = try await start("cid:logo@example.com", on: withNoMessage)
 
-        let failedFinished = expectation(description: "failed fetch answered")
-        let failed = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:missing@example.com"))) {
-            failedFinished.fulfill()
+        XCTAssertEqual(withTemporaryID.unavailableContentIDs, ["logo@example.com"])
+        XCTAssertEqual(withNoMessage.unavailableContentIDs, ["logo@example.com"])
+    }
+
+    /// Starts a request for `source` on `handler` and waits for its answer.
+    private func start(_ source: String, on handler: CIDSchemeHandler) async throws -> MockURLSchemeTask {
+        let finished = expectation(description: "\(source) answered")
+        let task = MockURLSchemeTask(url: try XCTUnwrap(URL(string: source))) {
+            finished.fulfill()
         }
-        handler.webView(WKWebView(), start: failed)
-        await fulfillment(of: [failedFinished], timeout: 2.0)
-        XCTAssertEqual(failed.response?.mimeType, "image/gif")
-        XCTAssertEqual(handler.unavailableImageCount, 1)
+        handler.webView(WKWebView(), start: task)
+        await fulfillment(of: [finished], timeout: 2.0)
+        return task
     }
 
     func testStoppedTaskReceivesNoCallbacksAfterDelayedFallbackCompletes() async throws {

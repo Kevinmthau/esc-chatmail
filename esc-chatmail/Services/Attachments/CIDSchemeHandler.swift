@@ -23,20 +23,25 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         set { resourceLock.withLock { resources = newValue } }
     }
 
-    private var unavailableImages = 0
-    /// How many images this handler answered with its transparent stand-in because their bytes
-    /// could not be read or fetched now: a local file that cannot be read, or an attachment with
-    /// no file whose on-demand fetch failed (offline, say). A Content-ID that no attachment of the
-    /// message names is not counted: it will never load, so a render without it is as complete as
-    /// it can be. The page reports the stand-in as a loaded image, so a snapshot render reads this
+    private var unavailableIDs: Set<String> = []
+    /// The normalized Content-IDs this handler answered with its transparent stand-in because their
+    /// bytes could not be had now and a later render may have them: an attachment with no file
+    /// whose on-demand fetch failed (offline, a 5xx), and a read of the message or its attachments
+    /// that failed or could not be made (no message, a temporary object ID), because a failed read
+    /// is never an absent attachment. Left out, because no later render will have them: a
+    /// Content-ID that no attachment of the message names, a local file that is gone (a local
+    /// resource's, or a `local_` attachment's, which cannot be downloaded again), an attachment
+    /// with no ID to fetch it by, and one Gmail answered 404 for. The page reports the stand-in as
+    /// a loaded image, so a snapshot render reads this, for the `cid:` images its capture shows,
     /// to know its capture is incomplete (architecture review 2026-11, `web-content-rendering#3`;
-    /// `EmailPreviewSnapshotRenderSession`).
-    var unavailableImageCount: Int {
-        resourceLock.withLock { unavailableImages }
+    /// `HTMLPreviewSnapshotImageOutcome`). A failed fetch through `AttachmentDownloader`, the
+    /// production path, cannot be told apart from a 404 and is counted.
+    var unavailableContentIDs: Set<String> {
+        resourceLock.withLock { unavailableIDs }
     }
 
-    private func recordUnavailableImage() {
-        resourceLock.withLock { unavailableImages += 1 }
+    private func recordUnavailableForNow(_ contentID: String) {
+        resourceLock.withLock { _ = unavailableIDs.insert(contentID) }
     }
 
     /// The message containing the attachments to resolve
@@ -125,16 +130,25 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             if let data = AttachmentPaths.loadData(from: resource.localURL) {
                 respond(urlSchemeTask, taskID: taskID, with: data, mimeType: resource.mimeType)
             } else {
-                recordUnavailableImage()
                 respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
             }
             return
         }
 
-        guard let attachment = await attachmentSnapshot(withContentId: contentId) else {
+        let attachment: AttachmentSnapshot
+        switch await attachmentLookup(withContentId: contentId) {
+        case .found(let found):
+            attachment = found
+        case .notNamed:
             guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: No attachment found for Content-ID: \(contentId)", category: .ui)
             // Return a transparent pixel instead of failing, to avoid broken image icons
+            respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
+            return
+        case .failed:
+            guard activeTasks.isActive(taskID) else { return }
+            Log.debug("CIDSchemeHandler: Attachment lookup failed for Content-ID: \(contentId)", category: .ui)
+            recordUnavailableForNow(contentId)
             respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
             return
         }
@@ -159,16 +173,20 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         }
 
         Log.debug("CIDSchemeHandler: on-demand fallback fetch for Content-ID: \(contentId)", category: .ui)
-        if let data = await fetchAndPersistMissingAttachmentData(
+        let outcome = await fetchAndPersistMissingAttachmentData(
             attachment: attachment,
             requestedContentId: contentId
-        ) {
-            guard activeTasks.isActive(taskID) else { return }
+        )
+        guard activeTasks.isActive(taskID) else { return }
+        switch outcome {
+        case .data(let data):
             respond(urlSchemeTask, taskID: taskID, with: data, mimeType: attachment.mimeType)
-        } else {
-            guard activeTasks.isActive(taskID) else { return }
+        case .unavailableForNow:
             Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
-            recordUnavailableImage()
+            recordUnavailableForNow(contentId)
+            respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
+        case .unavailableForGood:
+            Log.debug("CIDSchemeHandler: Attachment cannot be downloaded for Content-ID: \(contentId)", category: .ui)
             respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
         }
     }
@@ -181,7 +199,13 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         // - cid:///image001@domain.com
         // We need to handle all variants
 
-        var contentId = url.absoluteString
+        normalizedContentID(fromSource: url.absoluteString)
+    }
+
+    /// The Content-ID of a `cid:` source as a page states it (an image's `src`), normalized as a
+    /// request for that source is (`normalizedContentID(from:)`), so the two can be compared.
+    static func normalizedContentID(fromSource source: String) -> String? {
+        var contentId = source
 
         // Remove cid: prefix
         if contentId.lowercased().hasPrefix("cid:") {
@@ -191,18 +215,30 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         return EmailDocument.normalizedContentID(contentId)
     }
 
-    private func attachmentSnapshot(withContentId contentId: String) async -> AttachmentSnapshot? {
-        guard let messageObjectID = messageReference.currentObjectID() else {
-            return nil
+    private enum AttachmentLookup {
+        case found(AttachmentSnapshot)
+        /// The message was read and no attachment of it has the Content-ID.
+        case notNamed
+        /// The message could not be read: no message, a temporary object ID, or a read that threw.
+        case failed
+    }
+
+    private func attachmentLookup(withContentId contentId: String) async -> AttachmentLookup {
+        guard let messageObjectID = messageReference.currentObjectID(),
+              !messageObjectID.isTemporaryID else {
+            return .failed
         }
 
         let context = makeBackgroundContext()
         return await context.perform {
             guard let message = try? context.existingObject(with: messageObjectID) as? Message else {
-                return nil
+                return .failed
             }
 
-            return Self.findAttachmentSnapshot(withContentId: contentId, in: message)
+            guard let snapshot = Self.findAttachmentSnapshot(withContentId: contentId, in: message) else {
+                return .notNamed
+            }
+            return .found(snapshot)
         }
     }
 
@@ -234,12 +270,12 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     private func fetchAndPersistMissingAttachmentData(
         attachment: AttachmentSnapshot,
         requestedContentId: String
-    ) async -> Data? {
+    ) async -> CIDFetchOutcome {
         guard let attachmentId = attachment.attachmentId,
               !attachmentId.isEmpty,
               !attachmentId.hasPrefix("local_") ||
                 attachmentId.hasPrefix("local_inline_") else {
-            return nil
+            return .unavailableForGood
         }
 
         let key = CIDAttachmentFetchKey(
@@ -250,22 +286,22 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
 
         return await fetchCoalescer.data(for: key) { [apiClientOverride, makeBackgroundContext] in
             if apiClientOverride == nil {
-                return await Self.fetchUsingTrackedDownloader(
+                return CIDFetchOutcome(await Self.fetchUsingTrackedDownloader(
                     messageId: attachment.messageId,
                     attachmentObjectID: attachment.objectID,
                     makeBackgroundContext: makeBackgroundContext
-                )
+                ))
             }
 
             if attachmentId.hasPrefix("local_inline_"),
                let apiClientOverride {
-                return await SynthesizedInlineAttachmentRecovery.recover(
+                return CIDFetchOutcome(await SynthesizedInlineAttachmentRecovery.recover(
                     messageId: attachment.messageId,
                     requestedAttachmentObjectID: attachment.objectID,
                     requestedAttachmentId: attachmentId,
                     apiClient: apiClientOverride,
                     makeBackgroundContext: makeBackgroundContext
-                )
+                ))
             }
 
             return await Self.fetchAndPersistMissingAttachmentData(
@@ -305,7 +341,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         attachmentObjectID: NSManagedObjectID,
         apiClientOverride: (any GmailAPIClientProtocol)?,
         makeBackgroundContext: @Sendable () -> NSManagedObjectContext
-    ) async -> Data? {
+    ) async -> CIDFetchOutcome {
         do {
             let apiClient: any GmailAPIClientProtocol
             if let apiClientOverride {
@@ -326,7 +362,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             )
 
             guard AttachmentPaths.saveData(data, to: originalPath) else {
-                return data
+                return .data(data)
             }
 
             let backgroundContext = makeBackgroundContext()
@@ -342,14 +378,17 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
                 backgroundContext.saveOrLog(operation: "persist inline cid attachment")
             }
 
-            return data
+            return .data(data)
         } catch {
             await markAttachmentDownloadFailed(
                 attachmentObjectID: attachmentObjectID,
                 makeBackgroundContext: makeBackgroundContext
             )
             Log.debug("CIDSchemeHandler: On-demand fetch failed for attachment \(attachmentId): \(error.localizedDescription)", category: .ui)
-            return nil
+            if let apiError = error as? APIError, case .notFound = apiError {
+                return .unavailableForGood
+            }
+            return .unavailableForNow
         }
     }
 
@@ -454,6 +493,25 @@ private struct AttachmentSnapshot: @unchecked Sendable {
     }
 }
 
+/// What an on-demand fetch of a `cid:` attachment came to, for `unavailableContentIDs`.
+private enum CIDFetchOutcome: Sendable {
+    case data(Data)
+    /// Not had now; a later render may have it (offline, a 5xx, a failure whose kind is not known).
+    case unavailableForNow
+    /// No later render will have it: nothing to fetch it by, or Gmail answered 404.
+    case unavailableForGood
+
+    /// A fetch that answers only data or nothing: nothing is read as for now, because its cause is
+    /// not known.
+    init(_ data: Data?) {
+        if let data {
+            self = .data(data)
+        } else {
+            self = .unavailableForNow
+        }
+    }
+}
+
 private struct CIDAttachmentFetchKey: Hashable, Sendable {
     let messageId: String
     let attachmentId: String
@@ -461,12 +519,12 @@ private struct CIDAttachmentFetchKey: Hashable, Sendable {
 }
 
 private actor CIDAttachmentFetchCoalescer {
-    private var inFlight: [CIDAttachmentFetchKey: Task<Data?, Never>] = [:]
+    private var inFlight: [CIDAttachmentFetchKey: Task<CIDFetchOutcome, Never>] = [:]
 
     func data(
         for key: CIDAttachmentFetchKey,
-        operation: @escaping @Sendable () async -> Data?
-    ) async -> Data? {
+        operation: @escaping @Sendable () async -> CIDFetchOutcome
+    ) async -> CIDFetchOutcome {
         if let task = inFlight[key] {
             return await task.value
         }

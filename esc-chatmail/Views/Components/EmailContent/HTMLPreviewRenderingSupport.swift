@@ -152,32 +152,142 @@ enum HTMLPreviewHeightMeasurementScript {
     }
 }
 
-/// Counts the images a snapshot would capture that did not load: broken (`naturalWidth` 0 once
-/// complete) or not complete yet (architecture review 2026-11, `web-content-rendering#3`). Only
-/// images that show in the capture area count: larger than 2×2 points (tracking pixels and
-/// spacers, which a dead tracker host leaves broken for good, would otherwise keep a card from
-/// ever being stored), not hidden, and inside the first `captureHeight` points of the view at its
-/// `captureWidth`. A `cid:` image the app could not supply is not seen here, because the scheme
-/// handler answers it with a transparent stand-in that loads; `CIDSchemeHandler` counts those.
+/// Reports the images a snapshot would capture (architecture review 2026-11,
+/// `web-content-rendering#3`): the ones that did not load, broken (`naturalWidth` 0 once complete)
+/// or not complete yet, and the `cid:` source of every one, loaded or not. Only images that show in
+/// the capture area are reported: with a `src` (lazy-loader markup with only `data-src` asks for
+/// nothing), larger than 2×2 points once clipped by any ancestor that clips (tracking pixels and
+/// spacers, which a dead tracker host leaves broken for good, would otherwise keep a card from ever
+/// being stored), with no ancestor of opacity 0, not hidden, and inside the first `captureHeight`
+/// points of the view at its `captureWidth`. An image that did not load is reported as
+/// `scheme://host/` for http(s), which is all `HTMLPreviewSnapshotImageOutcome` needs to know
+/// whether it was blocked on purpose, and as its scheme otherwise (a `data:` URL can be megabytes).
+/// A `cid:` image the app could not supply loads as the scheme handler's transparent stand-in, so
+/// it is not among those; its source is reported so that `CIDSchemeHandler`'s record of it counts
+/// only if it is in the capture. Each list holds at most 256 entries, past which the outcome is
+/// truncated and reads as incomplete.
 enum HTMLPreviewSnapshotImageOutcomeScript {
     static func script(captureWidth: CGFloat, captureHeight: CGFloat) -> String {
         """
         (function(captureWidth, captureHeight) {
-            var incomplete = 0;
+            var limit = 256;
+            var outcome = { incomplete: [], cids: [], truncated: false };
+            function push(list, value) {
+                if (list.length >= limit) { outcome.truncated = true; return; }
+                list.push(value);
+            }
+            function schemeOf(source) {
+                var colon = source.indexOf(':');
+                return colon < 0 ? '' : source.slice(0, colon + 1).toLowerCase();
+            }
             var images = document.images;
             for (var i = 0; i < images.length; i++) {
                 var image = images[i];
-                var rect = image.getBoundingClientRect();
-                if (rect.width <= 2 || rect.height <= 2) { continue; }
-                if (rect.bottom <= 0 || rect.top >= captureHeight) { continue; }
-                if (rect.right <= 0 || rect.left >= captureWidth) { continue; }
+                if (!image.getAttribute('src') && !image.currentSrc) { continue; }
                 var style = window.getComputedStyle(image);
-                if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity) === 0) { continue; }
-                if (!image.complete || image.naturalWidth === 0) { incomplete++; }
+                if (style.visibility === 'hidden' || style.display === 'none') { continue; }
+                var rect = image.getBoundingClientRect();
+                var left = rect.left, top = rect.top, right = rect.right, bottom = rect.bottom;
+                var transparent = false;
+                for (var node = image; node && node.nodeType === 1; node = node.parentElement) {
+                    var nodeStyle = node === image ? style : window.getComputedStyle(node);
+                    if (parseFloat(nodeStyle.opacity) === 0) { transparent = true; break; }
+                    if (node === image) { continue; }
+                    if (nodeStyle.overflowX !== 'visible' || nodeStyle.overflowY !== 'visible') {
+                        var clip = node.getBoundingClientRect();
+                        if (nodeStyle.overflowX !== 'visible') {
+                            left = Math.max(left, clip.left);
+                            right = Math.min(right, clip.right);
+                        }
+                        if (nodeStyle.overflowY !== 'visible') {
+                            top = Math.max(top, clip.top);
+                            bottom = Math.min(bottom, clip.bottom);
+                        }
+                    }
+                }
+                if (transparent) { continue; }
+                if (right - left <= 2 || bottom - top <= 2) { continue; }
+                if (bottom <= 0 || top >= captureHeight) { continue; }
+                if (right <= 0 || left >= captureWidth) { continue; }
+                var source = image.currentSrc || image.src;
+                var scheme = schemeOf(source);
+                if (scheme === 'cid:') { push(outcome.cids, source.length <= 2048 ? source : 'cid:'); }
+                if (image.complete && image.naturalWidth !== 0) { continue; }
+                if (scheme === 'http:' || scheme === 'https:') {
+                    var origin = scheme + '//';
+                    try { origin = scheme + '//' + new URL(source).host + '/'; } catch (error) {}
+                    push(outcome.incomplete, origin);
+                } else {
+                    push(outcome.incomplete, scheme);
+                }
             }
-            return incomplete;
+            return outcome;
         })(\(Int(captureWidth.rounded())), \(Int(captureHeight.rounded())));
         """
+    }
+}
+
+/// What `HTMLPreviewSnapshotImageOutcomeScript` found, and whether it makes the capture complete.
+struct HTMLPreviewSnapshotImageOutcome: Equatable, Sendable {
+    /// One entry for each image in the capture that did not load: `scheme://host/` for http(s),
+    /// its scheme otherwise.
+    let incompleteSources: [String]
+    /// The `cid:` source of each image in the capture, loaded or not.
+    let capturedCIDSources: [String]
+    /// A list reached the script's limit, so the outcome is not known whole.
+    let isTruncated: Bool
+
+    init(incompleteSources: [String], capturedCIDSources: [String], isTruncated: Bool) {
+        self.incompleteSources = incompleteSources
+        self.capturedCIDSources = capturedCIDSources
+        self.isTruncated = isTruncated
+    }
+
+    /// Reads the script's result; nil for anything else, which the caller reads as incomplete.
+    init?(scriptResult: Any?) {
+        guard let dictionary = scriptResult as? [String: Any],
+              let incomplete = dictionary["incomplete"] as? [String],
+              let cids = dictionary["cids"] as? [String] else {
+            return nil
+        }
+        self.init(
+            incompleteSources: incomplete,
+            capturedCIDSources: cids,
+            isTruncated: (dictionary["truncated"] as? Bool) ?? true
+        )
+    }
+
+    /// Whether an image that did not load was refused on purpose: a load of a private, loopback,
+    /// link-local, single-label or otherwise reserved host, which the web content rules refuse
+    /// (`EmailWebContentNetworkRuleSource`, built from the same `PrivateNetworkAddressDetector`).
+    /// Such an image will not load at any later render, so counting it kept the card off disk for
+    /// good and rendered it again every ten minutes: a NAS or router notification, or any mail with
+    /// an image on such a host. Any other blocking of image loads in the snapshot web view (an
+    /// image-consent gate, say) must be answered here too, or every card it blocks is incomplete.
+    static func isBlockedOnPurpose(_ source: String) -> Bool {
+        guard let url = URL(string: source),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            return false
+        }
+        return PrivateNetworkAddressDetector.isPrivateOrReserved(url)
+    }
+
+    /// Complete when every image in the capture that did not load was blocked on purpose and no
+    /// `cid:` image in the capture is one the scheme handler could not supply for now
+    /// (`CIDSchemeHandler.unavailableContentIDs`).
+    func isComplete(unavailableContentIDs: Set<String>) -> Bool {
+        guard !isTruncated else { return false }
+        if incompleteSources.contains(where: { !Self.isBlockedOnPurpose($0) }) {
+            return false
+        }
+        return !capturedCIDSources.contains { source in
+            guard let contentID = CIDSchemeHandler.normalizedContentID(fromSource: source) else {
+                return false
+            }
+            return unavailableContentIDs.contains(contentID)
+        }
     }
 }
 
