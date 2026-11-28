@@ -80,8 +80,6 @@ enum FullInteractiveEmailWebView {
         case blockedDestination
     }
 
-    private static let unsupportedNavigationSchemes = ["javascript", "vbscript", "file"]
-
     /// Pure navigation decision for the full-interactive WebView, shared by the live `Coordinator`
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
     /// off-screen `WarmNavigationDelegate` (which has no side effects — it permits the `.allow` cases
@@ -164,8 +162,7 @@ enum FullInteractiveEmailWebView {
     }
 
     private static func isUnsupportedNavigationURL(_ url: URL) -> Bool {
-        let scheme = url.scheme?.lowercased() ?? ""
-        return unsupportedNavigationSchemes.contains(scheme)
+        EmailNavigationSchemeScreen.refuses(url)
     }
 
     private static func externalLinkResolution(for url: URL) -> ExternalLinkResolution {
