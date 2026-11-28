@@ -31,6 +31,9 @@ protocol CanonicalEmailContentLoading: Sendable {
         messageId: String,
         bodyStorageURI: String?
     ) -> String?
+
+    /// The message file's signature (`HTMLContentHandler.messageFileSignature`): a stat, not a read.
+    func currentMessageFileSignature(messageId: String) -> String?
 }
 
 extension CanonicalEmailContentLoading {
@@ -38,6 +41,10 @@ extension CanonicalEmailContentLoading {
         messageId: String,
         bodyStorageURI: String?
     ) -> String? {
+        nil
+    }
+
+    func currentMessageFileSignature(messageId: String) -> String? {
         nil
     }
 }
@@ -358,6 +365,13 @@ final class CanonicalEmailContentLoader: CanonicalEmailContentLoading, @unchecke
             messageId: messageId,
             accountGeneration: accountGeneration
         )
+    }
+
+    func currentMessageFileSignature(messageId: String) -> String? {
+        guard let accountGeneration = contentHandler.captureAccountGeneration() else {
+            return nil
+        }
+        return contentHandler.messageFileSignature(for: messageId, expectedGeneration: accountGeneration)
     }
 
     func currentHTMLSourceSignature(

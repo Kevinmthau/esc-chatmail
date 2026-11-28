@@ -72,19 +72,28 @@ struct WarmedOriginalEmailHTML: Sendable, Equatable {
     /// `web-content-rendering#4`).
     let htmlFingerprint: String
     let referencedInlineContentIDs: Set<String>
+    /// For a body read from the message file, that file's signature (modification date and size)
+    /// taken before the read: an open whose file still has it skips reading and hashing the body
+    /// to check the source (`FullEmailWebViewManager.preparedOpenArtifact`). Taken before, never
+    /// after: a write between the two then leaves the token older than the body, so the open sees
+    /// a changed signature and checks the content, which is today's check; a token taken after
+    /// could describe a newer body than the one prepared. Nil for every other source.
+    let messageFileSignature: String?
 
     init(
         html: String,
         sourceSignature: String,
         sourceKind: CanonicalEmailSourceKind,
         sourceLocation: CanonicalEmailSourceLocation,
-        hasHTMLSource: Bool
+        hasHTMLSource: Bool,
+        messageFileSignature: String? = nil
     ) {
         self.html = html
         self.sourceSignature = sourceSignature
         self.sourceKind = sourceKind
         self.sourceLocation = sourceLocation
         self.hasHTMLSource = hasHTMLSource
+        self.messageFileSignature = sourceLocation == .messageFile ? messageFileSignature : nil
         self.htmlFingerprint = ReaderContentFingerprint.make(html)
         self.referencedInlineContentIDs = InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
     }
@@ -580,6 +589,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
               ) else {
             return nil
         }
+        // Before the read (`WarmedOriginalEmailHTML.messageFileSignature` says why).
+        let messageFileSignature = canonicalContentLoader.currentMessageFileSignature(messageId: messageId)
         guard let canonicalContent = await canonicalContentLoader.loadCanonicalEmailContent(
             messageId: messageId,
             bodyStorageURI: bodyStorageURI,
@@ -631,7 +642,8 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             sourceSignature: canonicalContent.sourceSignature,
             sourceKind: canonicalContent.sourceKind,
             sourceLocation: canonicalContent.sourceLocation,
-            hasHTMLSource: canonicalContent.hasHTMLSource
+            hasHTMLSource: canonicalContent.hasHTMLSource,
+            messageFileSignature: messageFileSignature
         )
     }
 
@@ -647,6 +659,10 @@ final class OriginalEmailSourceLoader: OriginalEmailSourceLoading, @unchecked Se
             messageId: messageId,
             bodyStorageURI: bodyStorageURI
         )
+    }
+
+    func currentMessageFileSignature(messageId: String) -> String? {
+        canonicalContentLoader.currentMessageFileSignature(messageId: messageId)
     }
 
     private func prepareOriginalHTMLWithTelemetry(

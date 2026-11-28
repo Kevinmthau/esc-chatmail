@@ -528,6 +528,24 @@ final class HTMLContentHandler: @unchecked Sendable {
         htmlFileExists(for: messageId, expectedGeneration: nil)
     }
 
+    /// The message file's signature (its modification date and size, as `htmlSourceSignature`
+    /// reports it), or nil when the file is missing or the boundary is closed. A stat at most,
+    /// never a read: an open compares it with the one its warm saw, to skip reading and hashing a
+    /// body that has not changed (`FullEmailWebViewManager.preparedOpenArtifact`).
+    func messageFileSignature(
+        for messageId: String,
+        expectedGeneration: HTMLContentAccountGeneration?
+    ) -> String? {
+        let fileURL = messagesDirectory.appendingPathComponent("\(messageId).html")
+        let signature: String? = accountBoundary.perform(
+            directoryKey: directoryKey,
+            expectedGeneration: expectedGeneration
+        ) {
+            cachedFileSignature(for: fileURL, cacheMissing: true)
+        }
+        return signature == "missing" ? nil : signature
+    }
+
     func htmlFileExists(
         for messageId: String,
         expectedGeneration: HTMLContentAccountGeneration?

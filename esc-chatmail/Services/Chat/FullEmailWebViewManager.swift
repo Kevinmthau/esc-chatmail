@@ -337,6 +337,10 @@ struct FullEmailOpenPayload: Equatable, Sendable {
     /// once here, never again per key.
     let htmlFingerprint: String
     let referencedInlineContentIDs: Set<String>
+    /// The message file's signature the warm saw before reading the body
+    /// (`WarmedOriginalEmailHTML.messageFileSignature`); nil for any other source or a payload
+    /// built from an artifact.
+    let messageFileSignature: String?
 
     init(
         messageId: String,
@@ -348,7 +352,8 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         hasHTMLSource: Bool,
         checkoutAvailability: CheckoutAvailability,
         htmlFingerprint: String? = nil,
-        referencedInlineContentIDs: Set<String>? = nil
+        referencedInlineContentIDs: Set<String>? = nil,
+        messageFileSignature: String? = nil
     ) {
         self.messageId = messageId
         self.sourceSignature = sourceSignature
@@ -361,6 +366,7 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         self.htmlFingerprint = htmlFingerprint ?? ReaderContentFingerprint.make(html)
         self.referencedInlineContentIDs = referencedInlineContentIDs
             ?? InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
+        self.messageFileSignature = messageFileSignature
     }
 
     var originalEmailSource: OriginalEmailSource {
@@ -386,7 +392,8 @@ struct FullEmailOpenPayload: Equatable, Sendable {
             hasHTMLSource: hasHTMLSource,
             checkoutAvailability: checkoutAvailability,
             htmlFingerprint: htmlFingerprint,
-            referencedInlineContentIDs: referencedInlineContentIDs
+            referencedInlineContentIDs: referencedInlineContentIDs,
+            messageFileSignature: messageFileSignature
         )
     }
 
@@ -409,6 +416,7 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         self.checkoutAvailability = checkoutAvailability
         self.htmlFingerprint = ReaderContentFingerprint.make(html)
         self.referencedInlineContentIDs = InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
+        self.messageFileSignature = nil
     }
 
     func artifact(
@@ -1384,10 +1392,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return nil
         }
 
-        let currentSourceSignature = loader.currentHTMLSourceSignature(
-            messageId: request.messageId,
-            bodyStorageURI: request.bodyStorageURI
-        )
+        let currentSourceSignature = currentSourceSignature(for: preparedEntry.payload, request: request)
 
         switch FullEmailOpenPayloadReuseValidator.decision(
             entryRequest: preparedEntry.request,
@@ -1436,6 +1441,27 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             invalidate(messageId: request.messageId)
             return nil
         }
+    }
+
+    /// The body's source signature now, for the prepared payload's reuse check. Reading it reads
+    /// and hashes the whole body on the main actor (`currentHTMLSourceSignature`), so where the warm
+    /// read the message file and that file's signature (a stat) is still the one the warm saw, the
+    /// payload's own source signature is the answer (architecture review 2026-11,
+    /// `web-content-rendering#4`). Any other signature, or none, means today's content check, and
+    /// never reuse on its own: the content check decides.
+    private func currentSourceSignature(
+        for payload: FullEmailOpenPayload,
+        request: OriginalEmailWarmRequest
+    ) -> String? {
+        if let warmedFileSignature = payload.messageFileSignature,
+           payload.sourceLocation == .messageFile,
+           loader.currentMessageFileSignature(messageId: request.messageId) == warmedFileSignature {
+            return payload.sourceSignature
+        }
+        return loader.currentHTMLSourceSignature(
+            messageId: request.messageId,
+            bodyStorageURI: request.bodyStorageURI
+        )
     }
 
     /// Returns a fully-painted pre-rendered WebView for the reader to display instantly, or `nil` if
@@ -1709,7 +1735,8 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             hasHTMLSource: warmed.hasHTMLSource,
             checkoutAvailability: checkoutAvailability,
             htmlFingerprint: warmed.htmlFingerprint,
-            referencedInlineContentIDs: warmed.referencedInlineContentIDs
+            referencedInlineContentIDs: warmed.referencedInlineContentIDs,
+            messageFileSignature: warmed.messageFileSignature
         )
     }
 
