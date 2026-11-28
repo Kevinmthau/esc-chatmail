@@ -1,6 +1,22 @@
 import CoreGraphics
 import Foundation
 
+/// Where a rendered snapshot was kept: on disk when complete, in the cache's memory tier when an
+/// image was missing, or nowhere (a write that failed, or the account boundary closed meanwhile).
+enum EmailPreviewSnapshotStoredTier: String {
+    case disk
+    case memory
+    case none
+
+    init(stored: Bool, isComplete: Bool) {
+        if !stored {
+            self = .none
+        } else {
+            self = isComplete ? .disk : .memory
+        }
+    }
+}
+
 struct EmailPreviewSnapshotDiagnosticCounts: Equatable {
     var cacheHits = 0
     var cacheMisses = 0
@@ -42,7 +58,8 @@ enum EmailPreviewSnapshotDiagnostics {
         messageId: String?,
         duration: TimeInterval,
         displayHeight: CGFloat,
-        cacheStored: Bool
+        storedTier: EmailPreviewSnapshotStoredTier,
+        isComplete: Bool
     ) {
         counts.renderSuccesses += 1
         log(
@@ -53,7 +70,8 @@ enum EmailPreviewSnapshotDiagnostics {
                 "count=\(counts.renderSuccesses)",
                 "duration=\(durationDescription(duration))",
                 "height=\(Int(displayHeight.rounded()))",
-                "cacheStored=\(cacheStored)"
+                "stored=\(storedTier.rawValue)",
+                "complete=\(isComplete)"
             ]
         )
     }

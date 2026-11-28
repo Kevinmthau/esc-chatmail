@@ -152,6 +152,179 @@ enum HTMLPreviewHeightMeasurementScript {
     }
 }
 
+/// Reports the images a snapshot would capture (architecture review 2026-11,
+/// `web-content-rendering#3`): the ones that did not load, broken (`naturalWidth` 0 once complete)
+/// or not complete yet, and the `cid:` source of every one, loaded or not. Only images that show in
+/// the capture area are reported: with a `src` (lazy-loader markup with only `data-src` asks for
+/// nothing), larger than 2×2 points once clipped by any ancestor that clips (tracking pixels and
+/// spacers, which a dead tracker host leaves broken for good, would otherwise keep a card from ever
+/// being stored), with no ancestor of opacity 0, not hidden, and inside the first `captureHeight`
+/// points of the view at its `captureWidth`. An image that did not load is reported as
+/// `scheme://host/` for http(s), which is all `HTMLPreviewSnapshotImageOutcome` needs to know
+/// whether it was blocked on purpose, and as its scheme otherwise (a `data:` URL can be megabytes).
+/// A `cid:` image the app could not supply loads as the scheme handler's transparent stand-in, so
+/// it is not among those; its source is reported so that `CIDSchemeHandler`'s record of it counts
+/// only if it is in the capture. Each list holds at most 256 entries, past which the outcome is
+/// truncated and reads as incomplete.
+enum HTMLPreviewSnapshotImageOutcomeScript {
+    static func script(captureWidth: CGFloat, captureHeight: CGFloat) -> String {
+        """
+        (function(captureWidth, captureHeight) {
+            var limit = 256;
+            var outcome = { incomplete: [], cids: [], truncated: false };
+            function push(list, value) {
+                if (list.length >= limit) { outcome.truncated = true; return; }
+                list.push(value);
+            }
+            function schemeOf(source) {
+                var colon = source.indexOf(':');
+                return colon < 0 ? '' : source.slice(0, colon + 1).toLowerCase();
+            }
+            // Each element's state (whether it or an ancestor is transparent, and the rect its
+            // clipping ancestors and itself leave visible) is worked out once and kept, top down
+            // from the nearest element already known, so a deep tree of many images costs each
+            // element one style read and one rect read. Read per image up its ancestors, 2,000
+            // images 300 levels deep took 1.8 s, and 5,000 at 500 levels took 12 s, past the
+            // render's timeout (measured on macOS in review).
+            var states = new Map();
+            var rootState = { transparent: false, left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+            function stateOf(element) {
+                var chain = [];
+                var node = element;
+                while (node && node.nodeType === 1 && !states.has(node)) {
+                    chain.push(node);
+                    node = node.parentElement;
+                }
+                var state = (node && states.has(node)) ? states.get(node) : rootState;
+                for (var index = chain.length - 1; index >= 0; index--) {
+                    var current = chain[index];
+                    var currentStyle = window.getComputedStyle(current);
+                    var next = {
+                        transparent: state.transparent || parseFloat(currentStyle.opacity) === 0,
+                        left: state.left, top: state.top, right: state.right, bottom: state.bottom
+                    };
+                    if (!next.transparent && (currentStyle.overflowX !== 'visible' || currentStyle.overflowY !== 'visible')) {
+                        var clip = current.getBoundingClientRect();
+                        if (currentStyle.overflowX !== 'visible') {
+                            next.left = Math.max(next.left, clip.left);
+                            next.right = Math.min(next.right, clip.right);
+                        }
+                        if (currentStyle.overflowY !== 'visible') {
+                            next.top = Math.max(next.top, clip.top);
+                            next.bottom = Math.min(next.bottom, clip.bottom);
+                        }
+                    }
+                    states.set(current, next);
+                    state = next;
+                }
+                return state;
+            }
+            function isInCapture(left, top, right, bottom) {
+                if (right - left <= 2 || bottom - top <= 2) { return false; }
+                if (bottom <= 0 || top >= captureHeight) { return false; }
+                if (right <= 0 || left >= captureWidth) { return false; }
+                return true;
+            }
+            var images = document.images;
+            for (var i = 0; i < images.length; i++) {
+                var image = images[i];
+                if (!image.getAttribute('src') && !image.currentSrc) { continue; }
+                // The image's own rect first: one outside the capture reads no ancestor.
+                var rect = image.getBoundingClientRect();
+                if (!isInCapture(rect.left, rect.top, rect.right, rect.bottom)) { continue; }
+                var style = window.getComputedStyle(image);
+                if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity) === 0) { continue; }
+                var parentState = image.parentElement ? stateOf(image.parentElement) : rootState;
+                if (parentState.transparent) { continue; }
+                if (!isInCapture(
+                    Math.max(rect.left, parentState.left),
+                    Math.max(rect.top, parentState.top),
+                    Math.min(rect.right, parentState.right),
+                    Math.min(rect.bottom, parentState.bottom)
+                )) { continue; }
+                var source = image.currentSrc || image.src;
+                var scheme = schemeOf(source);
+                if (scheme === 'cid:') { push(outcome.cids, source.length <= 2048 ? source : 'cid:'); }
+                if (image.complete && image.naturalWidth !== 0) { continue; }
+                if (scheme === 'http:' || scheme === 'https:') {
+                    var origin = scheme + '//';
+                    try { origin = scheme + '//' + new URL(source).host + '/'; } catch (error) {}
+                    push(outcome.incomplete, origin);
+                } else {
+                    push(outcome.incomplete, scheme);
+                }
+            }
+            return outcome;
+        })(\(Int(captureWidth.rounded())), \(Int(captureHeight.rounded())));
+        """
+    }
+}
+
+/// What `HTMLPreviewSnapshotImageOutcomeScript` found, and whether it makes the capture complete.
+struct HTMLPreviewSnapshotImageOutcome: Equatable, Sendable {
+    /// One entry for each image in the capture that did not load: `scheme://host/` for http(s),
+    /// its scheme otherwise.
+    let incompleteSources: [String]
+    /// The `cid:` source of each image in the capture, loaded or not.
+    let capturedCIDSources: [String]
+    /// A list reached the script's limit, so the outcome is not known whole.
+    let isTruncated: Bool
+
+    init(incompleteSources: [String], capturedCIDSources: [String], isTruncated: Bool) {
+        self.incompleteSources = incompleteSources
+        self.capturedCIDSources = capturedCIDSources
+        self.isTruncated = isTruncated
+    }
+
+    /// Reads the script's result; nil for anything else, which the caller reads as incomplete.
+    init?(scriptResult: Any?) {
+        guard let dictionary = scriptResult as? [String: Any],
+              let incomplete = dictionary["incomplete"] as? [String],
+              let cids = dictionary["cids"] as? [String] else {
+            return nil
+        }
+        self.init(
+            incompleteSources: incomplete,
+            capturedCIDSources: cids,
+            isTruncated: (dictionary["truncated"] as? Bool) ?? true
+        )
+    }
+
+    /// Whether an image that did not load was on a host an email's web content is not to reach: a
+    /// private, loopback, link-local, single-label or otherwise reserved one, as
+    /// `PrivateNetworkAddressDetector` reads it (the same predicate a rule list refusing such
+    /// loads is built from). Such an image does not load at a later render either, so counting it
+    /// kept the card off disk for good and rendered it again every ten minutes: a NAS or router
+    /// notification, or any mail with an image on such a host. Any blocking of image loads in the
+    /// snapshot web view (a rule list, an image-consent gate) must be answered here too, or every
+    /// card it blocks is incomplete.
+    static func isBlockedOnPurpose(_ source: String) -> Bool {
+        guard let url = URL(string: source),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else {
+            return false
+        }
+        return PrivateNetworkAddressDetector.isPrivateOrReserved(url)
+    }
+
+    /// Complete when every image in the capture that did not load was blocked on purpose and no
+    /// `cid:` image in the capture is one the scheme handler could not supply for now
+    /// (`CIDSchemeHandler.unavailableContentIDs`).
+    func isComplete(unavailableContentIDs: Set<String>) -> Bool {
+        guard !isTruncated else { return false }
+        if incompleteSources.contains(where: { !Self.isBlockedOnPurpose($0) }) {
+            return false
+        }
+        return !capturedCIDSources.contains { source in
+            guard let contentID = CIDSchemeHandler.normalizedContentID(fromSource: source) else {
+                return false
+            }
+            return unavailableContentIDs.contains(contentID)
+        }
+    }
+}
+
 enum HTMLPreviewSnapshotHeightMeasurementScript {
     static func script(scale: CGFloat) -> String {
         """

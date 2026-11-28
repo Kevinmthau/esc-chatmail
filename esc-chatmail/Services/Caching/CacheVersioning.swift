@@ -36,6 +36,8 @@ enum CacheVersioning {
     static let richContentVerdictEpoch: Int16 = 4
 
     /// Embedded in email preview snapshot cache keys. Bump when the preview
-    /// renderer's visual output changes.
-    static let previewSnapshotRendererVersion = "snapshot-v4"
+    /// renderer's visual output changes, or what it keeps on disk does: v5 drops
+    /// the snapshots earlier builds stored with an image missing, which they kept
+    /// for seven days (`EmailPreviewSnapshotResult.isComplete`).
+    static let previewSnapshotRendererVersion = "snapshot-v5"
 }
