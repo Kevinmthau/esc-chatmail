@@ -180,12 +180,14 @@ final class EmailWebContentNetworkRulesTests: XCTestCase {
     }
 
     /// A compile that never answers counts as failed once `compileTimeout` passes, so a WebKit
-    /// that never calls back cannot hold every web view for the rest of the process; a late answer
-    /// of an attempt already given up is ignored.
+    /// that never calls back cannot hold every web view for the rest of the process. A late
+    /// failure of an attempt already given up changes nothing; a late success is taken, rather
+    /// than web views loading without the list until the next retry a minute later.
     ///
     /// Revert-check: removing the `scheduleCompileTimeout` call from `startCompile` leaves the
-    /// provider compiling and fails this.
-    func testCompileThatNeverAnswers_failsAtItsTimeout_andALateAnswerIsIgnored() async {
+    /// provider compiling and fails this; removing the late-success branch from `startCompile`'s
+    /// completion leaves it unavailable and fails it too.
+    func testCompileThatNeverAnswers_failsAtItsTimeout_andALateSuccessIsTaken() async throws {
         var completions: [@Sendable (WKContentRuleList?, Error?) -> Void] = []
         var timeouts: [@MainActor () -> Void] = []
         let rules = EmailWebContentNetworkRules(
@@ -206,11 +208,17 @@ final class EmailWebContentNetworkRulesTests: XCTestCase {
         XCTAssertEqual(rules.state, .unavailable)
         XCTAssertTrue(rules.permitsLoading)
 
-        let lateList = try? await compileRealList()
+        completions[0](nil, CocoaError(.featureUnsupported))
+        await Task.yield()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(rules.state, .unavailable, "A late failure of an attempt given up changes nothing")
+
+        let lateList = try await compileRealList()
         completions[0](lateList, nil)
         await Task.yield()
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        XCTAssertEqual(rules.state, .unavailable, "An answer of an attempt given up is ignored")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(rules.state, .ready, "A late success is taken")
+        XCTAssertTrue(rules.permitsLoading)
     }
 
     private func compileRealList() async throws -> WKContentRuleList {

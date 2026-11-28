@@ -32,13 +32,12 @@ import Foundation
 ///   public URL with a userinfo (`http://user:pw@example.com/`) would match the single-label rule
 ///   at `user:`.
 /// - No rule names the `document` type: the documents the app loads are its own
-///   `loadHTMLString` calls, whose base URL is the sender's domain, and a sender on a `.local`
-///   domain must still be readable. Measured: a document loaded with a single-label base URL
-///   loads under this list. So a top-level navigation the page starts itself is not this list's
-///   to stop: a `<meta http-equiv="refresh">` to `http://127.0.0.1`, with the list attached and no
-///   sanitizer, made its GET (measured on the iOS 27.0 simulator in review). The sanitizer strips
-///   `meta`, `iframe` and `link` from every wrapped email, and the delegates refuse such a
-///   navigation to a private host other than the document's own (`EmailDocumentNavigationGuard`).
+///   `loadHTMLString` calls, at the sender's public site or at `about:blank` (never a private host:
+///   `EmailSenderBaseURLResolver`). So a top-level navigation the page starts itself is not this
+///   list's to stop: a `<meta http-equiv="refresh">` to `http://127.0.0.1`, with the list attached
+///   and no sanitizer, made its GET (measured on the iOS 27.0 simulator in review). The sanitizer
+///   strips `meta`, `iframe` and `link` from every wrapped email, and the delegates refuse such a
+///   navigation to any private host (`EmailDocumentNavigationGuard`).
 ///   `popup` is left out too: a link the user taps is decided by the reader's navigation policy,
 ///   which refuses private hosts itself and logs it
 ///   (`FullInteractiveEmailWebView.navigationDecision`).

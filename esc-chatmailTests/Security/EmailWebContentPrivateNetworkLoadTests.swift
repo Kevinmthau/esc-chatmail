@@ -342,36 +342,43 @@ final class EmailWebContentPrivateNetworkLoadTests: XCTestCase {
     // MARK: - Document navigations
 
     /// A meta refresh to a loopback host, in markup the sanitizer did not see, makes no request
-    /// from the reader, while a sender on a `.local` domain still has its own document loaded
-    /// (its base URL is `https://<domain>/`, a private name). The control delegate, which allows
-    /// every `.other` navigation as the delegates did, does reach the listener.
+    /// from the reader, even when the sender's own From domain is that host (`a@127.0.0.1`, which
+    /// used to make it the document's base, and the base host was exempt), and the email from
+    /// such a sender still renders, at `about:blank`. So does one whose domain is a non-canonical
+    /// private spelling (`a@127.0.0.1.`), whose own load the guard used to refuse once WebKit had
+    /// canonicalized the host. The control delegate, which allows every `.other` navigation as the
+    /// delegates did, does reach the listener.
     ///
     /// Revert-check: removing the `EmailDocumentNavigationGuard` check from
-    /// `FullInteractiveEmailWebView.navigationDecision` fails this.
-    func testReader_metaRefreshToALoopbackHost_isRefused_ownLocalDocumentStillLoads() async throws {
+    /// `FullInteractiveEmailWebView.navigationDecision` fails this; so does dropping the
+    /// `isPrivateOrReserved` guard from `EmailSenderBaseURLResolver.baseURL(from:)` (the document
+    /// then loads at `https://127.0.0.1/`, which the guard refuses, so it never completes).
+    func testReader_metaRefreshToTheSendersOwnPrivateHost_isRefused_andTheEmailRenders() async throws {
         let refresh = """
         <html><head><meta http-equiv="refresh" content="0;url=http://127.0.0.1:\(recorder.port)/refresh"></head>
         <body><p>Hello</p></body></html>
         """
         let stack = TestCoreDataStack()
-        let message = MessageBuilder()
-            .withId("refresh-\(UUID().uuidString)")
-            .withSubject("Subject")
-            .withSender(email: "nas@storage.local", name: "NAS")
-            .withBody("Body")
-            .build(in: stack.viewContext)
-        let reader = FullEmailReaderWebView(htmlContent: refresh, sourceSignature: nil, message: message)
-        let coordinator = FullEmailReaderWebView.Coordinator(reader, networkRules: rules)
-        let webView = makeHostedWebView(configuration: FullInteractiveEmailWebView.makeConfiguration(
-            cidHandler: CIDSchemeHandler(message: nil),
-            networkRules: rules
-        ))
-        webView.navigationDelegate = coordinator
+        for sender in ["a@127.0.0.1", "a@127.0.0.1."] {
+            let message = MessageBuilder()
+                .withId("refresh-\(UUID().uuidString)")
+                .withSubject("Subject")
+                .withSender(email: sender, name: "Sender")
+                .withBody("Body")
+                .build(in: stack.viewContext)
+            let reader = FullEmailReaderWebView(htmlContent: refresh, sourceSignature: nil, message: message)
+            let coordinator = FullEmailReaderWebView.Coordinator(reader, networkRules: rules)
+            let webView = makeHostedWebView(configuration: FullInteractiveEmailWebView.makeConfiguration(
+                cidHandler: CIDSchemeHandler(message: nil),
+                networkRules: rules
+            ))
+            webView.navigationDelegate = coordinator
 
-        coordinator.loadContentIfReady(in: webView)
+            coordinator.loadContentIfReady(in: webView)
 
-        try await waitForCompleteDocument(in: webView)
-        XCTAssertEqual(webView.url?.host, "storage.local", "The .local sender's own document loaded")
+            try await waitForCompleteDocument(in: webView)
+            XCTAssertEqual(webView.url?.absoluteString, "about:blank", "\(sender): the email renders, with no private base")
+        }
         try await Task.sleep(nanoseconds: settleNanoseconds)
         XCTAssertEqual(recorder.connectionCount, 0)
     }

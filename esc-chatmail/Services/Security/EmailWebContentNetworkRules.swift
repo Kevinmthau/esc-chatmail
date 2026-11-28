@@ -258,8 +258,16 @@ final class EmailWebContentNetworkRules {
             // WebKit calls back on the main thread; the hop says so to the compiler instead of
             // trapping if a WebKit ever did not.
             Task { @MainActor [weak self] in
-                guard let self, self.compileAttemptToken == attempt else { return }
-                self.compileDidEnd(ruleList: ruleList, error: error)
+                guard let self else { return }
+                if self.compileAttemptToken == attempt {
+                    self.compileDidEnd(ruleList: ruleList, error: error)
+                } else if self.state != .ready, let ruleList, error == nil {
+                    // An attempt given up at its timeout that compiled after all: the list is
+                    // as good as any later attempt's, so it is taken, rather than web views
+                    // loading without it (failed open) until the next retry a minute later. A
+                    // late failure changes nothing.
+                    self.compileDidEnd(ruleList: ruleList, error: nil)
+                }
             }
         }
     }

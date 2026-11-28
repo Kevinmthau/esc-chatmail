@@ -515,8 +515,7 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             // links and logging blocked private/reserved ones.
             switch FullInteractiveEmailWebView.navigationDecision(
                 navigationType: navigationAction.navigationType,
-                url: navigationAction.request.url,
-                documentBaseURL: FullInteractiveEmailWebView.baseURL(message: parent.message, senderEmail: nil)
+                url: navigationAction.request.url
             ) {
             case .allow:
                 decisionHandler(.allow)

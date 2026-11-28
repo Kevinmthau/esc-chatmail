@@ -9,20 +9,18 @@ import Foundation
 /// strips `meta`, `iframe` and `link` from every wrapped email, so this is the second line, for
 /// markup that reaches a web view another way.
 ///
-/// The document's own load is one: `loadHTMLString` navigates to the base URL it was given, the
-/// sender's `https://<From domain>/`, which may itself be a private name (`nas.local`), so a
-/// navigation to the base URL's own host is never refused here.
+/// The document's own load is one of these navigations too: `loadHTMLString` navigates to the base
+/// URL it was given, which is never a private host (`EmailSenderBaseURLResolver` gives none for a
+/// domain the detector refuses, and the document then loads at `about:blank`), so the guard needs
+/// no exception for it. It had one, for the base URL's own host, and a sender whose From domain was
+/// a private host used it to send a refresh there.
 enum EmailDocumentNavigationGuard {
     /// Whether an `.other` or `.reload` navigation to `url` must be cancelled: an http(s) URL whose
-    /// host `PrivateNetworkAddressDetector` refuses and that is not the document's own base host.
-    static func refusesAutomaticNavigation(to url: URL?, documentBaseURL: URL?) -> Bool {
+    /// host `PrivateNetworkAddressDetector` refuses.
+    static func refusesAutomaticNavigation(to url: URL?) -> Bool {
         guard let url,
               let scheme = url.scheme?.lowercased(),
               scheme == "http" || scheme == "https" else {
-            return false
-        }
-        if let baseHost = documentBaseURL?.host?.lowercased(),
-           url.host?.lowercased() == baseHost {
             return false
         }
         return PrivateNetworkAddressDetector.isPrivateOrReserved(url)

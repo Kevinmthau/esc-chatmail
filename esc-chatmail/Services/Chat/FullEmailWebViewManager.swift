@@ -96,14 +96,11 @@ enum FullInteractiveEmailWebView {
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
     /// off-screen `WarmNavigationDelegate` (which has no side effects — it permits the `.allow` cases
     /// and cancels the link-opening and blocked-link cases). Keeping the decision pure lets it be
-    /// unit-tested without WebKit.
-    /// `documentBaseURL` is the base URL the view's document was loaded with: an `.other` or
-    /// `.reload` navigation to a private host other than its own is refused
-    /// (`EmailDocumentNavigationGuard`).
+    /// unit-tested without WebKit. An `.other` or `.reload` navigation to a private host is
+    /// refused (`EmailDocumentNavigationGuard`).
     static func navigationDecision(
         navigationType: WKNavigationType,
-        url: URL?,
-        documentBaseURL: URL? = nil
+        url: URL?
     ) -> NavigationDecision {
         // Screen dangerous/unsupported schemes first, for every navigation type, so a
         // javascript:/vbscript:/file: URL can never load — not even disguised as an .other or
@@ -133,10 +130,7 @@ enum FullInteractiveEmailWebView {
         // Allow the initial document load, resource loads, and reloads. This is critical for
         // loadHTMLString with an about:blank/base-URL baseURL, which arrives as .other.
         if navigationType == .other || navigationType == .reload {
-            if let url, EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-                to: url,
-                documentBaseURL: documentBaseURL
-            ) {
+            if let url, EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: url) {
                 return .blockedPrivateNetwork(url)
             }
             return .allow
@@ -1793,8 +1787,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         FullInteractiveEmailWebView.applyBackgroundAppearance(to: webView)
 
         let delegate = WarmNavigationDelegate()
-        let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
-        delegate.documentBaseURL = baseURL
         webView.navigationDelegate = delegate
         let entry = Entry(
             key: key,
@@ -1814,7 +1806,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         }
 
         host.host(webView, width: width)
-        webView.loadHTMLString(html, baseURL: baseURL)
+        webView.loadHTMLString(
+            html,
+            baseURL: FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
+        )
         return entry
     }
 
@@ -2066,8 +2061,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
     var onFinish: (() -> Void)?
     var onTerminate: (() -> Void)?
-    /// The base URL the pooled document was loaded with (`EmailDocumentNavigationGuard`).
-    var documentBaseURL: URL?
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         onFinish?()
@@ -2088,8 +2081,7 @@ private final class WarmNavigationDelegate: NSObject, WKNavigationDelegate {
     ) {
         switch FullInteractiveEmailWebView.navigationDecision(
             navigationType: navigationAction.navigationType,
-            url: navigationAction.request.url,
-            documentBaseURL: documentBaseURL
+            url: navigationAction.request.url
         ) {
         case .allow:
             decisionHandler(.allow)

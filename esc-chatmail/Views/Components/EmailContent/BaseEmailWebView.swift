@@ -334,13 +334,10 @@ struct BaseEmailWebView: WebViewRepresentable {
         // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            // Only allow initial load and reload for previews, and neither to a private host other
-            // than the preview's own base host (a meta refresh: `EmailDocumentNavigationGuard`).
+            // Only allow initial load and reload for previews, and neither to a private host (a
+            // meta refresh: `EmailDocumentNavigationGuard`).
             let isOwnLoad = navigationAction.navigationType == .other || navigationAction.navigationType == .reload
-            if isOwnLoad, !EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-                to: navigationAction.request.url,
-                documentBaseURL: deriveBaseURL(from: parent.message, senderEmail: parent.senderEmail)
-            ) {
+            if isOwnLoad, !EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: navigationAction.request.url) {
                 decisionHandler(.allow)
             } else {
                 decisionHandler(.cancel)

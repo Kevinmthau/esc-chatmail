@@ -106,33 +106,33 @@ final class EmailWebContentNetworkRuleSourceTests: XCTestCase {
         XCTAssertEqual(allowed.filter(isBlocked), [])
     }
 
-    /// A navigation WebKit makes on its own (a meta refresh) to a private host is refused, unless
-    /// it is the document's own base host; public hosts and other schemes are left alone.
-    func testDocumentNavigationGuard_refusesPrivateHostsButTheDocumentsOwn() {
-        let base = URL(string: "https://storage.local/")
-        XCTAssertTrue(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-            to: URL(string: "http://127.0.0.1:8080/x"), documentBaseURL: URL(string: "https://example.com/")
-        ))
-        XCTAssertTrue(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-            to: URL(string: "https://router.local/"), documentBaseURL: base
-        ))
-        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-            to: URL(string: "https://storage.local/"), documentBaseURL: base
-        ), "The document's own load")
-        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-            to: URL(string: "https://example.com/next"), documentBaseURL: base
-        ))
-        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(
-            to: URL(string: "about:blank"), documentBaseURL: nil
-        ))
+    /// A navigation WebKit makes on its own (a meta refresh) to a private host is refused, whatever
+    /// the document's base was; public hosts and other schemes are left alone.
+    func testDocumentNavigationGuard_refusesPrivateHosts() {
+        for refused in ["http://127.0.0.1:8080/x", "https://router.local/", "http://storage.local:5000/admin", "http://foo.localhost:8080/"] {
+            XCTAssertTrue(EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: URL(string: refused)), refused)
+        }
+        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: URL(string: "https://example.com/next")))
+        XCTAssertFalse(EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: URL(string: "about:blank")))
         XCTAssertEqual(
             FullInteractiveEmailWebView.navigationDecision(
                 navigationType: .other,
-                url: URL(string: "http://127.0.0.1/x"),
-                documentBaseURL: URL(string: "https://example.com/")
+                url: URL(string: "http://127.0.0.1/x")
             ),
             .blockedPrivateNetwork(URL(string: "http://127.0.0.1/x")!)
         )
+    }
+
+    /// A sender's From domain gives the document a base only where it is a public host: a sender
+    /// chooses its From, and a private base used to let it exempt its own host from the guard.
+    ///
+    /// Revert-check: dropping the `isPrivateOrReserved` guard from
+    /// `EmailSenderBaseURLResolver.baseURL(from:)` fails this.
+    func testSenderBaseURL_isNilForAPrivateDomain() {
+        for sender in ["a@127.0.0.1", "a@192.168.1.1", "nas@storage.local", "a@foo.localhost", "a@127.0.0.1.", "a@0x7f.1"] {
+            XCTAssertNil(EmailSenderBaseURLResolver.baseURL(from: sender), sender)
+        }
+        XCTAssertEqual(EmailSenderBaseURLResolver.baseURL(from: "news@example.com"), URL(string: "https://example.com/"))
     }
 
     /// The list never names the document type, so the email documents the app loads itself (with
