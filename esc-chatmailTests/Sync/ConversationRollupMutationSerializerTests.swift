@@ -79,6 +79,45 @@ final class ConversationRollupMutationSerializerTests: XCTestCase {
         XCTAssertEqual(durableState.1, 0)
     }
 
+    /// A message the sync context never loaded has nothing stale to correct:
+    /// it reads the store's values when read. The newer local read state is
+    /// asked of the store as values, and only messages the sync context holds
+    /// loaded are corrected, so this one stays out of the sync context.
+    ///
+    /// Revert-check: `registeredObject(for:)` in
+    /// `ConversationRollupMutationSerializer.preserveNewerLocalReadState`.
+    /// With `existingObject(with:)` every message of the conversation with a
+    /// local change is registered (and loaded) in the sync context.
+    func testSyncMutation_leavesAMessageTheSyncContextNeverLoadedUnregistered() async throws {
+        let stack = TestCoreDataStack(storeKind: .sqlite)
+        let viewContext = stack.makeMainQueueViewContext()
+        let conversation = ConversationBuilder().visible().build(in: viewContext)
+        let message = MessageBuilder()
+            .withId("read-elsewhere")
+            .unread()
+            .inConversation(conversation)
+            .build(in: viewContext)
+        message.isUnread = false
+        message.localModifiedAt = Date()
+        try viewContext.save()
+        let conversationObjectID = conversation.objectID
+        let messageObjectID = message.objectID
+
+        // Keeps what it registers: a context holds a row it has not changed
+        // weakly, so a message the check loaded and let go of would read as
+        // never registered (`ScaleHubFaultTests.makeContextUnderTest`).
+        let syncContext = stack.newBackgroundContext()
+        syncContext.performAndWait { syncContext.retainsRegisteredObjects = true }
+        let registered = try await ConversationRollupMutationSerializer().performThrowingSyncMutation(
+            conversationIDs: [conversationObjectID],
+            in: syncContext
+        ) {
+            await syncContext.perform { syncContext.registeredObject(for: messageObjectID) != nil }
+        }
+
+        XCTAssertFalse(registered, "The read-state check loaded a message the sync context never had")
+    }
+
     func testThrowingMutationReleasesConversationTail() async {
         let serializer = ConversationRollupMutationSerializer()
         let conversationKey = "throwing-sync-mutation"

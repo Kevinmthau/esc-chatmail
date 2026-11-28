@@ -215,6 +215,20 @@ actor ConversationRollupMutationSerializer {
     /// A sync context can prepare mailbox state before a serialized local read
     /// commits. Restore newer durable read values for every affected conversation
     /// before deriving rollups or saving the sync context.
+    ///
+    /// Only a message the sync context holds loaded can carry a stale value:
+    /// one it never loaded, or holds as a fault, reads the store's when it is
+    /// read. So the store is asked, in one dictionary fetch, for the
+    /// (objectID, `localModifiedAt`, `isUnread`) of every message with a local
+    /// change that the sync context changed or that is in a touched
+    /// conversation, and only the loaded ones are corrected
+    /// (`registeredObject(for:)`). Until 2026-11-28 it fetched those messages
+    /// as full rows, bodies included, and resolved each in the sync context
+    /// with `existingObject(with:)`, which registered and loaded every one.
+    /// `localModifiedAt` is set by every mark-read, archive and Report Spam and
+    /// is never cleared, so a large chat the user had opened or archived was
+    /// pulled into every sync context that touched it (architecture review
+    /// 2026-11, data-model#4). `ScaleHubFaultTests` measures it.
     private nonisolated static func preserveNewerLocalReadState(
         for conversationIDs: Set<NSManagedObjectID>,
         in context: NSManagedObjectContext
@@ -227,57 +241,53 @@ actor ConversationRollupMutationSerializer {
                 .map(\.objectID)
                 .filter { !$0.isTemporaryID }
         }
+        let permanentConversationIDs = conversationIDs.filter { !$0.isTemporaryID }
+        guard !updatedMessageObjectIDs.isEmpty || !permanentConversationIDs.isEmpty else { return }
 
         let storeContext = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
         storeContext.persistentStoreCoordinator = persistentStoreCoordinator
         let localStates: [LocalReadState] = await storeContext.perform {
-            var statesByObjectID: [NSManagedObjectID: LocalReadState] = [:]
-
-            for objectID in updatedMessageObjectIDs {
-                guard let message = try? storeContext.existingObject(with: objectID) as? Message,
-                      let localModifiedAt = message.localModifiedAt else {
-                    continue
-                }
-                statesByObjectID[objectID] = LocalReadState(
-                    objectID: objectID,
-                    localModifiedAt: localModifiedAt,
-                    isUnread: message.isUnread
-                )
+            let objectID = NSExpressionDescription()
+            objectID.name = "objectID"
+            objectID.expression = NSExpression.expressionForEvaluatedObject()
+            objectID.expressionResultType = .objectIDAttributeType
+            let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+            request.resultType = .dictionaryResultType
+            request.propertiesToFetch = [objectID, "localModifiedAt", "isUnread"]
+            request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                NSCompoundPredicate(orPredicateWithSubpredicates: [
+                    NSPredicate(format: "SELF IN %@", updatedMessageObjectIDs),
+                    NSPredicate(format: "conversation IN %@", Array(permanentConversationIDs))
+                ]),
+                NSPredicate(format: "localModifiedAt != nil")
+            ])
+            let rows: [NSDictionary]
+            do {
+                rows = try storeContext.fetch(request)
+            } catch {
+                Log.error("Failed to read newer local read state for a sync mutation", category: .coreData, error: error)
+                return []
             }
-
-            let conversations = conversationIDs.compactMap {
-                try? storeContext.existingObject(with: $0) as? Conversation
+            return rows.compactMap { row -> LocalReadState? in
+                guard let objectID = row["objectID"] as? NSManagedObjectID,
+                      let localModifiedAt = row["localModifiedAt"] as? Date,
+                      let isUnread = (row["isUnread"] as? NSNumber)?.boolValue else { return nil }
+                return LocalReadState(objectID: objectID, localModifiedAt: localModifiedAt, isUnread: isUnread)
             }
-            if !conversations.isEmpty {
-                let request = Message.fetchRequest()
-                request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
-                    NSPredicate(format: "conversation IN %@", conversations),
-                    NSPredicate(format: "localModifiedAt != nil")
-                ])
-                request.includesPendingChanges = false
-
-                for message in (try? storeContext.fetch(request)) ?? [] {
-                    guard let localModifiedAt = message.localModifiedAt else { continue }
-                    statesByObjectID[message.objectID] = LocalReadState(
-                        objectID: message.objectID,
-                        localModifiedAt: localModifiedAt,
-                        isUnread: message.isUnread
-                    )
-                }
-            }
-
-            return Array(statesByObjectID.values)
         }
         guard !localStates.isEmpty else { return }
 
         await context.perform {
             for state in localStates {
-                guard let message = try? context.existingObject(with: state.objectID) as? Message,
+                guard let message = context.registeredObject(for: state.objectID) as? Message,
+                      !message.isFault,
                       !message.isDeleted,
                       message.localModifiedAt.map({ $0 < state.localModifiedAt }) ?? true else {
                     continue
                 }
-                message.isUnread = state.isUnread
+                if message.isUnread != state.isUnread {
+                    message.isUnread = state.isUnread
+                }
                 message.localModifiedAt = state.localModifiedAt
             }
         }

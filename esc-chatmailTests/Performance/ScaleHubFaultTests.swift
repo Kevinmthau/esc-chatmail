@@ -209,6 +209,53 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTAssertTrue(state.selfParticipationsAreFault)
     }
 
+    /// The run's rollup of the largest chat as a sync run makes it, inside
+    /// `ConversationRollupMutationSerializer.performThrowingSyncMutation`, on a
+    /// chat whose every message carries a local change (`localModifiedAt`, set
+    /// by every mark-read and every archive or spam of the chat, and never
+    /// cleared). The serializer first restores newer local read state
+    /// (`preserveNewerLocalReadState`), and that must read the chat's local
+    /// changes as values, not load the messages into the sync context.
+    ///
+    /// Revert-check: `registeredObject(for:)` in `preserveNewerLocalReadState`.
+    /// With `existingObject(with:)` every message with a local change is
+    /// registered in the sync context: 20,063 objects (iOS 27.0 simulator,
+    /// 2026-11-28). HONEST SCOPE: the store read's own cost (it was full rows
+    /// with bodies, in a context of its own, and is now values) is not what
+    /// this counts.
+    @MainActor
+    func testSyncMutationOfTheLargestChat_withLocalChanges_readsABoundedNumberOfRows() async throws {
+        let largestConversationID = manifest.largestConversationID
+        let expectedCount = manifest.largestConversationMessageCount
+        let marker = stack.newBackgroundContext()
+        let conversationID = try await marker.perform {
+            let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+            request.predicate = NSPredicate(format: "id == %@", largestConversationID as CVarArg)
+            let conversationID = try XCTUnwrap(try marker.fetch(request).first).objectID
+            let update = NSBatchUpdateRequest(entityName: "Message")
+            update.predicate = NSPredicate(format: "conversation == %@", conversationID)
+            update.propertiesToUpdate = ["localModifiedAt": Date()]
+            update.resultType = .updatedObjectsCountResultType
+            let result = try XCTUnwrap(try marker.execute(update) as? NSBatchUpdateResult)
+            XCTAssertEqual(result.result as? Int, expectedCount)
+            return conversationID
+        }
+        let context = makeContextUnderTest()
+        let coreDataStack = self.coreDataStack!
+
+        let updated = try await ConversationRollupMutationSerializer().performThrowingSyncMutation(
+            conversationIDs: [conversationID],
+            in: context
+        ) {
+            await ConversationRollupUpdater(coreDataStack: coreDataStack)
+                .updateRollupsForModified(conversationIDs: [conversationID], in: context, myEmail: Self.selfEmail)
+        }
+        let state = try await state(of: context)
+
+        XCTAssertTrue(updated)
+        XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
+    }
+
     // MARK: - A new message
 
     /// The commonest write there is: an incremental sync that found one new
