@@ -2000,12 +2000,249 @@ final class ParticipantLoaderTests: XCTestCase {
 
     // MARK: - Helpers
 
+    // MARK: - Where the snapshot is read
+
+    /// A saved conversation's snapshot, the participant walk and the DISTINCT fetch of the
+    /// From names over its messages, is read on the private-queue context the loader makes,
+    /// off the main thread, and resolves the same contested name the view context did (the
+    /// newest From name over an older, fuller one). Until 2026-11-28 the list and the chat
+    /// header ran it on the view context (architecture review 2026-11, conversation-list-ui#1).
+    // Revert-check: `snapshotReadContext` returning the passed context (the factory's
+    // context then reads no message, and the read is on the main thread).
+    func testSnapshot_savedConversation_isReadOffTheMainThread_withTheSameNames() async throws {
+        let conversation = try makeRebrandedSenderConversation()
+        let factory = SnapshotContextFactory()
+        let loader = makeLoader(factory: factory)
+
+        let info = await loader.loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            maxParticipants: 4,
+            participantHash: conversation.participantHash,
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.formattedDisplayName, "TBPN")
+        let messageReads = factory.contexts.flatMap { $0.reads(of: "Message") }
+        XCTAssertFalse(messageReads.isEmpty, "The From names were read on the loader's own context")
+        XCTAssertFalse(messageReads.contains(true), "and not on the main thread")
+    }
+
+    /// A conversation the passed context holds unsaved changes to is read there: an
+    /// optimistic send's conversation has a permanent ID before any save, and the store
+    /// would give its saved participants without the new one.
+    // Revert-check: the `hasUnsavedChanges` routing in `snapshotReadContext` (read on the
+    // private context, Bob is missing).
+    func testSnapshot_conversationWithUnsavedChanges_isReadOnThePassedContext() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Alice")
+            .withParticipantHash("hash-unsaved-participant")
+            .build(in: context)
+        let alice = PersonBuilder().withEmail("alice@example.com").withDisplayName("Alice").build(in: context)
+        addConversationParticipant(person: alice, to: conversation)
+        try context.save()
+        let bob = PersonBuilder().withEmail("bob@example.com").withDisplayName("Bob").build(in: context)
+        addConversationParticipant(person: bob, to: conversation)
+        XCTAssertFalse(conversation.objectID.isTemporaryID, "Precondition: a permanent ID")
+        XCTAssertTrue(conversation.hasChanges, "Precondition: unsaved changes in the passed context")
+        let factory = SnapshotContextFactory()
+
+        let info = await makeLoader(factory: factory).loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            participantHash: "hash-unsaved-participant-2",
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(Set(info.emails), ["alice@example.com", "bob@example.com"])
+    }
+
+    /// An unsaved conversation has a temporary ID, which no other context can resolve.
+    // HONEST SCOPE: two things in `snapshotReadContext` keep this on the passed context,
+    // the `isTemporaryID` guard and the `hasUnsavedChanges` routing (an unsaved row always
+    // has changes), and this test fails only with both reverted (the private context finds
+    // no such row and the snapshot is empty). The guard spares the hop to the passed
+    // context's queue; the routing is pinned alone by the test above.
+    func testSnapshot_unsavedConversation_isReadOnThePassedContext() async throws {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Alice")
+            .withParticipantHash("hash-temporary")
+            .build(in: context)
+        let alice = PersonBuilder().withEmail("alice@example.com").withDisplayName("Alice").build(in: context)
+        addConversationParticipant(person: alice, to: conversation)
+        context.processPendingChanges()
+        XCTAssertTrue(conversation.objectID.isTemporaryID, "Precondition: a temporary ID")
+        let factory = SnapshotContextFactory()
+
+        let info = await makeLoader(factory: factory).loadParticipants(
+            from: conversation.objectID,
+            in: context,
+            currentUserEmail: "me@example.com",
+            participantHash: "hash-temporary",
+            fallbackDisplayName: conversation.displayName,
+            includePhotos: false
+        )
+
+        XCTAssertEqual(info.emails, ["alice@example.com"])
+    }
+
+    /// A row and a chat header asking for the same conversation at once share one read.
+    /// The factory's reads are held open a moment, so the second ask lands while the first
+    /// read is under way.
+    // Revert-check: the `snapshotsInFlight` lookup in `fetchConversationParticipantSnapshot`
+    // (each ask makes a context of its own: 2).
+    func testSnapshot_concurrentLoadsOfOneConversation_shareOneRead() async throws {
+        let conversation = try makeRebrandedSenderConversation()
+        let factory = SnapshotContextFactory(readDelay: 0.2)
+        let loader = makeLoader(factory: factory)
+        let objectID = conversation.objectID
+        let participantHash = conversation.participantHash
+        let fallback = conversation.displayName
+
+        async let first = loader.loadParticipants(
+            from: objectID, in: context, currentUserEmail: "me@example.com",
+            participantHash: participantHash, fallbackDisplayName: fallback, includePhotos: false
+        )
+        async let second = loader.loadParticipants(
+            from: objectID, in: context, currentUserEmail: "me@example.com",
+            participantHash: participantHash, fallbackDisplayName: fallback, includePhotos: false
+        )
+        let names = await [first.formattedDisplayName, second.formattedDisplayName]
+
+        XCTAssertEqual(names, ["TBPN", "TBPN"])
+        XCTAssertEqual(factory.contexts.count, 1)
+    }
+
+    /// A list's senders, every message's From address and name, are read off the main thread
+    /// as the snapshot is.
+    // Revert-check: `resolveSenders` reading on the passed context (the factory's context
+    // reads no message).
+    func testResolveSenders_isReadOffTheMainThread() async throws {
+        let conversation = try makeListConversation(senderCount: 3)
+        let factory = SnapshotContextFactory()
+
+        let senders = await makeLoader(factory: factory).resolveSenders(
+            inConversation: conversation.objectID,
+            context: context,
+            currentUserEmail: "me@example.com"
+        )
+
+        XCTAssertEqual(senders.count, 3)
+        let messageReads = factory.contexts.flatMap { $0.reads(of: "Message") }
+        XCTAssertFalse(messageReads.isEmpty)
+        XCTAssertFalse(messageReads.contains(true))
+    }
+
+    /// The rebranded sender of `testLoadParticipants_latestFromHeaderNameWinsOverOlderMultiWordName`:
+    /// an older, fuller From name and a newer short one, saved.
+    private func makeRebrandedSenderConversation() throws -> Conversation {
+        let conversation = ConversationBuilder()
+            .withDisplayName("Technology Brothers")
+            .withParticipantHash(calculateParticipantHash(from: ["tbpn@mail.beehiiv.com"]))
+            .build(in: context)
+        let participant = PersonBuilder()
+            .withEmail("tbpn@mail.beehiiv.com")
+            .withDisplayName("Technology Brothers")
+            .build(in: context)
+        addConversationParticipant(person: participant, to: conversation)
+        _ = MessageBuilder()
+            .withId("snapshot-rebrand-older")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "Technology Brothers")
+            .withDate(Date(timeIntervalSince1970: 100))
+            .inConversation(conversation)
+            .build(in: context)
+        _ = MessageBuilder()
+            .withId("snapshot-rebrand-newer")
+            .withSender(email: "tbpn@mail.beehiiv.com", name: "TBPN")
+            .withDate(Date(timeIntervalSince1970: 200))
+            .inConversation(conversation)
+            .build(in: context)
+        try context.save()
+        return conversation
+    }
+
+    private func makeLoader(factory: SnapshotContextFactory) -> ParticipantLoader {
+        ParticipantLoader(
+            contactsResolver: MockContactsResolving(contactMap: [:]),
+            currentUserAliasesProvider: { _, _ in ["me@example.com"] },
+            prefetchDisplayNames: { _ in },
+            cachedDisplayNameProvider: { _ in nil },
+            photoLoader: { _ in [] },
+            rollupDependencyTracker: ParticipantRollupDependencyTracker(),
+            makeSnapshotContext: { factory.make(on: $0) }
+        )
+    }
+
     private func addConversationParticipant(person: Person, to conversation: Conversation) {
         let participant = context.insertTestObject(ConversationParticipant.self)
         participant.id = UUID()
         participant.participantRole = .normal
         participant.person = person
         participant.conversation = conversation
+    }
+}
+
+// MARK: - Snapshot contexts
+
+/// Makes the loader's snapshot contexts as production does (a private-queue context on the
+/// passed context's coordinator), keeping each so a test can ask what was read on it.
+@MainActor
+private final class SnapshotContextFactory {
+    private(set) var contexts: [ReadRecordingContext] = []
+    private let readDelay: TimeInterval
+
+    init(readDelay: TimeInterval = 0) {
+        self.readDelay = readDelay
+    }
+
+    func make(on context: NSManagedObjectContext) -> NSManagedObjectContext? {
+        guard let coordinator = context.persistentStoreCoordinator else { return nil }
+        let made = ReadRecordingContext(readDelay: readDelay)
+        made.persistentStoreCoordinator = coordinator
+        made.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        contexts.append(made)
+        return made
+    }
+}
+
+/// A private-queue context that records, for each fetch it executes, the entity and
+/// whether it ran on the main thread, and can hold each fetch open for `readDelay`.
+///
+/// `@unchecked Sendable`: `recorded` is guarded by `lock`; Core Data's own state stays on
+/// the context's private queue.
+private final class ReadRecordingContext: NSManagedObjectContext, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(entity: String, onMainThread: Bool)] = []
+    private let readDelay: TimeInterval
+
+    init(readDelay: TimeInterval) {
+        self.readDelay = readDelay
+        super.init(concurrencyType: .privateQueueConcurrencyType)
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("not supported in tests")
+    }
+
+    /// Whether each fetch of `entity` ran on the main thread, in order.
+    func reads(of entity: String) -> [Bool] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded.filter { $0.entity == entity }.map(\.onMainThread)
+    }
+
+    override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
+        lock.lock()
+        recorded.append((request.entityName ?? "", Thread.isMainThread))
+        lock.unlock()
+        if readDelay > 0 {
+            Thread.sleep(forTimeInterval: readDelay)
+        }
+        return try super.__execute(request)
     }
 }
 

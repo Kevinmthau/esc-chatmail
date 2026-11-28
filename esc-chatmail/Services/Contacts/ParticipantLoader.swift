@@ -18,6 +18,19 @@ final class ParticipantLoader {
     private let currentUserAliasesProvider: ((NSManagedObjectContext?, String) async -> Set<String>)?
     private let rollupCache: ParticipantRollupCache
     private let resolver: ParticipantInfoResolver
+    /// Makes the context a saved conversation's snapshot is read on, from the context
+    /// the caller passed (`snapshotReadContext`). By default a private-queue context on
+    /// the passed context's coordinator (`makePrivateSnapshotContext`).
+    private let makeSnapshotContext: (NSManagedObjectContext) -> NSManagedObjectContext?
+    /// The snapshot read under way for each conversation, so a row and a chat header
+    /// asking at once read it once (`fetchConversationParticipantSnapshot`).
+    private var snapshotsInFlight: [SnapshotKey: Task<ConversationParticipantSnapshot, Never>] = [:]
+
+    private struct SnapshotKey: Hashable {
+        let conversationObjectID: NSManagedObjectID
+        let currentUserEmail: String
+        let fallbackDisplayName: String?
+    }
 
     init(
         personCache: PersonCache = .shared,
@@ -29,8 +42,10 @@ final class ParticipantLoader {
         photoLoader: (@Sendable ([String]) async -> [ProfilePhoto])? = nil,
         rollupDependencyTracker: any ParticipantRollupDependencyTracking = ParticipantRollupDependencyTracker.shared,
         participantRollupCacheTTL: TimeInterval = 300,
-        maxParticipantRollupCacheEntries: Int = 600
+        maxParticipantRollupCacheEntries: Int = 600,
+        makeSnapshotContext: @escaping (NSManagedObjectContext) -> NSManagedObjectContext? = ParticipantLoader.makePrivateSnapshotContext(on:)
     ) {
+        self.makeSnapshotContext = makeSnapshotContext
         self.currentUserAliasesProvider = currentUserAliasesProvider
         self.rollupCache = ParticipantRollupCache(
             rollupDependencyTracker: rollupDependencyTracker,
@@ -329,14 +344,17 @@ final class ParticipantLoader {
             currentUserEmail: currentUserEmail,
             context: context
         )
-        let senders: (emails: [String], headerDisplayNamesByEmail: [String: String]) = await context.perform {
-            guard let conversation = try? context.existingObject(with: conversationObjectID) as? Conversation,
+        // Read off the main thread like the snapshot (`snapshotReadContext`): a list's
+        // senders are every message's, through a DISTINCT fetch over all of them.
+        let readContext = await snapshotReadContext(for: conversationObjectID, passed: context)
+        let senders: (emails: [String], headerDisplayNamesByEmail: [String: String]) = await readContext.perform {
+            guard let conversation = try? readContext.existingObject(with: conversationObjectID) as? Conversation,
                   !conversation.isDeleted else {
                 return ([], [:])
             }
 
             let emails = ConversationParticipantExtractor.nonMeSenderEmails(
-                in: context,
+                in: readContext,
                 conversation: conversation,
                 currentUserEmail: currentUserEmail,
                 currentUserAliases: currentUserAliases
@@ -344,7 +362,7 @@ final class ParticipantLoader {
             return (
                 emails,
                 ConversationParticipantExtractor.headerDisplayNamesByEmail(
-                    in: context,
+                    in: readContext,
                     conversation: conversation,
                     participantEmails: emails
                 )
@@ -393,7 +411,79 @@ final class ParticipantLoader {
 
     // MARK: - Private Helpers
 
+    /// The context the private-queue snapshot read is made on by default: a context of
+    /// its own on the passed context's coordinator, with the app's merge policy (a context
+    /// built by hand must set it; this one is never saved). Nil where the passed context
+    /// has no coordinator (a child context), which then reads on itself.
+    nonisolated static func makePrivateSnapshotContext(on context: NSManagedObjectContext) -> NSManagedObjectContext? {
+        guard let coordinator = context.persistentStoreCoordinator else { return nil }
+        let snapshotContext = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+        snapshotContext.persistentStoreCoordinator = coordinator
+        snapshotContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+        return snapshotContext
+    }
+
+    /// Where a conversation's snapshot is read. A saved conversation is read on a
+    /// private-queue context (`makeSnapshotContext`), off the main thread: the snapshot
+    /// walks the participants and makes a DISTINCT fetch of the From names over every
+    /// message of the conversation, with no limit, and the list and the chat header pass
+    /// the view context, so until 2026-11-28 that ran on the main thread for every row
+    /// that missed the rollup cache and every chat opened (architecture review 2026-11,
+    /// conversation-list-ui#1; scalability `row-header-distinct-sender-scan`).
+    ///
+    /// The passed context reads it where the store cannot answer: a temporary ID, and a
+    /// conversation the passed context holds unsaved changes to. An optimistic send's
+    /// conversation is the second kind with a permanent ID: the send obtains one before the
+    /// list or the chat first sees it (`GmailSendService.createOptimisticMessage`), and a
+    /// private context would find nothing, or the saved participants without the new ones.
+    private func snapshotReadContext(
+        for conversationObjectID: NSManagedObjectID,
+        passed context: NSManagedObjectContext
+    ) async -> NSManagedObjectContext {
+        guard !conversationObjectID.isTemporaryID,
+              let snapshotContext = makeSnapshotContext(context) else {
+            return context
+        }
+        let hasUnsavedChanges = await context.perform {
+            context.registeredObject(for: conversationObjectID)?.hasChanges == true
+        }
+        return hasUnsavedChanges ? context : snapshotContext
+    }
+
+    /// The snapshot of one conversation, read once for concurrent callers: a row and the
+    /// chat header asking for the same conversation share the read in flight.
     private func fetchConversationParticipantSnapshot(
+        conversationObjectID: NSManagedObjectID,
+        in context: NSManagedObjectContext,
+        currentUserEmail: String,
+        currentUserAliases: Set<String>,
+        fallbackDisplayName: String?
+    ) async -> ConversationParticipantSnapshot {
+        let key = SnapshotKey(
+            conversationObjectID: conversationObjectID,
+            currentUserEmail: EmailNormalizer.normalize(currentUserEmail),
+            fallbackDisplayName: fallbackDisplayName
+        )
+        if let inFlight = snapshotsInFlight[key] {
+            return await inFlight.value
+        }
+        let read = Task { @MainActor [self] in
+            let readContext = await snapshotReadContext(for: conversationObjectID, passed: context)
+            return await Self.readSnapshot(
+                conversationObjectID: conversationObjectID,
+                in: readContext,
+                currentUserEmail: currentUserEmail,
+                currentUserAliases: currentUserAliases,
+                fallbackDisplayName: fallbackDisplayName
+            )
+        }
+        snapshotsInFlight[key] = read
+        let snapshot = await read.value
+        snapshotsInFlight[key] = nil
+        return snapshot
+    }
+
+    private nonisolated static func readSnapshot(
         conversationObjectID: NSManagedObjectID,
         in context: NSManagedObjectContext,
         currentUserEmail: String,

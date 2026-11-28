@@ -8,7 +8,9 @@ import CoreData
 /// `@MainActor` production paths — `ConversationListViewModel.onAppear(in:)`
 /// re-runs the window fetch (`ConversationWindowProvider.swift:60`),
 /// `ParticipantLoader` and `MessageBubbleLoader` are main-actor — and they use
-/// that context directly, which is on-queue only for a main-queue context. See
+/// that context directly, which is on-queue only for a main-queue context
+/// (`ParticipantLoader` reads a saved conversation's snapshot on a private-queue
+/// context of its own, and asks this one only whether it holds unsaved changes). See
 /// that helper for what the private-queue shape races. `measureAsync` runs its
 /// operation on the main actor for the same reason (see its doc comment).
 ///
