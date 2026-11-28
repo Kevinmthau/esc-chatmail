@@ -25,7 +25,7 @@ final class StoreMaintenanceCoordinatorTests: XCTestCase {
         let maintenance = Task {
             await coordinator.runExclusivelyWhenStoreIsIdle(operationName: "test cleanup") {
                 let generation = handler.captureAccountGeneration()
-                await DatabaseMaintenanceService.cleanupOrphanedHTMLFiles(
+                _ = await DatabaseMaintenanceService.cleanupOrphanedHTMLFiles(
                     in: stack.viewContext,
                     htmlContentHandler: handler,
                     expectedGeneration: generation
