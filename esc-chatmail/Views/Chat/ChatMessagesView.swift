@@ -17,7 +17,8 @@ private final class ChatMessagesSession: ObservableObject {
     init(
         conversation: Conversation,
         viewModel: ChatViewModel,
-        chatDependencies: ChatDependencies
+        chatDependencies: ChatDependencies,
+        onInitialReveal: @escaping @MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void
     ) {
         let scrollState = VirtualScrollState(
             conversationId: conversation.id.uuidString,
@@ -31,7 +32,8 @@ private final class ChatMessagesSession: ObservableObject {
             scrollState: scrollState,
             viewModel: viewModel,
             chatDependencies: chatDependencies,
-            initialPresentationAnchor: .bottom
+            initialPresentationAnchor: .bottom,
+            onInitialReveal: onInitialReveal
         )
 
         scrollState.objectWillChange
@@ -88,7 +90,8 @@ struct ChatMessagesView: View {
         bubbleStyle: MessageBubbleStyle,
         composerStyle: ChatComposerStyle,
         isTextFieldFocused: ChatComposerFocus,
-        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void
+        onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
+        onInitialReveal: (@MainActor (ChatMessagesCoordinator.InitialRevealOutcome) -> Void)? = nil
     ) {
         self.conversation = conversation
         self.viewModel = viewModel
@@ -100,11 +103,17 @@ struct ChatMessagesView: View {
         self.isTextFieldFocused = isTextFieldFocused
         self.onOpenFullMessage = onOpenFullMessage
 
+        // `onInitialReveal` is taken with the session, once for the chat's
+        // life, like the rest of the session's inputs: how the transcript was
+        // revealed (`ChatMessagesCoordinator.InitialRevealOutcome`). The app
+        // passes none; the hosted reveal test does
+        // (`ChatTranscriptRevealHostedTests`).
         _session = StateObject(
             wrappedValue: ChatMessagesSession(
                 conversation: conversation,
                 viewModel: viewModel,
-                chatDependencies: chatDependencies
+                chatDependencies: chatDependencies,
+                onInitialReveal: onInitialReveal ?? { _ in }
             )
         )
     }
