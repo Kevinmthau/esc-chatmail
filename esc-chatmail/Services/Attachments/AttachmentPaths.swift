@@ -322,9 +322,17 @@ struct AttachmentPaths {
         return nil
     }
     
+    /// Whether `data` is now stored at `relativePath`. For a caller that answers a full disk
+    /// as it answers any other failure; one that must tell them apart calls `writeData`.
     static func saveData(_ data: Data, to relativePath: String) -> Bool {
-        guard let url = fullURL(for: relativePath) else { return false }
-        
+        writeData(data, to: relativePath) == .saved
+    }
+
+    /// Writes `data` to `relativePath`, atomically, and gives it its backup mark; the one
+    /// writer of attachment bytes, which `saveData` wraps.
+    static func writeData(_ data: Data, to relativePath: String) -> AttachmentWriteResult {
+        guard let url = fullURL(for: relativePath) else { return .failed }
+
         do {
             // Atomic: readers treat file presence as validity (`needsRedownload`,
             // the local_inline_ confirmation), so an in-place write killed midway
@@ -336,10 +344,17 @@ struct AttachmentPaths {
             if isRedownloadable(relativePath) {
                 BackupExclusion.exclude(url, category: .attachment)
             }
-            return true
+            return .saved
         } catch {
-            Log.error("Failed to save attachment data", category: .attachment, error: error)
-            return false
+            let result = AttachmentWriteResult(classifying: error)
+            Log.error(
+                result == .outOfSpace
+                    ? "Failed to save attachment data: the disk is full"
+                    : "Failed to save attachment data",
+                category: .attachment,
+                error: error
+            )
+            return result
         }
     }
     
@@ -353,6 +368,21 @@ struct AttachmentPaths {
         FileSystemErrorHandler.removeItem(at: url, category: .attachment)
     }
     
+    /// The extension a received attachment is stored under: its filename's, where that is an
+    /// extension by the export's rules (`AttachmentExportPolicy.splitExtension`: a few characters,
+    /// no space, not all digits), lowercased; otherwise its type's. The filename is the sender's,
+    /// and its extension used whole could make the stored name longer than the file system
+    /// allows, so every write of the attachment failed and a kept inline row fetched its whole
+    /// message again at every showing.
+    static func storedFileExtension(filename: String, mimeType: String) -> String {
+        let name = (filename as NSString).lastPathComponent
+        let candidate = AttachmentExportPolicy.splitExtension(of: name).pathExtension.lowercased()
+        guard !candidate.isEmpty, !candidate.contains("/"), !candidate.contains(":") else {
+            return fileExtension(for: mimeType)
+        }
+        return candidate
+    }
+
     static func fileExtension(for mimeType: String) -> String {
         switch mimeType.lowercased() {
         // Images
