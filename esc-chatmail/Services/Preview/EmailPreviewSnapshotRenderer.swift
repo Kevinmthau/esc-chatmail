@@ -11,6 +11,9 @@ struct EmailPreviewSnapshotRequest {
     let isDarkMode: Bool
     let senderEmail: String?
     let message: Message?
+    /// The pipeline's values of `html` (`HTMLPreviewDerivedValues`); nil works them out here, on
+    /// the main actor, as before.
+    var derivedValues: HTMLPreviewDerivedValues? = nil
 }
 
 struct EmailPreviewSnapshotResult {
@@ -428,16 +431,24 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
     private var didComplete = false
     private let scale: CGFloat
 
+    var scaleForTesting: CGFloat {
+        scale
+    }
+
     init(request: EmailPreviewSnapshotRequest) throws {
         guard request.containerWidth > 1 else {
             throw EmailPreviewSnapshotRenderError.invalidWidth
         }
 
         self.request = request
+        // The width estimate is three regex passes over the whole HTML; the pipeline made it off
+        // the main actor where it built the payload.
+        let estimatedLayoutWidth = request.derivedValues.map(\.estimatedLayoutWidth)
+            ?? HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: request.html)
         self.scale = HTMLPreviewScaleCalculator.previewScale(
             defaultScale: 0.5,
             containerWidth: request.containerWidth,
-            html: request.html
+            estimatedLayoutWidth: estimatedLayoutWidth
         )
 
         let configuration = WKWebViewConfiguration()

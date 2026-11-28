@@ -26,6 +26,31 @@ enum NativePreviewCardRoute: Equatable, Sendable {
 struct HTMLPreviewPayload: Equatable, Sendable {
     let html: String
     let previewCacheKey: String
+    /// What the snapshot view and its render read off `html`, computed where the payload is made,
+    /// off the main actor (`EmailPreviewPipeline.loadPreview`), instead of at every body evaluation
+    /// of the card and every render (architecture review 2026-11, `web-content-rendering#4`).
+    let derivedValues: HTMLPreviewDerivedValues
+
+    init(html: String, previewCacheKey: String) {
+        self.html = html
+        self.previewCacheKey = previewCacheKey
+        self.derivedValues = HTMLPreviewDerivedValues(html: html)
+    }
+}
+
+/// The values of a preview's HTML that the snapshot path needs and that cost a pass over the whole
+/// HTML: the content digest in its cache key (`EmailPreviewSnapshotCacheKey.contentFingerprint`,
+/// so a key made from it is byte-identical to one made from the HTML) and the layout width the
+/// render scales to (`HTMLPreviewScaleCalculator.estimatedLayoutWidth`, nil when the HTML names
+/// none).
+struct HTMLPreviewDerivedValues: Equatable, Sendable {
+    let contentFingerprint: String
+    let estimatedLayoutWidth: CGFloat?
+
+    init(html: String) {
+        self.contentFingerprint = EmailPreviewSnapshotCacheKey.contentFingerprint(for: html)
+        self.estimatedLayoutWidth = HTMLPreviewScaleCalculator.estimatedLayoutWidth(from: html)
+    }
 }
 
 enum EmailPreviewRenderModel: Equatable, Sendable {
