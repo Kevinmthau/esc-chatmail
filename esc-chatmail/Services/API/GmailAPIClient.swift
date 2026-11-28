@@ -668,12 +668,12 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// already published `requireReauthentication`, so the parked queue is
     /// released by the sign-in that follows. Every other failure
     /// (`noValidToken`, `tokenExpired`, `refreshFailed`, `networkUnavailable`,
-    /// an unknown error) is `.authenticationError`: an account-scoped abort
-    /// that sync records no verdicts for, and that the pending-action queue
-    /// retries behind its bounded authentication timer, never a park, because
-    /// nothing has asked the user to sign in again. Not `.networkError`:
-    /// `MessageFetcher` would run the refresh again on each of its retry
-    /// passes and still stage per-message failures. A `CancellationError` (a
+    /// `refreshedIDTokenRefused`, an unknown error) is `.authenticationError`:
+    /// an account-scoped abort that sync records no verdicts for, and that the
+    /// pending-action queue retries behind its bounded authentication timer,
+    /// never a park, because nothing has asked the user to sign in again. Not
+    /// `.networkError`: `MessageFetcher` would run the refresh again on each
+    /// of its retry passes and still stage per-message failures. A `CancellationError` (a
     /// refresh whose epoch a sign-out retired) passes through unchanged, and so
     /// does an `APIError`. Mapped here, at the client's boundary, never inside
     /// `TokenManager`: its errors are its own contract (`GoogleTokenRefresher`

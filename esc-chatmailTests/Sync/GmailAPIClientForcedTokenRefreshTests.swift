@@ -290,8 +290,8 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(stepped.sendCount, 2, "The transport failure is retried, once")
     }
 
-    // Revert-check: fails if `GoogleForcedTokenRefresh.refreshError(for:)`
-    // maps AppAuth's -15 to `refreshFailed`: `TokenManager` would retry it,
+    // Revert-check: fails if `GoogleTokenRefreshFailure.error(for:)` maps
+    // AppAuth's -15 to `refreshFailed`: `TokenManager` would retry it,
     // and the 401 would cost three token requests instead of one.
     // HONEST SCOPE: the forced refresh helps only while the device's clock is
     // less than about ten minutes off; past that this is the outcome, the
@@ -330,6 +330,55 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
 
         XCTAssertEqual(stepped.sendCount, 1, "One token request: the refusal is not retried")
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
+        XCTAssertFalse(authSession.requiresReauthentication, "Nobody is asked to sign in again")
+        XCTAssertTrue(authSession.canAccessMailbox)
+        let stored = try keychain.loadCodable(
+            TokenInfo.self,
+            for: KeychainService.Key.googleAccessToken.rawValue
+        )
+        XCTAssertEqual(stored.accessToken, Self.rejectedToken, "The credentials are kept")
+    }
+
+    // Revert-check: fails if `TokenManager.isRetryableError` counts
+    // `.refreshedIDTokenRefused` as retryable (three token requests, the
+    // preflight's cost before this change), or if
+    // `GmailAPIClient.apiError(forTokenAcquisitionFailure:)` maps it to
+    // `credentialsRevoked` (the user asked to sign in again over a clock).
+    // HONEST SCOPE: `MockTokenRefresher` throws the classified error itself.
+    // That GoogleSignIn's own refresh throws it for AppAuth's -15 is pinned by
+    // `GoogleTokenRefreshFailureTests` and, from source, by
+    // `GoogleTokenRefresherSourceTests`.
+    func testGetMessage_plainRefreshRefusedForTheDeviceClock_costsOneTokenRequestAndSendsNothing() async throws {
+        authSession.isAuthenticated = true
+        // A clock set ahead past the token's expiry: `TokenManager` reads the
+        // token as expired, and so does GoogleSignIn, which asks Google.
+        try tokenManager.saveTokens(
+            access: Self.rejectedToken,
+            refresh: "refresh-token",
+            expirationDate: Date().addingTimeInterval(-60)
+        )
+        refresher.errorToThrow = TokenManagerError.refreshedIDTokenRefused(NSError(
+            domain: "org.openid.appauth.general",
+            code: -15,
+            userInfo: [NSLocalizedDescriptionKey: "Issued at time is more than 600 seconds before or after the current time"]
+        ))
+        StubURLProtocol.script = [.data(200, Self.messageBody)]
+        let client = makeClient(tokenManager: tokenManager)
+
+        do {
+            _ = try await client.getMessage(id: "m1")
+            XCTFail("Expected authenticationError")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, never credentialsRevoked; got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(refresher.callCount, 1, "One token request: the refusal is not retried")
+        XCTAssertEqual(refresher.forcedCallCount, 0)
+        XCTAssertEqual(StubURLProtocol.requestCount, 0, "No request is sent without a token")
         XCTAssertFalse(authSession.requiresReauthentication, "Nobody is asked to sign in again")
         XCTAssertTrue(authSession.canAccessMailbox)
         let stored = try keychain.loadCodable(
