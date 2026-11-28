@@ -29,6 +29,7 @@ import CoreData
 struct MacConversationSidebar: View {
     @ObservedObject var viewModel: ConversationListViewModel
     @ObservedObject var abandonedActions: AbandonedPendingActionsModel
+    @ObservedObject var exhaustedMessages: ExhaustedSyncMessagesModel
     /// Observed only for `isBlockedByInsufficientStorage`, as in `ConversationListView`.
     @ObservedObject var syncEngine: SyncEngine
     @Binding var selection: Set<NSManagedObjectID>
@@ -92,6 +93,16 @@ struct MacConversationSidebar: View {
                     summary: summary,
                     onRetry: abandonedActions.retryAll,
                     onDismiss: abandonedActions.dismissAll
+                )
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden, edges: .top)
+                .selectionDisabled()
+            }
+            if let summary = exhaustedMessages.summary {
+                ExhaustedSyncMessagesBanner(
+                    summary: summary,
+                    gmailURL: exhaustedMessages.gmailURL,
+                    onRetry: exhaustedMessages.retryAll
                 )
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden, edges: .top)

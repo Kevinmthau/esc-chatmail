@@ -5,6 +5,7 @@ struct ConversationListView: View {
     @ObservedObject private var authSession: AuthSession
     @StateObject private var viewModel: ConversationListViewModel
     @StateObject private var abandonedActions: AbandonedPendingActionsModel
+    @StateObject private var exhaustedMessages: ExhaustedSyncMessagesModel
     /// Observed only for `isBlockedByInsufficientStorage`; sync progress publishes through its
     /// own `SyncUIState`, so this does not re-render the list while a run is in flight.
     @ObservedObject private var syncEngine: SyncEngine
@@ -33,6 +34,9 @@ struct ConversationListView: View {
         )
         _abandonedActions = StateObject(
             wrappedValue: AbandonedPendingActionsModel(manager: resolvedDeps.pendingActionsManager)
+        )
+        _exhaustedMessages = StateObject(
+            wrappedValue: ExhaustedSyncMessagesModel(deps: resolvedDeps)
         )
     }
 
@@ -67,6 +71,15 @@ struct ConversationListView: View {
                     summary: summary,
                     onRetry: abandonedActions.retryAll,
                     onDismiss: abandonedActions.dismissAll
+                )
+                .listRowInsets(EdgeInsets())
+                .listRowSeparator(.hidden, edges: .top)
+            }
+            if let summary = exhaustedMessages.summary {
+                ExhaustedSyncMessagesBanner(
+                    summary: summary,
+                    gmailURL: exhaustedMessages.gmailURL,
+                    onRetry: exhaustedMessages.retryAll
                 )
                 .listRowInsets(EdgeInsets())
                 .listRowSeparator(.hidden, edges: .top)
@@ -186,6 +199,7 @@ struct ConversationListView: View {
         .conversationListLifecycle(
             viewModel: viewModel,
             abandonedActions: abandonedActions,
+            exhaustedMessages: exhaustedMessages,
             viewContext: viewContext,
             authSession: authSession
         )

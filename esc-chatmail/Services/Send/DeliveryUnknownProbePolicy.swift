@@ -25,8 +25,9 @@ import Foundation
 ///   keep our Message-ID. `DeliveryUnknownResolution.storeAgreesItWasNotSent`
 ///   refuses the verdict on what those leave in the store: a ledger row still
 ///   on record, a row carrying our Message-ID, or a message from the user
-///   that does not carry one. A failure whose retries ran out, or an
-///   unprocessable message, leaves no row, and then the search is the only
+///   that does not carry one. A row whose drain retries ran out is kept
+///   (`exhausted`) and holds the verdict until it is resolved or cleared; an
+///   unprocessable message leaves no row, and then the search is the only
 ///   witness.
 /// And it is asked only after a quiet period long past the send's own cap
 /// (`NetworkConfig.sendResourceTimeout`), so that Gmail has finished with any

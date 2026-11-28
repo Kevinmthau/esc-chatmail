@@ -90,6 +90,7 @@ final class MacConversationSidebarSelectionGuardTests: XCTestCase {
     private struct SidebarHost: View {
         @ObservedObject var viewModel: ConversationListViewModel
         let abandonedActions: AbandonedPendingActionsModel
+        let exhaustedMessages: ExhaustedSyncMessagesModel = .showingNothing()
         let viewContext: NSManagedObjectContext
         @State private var selectedConversationIDs: Set<NSManagedObjectID> = []
 
@@ -97,6 +98,7 @@ final class MacConversationSidebarSelectionGuardTests: XCTestCase {
             MacConversationSidebar(
                 viewModel: viewModel,
                 abandonedActions: abandonedActions,
+                exhaustedMessages: exhaustedMessages,
                 syncEngine: Dependencies.shared.syncEngine,
                 selection: $selectedConversationIDs,
                 currentUserEmail: "me@example.com",

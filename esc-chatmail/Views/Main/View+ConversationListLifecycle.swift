@@ -12,6 +12,7 @@ extension View {
     func conversationListLifecycle(
         viewModel: ConversationListViewModel,
         abandonedActions: AbandonedPendingActionsModel,
+        exhaustedMessages: ExhaustedSyncMessagesModel,
         viewContext: NSManagedObjectContext,
         authSession: AuthSession
     ) -> some View {
@@ -22,6 +23,7 @@ extension View {
             AppPrewarmer.prewarmAll()
             viewModel.onAppear(in: viewContext)
             abandonedActions.refresh()
+            exhaustedMessages.refresh()
             // Lookups never prompt on their own, so this is the one deliberate
             // Contacts permission request (no-op after first launch/answer).
             ContactsAuthorizationCoordinator.shared.requestAccessOnFirstAuthenticatedLaunchIfNeeded()

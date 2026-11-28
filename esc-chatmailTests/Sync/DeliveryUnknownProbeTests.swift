@@ -159,6 +159,28 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         XCTAssertEqual(staged.probedAt, runStart)
     }
 
+    /// A row the drain gave up on is kept now, and it is still a witness: it
+    /// may be this send's echo, which sync could not download, and a false
+    /// "Not sent" invites a duplicate resend (architecture review 2026-11,
+    /// sync-persist-path#6).
+    ///
+    /// Revert-check: the ledger predicate of
+    /// `DeliveryUnknownResolution.storeAgreesItWasNotSent` narrowed to rows
+    /// that are not `exhausted`.
+    func testRun_exhaustedLedgerRowSinceTheSend_refusesNotSent() async throws {
+        try seedSend(id: "maybe-exhausted-echo", admittedAgo: 2 * 60 * 60)
+        try seedLedgerRow(
+            abandonedAgo: 90 * 60,
+            state: "exhausted",
+            retryCount: Int16(SyncConfig.maxAbandonedMessageRetries)
+        )
+
+        let outcome = try await makeProbe().run(runStartedAt: runStart, in: context)
+
+        XCTAssertEqual(outcome.unresolved, ["maybe-exhausted-echo"])
+        XCTAssertEqual(outcome.resolvedAsNotSent, [])
+    }
+
     func testRun_ledgerRowFromBeforeTheSend_isNoWitness() async throws {
         try seedSend(id: "lost-send", admittedAgo: 2 * 60 * 60)
         try seedLedgerRow(abandonedAgo: 5 * 60 * 60)
@@ -472,7 +494,11 @@ final class DeliveryUnknownProbeTests: XCTestCase {
         try context.save()
     }
 
-    private func seedLedgerRow(abandonedAgo: TimeInterval) throws {
+    private func seedLedgerRow(
+        abandonedAgo: TimeInterval,
+        state: String = "abandoned",
+        retryCount: Int16 = 0
+    ) throws {
         let seedContext = stack.newBackgroundContext()
         let abandonedAt = runStart.addingTimeInterval(-abandonedAgo)
         try seedContext.performAndWait {
@@ -480,7 +506,8 @@ final class DeliveryUnknownProbeTests: XCTestCase {
             row.setValue(UUID(), forKey: "id")
             row.setValue("gmail-unstored-\(UUID().uuidString)", forKey: "gmailMessageId")
             row.setValue(abandonedAt, forKey: "abandonedAt")
-            row.setValue("abandoned", forKey: "state")
+            row.setValue(state, forKey: "state")
+            row.setValue(retryCount, forKey: "retryCount")
             try seedContext.save()
         }
     }

@@ -253,6 +253,7 @@ final class MacConversationSidebarRowIdentityTests: XCTestCase {
         @ObservedObject var viewModel: ConversationListViewModel
         let selection: Selection
         let abandonedActions: AbandonedPendingActionsModel
+        let exhaustedMessages: ExhaustedSyncMessagesModel = .showingNothing()
         let viewContext: NSManagedObjectContext
         @State private var selectedConversationIDs: Set<NSManagedObjectID> = []
 
@@ -260,6 +261,7 @@ final class MacConversationSidebarRowIdentityTests: XCTestCase {
             MacConversationSidebar(
                 viewModel: viewModel,
                 abandonedActions: abandonedActions,
+                exhaustedMessages: exhaustedMessages,
                 syncEngine: Dependencies.shared.syncEngine,
                 selection: $selectedConversationIDs,
                 currentUserEmail: "me@example.com",

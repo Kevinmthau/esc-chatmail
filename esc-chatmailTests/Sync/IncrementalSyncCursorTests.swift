@@ -1543,6 +1543,88 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertTrue(recovered, "The recovered message must be durably persisted")
     }
 
+    /// A drain attempt that meets a 5xx spends none of the row's retries: it
+    /// says nothing about the message (architecture review 2026-11,
+    /// sync-persist-path#6). It waits out the backoff instead.
+    ///
+    /// Revert-check: `MessageFetcher.fetchAbandonedMessages` putting
+    /// `exhaustedRetryIds` back in `failedIds`. The row then spends a retry.
+    @MainActor
+    func testDrainTransientFailure_stampsTheBackoffWithoutSpendingARetry() async throws {
+        try await seedLedgerRow(id: "abandoned-503", state: .abandoned)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageErrors["abandoned-503"] = APIError.serverError(503)
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertTrue(apiClient.getMessageCalledIds.contains("abandoned-503"), "Positive control: the drain asked")
+        let row = await fetchLedgerRows().first { $0.gmailMessageId == "abandoned-503" }
+        XCTAssertEqual(row?.retryCount, 0)
+        XCTAssertNotNil(row?.nextRetryAt, "It waits as a spent attempt would")
+        XCTAssertEqual(row?.state, AbandonedSyncMessage.State.abandoned.rawValue)
+    }
+
+    /// A message-scoped failure on the drain's last try keeps the row,
+    /// exhausted at the cap, where it used to be deleted.
+    ///
+    /// Revert-check: `MessageFetcher.fetchAbandonedMessages` putting
+    /// `permanentlyFailedIds` in `transientlyFailedIds`. The row then only
+    /// waits, and is never exhausted.
+    @MainActor
+    func testDrainMessageScopedFailureOnTheLastTry_keepsTheRowExhausted() async throws {
+        // The one-time reset of pre-drain retry counts has run on this device.
+        defaults.set(true, forKey: SyncConfig.abandonedRetryCountResetKey)
+        let cap = Int16(SyncConfig.maxAbandonedMessageRetries)
+        try await seedLedgerRow(id: "abandoned-undecodable", state: .abandoned, retryCount: cap - 1)
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+        apiClient.getMessageErrors["abandoned-undecodable"] = APIError.decodingError(
+            NSError(domain: "IncrementalSyncCursorTests", code: 2)
+        )
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let row = await fetchLedgerRows().first { $0.gmailMessageId == "abandoned-undecodable" }
+        XCTAssertEqual(row?.state, AbandonedSyncMessage.State.exhausted.rawValue)
+        XCTAssertEqual(row?.retryCount, cap)
+        let exhausted = await failureTracker.fetchUndownloadableMessageIds()
+        XCTAssertEqual(exhausted, ["abandoned-undecodable"])
+    }
+
+    /// An exhausted row leaves the ledger in the save of the run that stores
+    /// its message, here from the run's own history.
+    ///
+    /// Revert-check: the orchestrator's `stageClearingStoredExhaustedMessages`
+    /// call (its `if allowsDeferrableWork` block) removed. The row then stays
+    /// beside the stored message and the banner keeps counting it.
+    @MainActor
+    func testExhaustedRow_isClearedInTheSaveThatStoresItsMessage() async throws {
+        try await seedLedgerRow(
+            id: "m-new",
+            state: .exhausted,
+            retryCount: Int16(SyncConfig.maxAbandonedMessageRetries)
+        )
+        apiClient.setHistoryResponsesByPageToken(makeSinglePageHistory(messageId: "m-new"))
+        apiClient.getMessageResponses["m-new"] = makeFullMessage(id: "m-new")
+
+        _ = try await makeOrchestrator().performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let stored = await messageExists(id: "m-new")
+        XCTAssertTrue(stored)
+        let rows = await fetchLedgerRows()
+        XCTAssertTrue(rows.isEmpty, "The row went with the save that stored its message")
+    }
+
     /// An abandoned-message retry runs after this history slice's messages
     /// are staged. An account-wide auth failure there must abort the entire
     /// run before any cursor/counter/ledger movement. A history message saved
@@ -3647,16 +3729,22 @@ final class IncrementalSyncCursorTests: XCTestCase {
         let state: String?
         let failureClass: String?
         let sourceHistoryId: String?
+        let retryCount: Int16
+        let nextRetryAt: Date?
     }
 
-    private func seedLedgerRow(id: String, state: AbandonedSyncMessage.State) async throws {
+    private func seedLedgerRow(
+        id: String,
+        state: AbandonedSyncMessage.State,
+        retryCount: Int16 = 0
+    ) async throws {
         let context = coreDataStack.newBackgroundContext()
         try await context.perform {
             let record = AbandonedSyncMessage(context: context)
             record.setValue(UUID(), forKey: "id")
             record.setValue(id, forKey: "gmailMessageId")
             record.setValue(Date(timeIntervalSinceNow: -3600), forKey: "abandonedAt")
-            record.setValue(Int16(0), forKey: "retryCount")
+            record.setValue(retryCount, forKey: "retryCount")
             record.setValue(state.rawValue, forKey: "state")
             try context.save()
         }
@@ -3673,7 +3761,9 @@ final class IncrementalSyncCursorTests: XCTestCase {
                     gmailMessageId: $0.value(forKey: "gmailMessageId") as? String,
                     state: $0.value(forKey: "state") as? String,
                     failureClass: $0.value(forKey: "failureClass") as? String,
-                    sourceHistoryId: $0.value(forKey: "sourceHistoryId") as? String
+                    sourceHistoryId: $0.value(forKey: "sourceHistoryId") as? String,
+                    retryCount: $0.value(forKey: "retryCount") as? Int16 ?? -1,
+                    nextRetryAt: $0.value(forKey: "nextRetryAt") as? Date
                 )
             }
         }

@@ -520,7 +520,6 @@ final class LogRedactionTests: XCTestCase {
         "esc-chatmail/Services/Sync/Persistence/MessagePersister+Updates.swift|Log.debug( \"Preserving local mailbox state for message \\(processedMessage.id) while pending action exists\", category: .sync )",
         "esc-chatmail/Services/Sync/Persistence/MessagePersister+Updates.swift|Log.debug( \"Preserving local outgoing body text for message \\(processedMessage.id) over snippet-only sync body\", category: .sync )",
         "esc-chatmail/Services/Sync/Persistence/MessagePersister+Updates.swift|Log.debug(\"Updated existing message: \\(processedMessage.id)\", category: .sync)",
-        "esc-chatmail/Services/Sync/SyncFailureTracker.swift|Log.warning(\"Giving up on abandoned message \\(record.gmailMessageId) after \\(retryCount) retries\", category: .sync)",
         "esc-chatmail/Services/Sync/SyncReconciliation.swift|log.debug(\"Label reconciliation: no mismatches (checked \\(recentMessageIds.count - stats.notInLocalDB) local messages)\")",
         "esc-chatmail/Services/Sync/SyncReconciliation.swift|log.debug(\"Message \\(messageId) was deleted from Gmail, skipping reconciliation\")",
         "esc-chatmail/Services/TextProcessing/EmailTextProcessor.swift|Log.debug(\"Failed to create attributed string from HTML: \\(error)\", category: .message)",

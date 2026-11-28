@@ -55,6 +55,7 @@ final class Dependencies: ObservableObject {
 
     private let _attachmentCache: AttachmentCacheActor
     private let _pendingActionsManager: PendingActionsManager
+    private let _syncFailureTracker: SyncFailureTracker
     private let _profilePhotoResolver: ProfilePhotoResolver
     private let _htmlContentRecoveryService: HTMLContentRecoveryService
 
@@ -68,6 +69,12 @@ final class Dependencies: ObservableObject {
     /// Use `await` when calling methods on this actor.
     nonisolated var pendingActionsManager: PendingActionsManager {
         _pendingActionsManager
+    }
+
+    /// The sync failure ledger, for the conversation list's banner of mail
+    /// sync gave up on (`ExhaustedSyncMessagesModel`).
+    nonisolated var syncFailureTracker: SyncFailureTracker {
+        _syncFailureTracker
     }
 
     nonisolated var profilePhotoResolver: ProfilePhotoResolver {
@@ -376,6 +383,7 @@ final class Dependencies: ObservableObject {
         contactsResolver: (any ContactsResolving)? = nil,
         attachmentCache: AttachmentCacheActor = AttachmentCacheActor.shared,
         pendingActionsManager: PendingActionsManager = PendingActionsManager.shared,
+        syncFailureTracker: SyncFailureTracker = .shared,
         profilePhotoResolver: ProfilePhotoResolver = .shared,
         htmlContentHandler: HTMLContentHandler = .shared,
         htmlContentRecoveryService: HTMLContentRecoveryService = .shared,
@@ -408,6 +416,7 @@ final class Dependencies: ObservableObject {
         self.htmlContentHandler = htmlContentHandler
         self._attachmentCache = attachmentCache
         self._pendingActionsManager = pendingActionsManager
+        self._syncFailureTracker = syncFailureTracker
         self._profilePhotoResolver = profilePhotoResolver
         self._htmlContentRecoveryService = htmlContentRecoveryService
         self.syncEngine = resolvedSyncEngine
