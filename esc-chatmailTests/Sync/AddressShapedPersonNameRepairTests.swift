@@ -426,6 +426,35 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         XCTAssertEqual(name, jake)
     }
 
+    /// The candidates' message participations are read by a fetch of their
+    /// own (`DataCleanupService.messageParticipations(of:in:)`), not through
+    /// `Person.messageParticipations`, which model 9 drops. A fetch that fails
+    /// is not "no header names him": nothing is repaired and the flag stays
+    /// clear, so the next cleanup tries again.
+    ///
+    /// Revert-check: the `return nil` in the participation fetch's catch in
+    /// `repairAddressShapedPersonDisplayNamesIfNeeded`. Read a failure as no
+    /// participations and the pass latches its flag with Jake unrepaired.
+    func testRepair_participationFetchFails_repairsNothingAndLeavesTheFlagClear() async throws {
+        _ = try await seedGroupWithToOnlyJake(rawHeaders: true)
+        let context = EntityFetchFailingContext(
+            failingEntityName: "MessageParticipant",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+
+        await runRepair(in: context)
+
+        XCTAssertEqual(context.failedFetches, 1)
+        let name = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(name, jake)
+        XCTAssertFalse(migrationFlags.bool(forKey: DataCleanupService.addressShapedPersonNameRepairKey))
+
+        await runRepair()
+
+        let retriedName = try await storedDisplayName(forEmail: jake)
+        XCTAssertEqual(retriedName, "Jake")
+    }
+
     /// A failed save must not leave the repair staged: the cleanup hold saves
     /// the same context right after this pass, and committing the repair
     /// there would leave the flag clear with no cache invalidation, so the

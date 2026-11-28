@@ -486,6 +486,42 @@ final class ScaleQueryPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - A person's message participations
+
+    /// The cleanup passes read a person's message participations by a fetch,
+    /// `person IN %@` (`DataCleanupService.messageParticipations(of:in:)`),
+    /// and no longer through `Person.messageParticipations`, the inverse model 9
+    /// drops (architecture review 2026-11, data-model#3). A relationship read
+    /// went to the participant rows by their person; the fetch must too, and
+    /// never walk ZMESSAGEPARTICIPANT, which holds about two rows per message
+    /// of the mailbox.
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this. It fails if
+    /// the fetch stops being a match on `person`, or if a model version leaves
+    /// the participant rows' person column with no index.
+    func testPersonMessageParticipationsFetch_searchesAnIndex() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.newBackgroundContext()
+            let email = ScaleStoreSeeder.personEmail(at: 4_000)
+
+            var participationCount = 0
+            let plans = try SQLiteQueryPlanRecorder.record {
+                participationCount = try context.performAndWait {
+                    let request = NSFetchRequest<Person>(entityName: "Person")
+                    request.predicate = NSPredicate(format: "email == %@", email)
+                    let person = try XCTUnwrap(try context.fetch(request).first)
+                    return try DataCleanupService.messageParticipations(of: [person], in: context)[person.objectID]?.count ?? 0
+                }
+            }
+
+            XCTAssertGreaterThan(participationCount, 0, "\(statistics)")
+            let plan = try XCTUnwrap(plans.first { $0.reads("ZMESSAGEPARTICIPANT") }, "\(statistics):\n\(plans)")
+            XCTAssertEqual(plan.scans(of: "ZMESSAGEPARTICIPANT"), [], "\(statistics): \(plan)")
+            XCTAssertFalse(plan.indexes(on: "ZMESSAGEPARTICIPANT").isEmpty, "\(statistics): \(plan)")
+        }
+    }
+
     // MARK: - Stored rows of deleted messages
 
     /// Before a deleted message's body file is removed, the store is asked which of a

@@ -176,6 +176,44 @@ final class DuplicatePersonMergeTests: XCTestCase {
         )
     }
 
+    /// The participations are read by fetches
+    /// (`DataCleanupService.messageParticipations(of:in:)`), not through
+    /// `Person.messageParticipations`, which model 9 drops, and a fetch can
+    /// fail. A loser whose participations could not be read must not be
+    /// deleted: its cascade would take them along, and the messages would lose
+    /// their participant rows. Both rows stay for the next cleanup.
+    ///
+    /// Revert-check: the `continue` in `mergeDuplicatePersons`' catch. Fall
+    /// through to the delete and the loser goes with its participation.
+    func testParticipationFetchFails_keepsTheLoserAndItsParticipations() async throws {
+        let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
+        let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
+        let conversation = ConversationBuilder().withParticipantHash("hash-fetch-fails").visible().build(in: context)
+        let message = MessageBuilder().withId("msg-fetch-fails").inConversation(conversation).build(in: context)
+        addMessageParticipant(person: survivor, to: message, kind: "to")
+        addMessageParticipant(person: loser, to: message, kind: "from")
+        try context.save()
+        let loserID = loser.objectID
+        let failingContext = EntityFetchFailingContext(
+            failingEntityName: "MessageParticipant",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator,
+            concurrencyType: .mainQueueConcurrencyType
+        )
+
+        await makeService().mergeDuplicatePersons(in: failingContext)
+
+        XCTAssertEqual(failingContext.failedFetches, 1)
+        context.refreshAllObjects()
+        XCTAssertEqual(try personRows(forEmail: Self.alice).count, 2)
+        let participations = try context.fetch(MessageParticipant.fetchRequest())
+        XCTAssertEqual(participations.count, 2, "The loser's participation was deleted with it")
+        XCTAssertEqual(
+            participations.first { $0.kind == "from" }?.person?.objectID,
+            loserID,
+            "Nothing is moved when the reads fail"
+        )
+    }
+
     /// Rows written before PersonFactory normalized its input differ only by
     /// case. They must merge, and the survivor must end up normalized —
     /// otherwise the `email == %@` lookup still misses it and immediately

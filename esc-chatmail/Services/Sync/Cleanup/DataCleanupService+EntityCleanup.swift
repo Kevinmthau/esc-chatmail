@@ -448,8 +448,17 @@ extension DataCleanupService {
                 }
 
                 for loser in rows where loser !== survivor {
+                    do {
+                        try Self.repointParticipations(from: loser, to: survivor, in: context)
+                    } catch {
+                        // Nothing was moved (the reads come first), and the
+                        // loser must not be deleted with its participations
+                        // still on it: its cascade would take them along. Both
+                        // rows stay, and the next cleanup merges them.
+                        Log.error("Failed to read a duplicate person's participations; keeping the row", category: .coreData, error: error)
+                        continue
+                    }
                     Self.adoptMissingIdentityFields(from: loser, to: survivor, email: email)
-                    Self.repointParticipations(from: loser, to: survivor)
                     deletedObjectIDs.append(loser.objectID)
                     context.delete(loser)
                 }
@@ -514,7 +523,35 @@ extension DataCleanupService {
     /// survivor already holds for the same conversation (or the same message in
     /// the same role) is deleted instead of moved: repointing it would list the
     /// person twice in one conversation.
-    private static func repointParticipations(from loser: Person, to survivor: Person) {
+    ///
+    /// The message participations are read by fetches, never through
+    /// `Person.messageParticipations` (architecture review 2026-11,
+    /// data-model#3): for the user's own Person that inverse is every message
+    /// of the mailbox, and model 9 drops it. The survivor's are read only for
+    /// the loser's messages, which is all the duplicate check needs. Both reads
+    /// come before anything is moved, so one that fails throws with nothing
+    /// changed. The fetches include this context's unsaved changes, so a
+    /// participation an earlier loser of the same address just moved onto the
+    /// survivor counts as the survivor's.
+    private static func repointParticipations(
+        from loser: Person,
+        to survivor: Person,
+        in context: NSManagedObjectContext
+    ) throws {
+        let loserMessageParticipations = try messageParticipations(of: [loser], in: context)[loser.objectID] ?? []
+        let loserMessages = loserMessageParticipations.compactMap(\.message)
+        let survivorMessageKeys: Set<String>
+        if loserMessages.isEmpty {
+            survivorMessageKeys = []
+        } else {
+            let request = MessageParticipant.fetchRequest()
+            request.predicate = NSPredicate(format: "person == %@ AND message IN %@", survivor, loserMessages)
+            survivorMessageKeys = Set(try context.fetch(request).compactMap { participation -> String? in
+                guard let message = participation.message else { return nil }
+                return Self.messageParticipationKey(message: message, kind: participation.kind)
+            })
+        }
+
         let survivorConversations = Set(
             (survivor.conversationParticipations ?? []).compactMap { $0.conversation?.objectID }
         )
@@ -527,22 +564,38 @@ extension DataCleanupService {
             }
         }
 
-        let survivorMessages = Set(
-            (survivor.messageParticipations ?? []).compactMap { participation -> String? in
-                guard let message = participation.message else { return nil }
-                return Self.messageParticipationKey(message: message, kind: participation.kind)
-            }
-        )
-        for participation in loser.messageParticipations ?? [] {
+        for participation in loserMessageParticipations {
             let key = participation.message.map {
                 Self.messageParticipationKey(message: $0, kind: participation.kind)
             }
-            if let key, survivorMessages.contains(key) {
+            if let key, survivorMessageKeys.contains(key) {
                 participation.managedObjectContext?.delete(participation)
             } else {
                 participation.person = survivor
             }
         }
+    }
+
+    /// The message participations of `persons`, by person, read by a fetch of
+    /// `MessageParticipant` (`person IN %@`) with their messages prefetched.
+    /// Never through `Person.messageParticipations`: for the user's own
+    /// Person that inverse is every message of the mailbox, and model 9 drops
+    /// it (architecture review 2026-11, data-model#3). The fetch includes the
+    /// context's unsaved changes. Call on the context's queue.
+    static func messageParticipations(
+        of persons: [Person],
+        in context: NSManagedObjectContext
+    ) throws -> [NSManagedObjectID: [MessageParticipant]] {
+        guard !persons.isEmpty else { return [:] }
+        let request = MessageParticipant.fetchRequest()
+        request.predicate = NSPredicate(format: "person IN %@", persons)
+        request.relationshipKeyPathsForPrefetching = ["message"]
+        var byPerson: [NSManagedObjectID: [MessageParticipant]] = [:]
+        for participation in try context.fetch(request) {
+            guard let personID = participation.person?.objectID else { continue }
+            byPerson[personID, default: []].append(participation)
+        }
+        return byPerson
     }
 
     private static func messageParticipationKey(message: Message, kind: String) -> String {
