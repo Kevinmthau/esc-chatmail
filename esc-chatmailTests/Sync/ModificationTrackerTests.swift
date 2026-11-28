@@ -192,6 +192,66 @@ final class ModificationTrackerTests: XCTestCase {
         await tracker.consumeCommittedTransaction(run)
     }
 
+    /// The incremental run's intermediate flush claims what it applies, rollups
+    /// and names both, so the final save does only what was tracked after it
+    /// (architecture review 2026-11, data-model#4).
+    ///
+    /// Revert-check: `claimPendingConversationUpdates` leaving
+    /// `displayNameOnlyIDs` pending. The name-only conversation is then handed
+    /// out again.
+    func testClaimPendingConversationUpdates_handsOutEachUpdateOnce_untilTrackedAgain() async throws {
+        let ids = try makeConversationIDs(count: 3)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        await tracker.trackDisplayNameOnlyConversations([ids[1]], in: run)
+
+        let claimed = await tracker.claimPendingConversationUpdates(in: run)
+        let pendingRollups = await tracker.modifiedConversations(in: run)
+        let pendingNames = await tracker.displayNameOnlyConversations(in: run)
+
+        XCTAssertEqual(claimed.rollupIDs, [ids[0]])
+        XCTAssertEqual(claimed.displayNameOnlyIDs, [ids[1]])
+        XCTAssertEqual(pendingRollups, [])
+        XCTAssertEqual(pendingNames, [])
+
+        // A writer after the claim tracks what it changes again.
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        await tracker.trackDisplayNameOnlyConversations([ids[1], ids[2]], in: run)
+
+        let rependedRollups = await tracker.modifiedConversations(in: run)
+        let rependedNames = await tracker.displayNameOnlyConversations(in: run)
+        let count = await tracker.modificationCount(in: run)
+
+        XCTAssertEqual(rependedRollups, [ids[0]])
+        XCTAssertEqual(rependedNames, [ids[1], ids[2]])
+        XCTAssertEqual(count, 3, "A claimed conversation is still the run's, and counted once")
+    }
+
+    /// A rollup refreshes the stored title as well, so claiming a conversation's
+    /// rollup claims its pending name refresh with it. Left pending, the
+    /// consumer after it refreshed that name again, walking the conversation's
+    /// messages a second time.
+    ///
+    /// Revert-check: the `displayNameOnlyIDs.intersection(claimed)` move in
+    /// `ConversationModifications.claimPendingRollups`. The rolled-up
+    /// conversation then stays pending a name refresh.
+    func testClaimPendingRollupConversations_alsoClaimsTheirPendingNameRefresh() async throws {
+        let ids = try makeConversationIDs(count: 2)
+        let tracker = ModificationTracker.shared
+        let run = await tracker.beginTransaction()
+
+        await tracker.trackModifiedConversation(ids[0], in: run)
+        await tracker.trackDisplayNameOnlyConversations([ids[0], ids[1]], in: run)
+
+        let claimed = await tracker.claimPendingRollupConversations(in: run)
+        let pendingNames = await tracker.displayNameOnlyConversations(in: run)
+
+        XCTAssertEqual(claimed, [ids[0]])
+        XCTAssertEqual(pendingNames, [ids[1]], "Only the conversation that was not rolled up still owes a name refresh")
+    }
+
     private func makeConversationIDs(count: Int) throws -> [NSManagedObjectID] {
         let stack = TestCoreDataStack()
         let conversations = (0..<count).map { _ in

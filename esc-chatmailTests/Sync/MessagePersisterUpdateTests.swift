@@ -2204,7 +2204,12 @@ final class MessagePersisterUpdateTests: XCTestCase {
         XCTAssertEqual(conversation.snippet, "Updated clean snippet")
     }
 
-    func testUpdateExistingMessage_removingInboxLabelRecomputesConversationInboxIndicators() async {
+    /// The update itself no longer recomputes `hasInbox` and `latestInboxDate`
+    /// for a message that left INBOX: the run's rollup does
+    /// (`ConversationRollupUpdater.updateRollupsForModified`), and the update
+    /// tracks the conversation for it. That the update leaves those values to
+    /// the rollup is `SyncConversationWalkTests`'.
+    func testUpdateExistingMessage_removingInboxLabel_rollupClearsConversationInboxIndicators() async {
         let inboxLabel = LabelBuilder.inboxLabel(in: context)
         let messageDate = Date(timeIntervalSince1970: 1_700_002_000)
 
@@ -2243,6 +2248,11 @@ final class MessagePersisterUpdateTests: XCTestCase {
             processedMessage,
             labelIds: nil,
             in: context
+        )
+        await ConversationRollupUpdater().updateRollupsForModified(
+            conversationIDs: [conversation.objectID],
+            in: context,
+            myEmail: "me@example.com"
         )
 
         XCTAssertTrue(didUpdate)

@@ -324,7 +324,7 @@ final class ScaleHubFaultTests: XCTestCase {
         // A label change has nothing to do with who is on the message, and
         // does not read the user's participations today either.
         XCTAssertTrue(state.selfParticipationsAreFault)
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: one label removal registers 97,040 objects") {
+        XCTExpectFailure("inverse-tomany-hub-fault-tax: one label removal registers 97,034 objects (97,040 while it also walked the conversation)") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
     }

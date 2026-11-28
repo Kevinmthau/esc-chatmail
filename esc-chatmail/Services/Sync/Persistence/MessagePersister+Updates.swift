@@ -20,6 +20,9 @@ private struct MessageUpdateResult {
     let changedHTMLSourceSignature: String?
     let participantDisplayNameUpdateEmails: [String]
     let participantDisplayNameUpdateConversationIDs: Set<NSManagedObjectID>
+    /// The conversations a consumed send echo touched, which the run must roll
+    /// up (`consumeRemoteCommittedSendMutation`).
+    var echoConversationIDs: Set<NSManagedObjectID> = []
 }
 
 /// Outcome of an existing-message update attempt.
@@ -610,6 +613,7 @@ extension MessagePersister {
 
             // Keep mutation-route cleanup in the same eventual context save as
             // the message update, relationship move, and source rollup repair.
+            var echoConversationIDs = Set<NSManagedObjectID>()
             if canApplyAnchoredListRoute {
                 self.handoffOptimisticAttachmentStorage(
                     remoteCommittedSendMutation,
@@ -617,8 +621,9 @@ extension MessagePersister {
                     to: existingMessage,
                     in: context
                 )
-                self.consumeRemoteCommittedSendMutation(
+                echoConversationIDs = self.consumeRemoteCommittedSendMutation(
                     remoteCommittedSendMutation,
+                    persistedMessageConversationID: existingMessage.conversation?.objectID,
                     in: context
                 )
             }
@@ -632,13 +637,20 @@ extension MessagePersister {
                 htmlSourceDidChange: htmlSourceSignatureChanged,
                 changedHTMLSourceSignature: htmlSourceSignatureChanged ? incomingHTMLSourceSignature : nil,
                 participantDisplayNameUpdateEmails: displayNameUpdateEmails,
-                participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs
+                participantDisplayNameUpdateConversationIDs: displayNameUpdateConversationIDs,
+                echoConversationIDs: echoConversationIDs
             )
         }
 
         if let modifiedConversationID = result.modifiedConversationID {
             await ModificationTracker.shared.trackModifiedConversation(
                 modifiedConversationID,
+                in: modificationTransaction
+            )
+        }
+        if !result.echoConversationIDs.isEmpty {
+            await ModificationTracker.shared.trackModifiedConversations(
+                result.echoConversationIDs,
                 in: modificationTransaction
             )
         }

@@ -423,12 +423,12 @@ final class IncrementalSyncOrchestrator {
             timing.finish(labelTimer, detail: "records=\(historyResult.records.count)")
             if phaseContext.allowsIntermediateContextSaves {
                 let flushTimer = timing.start("intermediateFlush")
-                let intermediateRollupConversationIDs = await ModificationTracker.shared
-                    .modifiedConversations(in: modificationTransaction)
-                let trackedIntermediateDisplayNameConversationIDs = await ModificationTracker.shared
-                    .displayNameOnlyConversations(in: modificationTransaction)
-                let intermediateDisplayNameConversationIDs = trackedIntermediateDisplayNameConversationIDs
-                    .subtracting(intermediateRollupConversationIDs)
+                // Claimed, not read: the final save rolls up and renames only
+                // what was tracked after this flush (`claimPendingConversationUpdates`).
+                let claimedUpdates = await ModificationTracker.shared
+                    .claimPendingConversationUpdates(in: modificationTransaction)
+                let intermediateRollupConversationIDs = claimedUpdates.rollupIDs
+                let intermediateDisplayNameConversationIDs = claimedUpdates.displayNameOnlyIDs
                 let intermediateAffectedConversationIDs = intermediateRollupConversationIDs
                     .union(intermediateDisplayNameConversationIDs)
                 let conversationManager = self.conversationManager
@@ -437,16 +437,32 @@ final class IncrementalSyncOrchestrator {
                     conversationIDs: intermediateAffectedConversationIDs,
                     in: context
                 ) {
-                    if !intermediateRollupConversationIDs.isEmpty {
-                        await conversationManager.updateRollupsForModifiedConversations(
-                            conversationIDs: intermediateRollupConversationIDs,
-                            in: context
+                    // A rollup or name refresh that could not read its
+                    // conversations applied nothing (it answers false), and
+                    // what it claimed is not handed out again: those are
+                    // tracked once more, so the final save tries them again.
+                    // Dropped, the conversation kept whatever the batch saves
+                    // and label processing left, a chat still in the inbox
+                    // with no INBOX message among them, behind an advancing
+                    // cursor.
+                    if !intermediateRollupConversationIDs.isEmpty,
+                       !(await conversationManager.updateRollupsForModifiedConversations(
+                           conversationIDs: intermediateRollupConversationIDs,
+                           in: context
+                       )) {
+                        await ModificationTracker.shared.trackModifiedConversations(
+                            intermediateRollupConversationIDs,
+                            in: modificationTransaction
                         )
                     }
-                    if !intermediateDisplayNameConversationIDs.isEmpty {
-                        await conversationManager.updateConversationDisplayNames(
-                            conversationIDs: intermediateDisplayNameConversationIDs,
-                            in: context
+                    if !intermediateDisplayNameConversationIDs.isEmpty,
+                       !(await conversationManager.updateConversationDisplayNames(
+                           conversationIDs: intermediateDisplayNameConversationIDs,
+                           in: context
+                       )) {
+                        await ModificationTracker.shared.trackDisplayNameOnlyConversations(
+                            intermediateDisplayNameConversationIDs,
+                            in: modificationTransaction
                         )
                     }
                     try await coreDataStack.saveAsync(context: context)
@@ -967,10 +983,17 @@ final class IncrementalSyncOrchestrator {
                         conversationIDs: pageConversationIDs,
                         in: context
                     ) {
-                        if !pageConversationIDs.isEmpty {
-                            await conversationManager.updateRollupsForModifiedConversations(
-                                conversationIDs: pageConversationIDs,
-                                in: context
+                        // A failed rollup applied nothing: track the page's
+                        // conversations again so a later page's claim, or the
+                        // recovery's final save, rolls them up.
+                        if !pageConversationIDs.isEmpty,
+                           !(await conversationManager.updateRollupsForModifiedConversations(
+                               conversationIDs: pageConversationIDs,
+                               in: context
+                           )) {
+                            await ModificationTracker.shared.trackModifiedConversations(
+                                pageConversationIDs,
+                                in: modificationTransaction
                             )
                         }
                         let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)

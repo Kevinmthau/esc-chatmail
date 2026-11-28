@@ -14,16 +14,45 @@ actor ModificationTracker {
         /// Kept separate so re-tracking a claimed conversation re-pends it.
         var claimedRollupIDs: Set<NSManagedObjectID>
         var displayNameOnlyIDs: Set<NSManagedObjectID>
+        /// Display-name-only IDs whose names a mid-run consumer has refreshed,
+        /// kept apart for the same reason: tracking one again re-pends it.
+        var claimedDisplayNameOnlyIDs: Set<NSManagedObjectID>
 
         static let empty = ConversationModifications(
             rollupIDs: [],
             claimedRollupIDs: [],
-            displayNameOnlyIDs: []
+            displayNameOnlyIDs: [],
+            claimedDisplayNameOnlyIDs: []
         )
 
         var trackedCount: Int {
-            rollupIDs.union(claimedRollupIDs).count + displayNameOnlyIDs.count
+            rollupIDs.union(claimedRollupIDs).count
+                + displayNameOnlyIDs.union(claimedDisplayNameOnlyIDs).count
         }
+
+        /// Moves the pending rollup IDs to the claimed set, with the pending
+        /// display-name-only entries of the same conversations: a rollup
+        /// refreshes the stored title too (`ConversationRollupUpdater.updateRollups`
+        /// ends with `updateDisplayNameOnly`), so the name refresh is done once
+        /// the rollup is. Left pending, a later consumer refreshed those names
+        /// again, which walks every message of the conversation.
+        mutating func claimPendingRollups() -> Set<NSManagedObjectID> {
+            let claimed = rollupIDs
+            claimedRollupIDs.formUnion(claimed)
+            rollupIDs = []
+            let refreshedNames = displayNameOnlyIDs.intersection(claimed)
+            displayNameOnlyIDs.subtract(refreshedNames)
+            claimedDisplayNameOnlyIDs.formUnion(refreshedNames)
+            return claimed
+        }
+    }
+
+    /// What a mid-run consumer that refreshes both rollups and names claims
+    /// (`claimPendingConversationUpdates`): the conversations to roll up, and
+    /// the others whose names alone need refreshing. The two never overlap.
+    struct ClaimedConversationUpdates: Equatable, Sendable {
+        let rollupIDs: Set<NSManagedObjectID>
+        let displayNameOnlyIDs: Set<NSManagedObjectID>
     }
 
     private enum TransactionState {
@@ -76,10 +105,8 @@ actor ModificationTracker {
 
         switch state {
         case .active(var modifications):
-            let claimed = modifications.rollupIDs
-            guard !claimed.isEmpty else { return [] }
-            modifications.claimedRollupIDs.formUnion(claimed)
-            modifications.rollupIDs = []
+            guard !modifications.rollupIDs.isEmpty else { return [] }
+            let claimed = modifications.claimPendingRollups()
             transactions[transaction.id] = .active(modifications)
             Log.debug(
                 "Claimed \(claimed.count) pending rollup conversations in transaction \(transaction.id)",
@@ -92,7 +119,38 @@ actor ModificationTracker {
         }
     }
 
-    /// Returns conversations that only need display-name refreshes.
+    /// Claims every pending update, rollups and names alike, for a mid-run
+    /// consumer that applies both and saves them (the incremental run's
+    /// intermediate flush). What it claims is not handed out again: the run's
+    /// final save rolls up and renames only what was tracked after the claim,
+    /// so every writer after it must track what it changes, as every writer
+    /// does today (architecture review 2026-11, data-model#4). Until
+    /// 2026-11-28 the flush read without claiming, and the final save rolled
+    /// up every conversation the flush had already rolled up, walking each
+    /// one's messages a second time. Valid only on active transactions.
+    func claimPendingConversationUpdates(in transaction: Transaction) -> ClaimedConversationUpdates {
+        let none = ClaimedConversationUpdates(rollupIDs: [], displayNameOnlyIDs: [])
+        guard let state = transactions[transaction.id] else {
+            Log.warning("Attempted to claim conversation updates for unknown transaction \(transaction.id)", category: .sync)
+            return none
+        }
+
+        switch state {
+        case .active(var modifications):
+            let rollupIDs = modifications.claimPendingRollups()
+            let displayNameOnlyIDs = modifications.displayNameOnlyIDs
+            modifications.claimedDisplayNameOnlyIDs.formUnion(displayNameOnlyIDs)
+            modifications.displayNameOnlyIDs = []
+            transactions[transaction.id] = .active(modifications)
+            return ClaimedConversationUpdates(rollupIDs: rollupIDs, displayNameOnlyIDs: displayNameOnlyIDs)
+        case .committed:
+            Log.warning("Attempted to claim conversation updates on committed transaction \(transaction.id)", category: .sync)
+            return none
+        }
+    }
+
+    /// Returns the conversations whose names alone are pending a refresh:
+    /// tracked display-name-only and not claimed since.
     func displayNameOnlyConversations(in transaction: Transaction) -> Set<NSManagedObjectID> {
         guard let state = transactions[transaction.id] else {
             Log.warning("Attempted to read display-name-only changes for unknown transaction \(transaction.id)", category: .sync)
