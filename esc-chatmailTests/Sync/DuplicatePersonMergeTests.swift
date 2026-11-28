@@ -185,7 +185,7 @@ final class DuplicatePersonMergeTests: XCTestCase {
     }
 
     /// The participations are read by fetches
-    /// (`DataCleanupService.messageParticipations(of:in:)`), not through
+    /// (`DataCleanupService.messageParticipations(of:prefetchingMessages:in:)`), not through
     /// `Person.messageParticipations`, which model 9 drops, and a fetch can
     /// fail. A loser whose participations could not be read must not be
     /// deleted: its cascade would take them along, and the messages would lose
@@ -294,6 +294,37 @@ final class DuplicatePersonMergeTests: XCTestCase {
         )
         let conversationParticipants = try context.fetch(ConversationParticipant.fetchRequest())
         XCTAssertEqual(conversationParticipants.map { $0.person?.objectID }, [loserID])
+    }
+
+    /// The survivor's participations are read a chunk of messages at a time
+    /// (`DataCleanupService.messageParticipationKeys`), and every chunk is
+    /// asked, the last, partial one included; another person's rows on the
+    /// same messages are not the survivor's.
+    ///
+    /// Revert-check: the partial last chunk in `messageParticipationKeys`
+    /// (`min(start + chunkSize, messages.count)`). Ask only whole chunks and
+    /// the fifth message's row is missed.
+    ///
+    /// HONEST SCOPE: what the chunks are for, a bounded peak for a heavy
+    /// Person's duplicate, is not measured here.
+    func testSurvivorParticipationKeys_askEveryChunk() throws {
+        let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
+        let other = PersonBuilder().withEmail("bob@example.com").withDisplayName("Bob").build(in: context)
+        let conversation = ConversationBuilder().withParticipantHash("hash-chunks").visible().build(in: context)
+        let messages = (0..<5).map { index in
+            MessageBuilder().withId("msg-chunk-\(index)").inConversation(conversation).build(in: context)
+        }
+        for message in messages {
+            addMessageParticipant(person: survivor, to: message, kind: "to")
+            addMessageParticipant(person: other, to: message, kind: "from")
+        }
+        try context.save()
+
+        let chunked = try DataCleanupService.messageParticipationKeys(of: survivor, among: messages, chunkSize: 2, in: context)
+        let whole = try DataCleanupService.messageParticipationKeys(of: survivor, among: messages, chunkSize: 300, in: context)
+
+        XCTAssertEqual(chunked.count, 5)
+        XCTAssertEqual(chunked, whole)
     }
 
     /// Rows written before PersonFactory normalized its input differ only by

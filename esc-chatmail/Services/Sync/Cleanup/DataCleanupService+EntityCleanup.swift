@@ -583,21 +583,38 @@ extension DataCleanupService {
     /// `ScaleQueryPlanTests` pins the message index. The fetch includes the
     /// context's unsaved changes, and the filter reads each row's person as the
     /// context has it. Call on the context's queue.
+    ///
+    /// The fetch returns every participant row of each message, not only the
+    /// person's: about 240,000 rows at S2 for a duplicate of the user's own
+    /// Person, whose loser is on every message. So the messages are asked
+    /// about `chunkSize` at a time, each chunk's rows let go before the next,
+    /// which bounds the peak at a chunk's rows (not measured).
     static func messageParticipationKeys(
         of person: Person,
         among messages: [Message],
+        chunkSize: Int = messageParticipationKeysChunkSize,
         in context: NSManagedObjectContext
     ) throws -> Set<String> {
         guard !messages.isEmpty else { return [] }
-        let request = MessageParticipant.fetchRequest()
-        request.predicate = NSPredicate(format: "message IN %@", messages)
         let personID = person.objectID
-        return Set(try context.fetch(request).compactMap { participation -> String? in
-            guard participation.person?.objectID == personID,
-                  let message = participation.message else { return nil }
-            return Self.messageParticipationKey(message: message, kind: participation.kind)
-        })
+        var keys = Set<String>()
+        for start in stride(from: 0, to: messages.count, by: max(chunkSize, 1)) {
+            let chunk = Array(messages[start..<min(start + max(chunkSize, 1), messages.count)])
+            try autoreleasepool {
+                let request = MessageParticipant.fetchRequest()
+                request.predicate = NSPredicate(format: "message IN %@", chunk)
+                for participation in try context.fetch(request) {
+                    guard participation.person?.objectID == personID,
+                          let message = participation.message else { continue }
+                    keys.insert(Self.messageParticipationKey(message: message, kind: participation.kind))
+                }
+            }
+        }
+        return keys
     }
+
+    /// How many of a loser's messages one survivor fetch asks about.
+    static let messageParticipationKeysChunkSize = 300
 
     /// The message participations of `persons`, by person, read by a fetch of
     /// `MessageParticipant` (`person IN %@`). Never through

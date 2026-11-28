@@ -254,7 +254,10 @@ final class MessagePersisterLabelDiffTests: XCTestCase {
     /// SQLite returns first, writing both labels. HONEST SCOPE: which row
     /// comes first is SQLite's choice, so that diff fails here by chance: 11
     /// of 20 iterations (`-test-iterations 20`, iOS 27.0 simulator,
-    /// 2026-11-28).
+    /// 2026-11-28). The same mutation fails
+    /// `testRefetch_unchangedLabels_readsNoLabelAndWritesNone` every time: a
+    /// diff against the fetched rows reads the Label rows, which that test's
+    /// context refuses.
     func testRefetch_duplicateLabelRows_keepTheStoredDuplicate() async throws {
         let labelObjectIDs = try seedMessage(
             storedLabelIDs: ["INBOX"],
@@ -278,10 +281,10 @@ final class MessagePersisterLabelDiffTests: XCTestCase {
     /// the row changes, its labels, its snippet and its body file included.
     ///
     /// Revert-check: `fetchLabelsByIdsOrThrow` in
-    /// `MessagePersister.performExistingMessageUpdate`. With
-    /// `fetchLabelsByIds`, whose failed read is an empty answer, the update
-    /// goes ahead without the new label, writes the body and the new snippet,
-    /// and reports the message persisted.
+    /// `MessagePersister.performExistingMessageUpdate`. Read the failure as an
+    /// empty answer (`(try? …) ?? [:]`, as `fetchLabelsByIds` did until
+    /// 2026-11-28) and the update goes ahead without the new label, writes the
+    /// body and the new snippet, and reports the message persisted.
     func testSaveMessages_failedLabelRead_reportsFailedAndLeavesTheRowAsItWas() async throws {
         let labelObjectIDs = try seedMessage(
             storedLabelIDs: ["INBOX"],
@@ -316,6 +319,47 @@ final class MessagePersisterLabelDiffTests: XCTestCase {
             return try XCTUnwrap(try context.fetch(request).first).snippet
         }
         XCTAssertEqual(snippet, "Stored snippet")
+    }
+
+    /// A new message whose Label read fails is not a message with no labels:
+    /// it is reported failed, which holds the cursor, and nothing is written
+    /// for it, not its body, not a conversation, not a row.
+    ///
+    /// Revert-check: `fetchLabelsByIdsOrThrow` at the top of
+    /// `MessagePersister.createNewMessage`. Read the failure as an empty
+    /// answer and the message is stored with no labels and reported
+    /// persisted.
+    func testSaveMessages_newMessage_failedLabelRead_reportsFailedAndWritesNothing() async throws {
+        let context = makeUpdateContext()
+        try context.performAndWait {
+            _ = LabelBuilder.inboxLabel(in: context)
+            try context.save()
+        }
+        let gmailMessage = GmailMessageBuilder()
+            .withId("new-message-label-read-fails")
+            .withThreadId("thread-new-label-read-fails")
+            .withLabels(["INBOX"])
+            .withFrom("sender@example.com", name: "Sender")
+            .withTo(["me@example.com"])
+            .withSubject("Subject")
+            .withSnippet("A new message")
+            .withBodyHtml("<p>A new body</p>")
+            .build()
+
+        let report = try await persister.saveMessages([gmailMessage], myAliases: ["me@example.com"], in: context)
+
+        XCTAssertEqual(report.failedIds, ["new-message-label-read-fails"])
+        XCTAssertEqual(report.persistedIds, [])
+        XCTAssertEqual(context.failedFetches, 1)
+        XCTAssertEqual(htmlWrites.count, 0, "The body was written before the labels were read")
+        let hasChanges = await context.perform { context.hasChanges }
+        XCTAssertFalse(hasChanges, "Something was inserted for a message that failed")
+        let readContext = stack.newBackgroundContext()
+        let storedCounts = try readContext.performAndWait {
+            (try readContext.count(for: Message.fetchRequest()), try readContext.count(for: Conversation.fetchRequest()))
+        }
+        XCTAssertEqual(storedCounts.0, 0)
+        XCTAssertEqual(storedCounts.1, 0, "Routing made a conversation for a message that failed")
     }
 
     /// The stored message's label IDs, read in a context of its own.

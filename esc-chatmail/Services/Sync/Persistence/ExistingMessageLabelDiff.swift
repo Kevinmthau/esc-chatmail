@@ -20,7 +20,7 @@ import CoreData
 /// Three rules hold it, and each fails silently when broken.
 /// - A stored label stays while Gmail still reports its ID, whichever row of
 ///   that ID it is: duplicate Label rows are legal until the merge pass
-///   repairs them (`LabelPersister.fetchLabelsByIds`), and trading one
+///   repairs them (`LabelPersister.fetchLabelsByIdsOrThrow`), and trading one
 ///   duplicate for another would write on every refetch.
 /// - An incoming ID with no Label row is not a difference: nothing can be
 ///   added for it, and counting it would make every refetch of that message
@@ -44,7 +44,8 @@ struct ExistingMessageLabelDiff {
     ///     on the create path: an empty set is a prefetch that failed, and
     ///     narrows nothing.
     ///   - fetchLabels: reads the rows for a set of label IDs; it is called
-    ///     once, and never with IDs the row already has.
+    ///     at most once, not at all where the row already has every reported
+    ///     ID, and never with IDs the row already has.
     static func plan(
         storedLabels: Set<Label>,
         incomingLabelIds: [String],

@@ -489,7 +489,7 @@ final class ScaleQueryPlanTests: XCTestCase {
     // MARK: - A person's message participations
 
     /// The cleanup passes read a person's message participations by a fetch,
-    /// `person IN %@` (`DataCleanupService.messageParticipations(of:in:)`),
+    /// `person IN %@` (`DataCleanupService.messageParticipations(of:prefetchingMessages:in:)`),
     /// and no longer through `Person.messageParticipations`, the inverse model 9
     /// drops (architecture review 2026-11, data-model#3). A relationship read
     /// went to the participant rows by their person; the fetch must too, and

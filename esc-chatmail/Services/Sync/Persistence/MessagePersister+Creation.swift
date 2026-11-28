@@ -46,6 +46,19 @@ extension MessagePersister {
         let saveHTML = self.saveHTML
         let htmlContentHandler = self.htmlContentHandler
         let canonicalHTML = processedMessage.storedHTML
+        // The labels are read before the body write, the routing and any insert,
+        // and a read that fails throws, which the caller reports `.failed`, so the
+        // cursor holds. Read as an empty answer, as until 2026-11-28, it stored a new
+        // INBOX message with no labels and `.persisted`: the fast list update
+        // showed it, the rollup then cleared `hasInbox`, and the message stayed
+        // out of the inbox until refetched. An empty prefetched set means the
+        // prefetch failed, not that the store has no labels, so it narrows
+        // nothing.
+        let messageLabelIds = Set(processedMessage.labelIds)
+        let availableLabelIds = labelIds.flatMap { $0.isEmpty ? nil : messageLabelIds.intersection($0) } ?? messageLabelIds
+        let labelObjectIDs: [String: NSManagedObjectID] = try await context.perform {
+            try self.fetchLabelsByIdsOrThrow(availableLabelIds, in: context).mapValues(\.objectID)
+        }
         // Before routing or inserting anything: a body that could not be written must not
         // become a body-less row (`MessageProcessor`'s body-materialization contract).
         let saveResult = canonicalHTML.map { saveHTML($0, processedMessage.id) }
@@ -66,6 +79,11 @@ extension MessagePersister {
         }
 
         let result = try await context.perform { () throws -> MessageCreationResult in
+            // Resolved before the insert, so a label that went away since the
+            // read throws with nothing inserted.
+            let effectiveLabelCache = try labelObjectIDs.compactMapValues {
+                try context.existingObject(with: $0) as? Label
+            }
             guard let conversation = try context.existingObject(with: conversationObjectID) as? Conversation else {
                 throw CoreDataError.persistentFailure(
                     NSError(
@@ -137,15 +155,8 @@ extension MessagePersister {
                 in: context
             )
 
-            let messageLabelIds = Set(processedMessage.labelIds)
             let hasInboxLabel = messageLabelIds.contains("INBOX")
             var addedLabelIds: [String] = []
-            // An empty prefetched set means the label lookup failed, not that
-            // the store has no labels; treating it as authoritative would strip
-            // every label relationship and let the rollup recompute persist a
-            // durable zero unread count.
-            let availableLabelIds = labelIds.flatMap { $0.isEmpty ? nil : messageLabelIds.intersection($0) } ?? messageLabelIds
-            let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
             for labelId in processedMessage.labelIds {
                 if let label = effectiveLabelCache[labelId] {
                     message.addToLabels(label)

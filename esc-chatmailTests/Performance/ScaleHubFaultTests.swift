@@ -34,10 +34,11 @@ import CoreData
 /// which gives the assertion its `Revert-check:`. An assertion outside a
 /// wrapper holds today and must keep holding.
 ///
-/// HONEST SCOPE: nothing here can be revert-checked against a fix that does
-/// not exist yet. What each test checks outside its wrappers (the write
-/// happened, the row is as expected) is what keeps a broken fixture from
-/// counting as the expected failure.
+/// HONEST SCOPE: a write whose fix does not exist yet cannot be revert-checked;
+/// what each such test checks outside its wrappers (the write happened, the
+/// row is as expected) is what keeps a broken fixture from counting as the
+/// expected failure. The unchanged refetch's fix exists, and its test names its
+/// `Revert-check:`.
 final class ScaleHubFaultTests: XCTestCase {
     private static let selfEmail = ScaleStorePlan.selfEmail
 

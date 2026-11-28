@@ -427,7 +427,7 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
     }
 
     /// The candidates' message participations are read by a fetch of their
-    /// own (`DataCleanupService.messageParticipations(of:in:)`), not through
+    /// own (`DataCleanupService.messageParticipations(of:prefetchingMessages:in:)`), not through
     /// `Person.messageParticipations`, which model 9 drops. A fetch that fails
     /// is not "no header names him": nothing is repaired and the flag stays
     /// clear, so the next cleanup tries again.

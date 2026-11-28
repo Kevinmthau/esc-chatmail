@@ -5,10 +5,12 @@ import CoreData
 
 private struct MessageUpdateResult {
     let didUpdate: Bool
-    /// True when the existing-message lookup itself failed (Core Data error),
-    /// as opposed to the message legitimately not being present. Callers must
-    /// not fall through to creation on a failed lookup — that risks inserting
-    /// a duplicate of a row that exists.
+    /// True when a read the update needs failed (Core Data error): the
+    /// existing-message lookup, as opposed to the message legitimately not
+    /// being present, or the read of the Label rows the stored row lacks
+    /// (`ExistingMessageLabelDiff`), which leaves the row as it was. Callers
+    /// must not fall through to creation on a failed lookup — that risks
+    /// inserting a duplicate of a row that exists.
     var lookupFailed: Bool = false
     /// Set when the incoming body could not be written. The row is left exactly as it was: the
     /// write runs before any field changes, so a failed one never leaves a half-updated row.

@@ -21,41 +21,19 @@ extension MessagePersister {
         }
     }
 
-    /// Fetches labels by IDs within the given context.
-    /// IMPORTANT: Call this inside a context.perform block to ensure thread safety.
-    /// This is nonisolated because it must be called synchronously within context.perform.
-    /// - Parameters:
-    ///   - ids: Set of label IDs to fetch
-    ///   - context: The Core Data context (must be on its queue)
-    /// - Returns: Dictionary mapping label ID to Label object
-    nonisolated func fetchLabelsByIds(_ ids: Set<String>, in context: NSManagedObjectContext) -> [String: Label] {
-        guard !ids.isEmpty else { return [:] }
-        let request = Label.fetchRequest()
-        request.predicate = NSPredicate(format: "id IN %@", ids)
-        let labels: [Label]
-        do {
-            labels = try context.fetch(request)
-        } catch {
-            Log.error("Failed to fetch labels by IDs", category: .coreData, error: error)
-            return [:]
-        }
-        // Duplicate-id Label rows are possible until the v4 constraint lands
-        // (Label.id has no uniqueness constraint); collapse instead of
-        // trapping — the maintenance merge pass repairs the store rows.
-        return Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-    }
-
-    /// `fetchLabelsByIds`, but a read that fails throws instead of answering an
-    /// empty dictionary. For a caller that diffs against the answer
-    /// (`ExistingMessageLabelDiff`), where an empty answer would read as "none
-    /// of Gmail's labels has a row" and strip the message's labels.
+    /// The Label rows for `ids`, by ID. A read that fails throws, and never
+    /// answers an empty dictionary: read as "none of Gmail's labels has a
+    /// row", that stored a new message with no labels and stripped a stored
+    /// one's (`createNewMessage`, `ExistingMessageLabelDiff`).
     /// Call inside the context's `perform`.
     nonisolated func fetchLabelsByIdsOrThrow(_ ids: Set<String>, in context: NSManagedObjectContext) throws -> [String: Label] {
         guard !ids.isEmpty else { return [:] }
         let request = Label.fetchRequest()
         request.predicate = NSPredicate(format: "id IN %@", ids)
         let labels = try context.fetch(request)
-        // The same duplicate tolerance as `fetchLabelsByIds`.
+        // Duplicate-id Label rows are possible (Label.id has no uniqueness
+        // constraint); collapse instead of trapping. The maintenance merge
+        // pass repairs the store rows.
         return Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
@@ -73,7 +51,7 @@ extension MessagePersister {
                 Log.error("Failed to fetch existing labels for save", category: .coreData, error: error)
                 existingLabels = []
             }
-            // Same duplicate tolerance as fetchLabelsByIds: trapping here would
+            // Same duplicate tolerance as fetchLabelsByIdsOrThrow: trapping here would
             // crash every sync until the maintenance merge pass ran.
             var labelDict = Dictionary(existingLabels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
 

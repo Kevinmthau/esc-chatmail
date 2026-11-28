@@ -103,14 +103,14 @@ final class DuplicateLabelMergeTests: XCTestCase {
         )
     }
 
-    /// The persister-side shield: fetchLabelsByIds must tolerate duplicate
+    /// The persister-side shield: fetchLabelsByIdsOrThrow must tolerate duplicate
     /// rows (it used to trap in Dictionary(uniqueKeysWithValues:)) so syncs
     /// keep working between the duplicate appearing and maintenance running.
     func testFetchLabelsByIdsToleratesDuplicateRows() throws {
         let persister = MessagePersister(photoPrefetcher: { _ in })
         try seedLabels([("INBOX", "INBOX"), ("INBOX", "INBOX")])
-        let byId = context.performAndWait {
-            persister.fetchLabelsByIds(["INBOX"], in: context).mapValues(\.id)
+        let byId = try context.performAndWait {
+            try persister.fetchLabelsByIdsOrThrow(["INBOX"], in: context).mapValues(\.id)
         }
         XCTAssertEqual(byId.count, 1, "Duplicates must collapse, not trap")
         XCTAssertEqual(byId["INBOX"], "INBOX")

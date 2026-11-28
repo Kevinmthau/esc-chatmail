@@ -762,7 +762,7 @@ extension DataCleanupService {
     /// are folded newest-first through `isBetterDisplayName`, starting from
     /// nil, so of two equally good names the newer one wins.
     /// `participations` are the person's message participations
-    /// (`messageParticipations(of:in:)`). Call on their context's queue.
+    /// (`messageParticipations(of:prefetchingMessages:in:)`). Call on their context's queue.
     private static func recoveredHeaderDisplayName(
         fromParticipations participations: [MessageParticipant],
         email: String
