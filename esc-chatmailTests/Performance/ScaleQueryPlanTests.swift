@@ -119,6 +119,51 @@ final class ScaleQueryPlanTests: XCTestCase {
         return !indexes.isEmpty && indexes.isSubset(of: conversationIndexes)
     }
 
+    // MARK: - Bounded rollup of a large chat
+
+    /// The run's rollup of a large chat reads it with bounded queries
+    /// (`ConversationRollupBoundedReader`: the stored count that routes it,
+    /// the newest-first preview walk, the newest INBOX row, the unread count,
+    /// two existence probes and the grouped sender query). Each must find the
+    /// chat's messages through an index on the conversation, never walk
+    /// ZMESSAGE, with and without statistics (architecture review 2026-11,
+    /// data-model#4).
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this. It fails if
+    /// a reader query stops being driven by the conversation.
+    func testBoundedRollupReads_areDrivenByTheConversation() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.newBackgroundContext()
+            let conversationID = manifest.largestConversationID
+
+            var outcome = (counted: 0, hasDate: false, senderCount: 0)
+            let plans = try SQLiteQueryPlanRecorder.record {
+                outcome = try context.performAndWait {
+                    let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+                    request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
+                    let conversation = try XCTUnwrap(try context.fetch(request).first)
+                    let counts = try ConversationRollupBoundedReader.storedMessageCounts(
+                        of: [conversation.objectID],
+                        in: context
+                    )
+                    let snapshot = try ConversationRollupBoundedReader.snapshot(of: conversation, overlay: nil, in: context)
+                    let senders = try ConversationRollupBoundedReader.senders(of: conversation, overlay: nil, in: context)
+                    return (counts[conversation.objectID] ?? 0, snapshot.lastMessageDate != nil, senders.senderEmails.count)
+                }
+            }
+
+            XCTAssertEqual(outcome.counted, manifest.largestConversationMessageCount, "\(statistics)")
+            XCTAssertTrue(outcome.hasDate, "\(statistics)")
+            XCTAssertGreaterThan(outcome.senderCount, 1, "\(statistics)")
+            let messagePlans = plans.filter { $0.reads("ZMESSAGE") && !$0.reads("ZCONVERSATION") }
+            XCTAssertGreaterThanOrEqual(messagePlans.count, 7, "\(statistics):\n\(plans)")
+            for plan in messagePlans {
+                assertDrivenByTheConversation(plan, statistics)
+            }
+        }
+    }
+
     // MARK: - Unread snapshot at chat open
 
     /// Review item `chat-open-unread-snapshot`. Opening a chat snapshots its

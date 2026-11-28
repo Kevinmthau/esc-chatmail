@@ -174,6 +174,42 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTAssertTrue(state.selfParticipationsAreFault)
     }
 
+    // MARK: - A rollup
+
+    /// The run's rollup of the largest chat (20,000 messages, a mailing
+    /// list), through `ConversationRollupUpdater.updateRollupsForModified` on a
+    /// context that has read nothing. It reads the chat from bounded queries
+    /// (`ConversationRollupBoundedReader`) and its kept list title reads no
+    /// sender (architecture review 2026-11, data-model#4).
+    ///
+    /// Revert-check: the bounded route (`partitionForRollup` sending a
+    /// conversation over `ConversationRollupBoundedReader.messageCountThreshold`
+    /// to the reader). Walk every conversation and the rollup registers every
+    /// message of the chat: 20,063 objects (iOS 27.0 simulator, 2026-11-28).
+    @MainActor
+    func testRollingUpTheLargestChat_readsABoundedNumberOfRows() async throws {
+        let context = makeContextUnderTest()
+        let largestConversationID = manifest.largestConversationID
+        let conversationID = try await context.perform {
+            let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+            request.predicate = NSPredicate(format: "id == %@", largestConversationID as CVarArg)
+            return try XCTUnwrap(try context.fetch(request).first).objectID
+        }
+
+        let updated = await ConversationRollupUpdater(coreDataStack: coreDataStack)
+            .updateRollupsForModified(conversationIDs: [conversationID], in: context, myEmail: Self.selfEmail)
+        let state = try await state(of: context)
+
+        XCTAssertTrue(updated)
+        let lastMessageDate = try await context.perform {
+            try XCTUnwrap(context.existingObject(with: conversationID) as? Conversation).lastMessageDate
+        }
+        XCTAssertNotNil(lastMessageDate)
+        XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
+        XCTAssertTrue(state.inboxMembersAreFault)
+        XCTAssertTrue(state.selfParticipationsAreFault)
+    }
+
     // MARK: - A new message
 
     /// The commonest write there is: an incremental sync that found one new
