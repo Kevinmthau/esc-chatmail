@@ -521,9 +521,15 @@ extension MessagePersister {
                     attachment: attachment,
                     messageId: message.id
                 )
+                // Kept, `queued` with no file: a `local_inline_` row has a recovery owner, the
+                // downloader's full-message recovery (`SynthesizedInlineAttachmentRecovery`),
+                // which runs when the row is shown, and the update path refreshes its storage
+                // when the message is fetched again. Until 2026-11-28 the row was deleted here,
+                // and with it every way back: reconciliation skips a message already stored, so
+                // the inline image was gone for good (architecture review 2026-11,
+                // attachments-storage-disk#5).
                 if !didPersistInlineData {
-                    context.delete(attachment)
-                    Log.warning("Dropping inline attachment for message \(Log.hashIdentifier(message.id)) due to local persistence failure", category: .attachment)
+                    Log.warning("Inline attachment for message \(Log.hashIdentifier(message.id)) could not be written; left queued for recovery", category: .attachment)
                 }
             }
         } catch {
