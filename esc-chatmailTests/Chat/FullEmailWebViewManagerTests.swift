@@ -161,18 +161,6 @@ final class FullEmailRemoteImageFallbackBookkeepingTests: XCTestCase {
 }
 
 final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
-    private func makeKey(
-        messageId: String = "message-1",
-        sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>"
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey.make(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            wrappedHTML: html
-        )
-    }
-
     private func makeRequest(
         messageId: String = "message-1",
         subject: String = "Subject"
@@ -205,16 +193,14 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
 
     func testStoreAndReadPreparedPayload() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
-        let key = makeKey()
         let request = makeRequest()
         let payload = makePayload()
 
-        bookkeeping.store(key: key, request: request, payload: payload)
+        bookkeeping.store(request: request, payload: payload)
 
         XCTAssertEqual(
             bookkeeping.entry(for: "message-1"),
             FullEmailPreparedOpenPayloadBookkeeping.Entry(
-                key: key,
                 request: request,
                 payload: payload
             )
@@ -225,20 +211,17 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
     func testStoreReplacesExistingPayloadForMessage() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
         bookkeeping.store(
-            key: makeKey(html: "<html>old</html>"),
             request: makeRequest(subject: "Old"),
             payload: makePayload(html: "<html>old</html>")
         )
 
-        let newKey = makeKey(sourceSignature: "sha256:new", html: "<html>new</html>")
         let newRequest = makeRequest(subject: "New")
         let newPayload = makePayload(sourceSignature: "sha256:new", html: "<html>new</html>")
-        bookkeeping.store(key: newKey, request: newRequest, payload: newPayload)
+        bookkeeping.store(request: newRequest, payload: newPayload)
 
         XCTAssertEqual(
             bookkeeping.entry(for: "message-1"),
             FullEmailPreparedOpenPayloadBookkeeping.Entry(
-                key: newKey,
                 request: newRequest,
                 payload: newPayload
             )
@@ -249,12 +232,10 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
     func testRemoveAndRemoveAllDropPreparedPayloads() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
         bookkeeping.store(
-            key: makeKey(messageId: "message-1"),
             request: makeRequest(messageId: "message-1"),
             payload: makePayload(messageId: "message-1")
         )
         bookkeeping.store(
-            key: makeKey(messageId: "message-2"),
             request: makeRequest(messageId: "message-2"),
             payload: makePayload(messageId: "message-2")
         )
@@ -1414,17 +1395,6 @@ final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
 }
 
 final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
-    private func makeKey(
-        sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>"
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey.make(
-            messageId: "message-1",
-            sourceSignature: sourceSignature,
-            wrappedHTML: html
-        )
-    }
-
     private func makePayload(
         sourceSignature: String = "sha256:source",
         html: String = "<html>body</html>"

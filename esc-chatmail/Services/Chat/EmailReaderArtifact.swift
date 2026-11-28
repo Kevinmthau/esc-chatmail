@@ -15,14 +15,19 @@ enum StableFingerprint {
 }
 
 /// The one fingerprint of a reader body: `"<UTF-8 count>:<SHA-256 prefix>"`. Every key of the
-/// wrapped original HTML uses it (`FullEmailPreparedArtifactKey`, `FullEmailWebViewPreRenderKey`,
-/// `EmailReaderArtifact.renderSignature`), so a fingerprint computed once, off the main actor, by
+/// wrapped original HTML uses it (`FullEmailWebViewPreRenderKey`, the prepared payload's
+/// `htmlFingerprint`, `EmailReaderArtifact.renderSignature`), so a fingerprint computed once, off the main actor, by
 /// the warm (`WarmedOriginalEmailHTML`) can stand in for each of them byte for byte (architecture
 /// review 2026-11, `web-content-rendering#4`).
 enum ReaderContentFingerprint {
     static func make(_ text: String) -> String {
         countMainThreadComputationForTesting()
-        return "\(text.utf8.count):\(StableFingerprint.sha256Prefix(text))"
+        return uncounted(text)
+    }
+
+    /// `make` without the main-thread count, for a debug check of a fingerprint handed in.
+    static func uncounted(_ text: String) -> String {
+        "\(text.utf8.count):\(StableFingerprint.sha256Prefix(text))"
     }
 
     private static let mainThreadComputationLock = NSLock()
@@ -174,6 +179,13 @@ struct EmailReaderArtifact: Equatable, Sendable {
         hasHTMLSource: Bool,
         producedAt: Date = Date()
     ) {
+        // A fingerprint handed in stands in for the body's in the render signature, so one for
+        // other content would let an adopted view show what the signature does not say. Debug
+        // builds check it (a hash of the body on the main actor, which release builds skip).
+        assert(
+            bodyFingerprint.map { $0 == ReaderContentFingerprint.uncounted(body.content) } ?? true,
+            "EmailReaderArtifact was handed a fingerprint of other content"
+        )
         self.messageID = messageID
         self.sourceSignature = sourceSignature
         self.body = body
