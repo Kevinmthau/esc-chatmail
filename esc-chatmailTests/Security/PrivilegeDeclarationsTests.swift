@@ -58,4 +58,32 @@ final class PrivilegeDeclarationsTests: XCTestCase {
             )
         }
     }
+
+    // MARK: - Push
+
+    /// Nothing registers for remote notifications (`docs/mac-app-plan.md` recorded the push
+    /// entitlement as unused), so the iOS app asks for no push entitlement and no
+    /// remote-notification background mode. The background modes it does use stay, and so does
+    /// every BGTask identifier, the retired vacuum one included: BGTaskScheduler raises on a
+    /// request whose identifier has no entry, and a device that ran an earlier build can hold one.
+    ///
+    /// Revert-check: putting `aps-environment` back in `esc_chatmail.entitlements`, or
+    /// `remote-notification` back in `UIBackgroundModes`, fails this.
+    @MainActor
+    func testIOSApp_declaresNoPushPrivilege_andKeepsItsBackgroundTasks() throws {
+        let entitlements = try plist("esc-chatmail/Resources/esc_chatmail.entitlements")
+        XCTAssertNil(entitlements["aps-environment"])
+
+        let info = try plist("esc-chatmail/Resources/Info.plist")
+        XCTAssertEqual(info["UIBackgroundModes"] as? [String], ["fetch", "processing"])
+        let identifiers = try XCTUnwrap(info["BGTaskSchedulerPermittedIdentifiers"] as? [String])
+        XCTAssertTrue(identifiers.contains(DatabaseMaintenanceService.retiredVacuumTaskIdentifier))
+        XCTAssertEqual(identifiers.count, 5)
+
+        let code = try repositorySwiftFilePaths(under: "esc-chatmail").map { try repositorySource($0) }
+        XCTAssertFalse(
+            code.contains { $0.contains("registerForRemoteNotifications") },
+            "Something registers for remote notifications; it needs the push entitlement back"
+        )
+    }
 }
