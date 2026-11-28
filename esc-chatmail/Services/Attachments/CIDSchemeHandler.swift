@@ -23,6 +23,22 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         set { resourceLock.withLock { resources = newValue } }
     }
 
+    private var unavailableImages = 0
+    /// How many images this handler answered with its transparent stand-in because their bytes
+    /// could not be read or fetched now: a local file that cannot be read, or an attachment with
+    /// no file whose on-demand fetch failed (offline, say). A Content-ID that no attachment of the
+    /// message names is not counted: it will never load, so a render without it is as complete as
+    /// it can be. The page reports the stand-in as a loaded image, so a snapshot render reads this
+    /// to know its capture is incomplete (architecture review 2026-11, `web-content-rendering#3`;
+    /// `EmailPreviewSnapshotRenderSession`).
+    var unavailableImageCount: Int {
+        resourceLock.withLock { unavailableImages }
+    }
+
+    private func recordUnavailableImage() {
+        resourceLock.withLock { unavailableImages += 1 }
+    }
+
     /// The message containing the attachments to resolve
     weak var message: Message? {
         didSet {
@@ -109,6 +125,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             if let data = AttachmentPaths.loadData(from: resource.localURL) {
                 respond(urlSchemeTask, taskID: taskID, with: data, mimeType: resource.mimeType)
             } else {
+                recordUnavailableImage()
                 respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
             }
             return
@@ -151,6 +168,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         } else {
             guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: Attachment not downloaded for Content-ID: \(contentId)", category: .ui)
+            recordUnavailableImage()
             respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
         }
     }

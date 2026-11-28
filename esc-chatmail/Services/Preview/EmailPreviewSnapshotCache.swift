@@ -66,6 +66,22 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
     private let maxCacheAge: TimeInterval
     private let maxCacheSize: Int64
     private let fileManager: FileManager
+    /// Snapshots taken with an image missing (`EmailPreviewSnapshotResult.isComplete` false), kept
+    /// in memory only and for `incompleteEntryLifetime`, never on disk: on disk such a card showed
+    /// its gaps for the seven days of `maxCacheAge`, across launches (architecture review 2026-11,
+    /// `web-content-rendering#3`). After the lifetime the next mount renders the card again, and
+    /// a complete render goes to disk. The lifetime bounds how often a card whose images are dead
+    /// for good (a 404 tracker that is not tiny) is rendered again. Account state like the files:
+    /// `closeAccountWorkAndClear` empties it.
+    private var incompleteEntries: [String: IncompleteEntry] = [:]
+    private let incompleteEntryLifetime: TimeInterval
+    private let maxIncompleteEntries: Int
+    private let now: @Sendable () -> Date
+
+    private struct IncompleteEntry {
+        let entry: EmailPreviewSnapshotCacheEntry
+        let storedAt: Date
+    }
     private let cleanupTask = PeriodicCleanupTask()
     private var isCleaningUp = false
     private var activeCleanupID: UUID?
@@ -78,11 +94,17 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         maxCacheAge: TimeInterval = 7 * 24 * 60 * 60,
         maxCacheSize: Int64 = 50 * 1024 * 1024,
         fileManager: FileManager = .default,
-        startsPeriodicCleanup: Bool = false
+        startsPeriodicCleanup: Bool = false,
+        incompleteEntryLifetime: TimeInterval = 10 * 60,
+        maxIncompleteEntries: Int = 20,
+        now: @escaping @Sendable () -> Date = { Date() }
     ) {
         self.fileManager = fileManager
         self.maxCacheAge = maxCacheAge
         self.maxCacheSize = maxCacheSize
+        self.incompleteEntryLifetime = incompleteEntryLifetime
+        self.maxIncompleteEntries = max(1, maxIncompleteEntries)
+        self.now = now
 
         if let cacheDirectory {
             self.cacheDirectory = cacheDirectory
@@ -104,6 +126,12 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         expectedAccountGeneration: EmailPreviewSnapshotCacheAccountGeneration? = nil
     ) -> EmailPreviewSnapshotCacheEntry? {
         guard accepts(expectedAccountGeneration) else { return nil }
+        if let incomplete = incompleteEntries[cacheKey] {
+            if now().timeIntervalSince(incomplete.storedAt) <= incompleteEntryLifetime {
+                return incomplete.entry
+            }
+            incompleteEntries.removeValue(forKey: cacheKey)
+        }
         let paths = paths(for: cacheKey)
         guard fileManager.fileExists(atPath: paths.image.path),
               fileManager.fileExists(atPath: paths.metadata.path),
@@ -131,11 +159,14 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
         )
     }
 
+    /// Keeps a rendered snapshot: on disk when `isComplete`, else in memory only, for
+    /// `incompleteEntryLifetime`.
     @discardableResult
     func store(
         image: PlatformImage,
         displayHeight: CGFloat,
         pixelScale: CGFloat,
+        isComplete: Bool,
         for cacheKey: String,
         expectedAccountGeneration: EmailPreviewSnapshotCacheAccountGeneration? = nil
     ) -> EmailPreviewSnapshotCacheEntry? {
@@ -144,7 +175,18 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
             return nil
         }
 
-        let now = Date()
+        let now = self.now()
+        guard isComplete else {
+            let entry = EmailPreviewSnapshotCacheEntry(
+                imageData: imageData,
+                displayHeight: HTMLPreviewSizing.clampedHeight(displayHeight),
+                pixelScale: pixelScale,
+                createdAt: now
+            )
+            storeIncomplete(entry, for: cacheKey, at: now)
+            return entry
+        }
+        incompleteEntries.removeValue(forKey: cacheKey)
         let metadata = Metadata(
             displayHeight: Double(HTMLPreviewSizing.clampedHeight(displayHeight)),
             pixelScale: Double(pixelScale),
@@ -174,10 +216,12 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
     }
 
     func remove(for cacheKey: String) {
+        incompleteEntries.removeValue(forKey: cacheKey)
         removeFiles(for: cacheKey)
     }
 
     func clearAll() {
+        incompleteEntries.removeAll()
         FileSystemErrorHandler.removeItem(at: cacheDirectory, category: .general)
         Self.createDirectoryIfNeeded(at: cacheDirectory, fileManager: fileManager)
     }
@@ -196,6 +240,7 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
     func closeAccountWorkAndClear() async throws {
         acceptsAccountWork = false
         accountGeneration &+= 1
+        incompleteEntries.removeAll()
         let cleanupID = activeCleanupID
         let cleanupTask = activeCleanupTask
         await cleanupTask?.value
@@ -242,6 +287,19 @@ actor EmailPreviewSnapshotCache: PeriodicCleanupHandler {
             activeCleanupTask = nil
             isCleaningUp = false
         }
+    }
+
+    /// Keeps at most `maxIncompleteEntries`, dropping the oldest.
+    private func storeIncomplete(_ entry: EmailPreviewSnapshotCacheEntry, for cacheKey: String, at date: Date) {
+        incompleteEntries[cacheKey] = IncompleteEntry(entry: entry, storedAt: date)
+        while incompleteEntries.count > maxIncompleteEntries,
+              let oldest = incompleteEntries.min(by: { $0.value.storedAt < $1.value.storedAt })?.key {
+            incompleteEntries.removeValue(forKey: oldest)
+        }
+    }
+
+    var incompleteEntryCountForTesting: Int {
+        incompleteEntries.count
     }
 
     private func accepts(

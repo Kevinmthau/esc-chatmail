@@ -325,10 +325,12 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 return
             }
 
+            // An incomplete snapshot is shown all the same; the cache keeps it in memory only.
             let cached = await cache.store(
                 image: result.image,
                 displayHeight: result.displayHeight,
                 pixelScale: result.pixelScale,
+                isComplete: result.isComplete,
                 for: result.cacheKey,
                 expectedAccountGeneration: accountGenerations.snapshotCache
             )
@@ -347,7 +349,8 @@ final class EmailPreviewSnapshotViewModel: ObservableObject {
                 messageId: diagnosticMessageId,
                 duration: CFAbsoluteTimeGetCurrent() - renderStart,
                 displayHeight: result.displayHeight,
-                cacheStored: cached != nil
+                cacheStored: cached != nil,
+                isComplete: result.isComplete
             )
             if let cached {
                 guard await isActive(

@@ -249,6 +249,51 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertGreaterThan(failedAt, staleFailureDate)
     }
 
+    /// A failed on-demand fetch is answered with the transparent stand-in and counted, so a
+    /// snapshot render knows its capture is missing that image; a Content-ID no attachment names is
+    /// answered the same way and not counted, because it will never load
+    /// (architecture review 2026-11, `web-content-rendering#3`).
+    ///
+    /// Revert-check: removing `recordUnavailableImage()` after the failed fetch fails this.
+    func testUnavailableImageCount_countsAFailedFetch_notAContentIDWithNoAttachment() async throws {
+        let message = MessageBuilder()
+            .withId("message-cid-unavailable-count")
+            .withAttachments()
+            .build(in: context)
+        _ = AttachmentBuilder()
+            .withId("att-cid-unavailable-count")
+            .withFilename("missing.png")
+            .withMimeType("image/png")
+            .withContentId("missing@example.com")
+            .forMessage(message)
+            .build(in: context)
+        try saveViewContext()
+        let stack = testStack!
+        let handler = CIDSchemeHandler(
+            message: message,
+            apiClient: MockGmailAPIClient(),
+            makeBackgroundContext: { stack.newBackgroundContext() }
+        )
+
+        let unmatchedFinished = expectation(description: "unmatched Content-ID answered")
+        let unmatched = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:nobody@example.com"))) {
+            unmatchedFinished.fulfill()
+        }
+        handler.webView(WKWebView(), start: unmatched)
+        await fulfillment(of: [unmatchedFinished], timeout: 2.0)
+        XCTAssertEqual(unmatched.response?.mimeType, "image/gif")
+        XCTAssertEqual(handler.unavailableImageCount, 0)
+
+        let failedFinished = expectation(description: "failed fetch answered")
+        let failed = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:missing@example.com"))) {
+            failedFinished.fulfill()
+        }
+        handler.webView(WKWebView(), start: failed)
+        await fulfillment(of: [failedFinished], timeout: 2.0)
+        XCTAssertEqual(failed.response?.mimeType, "image/gif")
+        XCTAssertEqual(handler.unavailableImageCount, 1)
+    }
+
     func testStoppedTaskReceivesNoCallbacksAfterDelayedFallbackCompletes() async throws {
         let message = MessageBuilder()
             .withId("message-cid-cancel")

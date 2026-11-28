@@ -344,6 +344,7 @@ final class RenderedMessageCacheTests: XCTestCase {
             image: image,
             displayHeight: 144,
             pixelScale: 2,
+            isComplete: true,
             for: snapshotKey
         )
         let stored = try XCTUnwrap(storedCandidate)

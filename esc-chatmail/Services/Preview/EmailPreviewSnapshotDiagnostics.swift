@@ -42,7 +42,8 @@ enum EmailPreviewSnapshotDiagnostics {
         messageId: String?,
         duration: TimeInterval,
         displayHeight: CGFloat,
-        cacheStored: Bool
+        cacheStored: Bool,
+        isComplete: Bool
     ) {
         counts.renderSuccesses += 1
         log(
@@ -53,7 +54,8 @@ enum EmailPreviewSnapshotDiagnostics {
                 "count=\(counts.renderSuccesses)",
                 "duration=\(durationDescription(duration))",
                 "height=\(Int(displayHeight.rounded()))",
-                "cacheStored=\(cacheStored)"
+                "cacheStored=\(cacheStored)",
+                "complete=\(isComplete)"
             ]
         )
     }

@@ -109,6 +109,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: image,
             displayHeight: 188,
             pixelScale: 2,
+            isComplete: true,
             for: "snapshot-key"
         )
         let loaded = await cache.load(for: "snapshot-key")
@@ -129,6 +130,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemBlue),
             displayHeight: 188,
             pixelScale: 2,
+            isComplete: true,
             for: "old-snapshot",
             expectedAccountGeneration: oldGeneration
         )
@@ -144,6 +146,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemOrange),
             displayHeight: 220,
             pixelScale: 2,
+            isComplete: true,
             for: "stale-write",
             expectedAccountGeneration: oldGeneration
         )
@@ -158,6 +161,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemGreen),
             displayHeight: 206,
             pixelScale: 2,
+            isComplete: true,
             for: "fresh-write",
             expectedAccountGeneration: freshGeneration
         )
@@ -174,6 +178,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemRed),
             displayHeight: 188,
             pixelScale: 2,
+            isComplete: true,
             for: "expired-key"
         )
 
@@ -198,6 +203,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemGreen),
             displayHeight: 188,
             pixelScale: 2,
+            isComplete: true,
             for: cacheKey
         )
         let renderer = StubSnapshotRenderer { _ in
@@ -236,7 +242,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 image: self.makeImage(color: .systemPurple),
                 displayHeight: 212,
                 pixelScale: 2,
-                cacheKey: request.cacheKey
+                cacheKey: request.cacheKey,
+                isComplete: true
             )
         }
         let viewModel = EmailPreviewSnapshotViewModel(cache: cache, renderer: renderer)
@@ -338,6 +345,7 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: .systemGreen),
             displayHeight: 206,
             pixelScale: 2,
+            isComplete: true,
             for: expectedCacheKey
         )
 
@@ -374,7 +382,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 image: self.makeImage(color: .systemBlue),
                 displayHeight: 218,
                 pixelScale: 2,
-                cacheKey: request.cacheKey
+                cacheKey: request.cacheKey,
+                isComplete: true
             )
         }
         let viewModel = EmailPreviewSnapshotViewModel(
@@ -515,7 +524,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 image: self.makeImage(color: request.html == failedHTML ? .systemBlue : .systemGreen),
                 displayHeight: request.html == failedHTML ? 218 : 206,
                 pixelScale: 2,
-                cacheKey: request.cacheKey
+                cacheKey: request.cacheKey,
+                isComplete: true
             )
         }
         let viewModel = EmailPreviewSnapshotViewModel(
@@ -624,7 +634,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 image: makeImage(color: .systemOrange),
                 displayHeight: 220,
                 pixelScale: 2,
-                cacheKey: request.cacheKey
+                cacheKey: request.cacheKey,
+                isComplete: true
             )
         )
         await task.value
@@ -671,7 +682,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
                 image: makeImage(color: .systemOrange),
                 displayHeight: 220,
                 pixelScale: 2,
-                cacheKey: request.cacheKey
+                cacheKey: request.cacheKey,
+                isComplete: true
             )
         )
         await task.value
@@ -1135,7 +1147,8 @@ final class EmailPreviewSnapshotCacheTests: XCTestCase {
             image: makeImage(color: color),
             displayHeight: displayHeight,
             pixelScale: 2,
-            cacheKey: cacheKey
+            cacheKey: cacheKey,
+            isComplete: true
         )
     }
 
@@ -1253,7 +1266,8 @@ private final class KeyedDelayedSnapshotRenderer: EmailPreviewSnapshotRendering 
                 image: image,
                 displayHeight: displayHeight,
                 pixelScale: image.scale,
-                cacheKey: cacheKey
+                cacheKey: cacheKey,
+                isComplete: true
             )
         )
         continuations[cacheKey] = nil

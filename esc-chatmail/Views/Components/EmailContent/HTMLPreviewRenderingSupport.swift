@@ -152,6 +152,35 @@ enum HTMLPreviewHeightMeasurementScript {
     }
 }
 
+/// Counts the images a snapshot would capture that did not load: broken (`naturalWidth` 0 once
+/// complete) or not complete yet (architecture review 2026-11, `web-content-rendering#3`). Only
+/// images that show in the capture area count: larger than 2×2 points (tracking pixels and
+/// spacers, which a dead tracker host leaves broken for good, would otherwise keep a card from
+/// ever being stored), not hidden, and inside the first `captureHeight` points of the view at its
+/// `captureWidth`. A `cid:` image the app could not supply is not seen here, because the scheme
+/// handler answers it with a transparent stand-in that loads; `CIDSchemeHandler` counts those.
+enum HTMLPreviewSnapshotImageOutcomeScript {
+    static func script(captureWidth: CGFloat, captureHeight: CGFloat) -> String {
+        """
+        (function(captureWidth, captureHeight) {
+            var incomplete = 0;
+            var images = document.images;
+            for (var i = 0; i < images.length; i++) {
+                var image = images[i];
+                var rect = image.getBoundingClientRect();
+                if (rect.width <= 2 || rect.height <= 2) { continue; }
+                if (rect.bottom <= 0 || rect.top >= captureHeight) { continue; }
+                if (rect.right <= 0 || rect.left >= captureWidth) { continue; }
+                var style = window.getComputedStyle(image);
+                if (style.visibility === 'hidden' || style.display === 'none' || parseFloat(style.opacity) === 0) { continue; }
+                if (!image.complete || image.naturalWidth === 0) { incomplete++; }
+            }
+            return incomplete;
+        })(\(Int(captureWidth.rounded())), \(Int(captureHeight.rounded())));
+        """
+    }
+}
+
 enum HTMLPreviewSnapshotHeightMeasurementScript {
     static func script(scale: CGFloat) -> String {
         """
