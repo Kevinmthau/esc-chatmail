@@ -221,7 +221,7 @@ final class FullEmailReaderWebViewTests: XCTestCase {
     func testFullReaderLoadReadinessDoesNotRequirePreviewHeight() {
         let coordinator = FullEmailReaderWebView.Coordinator(makeReader(message: nil))
 
-        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5, networkRulesPermitLoading: true)
 
         XCTAssertEqual(readiness, .ready)
     }
@@ -230,11 +230,11 @@ final class FullEmailReaderWebViewTests: XCTestCase {
         let coordinator = FullEmailReaderWebView.Coordinator(makeReader(message: nil))
 
         XCTAssertEqual(
-            coordinator.loadReadiness(windowPresent: false, width: 320, height: 0.5),
+            coordinator.loadReadiness(windowPresent: false, width: 320, height: 0.5, networkRulesPermitLoading: true),
             .deferred(reason: "missing-window")
         )
         XCTAssertEqual(
-            coordinator.loadReadiness(windowPresent: true, width: 0.5, height: 0.5),
+            coordinator.loadReadiness(windowPresent: true, width: 0.5, height: 0.5, networkRulesPermitLoading: true),
             .deferred(reason: "missing-width")
         )
     }

@@ -16,8 +16,18 @@ import WebKit
 /// flash) the moment it was adopted into the full-view reader, defeating the point of warming.
 enum FullInteractiveEmailWebView {
     /// Builds the `WKWebViewConfiguration` for full original-email rendering.
-    static func makeConfiguration(cidHandler: CIDSchemeHandler) -> WKWebViewConfiguration {
+    ///
+    /// The private-network rule list is attached here when it is compiled, so the reader and the
+    /// pool get it together and an adopted view renders as a live one would. While it compiles,
+    /// the pool pre-renders nothing and the reader's coordinator attaches it before its first load
+    /// (`EmailWebContentNetworkRules`).
+    @MainActor
+    static func makeConfiguration(
+        cidHandler: CIDSchemeHandler,
+        networkRules: EmailWebContentNetworkRules? = nil
+    ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        (networkRules ?? .shared).attach(to: configuration.userContentController)
         // Register cid: scheme handler for inline attachments.
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
         configuration.applyFullReaderMediaAndDataDetectorSettings()
@@ -86,7 +96,8 @@ enum FullInteractiveEmailWebView {
     /// (which performs the side effects — opening external URLs, logging blocked links) and the
     /// off-screen `WarmNavigationDelegate` (which has no side effects — it permits the `.allow` cases
     /// and cancels the link-opening and blocked-link cases). Keeping the decision pure lets it be
-    /// unit-tested without WebKit.
+    /// unit-tested without WebKit. An `.other` or `.reload` navigation to a private host is
+    /// refused (`EmailDocumentNavigationGuard`).
     static func navigationDecision(
         navigationType: WKNavigationType,
         url: URL?
@@ -119,6 +130,9 @@ enum FullInteractiveEmailWebView {
         // Allow the initial document load, resource loads, and reloads. This is critical for
         // loadHTMLString with an about:blank/base-URL baseURL, which arrives as .other.
         if navigationType == .other || navigationType == .reload {
+            if let url, EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: url) {
+                return .blockedPrivateNetwork(url)
+            }
             return .allow
         }
 
@@ -1002,6 +1016,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         /// ready again: a snapshot that completes after the death does not mark it finished, and
         /// checkin drops it rather than re-hosting it.
         var isTerminated = false
+        /// The private-network rule list was attached when the view was made. One made while the
+        /// list could not be compiled loaded without it, and is not handed out once the list is
+        /// ready (`isUsable`).
+        var hasNetworkRules = false
 
         init(
             key: FullEmailWebViewPreRenderKey,
@@ -1024,6 +1042,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     private let capacity: Int
     private let loader: OriginalEmailSourceLoader
+    /// The private-network rule list every pooled view is made with. The pool makes no view while
+    /// it compiles, so it never hands out a view warmed without it (`canMakeEntryWithNetworkRules`).
+    private let networkRules: EmailWebContentNetworkRules
     /// Held for the manager's lifetime: its `deinit` ends the observation.
     private let memoryPressureEventSource: MemoryPressureEventSource
     private let host = OffscreenWebViewHost()
@@ -1052,10 +1073,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     init(
         capacity: Int = 4,
         loader: OriginalEmailSourceLoader = .shared,
-        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource()
+        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource(),
+        networkRules: EmailWebContentNetworkRules? = nil
     ) {
         self.capacity = max(1, capacity)
         self.loader = loader
+        self.networkRules = networkRules ?? .shared
         self.bookkeeping = FullEmailWebViewPoolBookkeeping(capacity: capacity)
         self.memoryPressureEventSource = memoryPressureEventSource
 
@@ -1186,7 +1209,8 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         )
 
         // Already warm (or warming) for this exact content + width: keep it hot and return.
-        if let existing = entries[request.messageId], existing.key == key, !existing.isCheckedOut {
+        if let existing = entries[request.messageId], existing.key == key, !existing.isCheckedOut,
+           isUsable(existing) {
             existing.request = request
             existing.payload = payload
             applyEvictions(bookkeeping.touch(request.messageId))
@@ -1202,6 +1226,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
+        guard canMakeEntryWithNetworkRules(messageId: request.messageId) else {
+            return
+        }
         let entry = makeEntry(
             key: key,
             request: request,
@@ -1279,7 +1306,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
                 return
             }
 
-            if existing.key == key {
+            if existing.key == key, isUsable(existing) {
                 let availability: FullEmailOpenPayload.CheckoutAvailability = existing.didFinishInitialLoad
                     ? .ready
                     : .warming
@@ -1306,6 +1333,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             request: request,
             payload: warmingPayload
         )
+        guard canMakeEntryWithNetworkRules(messageId: request.messageId) else {
+            applyEvictions(bookkeeping.touch(request.messageId))
+            return
+        }
         let entry = makeEntry(
             key: key,
             request: request,
@@ -1476,6 +1507,14 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         }
         guard entry.key == key else {
             logCheckoutMiss(messageId: messageId, reason: "key_mismatch")
+            return nil
+        }
+        guard isUsable(entry) else {
+            logCheckoutMiss(messageId: messageId, reason: "network_rules_missing")
+            if !entry.isCheckedOut {
+                entries.removeValue(forKey: messageId)
+                teardown(entry)
+            }
             return nil
         }
         guard entry.didFinishInitialLoad else {
@@ -1713,6 +1752,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
               width > 1,
               canCheckoutActiveWebView(messageId: messageId),
               let entry = entries[messageId],
+              isUsable(entry),
               entry.key == makePreRenderKey(
                 messageId: messageId,
                 sourceSignature: payload.sourceSignature,
@@ -1737,7 +1777,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         html: String
     ) -> Entry {
         let cidHandler = CIDSchemeHandler(message: message)
-        let configuration = FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        let configuration = FullInteractiveEmailWebView.makeConfiguration(
+            cidHandler: cidHandler,
+            networkRules: networkRules
+        )
         let webView = LayoutAwareWKWebView(
             frame: CGRect(x: 0, y: 0, width: width, height: host.preferredHeight()),
             configuration: configuration
@@ -1756,6 +1799,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             cidHandler: cidHandler,
             delegate: delegate
         )
+        entry.hasNetworkRules = networkRules.isAttached(to: configuration.userContentController)
         delegate.onFinish = { [weak self, weak entry] in
             self?.finalizeWarm(entry)
         }
@@ -1764,9 +1808,37 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         }
 
         host.host(webView, width: width)
-        let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
-        webView.loadHTMLString(html, baseURL: baseURL)
+        webView.loadHTMLString(
+            html,
+            baseURL: FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
+        )
         return entry
+    }
+
+    /// Whether the pool may make a view now: not while the private-network rule list compiles.
+    /// A view made then would load its email with nothing refusing loopback and LAN hosts, and a
+    /// reader that adopted it would show it as it is. The payload is kept; the next warm or
+    /// prepaint of the message makes the view. Nothing waits for the list here: an await inside a
+    /// warm's counted operation would hold a sign-out's drain on WebKit.
+    private func canMakeEntryWithNetworkRules(messageId: String) -> Bool {
+        guard networkRules.permitsLoading else {
+            networkRules.prepare()
+            Log.diagnostic(
+                .htmlPreview,
+                level: .info,
+                "FullEmailWebViewManager prerender_skipped message=\(Log.hashIdentifier(messageId)) reason=network_rules_pending",
+                category: .ui
+            )
+            return false
+        }
+        return true
+    }
+
+    /// A view may be handed out unless it was made without the private-network rule list and the
+    /// list is ready now: the review's rule is to never adopt a pooled view warmed without it. While
+    /// the list stays unavailable, a view made without it is as good as any other.
+    private func isUsable(_ entry: Entry) -> Bool {
+        entry.hasNetworkRules || networkRules.state != .ready
     }
 
     private func canCheckoutActiveWebView(messageId: String) -> Bool {

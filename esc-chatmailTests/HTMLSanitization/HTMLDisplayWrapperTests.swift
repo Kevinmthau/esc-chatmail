@@ -1677,4 +1677,40 @@ final class HTMLDisplayWrapperTests: XCTestCase {
         XCTAssertTrue(result.contains("Fragment body"))
         XCTAssertTrue(result.contains("form-action 'none'; base-uri 'none'"))
     }
+
+    /// Both wrapper templates, for a whole document and for a fragment, carry the one CSP constant,
+    /// once each (architecture review 2026-11, `web-content-rendering#5`), and the constant is the
+    /// policy the two copies held: it names no `img-src`, `font-src`, `media-src` or `default-src`,
+    /// because any of them changes which images an email shows, which waits on the image-consent
+    /// decision. Loopback and LAN hosts are kept out by WebKit's rule list instead.
+    ///
+    /// Revert-check: writing either template's meta tag out again with another policy (an added
+    /// `img-src https:`) fails this.
+    func testContentSecurityPolicy_isOneConstant_carriedByBothTemplates() {
+        XCTAssertEqual(
+            HTMLDisplayWrapper.contentSecurityPolicy,
+            "script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';"
+        )
+        let tag = HTMLDisplayWrapper.contentSecurityPolicyMetaTag
+        for purpose in HTMLDisplayPurpose.allCases {
+            for serialization in [HTMLHeadInjectionSerialization.domPreferred, .stringOnly] {
+                let document = sut.wrapHTMLForDisplay(
+                    "<html><head><title>T</title></head><body><p>Document</p></body></html>",
+                    isDarkMode: false,
+                    displayPurpose: purpose,
+                    headSerialization: serialization
+                )
+                let fragment = sut.wrapHTMLForDisplay(
+                    "<div>Fragment</div>",
+                    isDarkMode: false,
+                    displayPurpose: purpose,
+                    headSerialization: serialization
+                )
+                XCTAssertEqual(document.components(separatedBy: tag).count - 1, 1, "document \(purpose)")
+                XCTAssertEqual(fragment.components(separatedBy: tag).count - 1, 1, "fragment \(purpose)")
+                XCTAssertEqual(document.components(separatedBy: "Content-Security-Policy").count - 1, 1)
+                XCTAssertEqual(fragment.components(separatedBy: "Content-Security-Policy").count - 1, 1)
+            }
+        }
+    }
 }

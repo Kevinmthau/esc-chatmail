@@ -29,6 +29,9 @@ enum EmailPreviewSnapshotRenderError: Error {
     case navigationFailed(Error)
     case timeout
     case snapshotUnavailable
+    /// The private-network rule list was still compiling when the render's bounded wait for it
+    /// ended, so no session was built (`EmailWebContentNetworkRules`).
+    case networkRulesPending
 }
 
 enum EmailPreviewSnapshotAppearance {
@@ -364,9 +367,20 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
     static let shared = EmailPreviewSnapshotRenderer()
 
     private let scheduler: any EmailPreviewSnapshotRenderScheduling
+    private let networkRules: EmailWebContentNetworkRules
+    /// How long a render waits for the private-network rule list before it gives up with
+    /// `networkRulesPending`. The list compiles in milliseconds at launch; this bounds a render's
+    /// wait, which the scheduler's close awaits, should a compile not answer.
+    private let networkRulesWaitNanoseconds: UInt64
 
-    init(scheduler: (any EmailPreviewSnapshotRenderScheduling)? = nil) {
+    init(
+        scheduler: (any EmailPreviewSnapshotRenderScheduling)? = nil,
+        networkRules: EmailWebContentNetworkRules? = nil,
+        networkRulesWaitNanoseconds: UInt64 = 5_000_000_000
+    ) {
         self.scheduler = scheduler ?? EmailPreviewSnapshotRenderScheduler.shared
+        self.networkRules = networkRules ?? .shared
+        self.networkRulesWaitNanoseconds = networkRulesWaitNanoseconds
     }
 
     func render(request: EmailPreviewSnapshotRequest) async throws -> EmailPreviewSnapshotResult {
@@ -381,12 +395,26 @@ final class EmailPreviewSnapshotRenderer: EmailPreviewSnapshotRendering {
         expectedAccountGeneration: EmailPreviewSnapshotRenderAccountGeneration?
     ) async throws -> EmailPreviewSnapshotResult {
         try Task.checkCancellation()
+        let networkRules = networkRules
+        let networkRulesWaitNanoseconds = networkRulesWaitNanoseconds
         return try await scheduler.render(
             request: request,
             expectedAccountGeneration: expectedAccountGeneration
         ) {
             try Task.checkCancellation()
-            let session = try EmailPreviewSnapshotRenderSession(request: request)
+            // Bounded and cancellation-aware: the scheduler's account-transition close cancels
+            // and awaits this operation, and must not wait on WebKit's compile.
+            guard await networkRules.waitUntilLoadingPermitted(
+                timeoutNanoseconds: networkRulesWaitNanoseconds
+            ) else {
+                try Task.checkCancellation()
+                throw EmailPreviewSnapshotRenderError.networkRulesPending
+            }
+            try Task.checkCancellation()
+            let session = try EmailPreviewSnapshotRenderSession(
+                request: request,
+                networkRules: networkRules
+            )
             return try await withTaskCancellationHandler {
                 try await session.render()
             } onCancel: {
@@ -428,7 +456,10 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
     private var didComplete = false
     private let scale: CGFloat
 
-    init(request: EmailPreviewSnapshotRequest) throws {
+    init(
+        request: EmailPreviewSnapshotRequest,
+        networkRules: EmailWebContentNetworkRules? = nil
+    ) throws {
         guard request.containerWidth > 1 else {
             throw EmailPreviewSnapshotRenderError.invalidWidth
         }
@@ -441,6 +472,11 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
         )
 
         let configuration = WKWebViewConfiguration()
+        // A render never loads without the private-network rule list while it compiles; the
+        // renderer waits for it before building a session, so this refusal is the backstop.
+        guard (networkRules ?? .shared).attach(to: configuration.userContentController) else {
+            throw EmailPreviewSnapshotRenderError.networkRulesPending
+        }
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
         let cidHandler = CIDSchemeHandler(message: request.message)
@@ -653,7 +689,9 @@ final class EmailPreviewSnapshotRenderSession: NSObject, WKNavigationDelegate {
         decidePolicyFor navigationAction: WKNavigationAction,
         decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
     ) {
-        if navigationAction.navigationType == .other || navigationAction.navigationType == .reload {
+        // Its own load only, and not a meta refresh to a private host (`EmailDocumentNavigationGuard`).
+        let isOwnLoad = navigationAction.navigationType == .other || navigationAction.navigationType == .reload
+        if isOwnLoad, !EmailDocumentNavigationGuard.refusesAutomaticNavigation(to: navigationAction.request.url) {
             decisionHandler(.allow)
         } else {
             decisionHandler(.cancel)

@@ -20,6 +20,18 @@ enum HTMLHeadInjectionSerialization: Sendable {
 /// Wraps HTML content for display in WebView with proper styling and security
 /// Designed to match Apple Mail's rendering behavior as closely as possible
 struct HTMLDisplayWrapper {
+    /// The one Content-Security-Policy every wrapped email carries, for both wrapper templates
+    /// (architecture review 2026-11, `web-content-rendering#5`: two copies of it had to be kept
+    /// equal by hand). It forbids scripts, plugins, frames, external style sheets, form posts and a
+    /// `<base>`. It says nothing about images, fonts or media, deliberately: what the CSP may change
+    /// there (an `img-src`, `default-src 'none'`, `upgrade-insecure-requests`) changes which images
+    /// an email shows, which is the image-consent decision, not made yet. Loopback and LAN hosts are
+    /// kept out by WebKit's rule list instead (`EmailWebContentNetworkRuleSource`), which a CSP
+    /// cannot do: it has no way to name a private address range.
+    static let contentSecurityPolicy = "script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';"
+
+    static let contentSecurityPolicyMetaTag = #"<meta http-equiv="Content-Security-Policy" content="\#(contentSecurityPolicy)">"#
+
     private static let appleMailFallbackFontStack = "-apple-system, BlinkMacSystemFont, \"Helvetica Neue\", Helvetica, Arial, sans-serif"
     static let minimumFixedLayoutViewportWidth = 376
     static let maximumResponsiveLayoutViewportWidth = 480
@@ -122,7 +134,7 @@ struct HTMLDisplayWrapper {
         let injectedHead = """
         \(viewportMetaTag)
         \(originalColorSchemeHead)
-        <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
+        \(Self.contentSecurityPolicyMetaTag)
         <style id="esc-mail-styles">
             /* Minimal resets - don't override email's own styles */
             html {
@@ -402,7 +414,7 @@ struct HTMLDisplayWrapper {
             <meta charset="UTF-8">
             \(viewportMetaTag)
             \(originalColorSchemeHead)
-            <meta http-equiv="Content-Security-Policy" content="script-src 'none'; object-src 'none'; frame-src 'none'; style-src 'unsafe-inline'; form-action 'none'; base-uri 'none';">
+            \(Self.contentSecurityPolicyMetaTag)
             <style>
                 * {
                     box-sizing: border-box;

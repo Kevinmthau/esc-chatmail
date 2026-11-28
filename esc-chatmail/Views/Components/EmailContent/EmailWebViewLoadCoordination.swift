@@ -48,9 +48,14 @@ final class EmailWebViewLoadCoordination {
         lastLoadedContent != content || lastLoadedReloadSignature != reloadSignature
     }
 
+    /// `networkRulesPermitLoading` is `EmailWebContentNetworkRules.attach(to:)`'s answer for the
+    /// web view's user content controller: false while the private-network rule list is still
+    /// compiling, when loading would let the email's subresources reach loopback and LAN hosts. The
+    /// coordinator then loads when the rules call it back.
     func loadReadiness(
         needsReload: Bool,
         isLoading: Bool,
+        networkRulesPermitLoading: Bool,
         windowPresent: Bool,
         width: CGFloat,
         height: CGFloat
@@ -61,6 +66,10 @@ final class EmailWebViewLoadCoordination {
 
         guard !isLoading else {
             return .deferred(reason: "already-loading")
+        }
+
+        guard networkRulesPermitLoading else {
+            return .deferred(reason: Self.networkRulesPendingReason)
         }
 
         guard windowPresent else {
@@ -169,6 +178,8 @@ final class EmailWebViewLoadCoordination {
 
         return false
     }
+
+    static let networkRulesPendingReason = "network-rules-pending"
 
     static func messageIdentitySignature(messageId: String?) -> String {
         guard let messageId else {
