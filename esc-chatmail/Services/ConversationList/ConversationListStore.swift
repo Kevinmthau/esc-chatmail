@@ -21,13 +21,14 @@ struct ConversationListStore {
     /// Replaces the store contents with an already-filtered, already-sorted
     /// window in the caller's order. The only caller passes the result of
     /// `fetchWindow`, which applied the visibility filter and sort, so the
-    /// store deliberately does not re-filter or re-sort here.
+    /// store deliberately does not re-filter or re-sort here. A row the list
+    /// cannot show (`ConversationListItem.init?(conversation:)`) is skipped.
     mutating func replaceAll(with conversations: [Conversation]) {
         itemsByID.removeAll(keepingCapacity: true)
         visibleItems.removeAll(keepingCapacity: true)
 
         for conversation in conversations {
-            let item = ConversationListItem(conversation: conversation)
+            guard let item = ConversationListItem(conversation: conversation) else { continue }
             itemsByID[item.id] = item
             visibleItems.append(item)
         }
@@ -92,19 +93,21 @@ struct ConversationListStore {
     /// Inserts or refreshes one visible row: an unchanged `sortKey` replaces
     /// the snapshot in place; otherwise the row leaves its old position and
     /// re-enters at its `sortsBefore(_:_:)` position. A row failing
-    /// `matchesVisibility` is removed instead.
+    /// `matchesVisibility`, or one the list cannot show
+    /// (`ConversationListItem.init?(conversation:)`), is removed instead: only
+    /// skipped, a tombstone's stale row would stay on screen.
     private mutating func upsertConversation(
         _ conversation: Conversation,
         matchesVisibility: (Conversation) -> Bool
     ) {
         let objectID = conversation.objectID
-        guard matchesVisibility(conversation) else {
+        guard matchesVisibility(conversation),
+              let newItem = ConversationListItem(conversation: conversation) else {
             removeConversation(withID: objectID)
             return
         }
 
         let oldItem = itemsByID[objectID]
-        let newItem = ConversationListItem(conversation: conversation)
 
         itemsByID[objectID] = newItem
 

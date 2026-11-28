@@ -63,7 +63,7 @@ struct ConversationWindowProvider {
 
         request.fetchLimit = limit
         let candidates = try context.fetch(request)
-        return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+        return Array(candidates.filter { Self.isListable($0) && matchesVisibility($0) }.prefix(limit))
     }
 
     private func fetchFilteredWindow(
@@ -79,7 +79,7 @@ struct ConversationWindowProvider {
         let pendingIDs = Set(pendingConversations.map(\.objectID))
         let pendingVisibleConversations = pendingConversations
             .filter { conversation in
-                !conversation.isDeleted &&
+                Self.isListable(conversation) &&
                     conversation.archivedAt == nil &&
                     matchesVisibility(conversation)
             }
@@ -106,6 +106,7 @@ struct ConversationWindowProvider {
             for conversation in candidates {
                 guard !pendingIDs.contains(conversation.objectID),
                       persistedVisibleIDs.insert(conversation.objectID).inserted,
+                      Self.isListable(conversation),
                       matchesVisibility(conversation) else {
                     continue
                 }
@@ -130,6 +131,14 @@ struct ConversationWindowProvider {
                 .sorted(by: sortsBefore(_:_:))
                 .prefix(limit)
         )
+    }
+
+    /// Whether the list can show the row (`ConversationListItem.listableID(of:)`): a
+    /// returned fault whose row another context deleted before it fired is a tombstone,
+    /// and `SortKey(conversation:)` below and the list item would trap on its nil `id`.
+    /// Asked before the sort and the visibility check, so neither reads one.
+    private static func isListable(_ conversation: Conversation) -> Bool {
+        ConversationListItem.listableID(of: conversation) != nil
     }
 
     /// Delegates to `ConversationListItem.SortKey` (the CANONICAL chat-list

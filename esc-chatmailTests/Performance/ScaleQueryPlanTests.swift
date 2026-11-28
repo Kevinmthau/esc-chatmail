@@ -453,6 +453,69 @@ final class ScaleQueryPlanTests: XCTestCase {
         }
     }
 
+    /// A Person change the list's rows can show is answered with one fetch of the window
+    /// rows whose snapshots show the Person's address
+    /// (`ConversationListChangeFetch.storedWindowConversations`), with their participants
+    /// and persons prefetched for the snapshot build. Every read is by key: the rows by
+    /// their primary key, the participants through their conversation index. The review
+    /// asked for `ANY participants.person IN %@` in the predicate instead, and SQLite
+    /// answered that from the participant table's person index, which for the user's own
+    /// Person, in all 12,000 conversations of this store, read every one of its participant
+    /// rows with or without statistics (measured 2026-11-28).
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this, since the fetch has no
+    /// participant term to put back. A predicate the primary key cannot serve, or a model
+    /// version that drops the participant's conversation index, is what it would catch.
+    @MainActor
+    func testConversationListPersonChange_readsTheWindowRowsByKey() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.makeMainQueueViewContext()
+            let provider = ConversationWindowProvider()
+            let window = try provider.fetchWindow(
+                in: context,
+                limit: provider.initialLimit,
+                searchText: "",
+                filter: .all,
+                matchesVisibility: { _ in true }
+            )
+            XCTAssertEqual(window.count, provider.initialLimit, "\(statistics)")
+            let windowIDs = window.map(\.objectID)
+            context.reset()
+
+            var matched: [Conversation] = []
+            let plans = try SQLiteQueryPlanRecorder.record {
+                matched = try context.fetch(
+                    ConversationListChangeFetch.storedWindowConversations(withIDs: windowIDs)
+                )
+            }
+
+            XCTAssertEqual(Set(matched.map(\.objectID)), Set(windowIDs), "\(statistics)")
+            let rowsPlan = try XCTUnwrap(
+                plans.first { $0.reads("ZCONVERSATION") && $0.sql.contains("carray") },
+                "\(statistics):\n\(plans)"
+            )
+            XCTAssertEqual(rowsPlan.scans(of: "ZCONVERSATION"), [], "\(statistics): \(rowsPlan)")
+            XCTAssertTrue(
+                rowsPlan.steps.contains { $0.contains("INTEGER PRIMARY KEY") },
+                "\(statistics): \(rowsPlan)"
+            )
+            let participantPlan = try XCTUnwrap(
+                plans.first { $0.reads("ZCONVERSATIONPARTICIPANT") },
+                "\(statistics):\n\(plans)"
+            )
+            XCTAssertEqual(participantPlan.scans(of: "ZCONVERSATIONPARTICIPANT"), [], "\(statistics): \(participantPlan)")
+            XCTAssertEqual(
+                participantPlan.indexes(on: "ZCONVERSATIONPARTICIPANT"),
+                ["ZCONVERSATIONPARTICIPANT_ZCONVERSATION_INDEX"],
+                "\(statistics): \(participantPlan)"
+            )
+            if let personPlan = plans.first(where: { $0.reads("ZPERSON") }) {
+                XCTAssertEqual(personPlan.scans(of: "ZPERSON"), [], "\(statistics): \(personPlan)")
+            }
+        }
+    }
+
     // MARK: - Message by Gmail ID
 
     /// Every message a sync persists is first looked up by its Gmail ID, and

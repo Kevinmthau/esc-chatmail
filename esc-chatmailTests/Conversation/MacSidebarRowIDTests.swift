@@ -84,9 +84,9 @@ final class MacSidebarRowIDTests: XCTestCase {
     /// found that this could catch and the sidebar's own tests could not. It is here so the
     /// property has a test beside its type; a sidebar whose rows carried another conversation's
     /// id fails `MacConversationSidebarRowIdentityTests`' two selection tests.
-    func testListItem_sidebarRowID_holdsTheItemsOwnConversation() {
+    func testListItem_sidebarRowID_holdsTheItemsOwnConversation() throws {
         let conversation = makeConversation()
-        let item = ConversationListItem(conversation: conversation)
+        let item = try XCTUnwrap(ConversationListItem(conversation: conversation))
 
         XCTAssertEqual(item.sidebarRowID.conversationID, conversation.objectID)
         XCTAssertEqual(item.sidebarRowID, MacSidebarRowID(conversationID: item.id))

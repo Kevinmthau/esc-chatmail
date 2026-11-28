@@ -155,6 +155,6 @@ final class ConversationListPrefetchPolicyTests: XCTestCase {
         }
 
         try saveViewContext()
-        return ConversationListItem(conversation: conversation)
+        return try XCTUnwrap(ConversationListItem(conversation: conversation))
     }
 }
