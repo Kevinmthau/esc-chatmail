@@ -25,9 +25,10 @@ import CoreData
 /// untouched faults. Keeping the rows is the only difference from a sync
 /// run's context, and it changes what the context forgets, not what it reads.
 ///
-/// KNOWN GAPS. Today every one of these writes reads a hub, so the assertions
-/// that say it must not are wrapped in `XCTExpectFailure`, each naming what
-/// was measured (iOS 27.0 simulator, 2026-11-16). `XCTExpectFailure` is
+/// KNOWN GAPS. Today every one of these writes but the unchanged refetch
+/// reads a hub, so the assertions that say it must not are wrapped in
+/// `XCTExpectFailure`, each naming what was measured (iOS 27.0 simulator,
+/// 2026-11-16). `XCTExpectFailure` is
 /// strict: once the fix lands the assertion passes, the test fails with "no
 /// failure was recorded", and the wrapper comes off in that fix's own change,
 /// which gives the assertion its `Revert-check:`. An assertion outside a
@@ -214,6 +215,86 @@ final class ScaleHubFaultTests: XCTestCase {
         }
         XCTExpectFailure("inverse-tomany-hub-fault-tax: one new message registers 217,062 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
+        }
+    }
+
+    // MARK: - A refetch
+
+    /// A stored message fetched again with nothing changed in Gmail: what a
+    /// held cursor's re-scan and a history recovery's re-list do to every row
+    /// they meet. `MessagePersister.saveMessages` takes the update path, and
+    /// the save. The refetch carries exactly the row's labels, so nothing about
+    /// the message's mailboxes changed and nothing about them is written.
+    ///
+    /// Revert-check: `ExistingMessageLabelDiff` in
+    /// `MessagePersister.performExistingMessageUpdate`. Put back the old
+    /// `existingMessage.labels = nil` and re-add, and the refetch reads every
+    /// INBOX member and registers 99,877 objects (measured with the two
+    /// assertions below wrapped in `XCTExpectFailure`, iOS 27.0 simulator,
+    /// 2026-11-28).
+    @MainActor
+    func testRefetchingAStoredMessageWithUnchangedLabels_readsNeitherHubIntoTheSyncContext() async throws {
+        let messageID = manifest.ordinaryConversationInboxMessageID
+        let stored = try XCTUnwrap(try storedRow(id: messageID))
+        XCTAssertTrue(stored.labels.contains("INBOX"))
+        let persister = MessagePersister(
+            coreDataStack: coreDataStack,
+            messageProcessor: MessageProcessor(),
+            saveHTML: { _, messageId in .savedWithoutWriting(messageId: messageId) },
+            conversationManager: ConversationManager(currentUserEmail: { Self.selfEmail })
+        )
+        let context = makeContextUnderTest()
+        let refetch = GmailMessageBuilder()
+            .withId(messageID)
+            .withThreadId(stored.threadID)
+            .withLabels(stored.labelOrder)
+            .withInternalDate(stored.internalDate)
+            .withFrom(stored.senderEmail, name: stored.senderName)
+            .withTo([Self.selfEmail])
+            .withSubject(stored.subject)
+            .withSnippet(stored.snippet)
+            .build()
+
+        let report = try await persister.saveMessages([refetch], myAliases: [Self.selfEmail], in: context)
+        try await save(context)
+        let state = try await state(of: context)
+
+        XCTAssertEqual(report.persistedIds, [messageID])
+        XCTAssertEqual(try XCTUnwrap(try storedMessage(id: messageID)).labels, stored.labels)
+
+        XCTAssertTrue(state.inboxMembersAreFault)
+        XCTAssertTrue(state.selfParticipationsAreFault)
+        XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
+    }
+
+    /// The fields of a stored row a refetch of it carries, read in a context of
+    /// its own so the read does not change the context under test.
+    private func storedRow(id: String) throws -> (
+        labels: Set<String>,
+        labelOrder: [String],
+        threadID: String,
+        internalDate: Date,
+        senderEmail: String,
+        senderName: String?,
+        subject: String,
+        snippet: String
+    )? {
+        let context = stack.viewContext
+        return try context.performAndWait {
+            let request = NSFetchRequest<Message>(entityName: "Message")
+            request.predicate = MessagePredicates.id(id)
+            guard let message = try context.fetch(request).first else { return nil }
+            let labels = (message.labels ?? []).map(\.id)
+            return (
+                Set(labels),
+                labels.sorted(),
+                message.gmThreadId,
+                message.internalDate,
+                message.senderEmailValue ?? "",
+                message.senderNameValue,
+                message.subject ?? "",
+                message.snippet ?? ""
+            )
         }
     }
 
