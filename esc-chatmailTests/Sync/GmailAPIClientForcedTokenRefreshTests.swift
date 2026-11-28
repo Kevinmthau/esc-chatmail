@@ -346,8 +346,7 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
     // `credentialsRevoked` (the user asked to sign in again over a clock).
     // HONEST SCOPE: `MockTokenRefresher` throws the classified error itself.
     // That GoogleSignIn's own refresh throws it for AppAuth's -15 is pinned by
-    // `GoogleTokenRefreshFailureTests` and, from source, by
-    // `GoogleTokenRefresherSourceTests`.
+    // `GoogleTokenRefresherTests`.
     func testGetMessage_plainRefreshRefusedForTheDeviceClock_costsOneTokenRequestAndSendsNothing() async throws {
         authSession.isAuthenticated = true
         // A clock set ahead past the token's expiry: `TokenManager` reads the

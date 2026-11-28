@@ -5,7 +5,7 @@ import Foundation
 /// as, for both of `GoogleTokenRefresher`'s refreshes: GoogleSignIn's own
 /// (`refreshTokens()`) and the forced one (`GoogleForcedTokenRefresh`).
 /// Neither builds a `TokenManagerError` from a refresh's error any other way
-/// (`GoogleTokenRefresherSourceTests`).
+/// (`GoogleTokenRefresherTests`, `GoogleForcedTokenRefreshTests`).
 ///
 /// AppAuth's refusal of the answer's ID token (-15 in its general domain) is
 /// `refreshedIDTokenRefused`; every other failure is `refreshFailed`, which

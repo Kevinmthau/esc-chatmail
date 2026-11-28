@@ -40,9 +40,8 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     /// both GoogleSignIn and `TokenManager` read the token as expired and no
     /// refresh replaces it. As `refreshFailed` each refusal was retried
     /// twice, three token requests for nothing (architecture review 2026-11,
-    /// `gap-wall-clock-time#2`). HONEST SCOPE:
-    /// no test reaches this call, which needs a signed-in `GIDGoogleUser`;
-    /// `GoogleTokenRefresherSourceTests` pins it from source.
+    /// `gap-wall-clock-time#2`; `GoogleTokenRefresherTests`, over a
+    /// `StubGoogleUser` whose `refreshTokensIfNeeded` answers with the error).
     func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
         let user = await MainActor.run { authSession.currentUser }
         guard let user = user else {
