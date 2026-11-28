@@ -111,7 +111,7 @@ final class AttachmentPreviewCloneTests: XCTestCase {
         )
 
         XCTAssertEqual(calls.clones, [[fixture.originalPath, fixture.previewPath]])
-        XCTAssertEqual(calls.writes, [fixture.originalPath])
+        XCTAssertEqual(calls.writes, [], "The original is the downloaded file, moved; the preview its clone")
         let row = try await fetchRow(fixture.objectID)
         XCTAssertEqual(row.previewURL, fixture.previewPath)
         XCTAssertEqual(AttachmentPaths.loadData(from: fixture.previewPath), png)
@@ -133,7 +133,7 @@ final class AttachmentPreviewCloneTests: XCTestCase {
         )
 
         XCTAssertEqual(calls.clones, [])
-        XCTAssertEqual(calls.writes, [fixture.originalPath, fixture.previewPath])
+        XCTAssertEqual(calls.writes, [fixture.previewPath])
         let row = try await fetchRow(fixture.objectID)
         XCTAssertEqual(row.previewURL, fixture.previewPath)
     }

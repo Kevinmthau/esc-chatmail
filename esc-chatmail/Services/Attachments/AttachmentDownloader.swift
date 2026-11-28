@@ -422,6 +422,8 @@ final class AttachmentDownloader: ObservableObject {
     /// The writer of a preview that is its original's own bytes, as a clone of the original's
     /// file (source path, destination path): `AttachmentPaths.storeClone`.
     private let storeAttachmentClone: @Sendable (String, String) -> AttachmentWriteResult
+    /// What moves a downloaded file into the original's path: `AttachmentPaths.storeDownloadedFile`.
+    private let storeDownloadedFile: @Sendable (URL, String) -> AttachmentWriteResult
 
     /// Orphans younger than this survive the sweep and are judged by a later
     /// one. Every writer (a download, CID persistence, inline recovery) writes
@@ -457,6 +459,9 @@ final class AttachmentDownloader: ObservableObject {
         },
         storeAttachmentClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
             AttachmentPaths.storeClone(ofFileAt: source, at: destination)
+        },
+        storeDownloadedFile: @escaping @Sendable (URL, String) -> AttachmentWriteResult = { file, path in
+            AttachmentPaths.storeDownloadedFile(at: file, as: path)
         }
     ) {
         self.apiClient = apiClient ?? GmailAPIClient.shared
@@ -467,6 +472,7 @@ final class AttachmentDownloader: ObservableObject {
         self.availableStorageBytes = availableStorageBytes
         self.writeAttachmentData = writeAttachmentData
         self.storeAttachmentClone = storeAttachmentClone
+        self.storeDownloadedFile = storeDownloadedFile
         prepareDownloadDirectories()
     }
 
@@ -809,9 +815,19 @@ final class AttachmentDownloader: ObservableObject {
                 return
             }
 
-            // Download attachment data from Gmail. The API client's retry
-            // loop is the single retry owner — no second loop here.
-            let data = try await apiClient.getAttachment(messageId: messageId, attachmentId: attachmentId)
+            // Download the attachment to a file in `Attachments`, never into memory whole
+            // (`GmailAPIClient.downloadAttachmentFile`, on its transfer session). The API
+            // client's retry engine is the single retry owner: no second loop here.
+            guard let attachmentsDirectory = AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder) else {
+                return
+            }
+            let downloadedFile = try await apiClient.downloadAttachmentFile(
+                messageId: messageId,
+                attachmentId: attachmentId,
+                into: attachmentsDirectory
+            )
+            // Moved into place below; anything left of it, on any path out of here, is removed.
+            defer { try? FileManager.default.removeItem(at: downloadedFile) }
             guard isActive(generation) else {
                 await rollbackPartialDownload(
                     messageId: messageId,
@@ -842,13 +858,21 @@ final class AttachmentDownloader: ObservableObject {
             // forward it and await unwinding before account cleanup continues.
             let writeAttachmentData = self.writeAttachmentData
             let storeAttachmentClone = self.storeAttachmentClone
+            let storeDownloadedFile = self.storeDownloadedFile
             let processingTask: Task<(savedOriginal: Bool, width: Int16?, height: Int16?, pageCount: Int16?, savedPreview: Bool, outOfSpace: Bool), Never> = Task.detached {
                 guard !Task.isCancelled, !generation.isCancelled else {
                     return (false, nil, nil, nil, false, false)
                 }
-                // Save original file
-                let originalWrite = writeAttachmentData(data, originalPath)
+                // The downloaded file becomes the original, by a rename: its bytes are not
+                // written again.
+                let originalWrite = storeDownloadedFile(downloadedFile, originalPath)
                 let savedOriginal = originalWrite == .saved
+                // Read through a mapping of the stored file, so a large original is paged in as
+                // the dimensions and the preview read it, never held whole on the heap.
+                let data = savedOriginal
+                    ? (AttachmentPaths.fullURL(for: originalPath)
+                        .flatMap { try? Data(contentsOf: $0, options: .alwaysMapped) } ?? Data())
+                    : Data()
 
                 var width: Int16?
                 var height: Int16?
@@ -1008,6 +1032,20 @@ final class AttachmentDownloader: ObservableObject {
 
         } catch {
             if error is CancellationError || !isActive(generation) {
+                await rollbackPartialDownload(
+                    messageId: messageId,
+                    attachmentId: attachmentId
+                )
+                return
+            }
+            // The disk filled while the response or the decoded file was written: as for a
+            // write that found no room (`AttachmentWriteResult.outOfSpace`), nothing is kept and
+            // the row is left as it was, never marked failed.
+            if StorageErrorClassifier.isOutOfSpace(error) {
+                Log.warning(
+                    "Attachment \(Log.hashIdentifier(attachmentId)) did not fit on the disk while it downloaded; left queued",
+                    category: .attachment
+                )
                 await rollbackPartialDownload(
                     messageId: messageId,
                     attachmentId: attachmentId

@@ -72,6 +72,9 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// Carries only messages.send (`sendMessage`); every read, sync, and
     /// label request stays on `session`. See `createSendSession(basedOn:)`.
     let sendSession: URLSession
+    /// Carries only a received attachment's download to a file
+    /// (`downloadAttachmentFile`), for the downloader. See `createTransferSession(basedOn:)`.
+    let transferSession: URLSession
     let tokenManager: TokenManagerProtocol
     let retryStrategy: RetryStrategy
     /// Sleep source for the retry engine's backoff waits only. The circuit
@@ -112,6 +115,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         retryStrategy: RetryStrategy = NetworkRetryStrategy(),
         session: URLSession? = nil,
         sendSession: URLSession? = nil,
+        transferSession: URLSession? = nil,
         retryClock: any SyncClock = SystemSyncClock(),
         circuitBreakerClock: any SyncClock = SystemSyncClock(),
         serverClock: ServerClockEstimate = .shared,
@@ -126,6 +130,7 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         let resolvedSession = session ?? Self.createSession()
         self.session = resolvedSession
         self.sendSession = sendSession ?? Self.createSendSession(basedOn: resolvedSession)
+        self.transferSession = transferSession ?? Self.createTransferSession(basedOn: resolvedSession)
     }
 
     private static func createSession() -> URLSession {
@@ -185,6 +190,30 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         let configuration = session.configuration
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForResource = NetworkConfig.sendResourceTimeout
+        return URLSession(configuration: configuration)
+    }
+
+    /// A received attachment's download to a file (`downloadAttachmentFile`) runs here, never
+    /// on `session`, whose 60 s whole-request cap and connectivity wait are sync's contract:
+    /// sync's body parts still use `getAttachment` on `session`, and its errors decide their
+    /// verdicts. On the read session a large attachment on a slow link could never arrive: each
+    /// attempt timed out at 60 s and began again at byte zero (architecture review 2026-11,
+    /// attachments-storage-disk#2, networking#2).
+    ///
+    /// Derived from `session`'s configuration, as `sendSession` is, so an injected
+    /// `StubURLProtocol` session keeps its protocol classes and no test reaches the network. Its
+    /// idle timer is `NetworkConfig.attachmentTransferIdleTimeout` and its whole-transfer cap
+    /// `attachmentTransferResourceTimeout`; it does not wait for connectivity, so an attachment
+    /// shown offline fails at once and is asked for again at its next showing. Never a
+    /// background configuration: a sign-out drains every download
+    /// (`AttachmentDownloader.cancelAndAwaitAllDownloads`) before it removes `Attachments`, and
+    /// a background session's transfer would outlive that drain and deliver the old account's
+    /// bytes after the next sign-in.
+    static func createTransferSession(basedOn session: URLSession) -> URLSession {
+        let configuration = session.configuration
+        configuration.waitsForConnectivity = false
+        configuration.timeoutIntervalForRequest = NetworkConfig.attachmentTransferIdleTimeout
+        configuration.timeoutIntervalForResource = NetworkConfig.attachmentTransferResourceTimeout
         return URLSession(configuration: configuration)
     }
 
@@ -380,11 +409,20 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// otherwise the client's `session`. With a `bodyFile` every attempt is an
     /// upload of that file (`URLSession.upload(for:fromFile:)`), never a data
     /// task: the request's own `httpBody` is not sent.
+    ///
+    /// With a `downloadFile` every attempt is a download task
+    /// (`URLSession.download(for:)`) whose body is moved to `downloadFile` as soon as it has
+    /// arrived, replacing what an earlier attempt left there, so a large body never passes
+    /// through memory. `handleStatus` is then given an empty body for a 2xx, whose bytes are
+    /// the file's, and for any other status the file's first 64 KB, which is all an error
+    /// body's message needs (`classify403`, `gmailErrorMessage`). Only `downloadAttachmentFile`
+    /// passes one. A body and a download file are never both given.
     nonisolated func performRetryingRequest<T>(
         _ request: URLRequest,
         maxRetries: Int? = nil,
         session requestSession: URLSession? = nil,
         uploadingBodyFrom bodyFile: URL? = nil,
+        downloadingTo downloadFile: URL? = nil,
         behavior: GmailRetryPathBehavior,
         handleStatus: (Int?, Data) async throws -> T
     ) async throws -> T {
@@ -420,6 +458,14 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                 let response: URLResponse
                 if let bodyFile {
                     (data, response) = try await transport.upload(for: currentRequest, fromFile: bodyFile)
+                } else if let downloadFile {
+                    let (downloaded, downloadResponse) = try await transport.download(for: currentRequest)
+                    try Self.moveDownloadedBody(at: downloaded, to: downloadFile)
+                    response = downloadResponse
+                    let statusCode = (downloadResponse as? HTTPURLResponse)?.statusCode ?? 0
+                    data = (200..<300).contains(statusCode)
+                        ? Data()
+                        : Self.leadingBytes(ofFileAt: downloadFile, maxCount: 64 * 1024)
                 } else {
                     (data, response) = try await transport.data(for: currentRequest)
                 }
@@ -618,6 +664,29 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
         }
 
         throw lastError ?? URLError(.unknown)
+    }
+
+    /// Moves a download task's body from URLSession's temporary file to `destination`, replacing
+    /// what an earlier attempt left there. Done before anything else is awaited: the temporary
+    /// file is URLSession's, in a directory sign-out does not drain.
+    private nonisolated static func moveDownloadedBody(at temporary: URL, to destination: URL) throws {
+        let fileManager = FileManager.default
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        do {
+            try fileManager.moveItem(at: temporary, to: destination)
+        } catch {
+            try? fileManager.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    /// At most `maxCount` bytes from the start of the file at `url`; empty where it cannot be read.
+    private nonisolated static func leadingBytes(ofFileAt url: URL, maxCount: Int) -> Data {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return Data() }
+        defer { try? handle.close() }
+        return (try? handle.read(upToCount: maxCount)) ?? Data()
     }
 
     private nonisolated func sleepBeforeRetry(

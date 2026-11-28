@@ -70,6 +70,12 @@ protocol GmailAPIClientProtocol: AnyObject, Sendable {
 
     /// Fetches attachment data for a message.
     func getAttachment(messageId: String, attachmentId: String) async throws -> Data
+
+    /// Downloads an attachment's bytes to a new file in `directory` and returns its URL, for the
+    /// downloader of a received attachment only (`GmailAPIClient.downloadAttachmentFile`). A
+    /// required witness with no default: a default made of `getAttachment` would put the whole
+    /// attachment back in memory, on the read session, without a word.
+    func downloadAttachmentFile(messageId: String, attachmentId: String, into directory: URL) async throws -> URL
 }
 
 // MARK: - Default Parameter Values
