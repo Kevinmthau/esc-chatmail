@@ -299,7 +299,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 | `jpegData(compressionQuality: 0.82)` | `NSBitmapImageRep(cgImage:).representation(using: .jpeg, properties: [.compressionFactor: 0.82])` |
 | `layoutIfNeeded()` | `layoutSubtreeIfNeeded()` |
 | An offscreen `UIWindow` past the left edge of the screen | A borderless `NSWindow` at (-30000, -30000) with `ignoresMouseEvents`. It doesn't need to be ordered in |
-| Visible-row warm width from the screen's width (`currentVisibleRowWarmWidthEstimate`) | The reader's own width. A Mac screen is far wider than the reader, so a web view warmed at screen width never matches a checkout. Warming after an explicit open already uses the reader's width |
+| Visible-row warm width from the screen's width (`currentVisibleRowWarmWidthEstimate`) | The reader's own width. A Mac screen is far wider than the reader, so a web view warmed at screen width never matches a checkout. Warming after an explicit open already uses the reader's width. Since 2026-11-28 neither platform warms a web view for a visible row (`warmVisibleRow`, architecture review `security-privacy#3`), so the estimate is gone |
 | `UIApplication.didReceiveMemoryWarningNotification` | PR B's memory-pressure source |
 | `UIApplication.shared.open(url)` | `NSWorkspace.shared.open(url)` |
 
