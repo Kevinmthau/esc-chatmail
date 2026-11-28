@@ -94,6 +94,12 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     /// GoogleSignIn's keychain copy of the auth state is not rewritten, as it
     /// is not after `refreshTokensIfNeeded`.
     ///
+    /// It helps only while the device's clock is less than about ten minutes
+    /// off: AppAuth refuses an answer whose ID token was issued more than
+    /// 600 s from the device's clock, refresh grants included, and that
+    /// refusal is not retried (`GoogleForcedTokenRefresh`,
+    /// `TokenManagerError.refreshedIDTokenRefused`).
+    ///
     /// HONEST SCOPE: not run against Google in any test; the unit tests
     /// replace this refresher, and `GoogleForcedTokenRefresh` holds the one
     /// rule they can reach. The modules are reached as GoogleSignIn's

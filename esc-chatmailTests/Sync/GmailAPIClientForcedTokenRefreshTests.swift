@@ -290,6 +290,55 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(stepped.sendCount, 2, "The transport failure is retried, once")
     }
 
+    // Revert-check: fails if `GoogleForcedTokenRefresh.refreshError(for:)`
+    // maps AppAuth's -15 to `refreshFailed`: `TokenManager` would retry it,
+    // and the 401 would cost three token requests instead of one.
+    // HONEST SCOPE: the forced refresh helps only while the device's clock is
+    // less than about ten minutes off; past that this is the outcome, the
+    // same `authenticationError` as before the forced refresh existed.
+    func testGetMessage_forcedRefreshRefusedForTheDeviceClock_costsOneTokenRequestAndKeepsTheCredentials() async throws {
+        authSession.isAuthenticated = true
+        let skewRefusal = NSError(
+            domain: "org.openid.appauth.general",
+            code: -15,
+            userInfo: [NSLocalizedDescriptionKey: "Issued at time is more than 600 seconds before or after the current time"]
+        )
+        let stepped = SteppedForcedRefresher(
+            heldAccessToken: Self.rejectedToken,
+            refreshedAccessToken: Self.forcedToken,
+            sendOutcomes: [skewRefusal, skewRefusal, skewRefusal]
+        )
+        let manager = TokenManager(keychainService: keychain, authSession: authSession, tokenRefresher: stepped)
+        try manager.saveTokens(
+            access: Self.rejectedToken,
+            refresh: "refresh-token",
+            expirationDate: Date().addingTimeInterval(3_600)
+        )
+        StubURLProtocol.script = [.status(401), .data(200, Self.messageBody)]
+        let client = makeClient(tokenManager: manager)
+
+        do {
+            _ = try await client.getMessage(id: "m1")
+            XCTFail("Expected authenticationError")
+        } catch let error as APIError {
+            guard case .authenticationError = error else {
+                return XCTFail("Expected authenticationError, never credentialsRevoked; got \(error)")
+            }
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+
+        XCTAssertEqual(stepped.sendCount, 1, "One token request: the refusal is not retried")
+        XCTAssertEqual(StubURLProtocol.requestCount, 1)
+        XCTAssertFalse(authSession.requiresReauthentication, "Nobody is asked to sign in again")
+        XCTAssertTrue(authSession.canAccessMailbox)
+        let stored = try keychain.loadCodable(
+            TokenInfo.self,
+            for: KeychainService.Key.googleAccessToken.rawValue
+        )
+        XCTAssertEqual(stored.accessToken, Self.rejectedToken, "The credentials are kept")
+    }
+
     // MARK: - Concurrent 401s on one token
 
     // Revert-check: fails if `TokenRefreshCoordinator.getOrCreateTask` stops

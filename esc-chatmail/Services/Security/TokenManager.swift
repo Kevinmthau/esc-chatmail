@@ -92,6 +92,18 @@ enum TokenManagerError: LocalizedError {
     case rateLimitExceeded
     case invalidCredentials
     case tokenExpired
+    /// Google answered a forced refresh, but AppAuth refused the ID token in
+    /// that answer (`OIDErrorCodeIDTokenFailedValidationError`, -15): above
+    /// all because its issue time is more than 600 s from the device's clock,
+    /// or its expiry has passed by that clock (a clock set ahead). Not
+    /// `refreshFailed`, which is retried: asking again cannot change the
+    /// device's clock, so it cost three token requests for nothing. Not
+    /// `invalidCredentials` either: the grant is fine, and nothing may ask
+    /// the user to sign in again or clear the credentials for it. The 401
+    /// path maps it to `APIError.authenticationError`, as before
+    /// (`GoogleForcedTokenRefresh.refreshError(for:)`; architecture review
+    /// 2026-11, `gap-wall-clock-time#2`).
+    case refreshedIDTokenRefused(Error)
 
     var errorDescription: String? {
         switch self {
@@ -107,6 +119,8 @@ enum TokenManagerError: LocalizedError {
             return "Invalid credentials. Please sign in again"
         case .tokenExpired:
             return "Authentication token has expired"
+        case .refreshedIDTokenRefused(let error):
+            return "The refreshed sign-in token was refused: \(error.localizedDescription)"
         }
     }
 
@@ -120,6 +134,8 @@ enum TokenManagerError: LocalizedError {
             return "Please check your internet connection"
         case .rateLimitExceeded:
             return "Wait a few minutes before trying again"
+        case .refreshedIDTokenRefused:
+            return "Check that the device's date and time are set automatically"
         }
     }
 }

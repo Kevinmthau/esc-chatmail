@@ -589,6 +589,14 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertFalse(sut.isRetryableError(TokenManagerError.invalidCredentials))
     }
 
+    // Revert-check: fails if `isRetryableError` moves
+    // `.refreshedIDTokenRefused` to its retryable cases: a refusal by the
+    // device's clock would cost three token requests.
+    func testIsRetryableError_refreshedIDTokenRefused_isNotRetryable() {
+        let underlying = NSError(domain: "org.openid.appauth.general", code: -15)
+        XCTAssertFalse(sut.isRetryableError(TokenManagerError.refreshedIDTokenRefused(underlying)))
+    }
+
     func testIsRetryableError_tokenExpired_isNotRetryable() {
         XCTAssertFalse(sut.isRetryableError(TokenManagerError.tokenExpired))
     }

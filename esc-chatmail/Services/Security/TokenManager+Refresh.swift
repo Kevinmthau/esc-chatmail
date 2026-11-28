@@ -141,7 +141,7 @@ extension TokenManager {
             switch tokenError {
             case .networkUnavailable, .rateLimitExceeded:
                 return true
-            case .noValidToken, .invalidCredentials, .tokenExpired:
+            case .noValidToken, .invalidCredentials, .tokenExpired, .refreshedIDTokenRefused:
                 return false
             case .refreshFailed(let underlying):
                 // Check for invalid_grant error - this means the refresh token is revoked

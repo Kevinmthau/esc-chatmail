@@ -1,3 +1,4 @@
+import AppAuthCore
 import Foundation
 
 /// The forced refresh's outcome rule, apart from GoogleSignIn and AppAuth so
@@ -12,6 +13,20 @@ import Foundation
 /// (`AuthSession.swift`). Taken as success, the rejected token went back to
 /// `TokenManager`, which never retried the transient failure. Only a request
 /// that succeeded is read for tokens.
+///
+/// The forced refresh helps only while the device's clock is less than about
+/// ten minutes off. AppAuth validates the ID token of every token response,
+/// a refresh grant's included (`OIDAuthorizationService.m`, rule #10 of
+/// OpenID Connect Core 3.1.3.7): its issue time, Google's clock, may be at
+/// most 600 s from the device's (`kOIDAuthorizationSessionIATMaxSkew`), and
+/// Google returns an ID token on refresh for this app's `openid` scope. So
+/// with the clock set back hours or days, as in the review's triggers, Google
+/// issues a new token and AppAuth refuses its answer with -15. That is the
+/// one failure this maps apart (`refreshError(for:)`): it is not retried, and
+/// it is not a revocation. GoogleSignIn's own refresh makes the same check,
+/// so with the clock more than ten minutes off the outage does not end at the
+/// token's real expiry either, as the review expected; it lasts until the
+/// clock is put right. Neither is changed here.
 struct GoogleForcedTokenRefresh {
     typealias Tokens = (accessToken: String, refreshToken: String?, expirationDate: Date)
 
@@ -27,11 +42,26 @@ struct GoogleForcedTokenRefresh {
         try await withCheckedThrowingContinuation { continuation in
             send { error in
                 if let error {
-                    continuation.resume(throwing: TokenManagerError.refreshFailed(error))
+                    continuation.resume(throwing: Self.refreshError(for: error))
                 } else {
                     continuation.resume(returning: readTokens())
                 }
             }
         }
+    }
+
+    /// AppAuth's refusal of the answer's ID token (-15 in its general
+    /// domain: its issue time or expiry against the device's clock, or its
+    /// issuer or audience, none of which a retry changes) is
+    /// `refreshedIDTokenRefused`; every other failure is `refreshFailed`,
+    /// which `TokenManager` classifies as before (an invalid_grant is a
+    /// revocation, a network error is retried).
+    static func refreshError(for error: Error) -> TokenManagerError {
+        let nsError = error as NSError
+        if nsError.domain == OIDGeneralErrorDomain,
+           nsError.code == OIDErrorCode.idTokenFailedValidationError.rawValue {
+            return .refreshedIDTokenRefused(error)
+        }
+        return .refreshFailed(error)
     }
 }
