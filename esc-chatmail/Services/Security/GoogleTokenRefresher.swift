@@ -21,9 +21,6 @@ protocol TokenRefresherProtocol: Sendable {
 final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     private let authSession: AuthSession
 
-    /// Never sent: GTMAppAuth only writes the refreshed bearer into it.
-    private static let forcedRefreshProbeURL = URL(string: "https://gmail.googleapis.com/")!
-
     /// Initialize with an explicit AuthSession instance.
     /// Note: No default parameter to avoid MainActor-isolated access issues in Swift 6.
     init(authSession: AuthSession) {
@@ -59,25 +56,47 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     /// GoogleSignIn 9.0.0 has no public forced refresh:
     /// `refreshTokensIfNeeded` completes with the user it holds while neither
     /// token expires within 60 s of the device's clock (`GIDGoogleUser.m`).
-    /// Its `fetcherAuthorizer` is GTMAppAuth's `AuthSession` over the user's
-    /// `OIDAuthState`, and AppAuth's public `setNeedsTokenRefresh()` makes
-    /// the next fresh-token action ask Google whatever the clock says
-    /// (`OIDAuthState.isTokenFresh`). The action is run through the
-    /// session's `authorizeRequest` and not `OIDAuthState.performAction`
-    /// directly, because on iOS the session's delegate is GoogleSignIn's EMM
-    /// support, which adds the refresh parameters and handles the EMM errors
-    /// that `refreshTokensIfNeeded` adds and handles. The user's
-    /// `OIDAuthState` change delegate (`GIDGoogleUser.didChangeState`) has
-    /// replaced its tokens by the time the completion runs, so they are read
-    /// from the user as `refreshTokens()` reads them. GoogleSignIn's keychain
-    /// copy is not rewritten, as it is not after `refreshTokensIfNeeded`.
-    /// An OAuth error (invalid_grant) comes back as AppAuth's
-    /// `org.openid.appauth.oauth_token` error, which `TokenManager` already
-    /// classifies as revoked credentials. Main actor, as GoogleSignIn's own
-    /// calls are.
+    /// So this does what `refreshTokensIfNeededWithCompletion` does past that
+    /// check, on the user's `OIDAuthState`, which GoogleSignIn's public
+    /// `fetcherAuthorizer` (GTMAppAuth's `AuthSession`) exposes: a refresh
+    /// request built by `tokenRefreshRequest(withAdditionalParameters:)`, sent
+    /// with `OIDAuthorizationService.perform`, and its answer applied with
+    /// `update(with:error:)`, or `update(withAuthorizationError:)` for an
+    /// OAuth error, exactly as there. The user is the auth state's change
+    /// delegate (`GIDGoogleUser.didChangeState`), so the user's tokens are
+    /// replaced inside `update(with:error:)`, which is what
+    /// `refreshTokensIfNeeded`'s own completion relies on, and they are read
+    /// from the user as `refreshTokens()` reads them.
+    ///
+    /// Three things are deliberate:
+    /// - Never GTMAppAuth's `authorizeRequest`. On iOS its delegate is
+    ///   GoogleSignIn's `GIDEMMSupport`, which answers with the token
+    ///   response's own extra fields, numbers among them, bridged into
+    ///   `[String: String]`, a trap on the main thread (fixed upstream in
+    ///   GoogleSignIn 10.0.0). And it drops the error of a failed refresh
+    ///   whenever a token is present, which AppAuth leaves after a network
+    ///   error: the rejected token came back as success
+    ///   (`GoogleForcedTokenRefresh`).
+    /// - The parameters are the last token request's own
+    ///   (`lastTokenResponse.request.additionalParameters`), as
+    ///   `refreshTokensIfNeeded` sends them on macOS. They hold GoogleSignIn's
+    ///   EMM fields and its SDK-version and environment fields as it last sent
+    ///   them, and they are strings: GoogleSignIn builds them from strings,
+    ///   and a restored auth state decodes them as strings only
+    ///   (`OIDTokenRequest initWithCoder:`). On iOS `refreshTokensIfNeeded`
+    ///   also rewrites `device_os` and the passcode state through the private
+    ///   `GIDEMMSupport`; here they are what the last token request sent, and
+    ///   GoogleSignIn's next own refresh rewrites them again.
+    /// - The iOS EMM error handling (`GIDEMMSupport handleTokenFetchEMMError`,
+    ///   private, which can present an alert) is not run: an EMM refusal is a
+    ///   failed refresh like any other.
+    ///
+    /// GoogleSignIn's keychain copy of the auth state is not rewritten, as it
+    /// is not after `refreshTokensIfNeeded`.
     ///
     /// HONEST SCOPE: not run against Google in any test; the unit tests
-    /// replace this refresher. The modules are reached as GoogleSignIn's
+    /// replace this refresher, and `GoogleForcedTokenRefresh` holds the one
+    /// rule they can reach. The modules are reached as GoogleSignIn's
     /// dependencies, as `GoogleAuthTransport` reaches `AppAuthCore`, with no
     /// package product of their own in the project.
     @MainActor
@@ -86,18 +105,36 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
               let session = user.fetcherAuthorizer as? GTMAppAuth.AuthSession else {
             throw TokenManagerError.noValidToken
         }
-
-        session.authState.setNeedsTokenRefresh()
-        let probe = NSMutableURLRequest(url: Self.forcedRefreshProbeURL)
-        return try await withCheckedThrowingContinuation { continuation in
-            session.authorizeRequest(probe) { error in
-                if let error {
-                    continuation.resume(throwing: TokenManagerError.refreshFailed(error))
-                } else {
-                    continuation.resume(returning: Self.tokens(of: user))
-                }
-            }
+        let authState = session.authState
+        // `tokenRefreshRequest(withAdditionalParameters:)` raises an
+        // Objective-C exception, which Swift cannot catch, without one.
+        guard authState.refreshToken != nil else {
+            throw TokenManagerError.noValidToken
         }
+        let parameters = authState.lastTokenResponse?.request.additionalParameters
+        guard let request = authState.tokenRefreshRequest(withAdditionalParameters: parameters) else {
+            throw TokenManagerError.noValidToken
+        }
+
+        return try await GoogleForcedTokenRefresh(
+            send: { completion in
+                OIDAuthorizationService.perform(
+                    request,
+                    originalAuthorizationResponse: authState.lastAuthorizationResponse
+                ) { response, error in
+                    if let response {
+                        authState.update(with: response, error: nil)
+                        completion(nil)
+                        return
+                    }
+                    if let error, (error as NSError).domain == OIDOAuthTokenErrorDomain {
+                        authState.update(withAuthorizationError: error)
+                    }
+                    completion(error ?? TokenManagerError.noValidToken)
+                }
+            },
+            readTokens: { Self.tokens(of: user) }
+        ).run()
     }
 
     private static func tokens(of user: GIDGoogleUser) -> (accessToken: String, refreshToken: String?, expirationDate: Date) {

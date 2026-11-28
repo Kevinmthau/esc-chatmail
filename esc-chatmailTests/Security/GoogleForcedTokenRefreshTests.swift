@@ -1,0 +1,71 @@
+import XCTest
+@testable import esc_chatmail
+
+/// `GoogleForcedTokenRefresh`, the forced refresh's outcome rule, without
+/// GoogleSignIn or AppAuth (architecture review 2026-11,
+/// `gap-wall-clock-time#2`). After a network error AppAuth leaves the old
+/// access token in the user's auth state, so a rule that read the state
+/// whenever it held a token handed `TokenManager` the token Gmail had just
+/// rejected, as a success it never retried.
+@MainActor
+final class GoogleForcedTokenRefreshTests: XCTestCase {
+
+    private static let heldTokens: GoogleForcedTokenRefresh.Tokens = (
+        accessToken: "rejected-access-token",
+        refreshToken: "refresh-token",
+        expirationDate: Date(timeIntervalSince1970: 1_800_000_000)
+    )
+
+    // Revert-check: fails if `GoogleForcedTokenRefresh.run` reads the user's
+    // tokens when `send` reports an error (as GTMAppAuth's `authorizeRequest`
+    // did whenever a token was present): the rejected token would come back
+    // as a successful refresh.
+    func testRun_requestFailsInTransportWhileTheOldTokenIsHeld_throwsAndReadsNoTokens() async {
+        let transportError = NSError(
+            domain: "org.openid.appauth.general",
+            code: -5,
+            userInfo: [NSUnderlyingErrorKey: URLError(.networkConnectionLost)]
+        )
+        var tokenReads = 0
+        let refresh = GoogleForcedTokenRefresh(
+            send: { completion in completion(transportError) },
+            readTokens: {
+                tokenReads += 1
+                return Self.heldTokens
+            }
+        )
+
+        do {
+            let tokens = try await refresh.run()
+            XCTFail("Expected the transport error, got \(tokens.accessToken)")
+        } catch TokenManagerError.refreshFailed(let underlying) {
+            let nsError = underlying as NSError
+            XCTAssertEqual(nsError.domain, "org.openid.appauth.general")
+            XCTAssertEqual(nsError.code, -5)
+        } catch {
+            XCTFail("Expected TokenManagerError.refreshFailed, got \(error)")
+        }
+        XCTAssertEqual(tokenReads, 0, "A failed request is never read for tokens")
+    }
+
+    func testRun_requestSucceeds_returnsTheTokensItLeft() async throws {
+        let refreshed: GoogleForcedTokenRefresh.Tokens = (
+            accessToken: "refreshed-access-token",
+            refreshToken: "refresh-token",
+            expirationDate: Date(timeIntervalSince1970: 1_800_003_600)
+        )
+        var held = Self.heldTokens
+        let refresh = GoogleForcedTokenRefresh(
+            send: { completion in
+                held = refreshed
+                completion(nil)
+            },
+            readTokens: { held }
+        )
+
+        let tokens = try await refresh.run()
+
+        XCTAssertEqual(tokens.accessToken, "refreshed-access-token")
+        XCTAssertEqual(tokens.expirationDate, refreshed.expirationDate)
+    }
+}

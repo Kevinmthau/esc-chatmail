@@ -33,6 +33,65 @@ private final class CountingTokenManager: TokenManagerProtocol, @unchecked Senda
     func isAuthenticated() -> Bool { base.isAuthenticated() }
 }
 
+/// GoogleSignIn's side of a forced refresh as `GoogleTokenRefresher` drives it,
+/// through `GoogleForcedTokenRefresh`, over a stand-in for the user's auth
+/// state: a send that fails leaves the old token in place, as AppAuth does
+/// after a network error. The plain refresh hands back the held token, as
+/// `refreshTokensIfNeeded` does by a clock set back.
+private final class SteppedForcedRefresher: TokenRefresherProtocol, @unchecked Sendable {
+    /// Guards every stored property; the refresh runs off the test's actor.
+    private let lock = NSLock()
+    private var heldAccessToken: String
+    private let refreshedAccessToken: String
+    /// One entry per send, in order: an error, or nil for a send that
+    /// succeeds. Sends past the end succeed.
+    private var sendOutcomes: [Error?]
+    private var _sendCount = 0
+
+    init(heldAccessToken: String, refreshedAccessToken: String, sendOutcomes: [Error?]) {
+        self.heldAccessToken = heldAccessToken
+        self.refreshedAccessToken = refreshedAccessToken
+        self.sendOutcomes = sendOutcomes
+    }
+
+    var sendCount: Int {
+        lock.withLock { _sendCount }
+    }
+
+    private var heldTokens: GoogleForcedTokenRefresh.Tokens {
+        lock.withLock {
+            (accessToken: heldAccessToken, refreshToken: "refresh-token", expirationDate: Date().addingTimeInterval(3_600))
+        }
+    }
+
+    private func answerSend() -> Error? {
+        lock.withLock {
+            _sendCount += 1
+            let outcome = sendOutcomes.isEmpty ? nil : sendOutcomes.removeFirst()
+            if outcome == nil {
+                heldAccessToken = refreshedAccessToken
+            }
+            return outcome
+        }
+    }
+
+    func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
+        heldTokens
+    }
+
+    func forceRefreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
+        try await Self.runForcedRefresh(on: self)
+    }
+
+    @MainActor
+    private static func runForcedRefresh(on refresher: SteppedForcedRefresher) async throws -> GoogleForcedTokenRefresh.Tokens {
+        try await GoogleForcedTokenRefresh(
+            send: { completion in completion(refresher.answerSend()) },
+            readTokens: { refresher.heldTokens }
+        ).run()
+    }
+}
+
 /// The 401 path against the real `TokenManager`, through the real
 /// `GmailAPIClient` and `StubURLProtocol` (architecture review 2026-11,
 /// `gap-wall-clock-time#2`). GoogleSignIn's refresh asks Google only by the
@@ -195,6 +254,40 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
 
         XCTAssertEqual(StubURLProtocol.requestCount, 1, "The rejected token is not sent again")
         XCTAssertEqual(refresher.forcedCallCount, 1)
+    }
+
+    // Revert-check: fails if `GoogleForcedTokenRefresh.run` reads the user's
+    // tokens after a failed send (GTMAppAuth's `authorizeRequest` kept the
+    // token and dropped the error): the first forced refresh would hand back
+    // the rejected token as a success, nothing would retry it, and the call
+    // would fail as `authenticationError` after one request.
+    func testGetMessage_forcedRefreshFailsOnceInTransport_isRetriedAndResendsWithTheNewBearer() async throws {
+        let stepped = SteppedForcedRefresher(
+            heldAccessToken: Self.rejectedToken,
+            refreshedAccessToken: Self.forcedToken,
+            sendOutcomes: [NSError(
+                domain: "org.openid.appauth.general",
+                code: -5,
+                userInfo: [NSUnderlyingErrorKey: URLError(.networkConnectionLost)]
+            )]
+        )
+        let manager = TokenManager(keychainService: keychain, authSession: authSession, tokenRefresher: stepped)
+        try manager.saveTokens(
+            access: Self.rejectedToken,
+            refresh: "refresh-token",
+            expirationDate: Date().addingTimeInterval(3_600)
+        )
+        StubURLProtocol.script = [.status(401), .data(200, Self.messageBody)]
+        let client = makeClient(tokenManager: manager)
+
+        let message = try await client.getMessage(id: "m1")
+
+        XCTAssertEqual(message.id, "m1")
+        XCTAssertEqual(
+            Self.bearers(of: StubURLProtocol.requests),
+            [Self.rejectedToken, Self.forcedToken]
+        )
+        XCTAssertEqual(stepped.sendCount, 2, "The transport failure is retried, once")
     }
 
     // MARK: - Concurrent 401s on one token
