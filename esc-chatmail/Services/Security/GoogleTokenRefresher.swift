@@ -8,6 +8,8 @@ protocol TokenRefresherProtocol: Sendable {
     /// GoogleSignIn's own refresh: asks Google only when the access token's
     /// device-clock expiry, or the ID token's `exp`, is within 60 s, and
     /// otherwise hands back the token it holds.
+    /// Both refreshes throw what `GoogleTokenRefreshFailure` makes of a
+    /// failed request.
     func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date)
     /// A refresh that asks Google's token endpoint whatever the device's clock
     /// says. `TokenManager` asks for it only after a 401, when `refreshTokens()`
@@ -30,6 +32,16 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     /// Refreshes tokens using Google Sign-In SDK.
     /// - Returns: A tuple containing the new access token, optional refresh token, and expiration date
     /// - Throws: TokenManagerError if refresh fails
+    ///
+    /// GoogleSignIn's error goes through `GoogleTokenRefreshFailure`, as the
+    /// forced refresh's does: AppAuth refuses the ID token of Google's answer
+    /// by the device's clock here too (-15). With a clock set ahead past the
+    /// token's expiry every request's preflight asks for this refresh, since
+    /// both GoogleSignIn and `TokenManager` read the token as expired and no
+    /// refresh replaces it. As `refreshFailed` each refusal was retried
+    /// twice, three token requests for nothing (architecture review 2026-11,
+    /// `gap-wall-clock-time#2`; `GoogleTokenRefresherTests`, over a
+    /// `StubGoogleUser` whose `refreshTokensIfNeeded` answers with the error).
     func refreshTokens() async throws -> (accessToken: String, refreshToken: String?, expirationDate: Date) {
         let user = await MainActor.run { authSession.currentUser }
         guard let user = user else {
@@ -39,7 +51,7 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
         return try await withCheckedThrowingContinuation { continuation in
             user.refreshTokensIfNeeded { tokens, error in
                 if let error = error {
-                    continuation.resume(throwing: TokenManagerError.refreshFailed(error))
+                    continuation.resume(throwing: GoogleTokenRefreshFailure.error(for: error))
                 } else if let tokens = tokens {
                     continuation.resume(returning: Self.tokens(of: tokens))
                 } else {
@@ -97,7 +109,7 @@ final class GoogleTokenRefresher: TokenRefresherProtocol, @unchecked Sendable {
     /// It helps only while the device's clock is less than about ten minutes
     /// off: AppAuth refuses an answer whose ID token was issued more than
     /// 600 s from the device's clock, refresh grants included, and that
-    /// refusal is not retried (`GoogleForcedTokenRefresh`,
+    /// refusal is not retried (`GoogleTokenRefreshFailure`,
     /// `TokenManagerError.refreshedIDTokenRefused`).
     ///
     /// HONEST SCOPE: not run against Google in any test; the unit tests

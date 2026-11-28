@@ -92,17 +92,18 @@ enum TokenManagerError: LocalizedError {
     case rateLimitExceeded
     case invalidCredentials
     case tokenExpired
-    /// Google answered a forced refresh, but AppAuth refused the ID token in
-    /// that answer (`OIDErrorCodeIDTokenFailedValidationError`, -15): above
-    /// all because its issue time is more than 600 s from the device's clock,
-    /// or its expiry has passed by that clock (a clock set ahead). Not
+    /// Google answered a token refresh, GoogleSignIn's own or the forced one,
+    /// but AppAuth refused the ID token in that answer
+    /// (`OIDErrorCodeIDTokenFailedValidationError`, -15): above all because
+    /// its issue time is more than 600 s from the device's clock, or its
+    /// expiry has passed by that clock (a clock set ahead). Not
     /// `refreshFailed`, which is retried: asking again cannot change the
     /// device's clock, so it cost three token requests for nothing. Not
     /// `invalidCredentials` either: the grant is fine, and nothing may ask
-    /// the user to sign in again or clear the credentials for it. The 401
-    /// path maps it to `APIError.authenticationError`, as before
-    /// (`GoogleForcedTokenRefresh.refreshError(for:)`; architecture review
-    /// 2026-11, `gap-wall-clock-time#2`).
+    /// the user to sign in again or clear the credentials for it. The client
+    /// maps it to `APIError.authenticationError`, as before, at a request's
+    /// token preflight and on a 401 (`GoogleTokenRefreshFailure`;
+    /// architecture review 2026-11, `gap-wall-clock-time#2`).
     case refreshedIDTokenRefused(Error)
 
     var errorDescription: String? {

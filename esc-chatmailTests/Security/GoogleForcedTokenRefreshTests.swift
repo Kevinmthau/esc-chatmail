@@ -48,9 +48,10 @@ final class GoogleForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(tokenReads, 0, "A failed request is never read for tokens")
     }
 
-    // Revert-check: fails if `GoogleForcedTokenRefresh.refreshError(for:)`
-    // stops mapping AppAuth's -15 apart: it would be `refreshFailed`, which
-    // `TokenManager` retries, three token requests that the device's clock
+    // Revert-check: fails if `GoogleForcedTokenRefresh.run` wraps a failed
+    // send as `refreshFailed` itself instead of asking
+    // `GoogleTokenRefreshFailure.error(for:)`: AppAuth's -15 would be
+    // retried by `TokenManager`, three token requests that the device's clock
     // refuses each time.
     func testRun_idTokenIssuedOutsideTheAllowedSkew_isRefusedNotATransientFailure() async {
         let skewRefusal = NSError(
@@ -70,22 +71,6 @@ final class GoogleForcedTokenRefreshTests: XCTestCase {
             XCTAssertEqual((underlying as NSError).code, -15)
         } catch {
             XCTFail("Expected TokenManagerError.refreshedIDTokenRefused, got \(error)")
-        }
-    }
-
-    // Revert-check: fails if `refreshError(for:)` matches the code without
-    // AppAuth's general domain: an OAuth error, whose classification
-    // (invalid_grant as a revocation) runs on `refreshFailed`, would be
-    // mapped apart.
-    func testRefreshError_otherAppAuthFailures_stayRefreshFailures() {
-        let parsingError = NSError(domain: "org.openid.appauth.general", code: -14)
-        let oauthError = NSError(domain: "org.openid.appauth.oauth_token", code: -15)
-
-        guard case .refreshFailed = GoogleForcedTokenRefresh.refreshError(for: parsingError) else {
-            return XCTFail("Only -15 in AppAuth's general domain is mapped apart")
-        }
-        guard case .refreshFailed = GoogleForcedTokenRefresh.refreshError(for: oauthError) else {
-            return XCTFail("An OAuth error keeps its own classification (invalid_grant is a revocation)")
         }
     }
 

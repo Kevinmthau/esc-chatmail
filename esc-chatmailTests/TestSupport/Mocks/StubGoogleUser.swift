@@ -11,8 +11,14 @@ import GoogleSignIn
 /// declares no initializer of its own in that header, so a subclass starts from `NSObject`'s
 /// `init()` and answers the four properties the restore reads: `profile`, `grantedScopes`,
 /// `accessToken` and `refreshToken`. Every other property reads the superclass's empty
-/// state, so nothing under test may ask for `configuration`, `idToken`,
-/// `fetcherAuthorizer` or `refreshTokensIfNeeded`.
+/// state, so nothing under test may ask for `configuration`, `idToken` or
+/// `fetcherAuthorizer`. `refreshTokensIfNeeded` answers with `refreshError` where one is
+/// given, on the main queue as GoogleSignIn does. Without one it is GoogleSignIn's own
+/// (9.0.0), which answers with this user, on the main queue and asking nothing, while
+/// `accessToken` is more than 60 s from its expiry, and otherwise starts a token request
+/// from the auth state this user lacks. So a test that is asked for a refresh and gives no
+/// `refreshError` keeps `accessTokenExpirationDate` more than 60 s ahead (the default is an
+/// hour ahead).
 ///
 /// Make it inside the stub closure that hands it over, never outside it: it is not
 /// `Sendable`, and CI's Swift 6.2 refuses a capture of a non-`Sendable` value in a
@@ -22,6 +28,11 @@ final class StubGoogleUser: GIDGoogleUser {
     private let stubGrantedScopes: [String]?
     private let stubAccessToken: GIDToken
     private let stubRefreshToken: GIDToken
+    private let refreshError: Error?
+    /// Guards `_refreshCallCount`: `GoogleTokenRefresher` asks for the refresh off the
+    /// main actor, and a test reads the count on it.
+    private let refreshCallLock = NSLock()
+    private var _refreshCallCount = 0
 
     /// A user with the Gmail scope granted, whose profile has `email` (no profile at all
     /// for nil).
@@ -31,12 +42,14 @@ final class StubGoogleUser: GIDGoogleUser {
         grantedScopes: [String]? = [GoogleConfig.gmailModifyScope],
         accessToken: String = "stub-access-token",
         refreshToken: String = "stub-refresh-token",
-        accessTokenExpirationDate: Date = Date().addingTimeInterval(3600)
+        accessTokenExpirationDate: Date = Date().addingTimeInterval(3600),
+        refreshError: Error? = nil
     ) {
         stubProfile = email.map { StubGoogleProfile(email: $0, name: name) }
         stubGrantedScopes = grantedScopes
         stubAccessToken = Self.makeToken(accessToken, expirationDate: accessTokenExpirationDate)
         stubRefreshToken = Self.makeToken(refreshToken, expirationDate: nil)
+        self.refreshError = refreshError
         super.init()
     }
 
@@ -48,6 +61,23 @@ final class StubGoogleUser: GIDGoogleUser {
     override var grantedScopes: [String]? { stubGrantedScopes }
     override var accessToken: GIDToken { stubAccessToken }
     override var refreshToken: GIDToken { stubRefreshToken }
+
+    /// How many times `refreshTokensIfNeeded` was asked: with `refreshError`, how many
+    /// token requests GoogleSignIn would have made.
+    var refreshCallCount: Int {
+        refreshCallLock.withLock { _refreshCallCount }
+    }
+
+    override func refreshTokensIfNeeded(completion: @escaping (GIDGoogleUser?, (any Error)?) -> Void) {
+        refreshCallLock.withLock { _refreshCallCount += 1 }
+        guard let refreshError else {
+            super.refreshTokensIfNeeded(completion: completion)
+            return
+        }
+        DispatchQueue.main.async {
+            completion(nil, refreshError)
+        }
+    }
 
     /// A `GIDToken`, whose initializers are not public either, made through its own
     /// `NSSecureCoding` (the keys of `GIDToken.m`'s `encodeWithCoder:` in GoogleSignIn 9.0.0).
