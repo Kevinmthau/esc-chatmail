@@ -275,7 +275,10 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
-    func testPersistSessionForBackgroundAccess_migratesLegacyTokensToBackgroundReadableAccess() throws {
+    // Revert-check: fails if `persistSessionForBackgroundAccess` stops writing
+    // an address that differs from the stored one (its marked branch skipped),
+    // or if the adoption writes token items again.
+    func testPersistSessionForBackgroundAccess_newAddress_writesItInTheMarkedTransactionAndNoTokens() async throws {
         let defaults = makeDefaults()
         let keychain = MockKeychainService()
         try keychain.save(
@@ -290,66 +293,20 @@ final class AuthSessionTests: XCTestCase {
                 forKey: AuthSession.credentialCleanupRequiredKey
             )
         }
-        let tokenManagerProvider = TokenManagerProvider()
-        let session = makeAuthSession(
-            tokenManagerProvider: { tokenManagerProvider.tokenManager },
-            keychainService: keychain,
-            userDefaults: defaults
+        let refresher = MockTokenRefresher()
+        let (session, tokenManager) = makeSessionWithRealTokenManager(
+            keychain: keychain,
+            defaults: defaults,
+            refresher: refresher
         )
-        tokenManagerProvider.tokenManager = TokenManager(
-            keychainService: keychain,
-            authSession: session,
-            tokenRefresher: MockTokenRefresher()
-        )
+        try LegacyTokenItems.seed(in: keychain)
 
-        let legacyExpiration = Date().addingTimeInterval(300)
-        try keychain.saveCodable(
-            TokenInfo(
-                accessToken: "legacy-access",
-                refreshToken: "legacy-refresh",
-                expirationDate: legacyExpiration,
-                scope: GoogleConfig.scopes.joined(separator: " ")
-            ),
-            for: KeychainService.Key.googleAccessToken.rawValue,
-            withAccess: .whenUnlockedThisDeviceOnly
-        )
-        try keychain.saveString(
-            "legacy-refresh",
-            for: KeychainService.Key.googleRefreshToken.rawValue,
-            withAccess: .whenUnlockedThisDeviceOnly
-        )
-
-        let migratedExpiration = Date().addingTimeInterval(3600)
         try session.persistSessionForBackgroundAccess(
             accessToken: "restored-access",
-            refreshToken: "restored-refresh",
-            expirationDate: migratedExpiration,
+            expirationDate: Date().addingTimeInterval(3600),
             email: "stored@example.com"
         )
 
-        let storedToken = try keychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
-        )
-        XCTAssertEqual(storedToken.accessToken, "restored-access")
-        XCTAssertEqual(storedToken.refreshToken, "restored-refresh")
-        XCTAssertEqual(
-            storedToken.expirationDate.timeIntervalSince1970,
-            migratedExpiration.timeIntervalSince1970,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(
-            keychain.accessLevel(for: KeychainService.Key.googleAccessToken.rawValue),
-            .afterFirstUnlockThisDeviceOnly
-        )
-        XCTAssertEqual(
-            try keychain.loadString(for: KeychainService.Key.googleRefreshToken.rawValue),
-            "restored-refresh"
-        )
-        XCTAssertEqual(
-            keychain.accessLevel(for: KeychainService.Key.googleRefreshToken.rawValue),
-            .afterFirstUnlockThisDeviceOnly
-        )
         XCTAssertEqual(
             try keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
             "stored@example.com"
@@ -358,16 +315,237 @@ final class AuthSessionTests: XCTestCase {
             keychain.accessLevel(for: KeychainService.Key.googleUserEmail.rawValue),
             .afterFirstUnlockThisDeviceOnly
         )
-        XCTAssertTrue(defaultsMarkerWasClearedBeforeKeychainDelete)
+        XCTAssertTrue(
+            defaultsMarkerWasClearedBeforeKeychainDelete,
+            "The address is written inside the cleanup marker's transaction"
+        )
         XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
         XCTAssertFalse(
             keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue),
             "A fully persisted replacement session must consume the signed-out verdict"
         )
+        XCTAssertFalse(
+            LegacyTokenItems.anyStored(in: keychain),
+            "No token item is written, and an earlier build's are deleted"
+        )
+        XCTAssertTrue(defaults.bool(forKey: AuthSession.userEmailWrittenForBackgroundAccessKey))
+        let token = try await tokenManager.getCurrentToken()
+        XCTAssertEqual(token, "restored-access")
+        XCTAssertEqual(refresher.callCount, 0)
     }
 
-    func testCredentialPersistenceFailureLeavesMarkerAndLaunchCleanupDeletesPartialTokens() async throws {
-        struct EmailPersistenceFailure: Error {}
+    // An ordinary launch: the stored address is the session's, no cleanup marker
+    // is set, and this install has written the address once already. Until
+    // 2026-11-28 this was about nine keychain calls on the main actor, five of
+    // them writes, inside the cleanup marker's transaction (architecture review
+    // 2026-11, `account-boundary-auth#4`).
+    // Revert-check: fails if `persistSessionForBackgroundAccess` writes the
+    // address, or runs the marker's transaction, where the stored address is
+    // already the session's, or if that branch stops removing the signed-out
+    // verdict, which a launch that could not delete the address after finding
+    // the verdict leaves beside it with no marker (`resumeDurableSignedOutStateIfNeeded`).
+    func testPersistSessionForBackgroundAccess_sameAddress_onlyReadsItAndRemovesTheVerdict() async throws {
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: AuthSession.userEmailWrittenForBackgroundAccessKey)
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        try keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let (session, tokenManager) = makeSessionWithRealTokenManager(keychain: keychain, defaults: defaults)
+        let savesBefore = keychain.saveCallCount
+        let loadsBefore = keychain.loadCallCount
+        let deletesBefore = keychain.deleteCallCount
+
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-access",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.saveCallCount - savesBefore, 0, "Nothing is written: no address, no marker, no token")
+        XCTAssertEqual(keychain.loadCallCount - loadsBefore, 2, "The cleanup marker and the stored address are read")
+        XCTAssertEqual(
+            keychain.deleteCallCount - deletesBefore,
+            3,
+            "The verdict's removal, and once a process the two items earlier builds wrote"
+        )
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+        XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+        let token = try await tokenManager.getCurrentToken()
+        XCTAssertEqual(token, "restored-access")
+
+        let deletesAfterFirst = keychain.deleteCallCount
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-again",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.deleteCallCount - deletesAfterFirst, 1, "The next restore in the process removes the verdict alone")
+        XCTAssertEqual(keychain.saveCallCount - savesBefore, 0)
+    }
+
+    // Revert-check: fails if `persistedUserEmailMatches` answers true where the
+    // stored address cannot be read: the address would not be written again.
+    func testPersistSessionForBackgroundAccess_unreadableAddress_writesItAgain() throws {
+        struct ReadFailure: Error {}
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: AuthSession.userEmailWrittenForBackgroundAccessKey)
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        let (session, _) = makeSessionWithRealTokenManager(keychain: keychain, defaults: defaults)
+        keychain.failNextLoad(for: KeychainService.Key.googleUserEmail.rawValue, with: ReadFailure())
+        let savesBefore = keychain.saveCallCount
+
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-access",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.saveCallCount - savesBefore, 2, "The marker, then the address")
+        XCTAssertEqual(
+            try keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+            "stored@example.com"
+        )
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+    }
+
+    // Revert-check: fails if `persistSessionForBackgroundAccess` adopts the
+    // token before its keychain work: the session its caller then rejects
+    // would have its token handed to the next request.
+    func testPersistSessionForBackgroundAccess_verdictRemovalFails_throwsAndAdoptsNothing() throws {
+        struct DeleteFailure: Error {}
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: AuthSession.userEmailWrittenForBackgroundAccessKey)
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        let (session, tokenManager) = makeSessionWithRealTokenManager(keychain: keychain, defaults: defaults)
+        keychain.failNextDelete(for: KeychainService.Key.durableSignedOut.rawValue, with: DeleteFailure())
+
+        XCTAssertThrowsError(
+            try session.persistSessionForBackgroundAccess(
+                accessToken: "rejected-access",
+                expirationDate: Date().addingTimeInterval(3600),
+                email: "stored@example.com"
+            )
+        )
+
+        XCTAssertFalse(tokenManager.isAuthenticated(), "A rejected session's token is not adopted")
+    }
+
+    // The state `clearFailedGoogleSession` leaves when its delete of the address
+    // fails: the credential-cleanup marker (in the keychain and its defaults
+    // mirror) and the signed-out verdict, beside the address it could not delete.
+    // A sign-in as the same account in that process must consume the marker: left
+    // in place, the next launch finishes that cleanup and signs the new session out.
+    // Revert-check: fails if `needsMarkedCredentialWrite` drops its
+    // `hasPersistedCredentialCleanupRequirement()` term.
+    func testPersistSessionForBackgroundAccess_cleanupMarkerLeftBesideTheSameAddress_consumesItAndTheNextLaunchKeepsTheSession() async throws {
+        let restore = RestorePreparationFixture()
+        try restore.keychain.save(
+            Data([1]),
+            for: KeychainService.Key.credentialCleanupRequired.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        restore.defaults.set(true, forKey: AuthSession.credentialCleanupRequiredKey)
+        try restore.keychain.save(
+            Data([1]),
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            withAccess: .afterFirstUnlockThisDeviceOnly
+        )
+        let signingIn = makeRestoringSession(restore)
+
+        try signingIn.persistSessionForBackgroundAccess(
+            accessToken: "signed-in-access",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: RestorePreparationFixture.accountEmail
+        )
+
+        XCTAssertFalse(restore.keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+        XCTAssertFalse(restore.defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
+        XCTAssertFalse(restore.keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue))
+        XCTAssertEqual(
+            try restore.keychain.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
+            RestorePreparationFixture.accountEmail
+        )
+
+        let nextLaunch = makeRestoringSession(restore)
+        let outcome = await nextLaunch.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .authenticated)
+        XCTAssertEqual(restore.events.events, [], "Nothing signs Google out")
+    }
+
+    // Revert-check: fails if `needsMarkedCredentialWrite` takes a credential-cleanup
+    // marker that cannot be read for one that is not set (`== true` in place of
+    // `!= false`): a marker that is there would be left for the next launch.
+    func testPersistSessionForBackgroundAccess_cleanupMarkerUnreadable_writesInTheMarkedTransaction() throws {
+        struct ReadFailure: Error {}
+        let defaults = makeDefaults()
+        defaults.set(true, forKey: AuthSession.userEmailWrittenForBackgroundAccessKey)
+        let keychain = MockKeychainService()
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: "stored@example.com"])
+        let (session, _) = makeSessionWithRealTokenManager(keychain: keychain, defaults: defaults)
+        keychain.failNextLoad(for: KeychainService.Key.credentialCleanupRequired.rawValue, with: ReadFailure())
+        let savesBefore = keychain.saveCallCount
+
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-access",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.saveCallCount - savesBefore, 2, "The marker, then the address")
+        XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
+    }
+
+    // The first launch of this build on an install whose address a build before
+    // April 2026 stored readable only while the device is unlocked: every launch of
+    // the builds since rewrote it, and from this build on only this one does.
+    // Revert-check: fails if `needsMarkedCredentialWrite` drops its
+    // `userEmailWrittenForBackgroundAccessKey` term: the address would keep its old
+    // accessibility, which a locked background launch cannot read.
+    func testPersistSessionForBackgroundAccess_firstWriteOnTheInstall_rewritesAnUnchangedAddressOnce() throws {
+        let defaults = makeDefaults()
+        let keychain = MockKeychainService()
+        try keychain.saveString(
+            "stored@example.com",
+            for: KeychainService.Key.googleUserEmail.rawValue,
+            withAccess: .whenUnlockedThisDeviceOnly
+        )
+        let (session, _) = makeSessionWithRealTokenManager(keychain: keychain, defaults: defaults)
+        let savesBefore = keychain.saveCallCount
+
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-access",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.saveCallCount - savesBefore, 2, "The marker, then the address")
+        XCTAssertEqual(
+            keychain.accessLevel(for: KeychainService.Key.googleUserEmail.rawValue),
+            .afterFirstUnlockThisDeviceOnly
+        )
+        XCTAssertTrue(defaults.bool(forKey: AuthSession.userEmailWrittenForBackgroundAccessKey))
+
+        let savesAfterFirst = keychain.saveCallCount
+        try session.persistSessionForBackgroundAccess(
+            accessToken: "restored-again",
+            expirationDate: Date().addingTimeInterval(3600),
+            email: "stored@example.com"
+        )
+
+        XCTAssertEqual(keychain.saveCallCount - savesAfterFirst, 0, "Once an install")
+    }
+
+    func testCredentialPersistenceFailureLeavesMarkerAndLaunchCleanupDeletesThePartialAddress() async throws {
+        struct VerdictRemovalFailure: Error {}
         let defaults = makeDefaults()
         let keychain = MockKeychainService()
         let tokenManagerProvider = TokenManagerProvider()
@@ -386,29 +564,26 @@ final class AuthSessionTests: XCTestCase {
             authSession: session,
             tokenRefresher: MockTokenRefresher()
         )
-        keychain.failNextSave(
-            for: KeychainService.Key.googleUserEmail.rawValue,
-            with: EmailPersistenceFailure()
+        keychain.failNextDelete(
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            with: VerdictRemovalFailure()
         )
 
         XCTAssertThrowsError(
             try session.persistSessionForBackgroundAccess(
                 accessToken: "partially-saved-access",
-                refreshToken: "partially-saved-refresh",
                 expirationDate: Date().addingTimeInterval(3600),
                 email: "partial@example.com"
             )
         )
-        XCTAssertTrue(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
-        XCTAssertTrue(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+        XCTAssertTrue(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue), "The address was written")
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: keychain), "No token item is written")
         XCTAssertTrue(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
         XCTAssertTrue(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
 
         let outcome = await session.restorePreviousSignIn()
 
         XCTAssertEqual(outcome, .terminalNoSession)
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
         XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue))
         XCTAssertFalse(keychain.exists(for: KeychainService.Key.credentialCleanupRequired.rawValue))
         XCTAssertFalse(defaults.bool(forKey: AuthSession.credentialCleanupRequiredKey))
@@ -416,6 +591,28 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertTrue(cleanup.downloadsCleared)
         XCTAssertFalse(cleanup.storeReset, "Credential recovery must preserve an already-isolated local store")
         XCTAssertFalse(cleanup.attachmentFilesCleared)
+    }
+
+    /// A session over `keychain` whose token manager is a real `TokenManager`
+    /// on the same keychain, as the app's is.
+    private func makeSessionWithRealTokenManager(
+        keychain: MockKeychainService,
+        defaults: UserDefaults,
+        refresher: MockTokenRefresher = MockTokenRefresher()
+    ) -> (AuthSession, TokenManager) {
+        let tokenManagerProvider = TokenManagerProvider()
+        let session = makeAuthSession(
+            tokenManagerProvider: { tokenManagerProvider.tokenManager },
+            keychainService: keychain,
+            userDefaults: defaults
+        )
+        let tokenManager = TokenManager(
+            keychainService: keychain,
+            authSession: session,
+            tokenRefresher: refresher
+        )
+        tokenManagerProvider.tokenManager = tokenManager
+        return (session, tokenManager)
     }
 
     func testRestoreDurableSignedOutStateRejectsSurvivingSDKSession() async throws {
@@ -2041,15 +2238,20 @@ final class AuthSessionTests: XCTestCase {
     // Revert-check: fails if the persistence catch in the restore callback stops calling
     // `clearFailedGoogleSession()`.
     func testRestore_credentialPersistenceFails_clearsGoogleSession() async {
-        struct TokenSaveFailure: Error {}
+        struct VerdictRemovalFailure: Error {}
         let restore = RestorePreparationFixture()
-        restore.tokenManager.saveError = TokenSaveFailure()
+        // The stored address is the session's, so the verdict's removal is the
+        // persistence's one write.
+        restore.keychain.failNextDelete(
+            for: KeychainService.Key.durableSignedOut.rawValue,
+            with: VerdictRemovalFailure()
+        )
         let session = makeRestoringSession(restore)
 
         let outcome = await session.restorePreviousSignIn()
 
         XCTAssertEqual(outcome, .retryableFailure)
-        XCTAssertEqual(restore.tokenManager.saveTokensCallCount, 1)
+        XCTAssertEqual(restore.tokenManager.adoptTokensCallCount, 0, "A rejected session's token is not adopted")
         assertRestoreClearedGoogleSession(session, restore)
     }
 
@@ -3711,7 +3913,7 @@ final class AuthSessionTests: XCTestCase {
     // if `performDurableLocalCleanup(removalRequest:)` drops its `pendingAccountRemoval
     // Requests.count == 1 && contains(removalRequest)` gate — the first removal would
     // consume the marker the still-queued final removal depends on. The
-    // `invocationCount`/`saveTokensCallCount` assertions fail if `signIn(presenting:)`
+    // `invocationCount`/`adoptTokensCallCount` assertions fail if `signIn(presenting:)`
     // loses its leading `guard !isAccountRemovalRequested else { throw CancellationError() }`,
     // letting the intervening sign-in reach Google UI and persist a session between two
     // removals. Both depend on `endAuthenticationTransition()` resuming waiters FIFO
@@ -3776,7 +3978,7 @@ final class AuthSessionTests: XCTestCase {
 
         XCTAssertTrue(firstRemovalResult)
         XCTAssertEqual(interactiveSignIn.invocationCount, 1)
-        XCTAssertEqual(tokenManager.saveTokensCallCount, 0)
+        XCTAssertEqual(tokenManager.adoptTokensCallCount, 0)
         XCTAssertTrue(
             keychain.exists(for: KeychainService.Key.localStoreResetRequired.rawValue),
             "The first removal must retain the marker while the final removal is pending"
@@ -4127,7 +4329,7 @@ final class AuthSessionTests: XCTestCase {
         XCTAssertEqual(restore.events.events, [], "The SDK session stays", file: file, line: line)
         XCTAssertEqual(restore.tokenManager.clearTokensCallCount, 0, file: file, line: line)
         XCTAssertEqual(
-            restore.tokenManager.saveTokensCallCount,
+            restore.tokenManager.adoptTokensCallCount,
             0,
             "Nothing of the restored session is persisted before its mailbox is checked",
             file: file,
@@ -4204,6 +4406,9 @@ private final class RestorePreparationFixture {
     init() {
         keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: Self.accountEmail])
         defaults.set(lastSuccessfulSyncTime, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+        // A launch after this install first wrote the address, so an unchanged one
+        // is not rewritten (`AuthSession.needsMarkedCredentialWrite`).
+        defaults.set(true, forKey: AuthSession.userEmailWrittenForBackgroundAccessKey)
     }
 }
 
@@ -4352,7 +4557,7 @@ private final class RecordingTokenManager: TokenManagerProtocol, @unchecked Send
         self.onClear = onClear
     }
 
-    func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {}
+    func adoptTokens(access: String, expirationDate: Date) {}
     func getCurrentToken() async throws -> String { "token" }
     func refreshToken() async throws -> String { "token" }
     func refreshToken(rejecting rejectedAccessToken: String) async throws -> String { "token" }

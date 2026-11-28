@@ -52,7 +52,6 @@
         "DraftFileDropPolicyTests",
         "EmailPreviewCardMetricsTests",
         "ExternalURLOpenerTests",
-        "FullEmailReaderWarmWidthSourceTests",
         "HTMLContentAccountBoundaryTests",
         "IncrementalSyncCursorTests",
         "KeychainServiceTests",

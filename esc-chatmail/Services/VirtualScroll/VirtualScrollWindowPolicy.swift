@@ -49,16 +49,18 @@ import Foundation
 /// bottom edge, about ten on a phone. A phone that realizes more (short rows
 /// on a Pro Max, a small text size) widens as a tall viewport does, which has
 /// not been measured on a phone. What a wider replace costs is its rows: every
-/// replace re-fetches and re-maps all of them on the main actor, about 70
-/// instead of 40 for a Mac viewport of 33 rows.
+/// replace publishes all of them, about 70 instead of 40 for a Mac viewport of
+/// 33 rows, and fetches and maps on the main actor each one its window did not
+/// hold (`VirtualScrollState.updateVisibleMessages` reuses the window's cached
+/// rows).
 ///
 /// Not growth on every step: extending the window at each step grew it to the
 /// cap and front-trimmed rows far above the reader (iPhone simulator, 11 of 40
 /// slow drags, `testMarkIndexVisible_withoutHold_slidesWindowAsBefore`), while
 /// this keeps a span that moves with the viewport. Nor a larger buffer or
-/// configuration for a tall viewport: every replace re-fetches and re-maps its
-/// rows on the main actor, and the configuration also sets the initial window
-/// and the window cap.
+/// configuration for a tall viewport: every replace publishes its rows, and
+/// fetches and maps on the main actor every one its window did not hold, and
+/// the configuration also sets the initial window and the window cap.
 enum VirtualScrollWindowPolicy {
     /// Absolute rows `startIndex..<endIndex`. Not a `Range`: a position past
     /// the dataset's end (a count that shrank under it) gives an end at or

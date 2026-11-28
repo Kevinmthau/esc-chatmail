@@ -65,36 +65,68 @@ final class TokenManagerTests: XCTestCase {
         )
     }
 
-    // MARK: - saveTokens
+    // MARK: - adoptTokens
 
-    func testSaveTokens_persistsAccessTokenToKeychain() async throws {
-        let expiration = Date().addingTimeInterval(3600)
-        try sut.saveTokens(access: "access-1", refresh: "refresh-1", expirationDate: expiration)
+    // Revert-check: fails if `adoptTokens(access:expirationDate:ifCacheEpochMatches:)`
+    // writes the token to the keychain again, as `saveTokens` did at every
+    // launch until 2026-11-28 (architecture review 2026-11, `account-boundary-auth#4`).
+    func testAdoptTokens_writesNothingToTheKeychain() async throws {
+        sut.adoptTokens(access: "access-1", expirationDate: Date().addingTimeInterval(3600))
 
-        let stored = try mockKeychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
+        XCTAssertEqual(mockKeychain.saveCallCount, 0)
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: mockKeychain))
+        let token = try await sut.getCurrentToken()
+        XCTAssertEqual(token, "access-1", "The adopted token is the one requests are given")
+        XCTAssertEqual(mockRefresher.callCount, 0)
+    }
+
+    // Revert-check: fails if the ungated `adoptTokens` stops calling
+    // `removeLegacyTokenItemsIfNeeded()`: the items an earlier build wrote, the
+    // refresh token's copy among them, would stay in the keychain until a sign-out.
+    func testAdoptTokens_ungated_deletesTheItemsEarlierBuildsWrote() throws {
+        try LegacyTokenItems.seed(in: mockKeychain)
+
+        sut.adoptTokens(access: "access-1", expirationDate: Date().addingTimeInterval(3600))
+
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: mockKeychain))
+    }
+
+    // Revert-check: fails if `removeLegacyTokenItemsIfNeeded()` drops its
+    // `_legacyTokenItemsRemoved` guard: every restore and sign-in in the
+    // process would delete them again.
+    func testAdoptTokens_ungatedTwice_deletesTheLegacyItemsOnce() {
+        sut.adoptTokens(access: "a", expirationDate: Date().addingTimeInterval(3600))
+        let deletesAfterFirst = mockKeychain.deleteCallCount
+        sut.adoptTokens(access: "b", expirationDate: Date().addingTimeInterval(3600))
+
+        XCTAssertEqual(deletesAfterFirst, 2)
+        XCTAssertEqual(mockKeychain.deleteCallCount, 2, "The process deletes them once")
+    }
+
+    // Revert-check: fails if `removeLegacyTokenItemsIfNeeded()` sets
+    // `_legacyTokenItemsRemoved` before its deletes have succeeded: a failed
+    // delete would never be asked again in the process.
+    func testAdoptTokens_legacyDeleteFails_adoptsTheTokenAndDeletesNextTime() async throws {
+        struct DeleteFailure: Error {}
+        try LegacyTokenItems.seed(in: mockKeychain)
+        mockKeychain.failNextDelete(
+            for: KeychainService.Key.googleAccessToken.rawValue,
+            with: DeleteFailure()
         )
-        XCTAssertEqual(stored.accessToken, "access-1")
-        XCTAssertEqual(stored.refreshToken, "refresh-1")
-        XCTAssertEqual(stored.expirationDate.timeIntervalSince1970, expiration.timeIntervalSince1970, accuracy: 0.001)
+
+        sut.adoptTokens(access: "first", expirationDate: Date().addingTimeInterval(3600))
+
+        XCTAssertTrue(LegacyTokenItems.anyStored(in: mockKeychain))
+        let adopted = try await sut.getCurrentToken()
+        XCTAssertEqual(adopted, "first", "A failed cleanup does not fail the adoption")
+
+        sut.adoptTokens(access: "second", expirationDate: Date().addingTimeInterval(3600))
+
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: mockKeychain))
     }
 
-    func testSaveTokens_persistsRefreshTokenSeparately() throws {
-        try sut.saveTokens(access: "a", refresh: "refresh-xyz", expirationDate: Date().addingTimeInterval(3600))
-
-        let stored = try mockKeychain.loadString(for: KeychainService.Key.googleRefreshToken.rawValue)
-        XCTAssertEqual(stored, "refresh-xyz")
-    }
-
-    func testSaveTokens_nilRefreshToken_doesNotWriteRefreshEntry() throws {
-        try sut.saveTokens(access: "a", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
-
-        XCTAssertFalse(mockKeychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
-    }
-
-    func testSaveTokens_updatesInMemoryAuthSessionAccessToken() async throws {
-        try sut.saveTokens(access: "memory-cached", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
+    func testAdoptTokens_updatesInMemoryAuthSessionAccessToken() async throws {
+        sut.adoptTokens(access: "memory-cached", expirationDate: Date().addingTimeInterval(3600))
 
         await waitForAccessToken("memory-cached")
         XCTAssertEqual(authSession.accessToken, "memory-cached")
@@ -102,18 +134,17 @@ final class TokenManagerTests: XCTestCase {
 
     // MARK: - clearTokens
 
-    func testClearTokens_removesAccessAndRefreshFromKeychain() throws {
-        try sut.saveTokens(access: "a", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
+    func testClearTokens_deletesTheItemsEarlierBuildsWrote() throws {
+        try LegacyTokenItems.seed(in: mockKeychain)
 
         try sut.clearTokens()
 
-        XCTAssertFalse(mockKeychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
-        XCTAssertFalse(mockKeychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: mockKeychain))
     }
 
     func testClearTokens_clearsInMemoryAuthSessionAccessToken() async throws {
         authSession.accessToken = "cached"
-        try sut.saveTokens(access: "cached", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
+        sut.adoptTokens(access: "cached", expirationDate: Date().addingTimeInterval(3600))
         await waitForAccessToken("cached")
 
         try sut.clearTokens()
@@ -124,28 +155,32 @@ final class TokenManagerTests: XCTestCase {
 
     // MARK: - isAuthenticated
 
-    func testIsAuthenticated_noStoredToken_returnsFalse() {
+    func testIsAuthenticated_nothingAdopted_returnsFalse() {
+        XCTAssertFalse(sut.isAuthenticated())
+    }
+
+    // Revert-check: fails if `isAuthenticated()` reads the access-token item
+    // an earlier build wrote in place of the cache.
+    func testIsAuthenticated_onlyAnEarlierBuildsItem_returnsFalse() throws {
+        try LegacyTokenItems.seed(in: mockKeychain)
+
         XCTAssertFalse(sut.isAuthenticated())
     }
 
     func testIsAuthenticated_validToken_returnsTrue() throws {
-        try sut.saveTokens(access: "a", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
+        sut.adoptTokens(access: "a", expirationDate: Date().addingTimeInterval(3600))
         XCTAssertTrue(sut.isAuthenticated())
     }
 
     func testIsAuthenticated_expiredToken_returnsFalse() throws {
-        try sut.saveTokens(access: "a", refresh: nil, expirationDate: Date().addingTimeInterval(-60))
+        sut.adoptTokens(access: "a", expirationDate: Date().addingTimeInterval(-60))
         XCTAssertFalse(sut.isAuthenticated())
     }
 
     // MARK: - getCurrentToken
 
-    func testGetCurrentToken_freshKeychainToken_returnsItWithoutRefresh() async throws {
-        try sut.saveTokens(access: "stored", refresh: nil, expirationDate: Date().addingTimeInterval(3600))
-        await waitForAccessToken("stored")
-
-        // Clear in-memory cache so getCurrentToken has to read keychain
-        authSession.accessToken = nil
+    func testGetCurrentToken_adoptedToken_returnsItWithoutRefresh() async throws {
+        sut.adoptTokens(access: "stored", expirationDate: Date().addingTimeInterval(3600))
 
         let token = try await sut.getCurrentToken()
 
@@ -153,7 +188,7 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(mockRefresher.callCount, 0)
     }
 
-    func testGetCurrentToken_noStoredToken_triggersRefresh() async throws {
+    func testGetCurrentToken_nothingAdopted_triggersRefresh() async throws {
         mockRefresher.accessToken = "fresh-after-refresh"
         mockRefresher.expirationDate = Date().addingTimeInterval(3600)
 
@@ -163,10 +198,25 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(mockRefresher.callCount, 1)
     }
 
+    // Revert-check: fails if `getCurrentToken` reads the access-token item an
+    // earlier build wrote before it refreshes: a process that adopted nothing
+    // would be handed a token GoogleSignIn did not give it.
+    func testGetCurrentToken_nothingAdoptedBesideAnEarlierBuildsItem_refreshesWithoutReadingIt() async throws {
+        try LegacyTokenItems.seed(in: mockKeychain, accessToken: "legacy-access")
+        mockRefresher.accessToken = "from-google-sign-in"
+        mockRefresher.expirationDate = Date().addingTimeInterval(3600)
+        let loadsBefore = mockKeychain.loadCallCount
+
+        let token = try await sut.getCurrentToken()
+
+        XCTAssertEqual(token, "from-google-sign-in")
+        XCTAssertEqual(mockRefresher.callCount, 1)
+        XCTAssertEqual(mockKeychain.loadCallCount, loadsBefore, "No keychain read")
+    }
+
     func testGetCurrentToken_expiringSoonToken_triggersRefresh() async throws {
         // Token expires in 1 minute — inside the 5-minute "expiring soon" window.
-        try sut.saveTokens(access: "soon-expiring", refresh: nil, expirationDate: Date().addingTimeInterval(60))
-        authSession.accessToken = nil
+        sut.adoptTokens(access: "soon-expiring", expirationDate: Date().addingTimeInterval(60))
 
         mockRefresher.accessToken = "refreshed"
         mockRefresher.expirationDate = Date().addingTimeInterval(3600)
@@ -196,18 +246,18 @@ final class TokenManagerTests: XCTestCase {
         XCTAssertEqual(mockRefresher.callCount, 1, "Three concurrent callers must share one refresh")
     }
 
-    func testRefreshToken_persistsNewTokenToKeychain() async throws {
+    func testRefreshToken_adoptsTheNewTokenAndWritesNothingToTheKeychain() async throws {
         mockRefresher.accessToken = "brand-new"
         mockRefresher.refreshToken = "new-refresh"
         mockRefresher.expirationDate = Date().addingTimeInterval(3600)
 
         _ = try await sut.refreshToken()
 
-        let stored = try mockKeychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
-        )
-        XCTAssertEqual(stored.accessToken, "brand-new")
+        XCTAssertEqual(mockKeychain.saveCallCount, 0)
+        XCTAssertFalse(LegacyTokenItems.anyStored(in: mockKeychain))
+        let current = try await sut.getCurrentToken()
+        XCTAssertEqual(current, "brand-new")
+        XCTAssertEqual(mockRefresher.callCount, 1, "The refreshed token is served from the cache")
     }
 
     // MARK: - refreshToken error classification
@@ -292,7 +342,7 @@ final class TokenManagerTests: XCTestCase {
         }
     }
 
-    // Revert-check: fails if saveTokens drops the ungated-save epoch bump
+    // Revert-check: fails if adoptTokens drops the ungated-adoption epoch bump
     // (`if epoch == nil { _cacheEpoch &+= 1 }`) that retires refreshes begun
     // under the previous credentials — the retired refresh's invalid_grant
     // verdict is then published into the replacement session, parking a
@@ -316,10 +366,9 @@ final class TokenManagerTests: XCTestCase {
         }
         await staleRefresher.waitUntilStarted()
 
-        // A direct save establishes the replacement sign-in generation.
-        try manager.saveTokens(
+        // A direct adoption establishes the replacement sign-in generation.
+        manager.adoptTokens(
             access: "replacement-access",
-            refresh: "replacement-refresh",
             expirationDate: Date().addingTimeInterval(3_600)
         )
         await staleRefresher.resumeWithFailure()
@@ -363,9 +412,8 @@ final class TokenManagerTests: XCTestCase {
             try await manager.refreshToken()
         }
         await refresher.waitUntilStarted()
-        try manager.saveTokens(
+        manager.adoptTokens(
             access: "replacement-access",
-            refresh: "replacement-refresh",
             expirationDate: Date().addingTimeInterval(3_600)
         )
 
@@ -477,7 +525,7 @@ final class TokenManagerTests: XCTestCase {
     // as `performTokenRefresh` starts, and either call alone answers this, so
     // removing just one of them still passes.
     func testRefreshTokenRejecting_cacheHoldsAnotherFreshToken_returnsItWithoutRefreshing() async throws {
-        try sut.saveTokens(access: "replacement", refresh: nil, expirationDate: Date().addingTimeInterval(3_600))
+        sut.adoptTokens(access: "replacement", expirationDate: Date().addingTimeInterval(3_600))
 
         let token = try await sut.refreshToken(rejecting: "rejected")
 
@@ -492,9 +540,8 @@ final class TokenManagerTests: XCTestCase {
     // the replacement session's token instead of a `CancellationError`.
     func testPerformTokenRefreshRejecting_retiredGeneration_isCancelledNotHandedTheReplacementToken() async throws {
         let retiredEpoch = sut.cacheEpoch()
-        try sut.saveTokens(
+        sut.adoptTokens(
             access: "replacement-access",
-            refresh: "replacement-refresh",
             expirationDate: Date().addingTimeInterval(3_600)
         )
 
@@ -521,7 +568,7 @@ final class TokenManagerTests: XCTestCase {
     // slow run can pass with the second look removed. The join rule itself is
     // pinned deterministically by the coordinator test above.
     func testRefreshTokenRejecting_joinsAPlainRefreshThatHandsBackTheRejectedToken_forcesANewOne() async throws {
-        try sut.saveTokens(access: "rejected", refresh: nil, expirationDate: Date().addingTimeInterval(3_600))
+        sut.adoptTokens(access: "rejected", expirationDate: Date().addingTimeInterval(3_600))
         mockRefresher.accessToken = "rejected"
         mockRefresher.forcedAccessToken = "forced"
         mockRefresher.artificialDelay = 0.3

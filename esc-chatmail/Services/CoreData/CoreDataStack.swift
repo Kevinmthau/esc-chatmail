@@ -245,6 +245,24 @@ final class CoreDataStack: @unchecked Sendable {
     }
 #endif
 
+    /// The store's data-protection class, written out on iOS (architecture review 2026-11,
+    /// `security-privacy#6`): complete until the first unlock after a restart, which is Core Data's
+    /// own default, so this changes nothing on a device today. The keychain names its class at
+    /// every write (`TokenManager`, for locked-device background sync), and the store had none of
+    /// its own: a Data Protection capability added to the target later, whose default is Complete,
+    /// would have locked the store away from every BGAppRefresh and BGProcessing run on a locked
+    /// phone, and the load-failure policy would have latched those launches without a word.
+    /// `PrivilegeDeclarationsTests` pins the option and the entitlement file. The key is not
+    /// available on macOS, where the store has no protection classes.
+    static func applyFileProtection(to description: NSPersistentStoreDescription?) {
+        #if os(iOS)
+        description?.setOption(
+            FileProtectionType.completeUntilFirstUserAuthentication.rawValue as NSString,
+            forKey: NSPersistentStoreFileProtectionKey
+        )
+        #endif
+    }
+
     lazy var persistentContainer: NSPersistentContainer = {
         markContainerCreated()
         if let injectedContainerForTesting {
@@ -260,6 +278,7 @@ final class CoreDataStack: @unchecked Sendable {
         let description = container.persistentStoreDescriptions.first
         description?.shouldMigrateStoreAutomatically = true
         description?.shouldInferMappingModelAutomatically = true
+        Self.applyFileProtection(to: description)
 
         #if os(macOS)
         // A Mac unit-test host must never open the default URL

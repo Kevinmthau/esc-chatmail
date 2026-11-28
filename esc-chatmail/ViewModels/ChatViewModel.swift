@@ -264,8 +264,9 @@ final class ChatViewModel: ObservableObject {
     private var replyDraftSaveIsOwed = false
     /// The composer changed after a draft save last read it: the 350 ms
     /// debounce owes it a save. Set on every `objectWillChange` of the
-    /// composer, the publisher the debounce follows, and cleared where a save
-    /// reads the composer. Only the quit's flush asks
+    /// composer, the publisher the debounce follows, cleared where a save
+    /// reads the composer, and set again when that save throws, having
+    /// written nothing. Only the quit's flush asks
     /// (`saveReplyDraftChangeForTermination`).
     private var composerChangedSinceDraftRead = false
     /// Unsent replies waiting for the cleanup gate to merge them into the
@@ -1434,17 +1435,28 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    /// The save this composer's debounce still owes, started now, because
-    /// the app is quitting (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`).
+    /// The save this composer still owes the store, started now, because the
+    /// app is quitting (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`).
     ///
-    /// Nothing when no change has reached the composer since a save last read
-    /// it, or when a save is already waiting to read it
-    /// (`replyDraftSaveIsOwed`), which then reads this change too and is
+    /// Owed in three cases. A change has reached the composer since a save
+    /// last read it, which the 350 ms debounce would save. A save read it and
+    /// threw, writing nothing (`composerChangedSinceDraftRead` is set again
+    /// then). Or files are still importing (`isProcessingAttachments`): a
+    /// document import finishes each file in place, which the composer does
+    /// not publish (`DocumentAttachmentImporter`), so a file it finished after
+    /// the last save is in no change until the whole import ends. A save now
+    /// stores it, and leaves out the files still importing, as every save
+    /// does.
+    ///
+    /// Nothing when a save is already waiting to read the composer
+    /// (`replyDraftSaveIsOwed`), which then reads all of this too and is
     /// counted already: a request here would only cancel it and queue again
-    /// at the back of the gate. Off screen `scheduleReplyDraftSave` is the
-    /// no-op it always is.
+    /// at the back of the gate. Nothing for a composer in none of the three
+    /// cases either, which a save has read as it is (see the flush for why).
+    /// Off screen `scheduleReplyDraftSave` is the no-op it always is.
     func saveReplyDraftChangeForTermination() {
-        guard composerChangedSinceDraftRead, !replyDraftSaveIsOwed else { return }
+        guard !replyDraftSaveIsOwed,
+              composerChangedSinceDraftRead || composerState.isProcessingAttachments else { return }
         scheduleReplyDraftSave()
     }
 
@@ -1494,6 +1506,23 @@ final class ChatViewModel: ObservableObject {
         // request's to hand on either.
         replyDraftSaveIsOwed = false
         composerChangedSinceDraftRead = false
+        do {
+            try writeComposerToReplyDraft()
+        } catch {
+            // Read and not written: the store still lacks what the composer
+            // holds. Only a quit asks this flag, and its flush then makes the
+            // save again (`saveReplyDraftChangeForTermination`); the debounce
+            // waits for the next change, as it always has.
+            composerChangedSinceDraftRead = true
+            throw error
+        }
+    }
+
+    /// The write half of `saveReplyDraftWithoutCleanupInterleaving`, run once
+    /// the request has read the composer: it returns without writing where the
+    /// draft is not this request's to write, and throws where it is and could
+    /// not be written.
+    private func writeComposerToReplyDraft() throws {
         // Read live state only after acquiring cleanup's gate: a queued save
         // must not resurrect content that was sent or explicitly discarded.
         // `sendReply` clears the composer at tap, so a save scheduled by a
