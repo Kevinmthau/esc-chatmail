@@ -88,9 +88,9 @@ final class DuplicatePersonMergeTests: XCTestCase {
         XCTAssertEqual(rows.first?.displayName, "Alice Smith", "The richer identity must survive")
     }
 
-    /// Both Person relationships delete-cascade, so the merge must end with
-    /// every participation still present and pointing at the survivor rather
-    /// than stranding a participant-less conversation.
+    /// A Person's conversation participations delete-cascade, so the merge
+    /// must end with every participation still present and pointing at the
+    /// survivor rather than stranding a participant-less conversation.
     ///
     /// Revert-check: the repoint-before-delete order in
     /// `DataCleanupService.mergeDuplicatePersons`. Delete the loser before its
@@ -150,12 +150,16 @@ final class DuplicatePersonMergeTests: XCTestCase {
     }
 
     /// Message participations move too, and a same-message/same-role row is
-    /// likewise collapsed rather than duplicated.
+    /// likewise collapsed rather than duplicated. Since model 9 a row left on
+    /// the loser is not cascaded away with it: it keeps naming the deleted
+    /// Person, so the move is all that keeps it right.
     ///
-    /// Revert-check: the repoint-before-delete order in
-    /// `DataCleanupService.mergeDuplicatePersons`. Delete the loser before its
-    /// repoint and the repoint's first fetch processes the delete, whose
-    /// cascade takes `msg-loser-only`'s row with it.
+    /// Revert-check: the message loop's `participation.person = survivor` in
+    /// `DataCleanupService.repointParticipations`. Leave the row on the loser
+    /// and `msg-loser-only`'s participation does not point at the survivor.
+    /// (Until model 9 this test pinned the repoint-before-delete order too,
+    /// through the cascade; with the order reverted on model 9 it passes,
+    /// measured, and the order is pinned by the conversation test above.)
     func testMovesMessageParticipationsAndCollapsesRedundantOnes() async throws {
         let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
         let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
@@ -188,11 +192,13 @@ final class DuplicatePersonMergeTests: XCTestCase {
     /// (`DataCleanupService.messageParticipations(of:prefetchingMessages:in:)`), not through
     /// `Person.messageParticipations`, which model 9 drops, and a fetch can
     /// fail. A loser whose participations could not be read must not be
-    /// deleted: its cascade would take them along, and the messages would lose
-    /// their participant rows. Both rows stay for the next cleanup.
+    /// deleted: its participations would be left naming a deleted row, which
+    /// model 9 neither cascades nor nullifies. Both rows stay for the next
+    /// cleanup.
     ///
     /// Revert-check: the `continue` in `mergeDuplicatePersons`' catch. Fall
-    /// through to the delete and the loser goes with its participation.
+    /// through to the delete and the loser row is gone, and the participation
+    /// that named it reads no person.
     func testParticipationFetchFails_keepsTheLoserAndItsParticipations() async throws {
         let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
         let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
@@ -214,7 +220,7 @@ final class DuplicatePersonMergeTests: XCTestCase {
         context.refreshAllObjects()
         XCTAssertEqual(try personRows(forEmail: Self.alice).count, 2)
         let participations = try context.fetch(MessageParticipant.fetchRequest())
-        XCTAssertEqual(participations.count, 2, "The loser's participation was deleted with it")
+        XCTAssertEqual(participations.count, 2, "Every participation is kept")
         XCTAssertEqual(
             participations.first { $0.kind == "from" }?.person?.objectID,
             loserID,

@@ -25,10 +25,13 @@ import CoreData
 /// untouched faults. Keeping the rows is the only difference from a sync
 /// run's context, and it changes what the context forgets, not what it reads.
 ///
-/// KNOWN GAPS. Today every one of these writes but the unchanged refetch
-/// reads a hub, so the assertions that say it must not are wrapped in
+/// KNOWN GAPS. Model 9 took the user's Person off as a hub (it dropped the
+/// inverse `Person.messageParticipations`), so no write here reads the user's
+/// participations. Every write but the unchanged refetch still reads the INBOX
+/// label's members, so the assertions that say it must not are wrapped in
 /// `XCTExpectFailure`, each naming what was measured (iOS 27.0 simulator,
-/// 2026-11-16). `XCTExpectFailure` is
+/// 2026-11-16 and 2026-11-28); they come off with the denormalized label
+/// flags. `XCTExpectFailure` is
 /// strict: once the fix lands the assertion passes, the test fails with "no
 /// failure was recorded", and the wrapper comes off in that fix's own change,
 /// which gives the assertion its `Revert-check:`. An assertion outside a
@@ -50,15 +53,25 @@ final class ScaleHubFaultTests: XCTestCase {
     private static let registeredObjectBound = 1_000
 
     /// Someone who writes to the user now and then, not one of the 25 people
-    /// who post to the seeded mailing list: a sender's own
-    /// `messageParticipations` is read by a new message too, and a list
+    /// who post to the seeded mailing list: until model 9 a sender's own
+    /// `messageParticipations` was read by a new message too, and a list
     /// sender has 800 of them.
     private static let ordinarySenderIndex = 4_000
 
     private struct ContextState {
         let inboxMembersAreFault: Bool
-        let selfParticipationsAreFault: Bool
+        /// How many participant rows the context registered. Until model 9
+        /// a write that set a participant's person read the user's whole
+        /// `Person.messageParticipations` (120,000 rows at S2); model 9 has no
+        /// such inverse to ask `hasFault` of, so the rows are counted.
+        let registeredParticipantCount: Int
         let registeredObjectCount: Int
+
+        /// The user's participations were not read: far fewer participant
+        /// rows than the self hub holds.
+        var selfParticipationsAreUnread: Bool {
+            registeredParticipantCount < ScaleHubFaultTests.registeredObjectBound
+        }
     }
 
     private var stack: TestCoreDataStack!
@@ -108,9 +121,10 @@ final class ScaleHubFaultTests: XCTestCase {
     /// Reads the context as the write and its save left it.
     private func state(of context: NSManagedObjectContext) async throws -> ContextState {
         try await context.perform {
-            // Counted first: the two fetches below register a hub row the
-            // write never touched.
+            // Counted first: the fetch below registers a hub row the write
+            // never touched.
             let registeredObjectCount = context.registeredObjects.count
+            let registeredParticipantCount = context.registeredObjects.filter { $0 is MessageParticipant }.count
 
             // A fetch returns the row the context already holds, as the write
             // left it, and a row the write never registered comes back with
@@ -119,13 +133,9 @@ final class ScaleHubFaultTests: XCTestCase {
             labelRequest.predicate = NSPredicate(format: "id == %@", "INBOX")
             let inbox = try XCTUnwrap(try context.fetch(labelRequest).first)
 
-            let personRequest = NSFetchRequest<Person>(entityName: "Person")
-            personRequest.predicate = NSPredicate(format: "email == %@", Self.selfEmail)
-            let me = try XCTUnwrap(try context.fetch(personRequest).first)
-
             return ContextState(
                 inboxMembersAreFault: inbox.hasFault(forRelationshipNamed: "messages"),
-                selfParticipationsAreFault: me.hasFault(forRelationshipNamed: "messageParticipations"),
+                registeredParticipantCount: registeredParticipantCount,
                 registeredObjectCount: registeredObjectCount
             )
         }
@@ -172,7 +182,7 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTAssertGreaterThan(messageCount, Self.registeredObjectBound)
         XCTAssertGreaterThan(state.registeredObjectCount, messageCount)
         XCTAssertTrue(state.inboxMembersAreFault)
-        XCTAssertTrue(state.selfParticipationsAreFault)
+        XCTAssertTrue(state.selfParticipationsAreUnread)
     }
 
     // MARK: - A new message
@@ -211,12 +221,61 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTExpectFailure("inverse-tomany-hub-fault-tax: a new INBOX message reads all 97,031 INBOX members") {
             XCTAssertTrue(state.inboxMembersAreFault)
         }
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: a new message reads all 120,000 of the user's participations") {
-            XCTAssertTrue(state.selfParticipationsAreFault)
-        }
+        // Revert-check: model 9's inverse-less `MessageParticipant.person`.
+        // Move the model 9 directory out of the `.xcdatamodeld` and mark
+        // model 8 current (the build rewrites `.xccurrentversion` alone back
+        // to 9): the new message registers 120,025 participant rows.
+        XCTAssertTrue(state.selfParticipationsAreUnread, "\(state.registeredParticipantCount) participant rows")
         XCTExpectFailure("inverse-tomany-hub-fault-tax: one new message registers 217,062 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
+    }
+
+    // MARK: - A send
+
+    /// A New Message, created as the app creates it: on the main-queue view
+    /// context (`GmailSendService.createOptimisticMessage`), with the user's
+    /// own address as its From row (architecture review 2026-11,
+    /// coredata-stack#4). Setting that row's person read every one of the
+    /// user's participations into the view context, on the main thread, until
+    /// model 9 dropped the inverse. The review's other fix, building the
+    /// graph in a private context, was settled against: it conflicts with
+    /// gap-change-propagation-pipeline#1 (the view-context reads after
+    /// creation), and model 9 removes the cost it was for.
+    ///
+    /// Revert-check: model 9's inverse-less `MessageParticipant.person`. Move
+    /// the model 9 directory out of the `.xcdatamodeld` and mark model 8
+    /// current: the send registers 120,025 participant rows and 120,035
+    /// objects.
+    @MainActor
+    func testSendingANewMessage_onTheViewContext_readsNoneOfTheUsersParticipations() async throws {
+        let viewContext = stack.makeMainQueueViewContext()
+        viewContext.retainsRegisteredObjects = true
+        let authSession = AuthSession(
+            tokenManagerProvider: { MockTokenManager() },
+            keychainService: MockKeychainService(),
+            userDefaults: UserDefaults(suiteName: "ScaleHubFaultTests.\(UUID().uuidString)")!,
+            clearConversationCaches: {},
+            cleanupDownloads: {},
+            resetCoreDataStore: {},
+            clearAttachmentCache: {}
+        )
+        authSession.userEmail = Self.selfEmail
+        authSession.userName = "Me"
+        let recipient = ScaleStoreSeeder.personEmail(at: Self.ordinarySenderIndex)
+        let sendService = GmailSendService(viewContext: viewContext, authSession: authSession)
+
+        let handle = try await sendService.createOptimisticMessage(
+            to: [recipient],
+            body: "Hello",
+            optimisticConversation: .participantHash(calculateParticipantHash(from: [normalizedEmail(recipient)]))
+        )
+
+        let message = try XCTUnwrap(sendService.fetchMessageSync(byID: handle.optimisticMessageID))
+        XCTAssertTrue(message.participants?.contains { $0.person?.email == Self.selfEmail } == true)
+        let registeredParticipants = viewContext.registeredObjects.filter { $0 is MessageParticipant }.count
+        XCTAssertLessThan(registeredParticipants, Self.registeredObjectBound)
+        XCTAssertLessThan(viewContext.registeredObjects.count, Self.registeredObjectBound)
     }
 
     // MARK: - A refetch
@@ -264,7 +323,7 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(try storedMessage(id: messageID)).labels, stored.labels)
 
         XCTAssertTrue(state.inboxMembersAreFault)
-        XCTAssertTrue(state.selfParticipationsAreFault)
+        XCTAssertTrue(state.selfParticipationsAreUnread)
         XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
     }
 
@@ -324,7 +383,7 @@ final class ScaleHubFaultTests: XCTestCase {
         }
         // A label change has nothing to do with who is on the message, and
         // does not read the user's participations today either.
-        XCTAssertTrue(state.selfParticipationsAreFault)
+        XCTAssertTrue(state.selfParticipationsAreUnread)
         XCTExpectFailure("inverse-tomany-hub-fault-tax: one label removal registers 97,040 objects") {
             XCTAssertLessThan(state.registeredObjectCount, Self.registeredObjectBound)
         }
@@ -351,9 +410,11 @@ final class ScaleHubFaultTests: XCTestCase {
         XCTExpectFailure("inverse-tomany-hub-fault-tax: deleting one INBOX message reads every INBOX member") {
             XCTAssertTrue(state.inboxMembersAreFault)
         }
-        XCTExpectFailure("inverse-tomany-hub-fault-tax: deleting one message reads all of the user's participations") {
-            XCTAssertTrue(state.selfParticipationsAreFault)
-        }
+        // Revert-check: model 9's inverse-less `MessageParticipant.person`.
+        // Move the model 9 directory aside and mark model 8 current: 120,038
+        // participant rows (the deletion cascaded to the participants, whose
+        // person's set was read to nullify them).
+        XCTAssertTrue(state.selfParticipationsAreUnread, "\(state.registeredParticipantCount) participant rows")
         // 2,885 of them are members of neither hub: 2,841 messages and the
         // rows of the message's other people. Which read brings those
         // messages in was not looked into; the count before this context

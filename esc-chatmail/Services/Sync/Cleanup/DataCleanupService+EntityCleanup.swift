@@ -403,19 +403,30 @@ extension DataCleanupService {
     /// can resolve to a different display name or avatar from one fetch to the
     /// next.
     ///
-    /// Both Person relationships cascade on delete, and a cascade that fired
-    /// before its participations were moved would strand participant-less
+    /// A Person's conversation participations cascade on delete, and a cascade
+    /// that fired before they were moved would strand participant-less
     /// conversations — the exact failure the serializer's commit-the-whole-graph
     /// design exists to prevent. Core Data defers cascade propagation to
     /// `processPendingChanges`, and anything that forces a pending-changes pass
     /// in between (a fetch, a relationship fault) lets the cascade win. The
     /// repoint begins with a `MessageParticipant` fetch, so the order is
     /// required, not defensive: a loser deleted before its repoint has its
-    /// participations cascaded away by that fetch. `DuplicatePersonMergeTests`'
-    /// `testRepointsParticipationsInsteadOfCascadingThemAway` and
-    /// `testMovesMessageParticipationsAndCollapsesRedundantOnes` pin it. Losers
-    /// are deleted through the graph rather than by NSBatchDeleteRequest, which
-    /// would cascade in the store behind the context's back.
+    /// conversation participations cascaded away by that fetch.
+    /// `DuplicatePersonMergeTests`' `testRepointsParticipationsInsteadOfCascadingThemAway`
+    /// pins it. Losers are deleted through the graph rather than by
+    /// NSBatchDeleteRequest, which would cascade in the store behind the
+    /// context's back.
+    ///
+    /// Message participations no longer cascade: model 9 gave
+    /// `MessageParticipant.person` no inverse, so deleting a Person neither
+    /// deletes nor nullifies the rows that name it. One left on a deleted loser
+    /// keeps naming the deleted row, and the save raises no error (measured on
+    /// the in-memory test store, where the row then reads nil; on SQLite the
+    /// key names a row that is gone, which is the dangling fault the review
+    /// warned of, not measured). So the repoint must move every one of them
+    /// before the delete, and a loser whose rows could not be read is kept
+    /// (`testMovesMessageParticipationsAndCollapsesRedundantOnes`,
+    /// `testParticipationFetchFails_keepsTheLoserAndItsParticipations`).
     func mergeDuplicatePersons(in context: NSManagedObjectContext) async {
         let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -455,8 +466,10 @@ extension DataCleanupService {
                     } catch {
                         // Nothing was moved (the reads come first), and the
                         // loser must not be deleted with its participations
-                        // still on it: its cascade would take them along. Both
-                        // rows stay, and the next cleanup merges them.
+                        // still on it: its cascade would take the conversation
+                        // ones along, and the message ones would be left
+                        // naming a deleted row (model 9: no inverse). Both rows
+                        // stay, and the next cleanup merges them.
                         Log.error("Failed to read a duplicate person's participations; keeping the row", category: .coreData, error: error)
                         continue
                     }

@@ -164,6 +164,11 @@ extension Message {
     /// `== nil` disjunct.
     @NSManaged public var richContentVerdict: Int16
     @NSManaged public var localModifiedAt: Date?
+    /// When the message was last shown to the user, at most once a day
+    /// (model 9). The attachments-disk line's eviction pass writes and reads
+    /// it; nothing in the UI reads it, and it stays out of every load
+    /// signature. Nil on every row from before model 9.
+    @NSManaged public var lastViewedAt: Date?
     @NSManaged public var conversation: Conversation?
     @NSManaged public var labels: Set<Label>?
     @NSManaged public var participants: Set<MessageParticipant>?

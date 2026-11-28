@@ -5,17 +5,18 @@ import Foundation
 ///
 /// Initial sync and history recovery reuse one context for every listed page.
 /// Inserted rows are wired in both directions (`Conversation.messages`,
-/// `Message.participants`, `Person.messageParticipations`, `Label.messages`),
-/// and the rollup prefetch realizes `conversation.messages` too, so after each
+/// `Message.participants`, `Label.messages`; until model 9 also
+/// `Person.messageParticipations`), and the rollup prefetch realizes
+/// `conversation.messages` too, so after each
 /// save those realized sets form strong cycles and every message of the run
 /// stayed resident with its body text, snippet and participants. A
 /// since-install re-list held about 1.6 GB at 400k messages and was killed
 /// part-way, then restarted from page 1.
 ///
 /// Only the page's own rows are refreshed. `refreshAllObjects()` would also
-/// re-fault the system Label and self Person hubs, so the next page's first
-/// label or participant write would refire a fault over every member saved so
-/// far: quadratic over a large re-list. `reset()` would invalidate objects the
+/// re-fault the system Label hubs (and, until model 9 dropped its inverse, the
+/// self Person's), so the next page's first label write would refire a fault
+/// over every member saved so far: quadratic over a large re-list. `reset()` would invalidate objects the
 /// persister's per-run caches still hold.
 enum SyncContextPageObjectRelease {
     /// The rows a page touched, captured before its save (after the save the
