@@ -12,8 +12,10 @@ import AppKit
 ///
 /// Both platforms open `EmailLinkSchemePolicy.schemesOpenedOnEveryPlatform` (web, mail, phone,
 /// Messages, FaceTime). The Mac opens nothing else, because `NSWorkspace.open` has no check of its
-/// own. iOS opens any other scheme only when `canOpenURL` accepts it. That policy explains why the
-/// query is not asked for the shared list, and how much more it accepts than the Mac's list.
+/// own. iOS opens any other scheme only when `canOpenURL` accepts it, and never one of the app's own
+/// schemes (`EmailLinkSchemePolicy.appURLSchemes`, its Google sign-in redirect), which the query
+/// accepts. That policy explains why the query is not asked for the shared list, and how much more
+/// it accepts than the Mac's list.
 @MainActor
 enum ExternalURLOpener {
     static func open(_ url: URL) {
@@ -26,6 +28,7 @@ enum ExternalURLOpener {
     static func open(
         _ url: URL,
         on platform: AppPlatform,
+        appURLSchemes: Set<String> = EmailLinkSchemePolicy.appURLSchemes,
         systemCanOpen: (URL) -> Bool,
         systemOpen: (URL) -> Void
     ) {
@@ -37,6 +40,14 @@ enum ExternalURLOpener {
                 return
             }
         case .iOS:
+            // Before the query, which accepts the app's own schemes: an email link must not be
+            // handed to the app's sign-in redirect. The URL is not logged, redacted or not: a
+            // redirect link is where an authorization code would be.
+            guard opensOnEveryPlatform
+                || !EmailLinkSchemePolicy.usesAppURLScheme(url, appSchemes: appURLSchemes) else {
+                Log.warning("Refused email link with the app's own URL scheme", category: .ui)
+                return
+            }
             // The shared list goes straight to `UIApplication.open`, which needs no declared query
             // scheme. `canOpenURL` answered false for `mailto:`, `tel:` and `facetime:` on a
             // simulator where no Apple app claims them (`EmailLinkSchemePolicy` has the
