@@ -227,6 +227,95 @@ final class ConversationWindowProviderTests: XCTestCase {
         XCTAssertEqual(visibilityChecks, 2)
     }
 
+    // MARK: - Completeness
+
+    /// A row another context deletes between the window fetch's ID query and the faulting
+    /// of its rows is a tombstone, which the window drops, so it comes back one row short
+    /// of the limit. That is not the end of the store's rows, and the window must not say
+    /// it is: counted from the rows, the list latched "all loaded" and paged no more, and
+    /// on the Mac nothing reloads (PR 527's review). The race is made deterministic by
+    /// deleting right after the fetch returns (`DeletingAfterFetchContext`), on a SQLite
+    /// store, where a deleted row is really gone.
+    // Revert-check: `isComplete: candidates.count < limit` in
+    // `fetchWindowReportingCompleteness` (counted from the returned rows, the window reads
+    // as complete).
+    func testWindow_aRowTombstonedDuringTheFetch_isNotTheEndOfTheStore() throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let setup = sqliteStack.makeMainQueueViewContext()
+        let alice = ConversationBuilder().withDisplayName("Alice").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 300)).build(in: setup)
+        let bob = ConversationBuilder().withDisplayName("Bob").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 200)).build(in: setup)
+        _ = ConversationBuilder().withDisplayName("Carol").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100)).build(in: setup)
+        try setup.save()
+        let context = DeletingAfterFetchContext(
+            entityName: "Conversation",
+            coordinator: sqliteStack.persistentContainer.persistentStoreCoordinator
+        )
+        context.deleteAfterNextFetch(bob.objectID, through: sqliteStack.newBackgroundContext())
+
+        let window = try ConversationWindowProvider().fetchWindowReportingCompleteness(
+            in: context,
+            limit: 2,
+            searchText: "",
+            filter: .all,
+            matchesVisibility: { _ in true }
+        )
+
+        XCTAssertEqual(window.rows.map(\.objectID), [alice.objectID], "Precondition: Bob came back a tombstone and was dropped")
+        XCTAssertFalse(window.isComplete)
+    }
+
+    func testWindow_storeShorterThanTheLimit_isComplete() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        try saveViewContext()
+
+        let window = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "",
+            filter: .all,
+            matchesVisibility: { _ in true }
+        )
+
+        XCTAssertEqual(window.rows.map(\.objectID), [alice.objectID])
+        XCTAssertTrue(window.isComplete)
+    }
+
+    /// The filtered scan is complete when it ran out of the store before finding the
+    /// limit's worth of visible rows, and not when it found them.
+    // Revert-check: the `persistedVisibleConversations.count < limit` term of
+    // `fetchFilteredWindow`'s completeness (without it a full filtered window reads as
+    // final).
+    func testFilteredWindow_completeOnlyWhenTheScanRanOutOfTheStore() throws {
+        _ = makeConversation(name: "Alice", snippet: "match", date: 300)
+        _ = makeConversation(name: "Bob", snippet: "other", date: 200)
+        try saveViewContext()
+
+        let short = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "match",
+            filter: .all,
+            matchesVisibility: { $0.snippet == "match" }
+        )
+        XCTAssertEqual(short.rows.count, 1)
+        XCTAssertTrue(short.isComplete)
+
+        _ = makeConversation(name: "Carol", snippet: "match", date: 100)
+        try saveViewContext()
+        let full = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "match",
+            filter: .all,
+            matchesVisibility: { $0.snippet == "match" }
+        )
+        XCTAssertEqual(full.rows.count, 2)
+        XCTAssertFalse(full.isComplete)
+    }
+
     // MARK: - Helpers
 
     /// Small window: `limit * contactFilterCandidateMultiplier` yields a

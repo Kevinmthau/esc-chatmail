@@ -604,9 +604,9 @@ final class ConversationListViewModel: ObservableObject {
         // (observedConversationContext is weak, so no assert).
         guard observedConversationContext != nil else { return false }
 
-        let window: [Conversation]
+        let window: ConversationWindowProvider.Window
         do {
-            window = try windowProvider.fetchWindow(
+            window = try windowProvider.fetchWindowReportingCompleteness(
                 in: conversationContext,
                 limit: loadedConversationLimit,
                 searchText: searchService.debouncedSearchText,
@@ -634,7 +634,7 @@ final class ConversationListViewModel: ObservableObject {
         // rows entering the window on this reload (paging's appended tail, a
         // live insert) instead of re-submitting the whole window every time.
         let previouslyVisibleIDs = Set(listStore.visibleItems.map(\.id))
-        listStore.replaceAll(with: window, isComplete: window.count < loadedConversationLimit)
+        listStore.replaceAll(with: window.rows, isComplete: window.isComplete)
         publishVisibleItems()
         let newlyVisibleItems = listStore.visibleItems.filter { !previouslyVisibleIDs.contains($0.id) }
         prefetchPersonData(from: newlyVisibleItems)

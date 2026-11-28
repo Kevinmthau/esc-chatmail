@@ -809,6 +809,44 @@ final class ConversationListViewModelTests: XCTestCase {
         )
     }
 
+    /// A row tombstoned during the first window fetch leaves the window one row short of
+    /// the limit, and paging must still reach the rows past it. Before (PR 527's review),
+    /// the view model latched "all loaded" from the short count, and neither the delete's
+    /// own notification nor the backfill reopened paging.
+    // Revert-check: `isComplete: window.isComplete` in `reloadConversationWindowFromStore`'s
+    // `replaceAll` (deciding it from `window.rows.count` leaves the list at [Alice]).
+    func testRowTombstonedDuringTheWindowFetch_pagingStillReachesTheRowsPastIt() throws {
+        stack = TestCoreDataStack(storeKind: .sqlite)
+        viewContext = stack.makeMainQueueViewContext()
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 400)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 300)
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 200)
+        let dave = makeConversation(name: "Dave", snippet: "delta", date: 100)
+        try viewContext.save()
+        let observed = DeletingAfterFetchContext(
+            entityName: "Conversation",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        observed.deleteAfterNextFetch(bob.objectID, through: stack.newBackgroundContext())
+        let viewModel = makeViewModel(
+            windowProvider: ConversationWindowProvider(
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 2,
+                    pageSize: 1,
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
+                )
+            )
+        )
+
+        viewModel.onAppear(in: observed)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID], "Precondition: Bob was dropped")
+
+        let last = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: last)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [alice.objectID, carol.objectID, dave.objectID])
+    }
+
     // Revert-check: request.includesPendingChanges = true on
     // ConversationWindowProvider.fetchWindow's unfiltered path — this
     // .all/no-search re-appear takes the plain fetchLimit fetch, and only
