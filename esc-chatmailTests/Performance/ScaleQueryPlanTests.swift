@@ -453,6 +453,123 @@ final class ScaleQueryPlanTests: XCTestCase {
         }
     }
 
+    /// A page of the list (`ConversationWindowProvider.fetchPage`, the rows after the
+    /// window's last one) reads the store as the window does: the unarchived conversations
+    /// through an index, never ZCONVERSATION from one end, and the page's rows are the ones
+    /// a fetch of the longer window would put after the first. Like the window, it sorts
+    /// the unarchived rows in a temporary B-tree (an index for the order belongs in a model
+    /// version, review step 10), which is not asserted; what keyset paging removed is the
+    /// re-read and re-snapshot of every row above the page on the main thread.
+    ///
+    /// HONEST SCOPE: no one line of production code reverts the plan. A keyset term the
+    /// archive index cannot serve beside, or a model version that drops that index, is
+    /// what it would catch.
+    @MainActor
+    func testConversationListPage_findsUnarchivedConversationsThroughAnIndex() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.makeMainQueueViewContext()
+            let provider = ConversationWindowProvider()
+            let longer = try provider.fetchWindow(
+                in: context,
+                limit: provider.initialLimit + provider.pageSize,
+                searchText: "",
+                filter: .all,
+                matchesVisibility: { _ in true }
+            )
+            XCTAssertEqual(longer.count, provider.initialLimit + provider.pageSize, "\(statistics)")
+            let edge = ConversationListItem.SortKey(conversation: longer[provider.initialLimit - 1])
+
+            var page: ConversationWindowProvider.Window?
+            let plans = try SQLiteQueryPlanRecorder.record {
+                page = try provider.fetchPage(
+                    in: context,
+                    after: edge,
+                    limit: provider.pageSize,
+                    filter: .all,
+                    matchesVisibility: { _ in true }
+                )
+            }
+
+            let fetched = try XCTUnwrap(page, "\(statistics)")
+            XCTAssertEqual(
+                fetched.rows.map(\.objectID),
+                longer.dropFirst(provider.initialLimit).map(\.objectID),
+                "\(statistics)"
+            )
+            XCTAssertFalse(fetched.isComplete, "\(statistics)")
+            let pagePlan = try XCTUnwrap(
+                plans.first { $0.reads("ZCONVERSATION") && $0.sql.contains("ORDER BY") },
+                "\(statistics):\n\(plans)"
+            )
+            XCTAssertEqual(pagePlan.scans(of: "ZCONVERSATION"), [], "\(statistics): \(pagePlan)")
+            XCTAssertFalse(pagePlan.indexes(on: "ZCONVERSATION").isEmpty, "\(statistics): \(pagePlan)")
+        }
+    }
+
+    /// A Person change the list's rows can show is answered with one fetch of the window
+    /// rows whose snapshots show the Person's address
+    /// (`ConversationListChangeFetch.storedWindowConversations`), with their participants
+    /// and persons prefetched for the snapshot build. Every read is by key: the rows by
+    /// their primary key, the participants through their conversation index. The review
+    /// asked for `ANY participants.person IN %@` in the predicate instead, and SQLite
+    /// answered that from the participant table's person index, which for the user's own
+    /// Person, in all 12,000 conversations of this store, read every one of its participant
+    /// rows with or without statistics (measured 2026-11-28).
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this, since the fetch has no
+    /// participant term to put back. A predicate the primary key cannot serve, or a model
+    /// version that drops the participant's conversation index, is what it would catch.
+    @MainActor
+    func testConversationListPersonChange_readsTheWindowRowsByKey() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.makeMainQueueViewContext()
+            let provider = ConversationWindowProvider()
+            let window = try provider.fetchWindow(
+                in: context,
+                limit: provider.initialLimit,
+                searchText: "",
+                filter: .all,
+                matchesVisibility: { _ in true }
+            )
+            XCTAssertEqual(window.count, provider.initialLimit, "\(statistics)")
+            let windowIDs = window.map(\.objectID)
+            context.reset()
+
+            var matched: [Conversation] = []
+            let plans = try SQLiteQueryPlanRecorder.record {
+                matched = try context.fetch(
+                    ConversationListChangeFetch.storedWindowConversations(withIDs: windowIDs)
+                )
+            }
+
+            XCTAssertEqual(Set(matched.map(\.objectID)), Set(windowIDs), "\(statistics)")
+            let rowsPlan = try XCTUnwrap(
+                plans.first { $0.reads("ZCONVERSATION") && $0.sql.contains("carray") },
+                "\(statistics):\n\(plans)"
+            )
+            XCTAssertEqual(rowsPlan.scans(of: "ZCONVERSATION"), [], "\(statistics): \(rowsPlan)")
+            XCTAssertTrue(
+                rowsPlan.steps.contains { $0.contains("INTEGER PRIMARY KEY") },
+                "\(statistics): \(rowsPlan)"
+            )
+            let participantPlan = try XCTUnwrap(
+                plans.first { $0.reads("ZCONVERSATIONPARTICIPANT") },
+                "\(statistics):\n\(plans)"
+            )
+            XCTAssertEqual(participantPlan.scans(of: "ZCONVERSATIONPARTICIPANT"), [], "\(statistics): \(participantPlan)")
+            XCTAssertEqual(
+                participantPlan.indexes(on: "ZCONVERSATIONPARTICIPANT"),
+                ["ZCONVERSATIONPARTICIPANT_ZCONVERSATION_INDEX"],
+                "\(statistics): \(participantPlan)"
+            )
+            if let personPlan = plans.first(where: { $0.reads("ZPERSON") }) {
+                XCTAssertEqual(personPlan.scans(of: "ZPERSON"), [], "\(statistics): \(personPlan)")
+            }
+        }
+    }
+
     // MARK: - Message by Gmail ID
 
     /// Every message a sync persists is first looked up by its Gmail ID, and

@@ -222,8 +222,8 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         XCTAssertEqual(viewModel.filteredConversationItems.last?.snapshot.inboxUnreadCount, 1)
     }
 
-    // Revert-check: `returnsObjectsAsFaults = false` on the batch "self IN %@" NSFetchRequest in ConversationListViewModel.handleSiblingContextSave. Returned-as-faults rows leave a window between the fetch and the snapshot build's fault fire; a sibling delete landing in it tombstones the row (shouldDeleteInaccessibleFaults defaults on) and ConversationListItem.init traps bridging the nil `id` UUID.
-    // HONEST SCOPE: the tombstone window is a race between this delivery and the second save, so a revert crashes this test's process on most runs, not provably all — the window cannot be held open deterministically from outside handleSiblingContextSave. Fetch-time materialization is the only way to close it, which is exactly what a revert removes. A clean revert to the old per-ID existingObject(with:) loop (which also materialized immediately) passes.
+    // Revert-check: both `returnsObjectsAsFaults = false` in `ConversationListChangeFetch.materializedConversations` (the sibling save's "self IN %@" fetch) and the KVC guard of `ConversationListItem.listableID(of:)`. Returned-as-faults rows leave a window between the fetch and the snapshot build's fault fire; a sibling delete landing in it tombstones the row (shouldDeleteInaccessibleFaults defaults on), and the list item, which used to trap bridging the nil `id` UUID, now refuses it (architecture review 2026-11, conversation-list-ui#4). Either guard alone keeps this test alive; `ConversationListStoreTests`' tombstone tests pin the list item's deterministically.
+    // HONEST SCOPE: the tombstone window is a race between this delivery and the second save, so reverting both crashes this test's process on most runs, not provably all — the window cannot be held open deterministically from outside handleSiblingContextSave. A clean revert to the old per-ID existingObject(with:) loop (which also materialized immediately) passes.
     func testBackgroundSave_rowDeletedWhileFirstSaveDeliveryRuns_doesNotCrashSnapshotBuild() async throws {
         let viewModel = makeViewModel()
         var aliceID: NSManagedObjectID!
@@ -271,6 +271,102 @@ final class ConversationListViewModelBackgroundSaveTests: XCTestCase {
         await waitForFilteredConversationIDs([aliceID, bobID], in: viewModel)
         XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "alpha updated")
         XCTAssertEqual(viewModel.filteredConversationItems.last?.snapshot.snippet, "beta updated")
+    }
+
+    /// A catch-up save touches 50 conversations far past a full window of 3, and one that
+    /// now sorts first: only that one enters, the 50 have none of their participants read
+    /// into the view context, and paging still reaches them with their new snippets. A
+    /// prefetch leaves no trace in the context (it registers no participant, and the
+    /// relationship still reads as a fault), so the witness is the requests themselves
+    /// (`FetchRecordingContext`): no request carrying the participant prefetch names a row
+    /// past the window.
+    /// Before, every changed row was fetched with its participants and persons and
+    /// snapshotted on the main thread before the trim dropped it (architecture review
+    /// 2026-11, conversation-list-ui#5).
+    // Revert-check: `conversationsToApply`'s first read (fetching every saved ID with
+    // `ConversationListChangeFetch.savedConversations`, the prefetching request, names the
+    // 50 rows).
+    func testCatchUpSave_rowsPastTheWindow_haveNoParticipantsRead_andPagingStillReachesThem() async throws {
+        var windowIDs: [NSManagedObjectID] = []
+        var farIDs: [NSManagedObjectID] = []
+        var risingID: NSManagedObjectID!
+        try autoreleasepool {
+            let window = (0..<3).map { index in
+                makeConversation(name: "Window \(index)", snippet: "window", date: TimeInterval(1_000 - index))
+            }
+            let far = (0..<50).map { index -> Conversation in
+                let person = PersonBuilder().withEmail("far\(index)@example.com").withDisplayName("Far \(index)").build(in: viewContext)
+                return ConversationBuilder()
+                    .withDisplayName("Far \(index)")
+                    .withSnippet("old")
+                    .visible()
+                    .withLastMessageDate(Date(timeIntervalSince1970: TimeInterval(500 - index)))
+                    .withCreatedAt(Date())
+                    .withParticipant(person)
+                    .build(in: viewContext)
+            }
+            let rising = makeConversation(name: "Rising", snippet: "old", date: 100)
+            try viewContext.save()
+            windowIDs = window.map(\.objectID)
+            farIDs = far.map(\.objectID)
+            risingID = rising.objectID
+            viewContext.reset()
+        }
+        let observed = FetchRecordingContext(
+            recordedEntityName: "Conversation",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+
+        let viewModel = ConversationListViewModel(
+            dependencies: .forTesting(
+                stack: stack,
+                viewContext: viewContext,
+                migrationFlags: InMemoryMigrationFlagStore.withConversationListLaunchPassesDone(),
+                contactEmailLoader: { _ in [] }
+            ),
+            windowProvider: ConversationWindowProvider(
+                configuration: ConversationListWindowConfiguration(
+                    initialLimit: 3,
+                    pageSize: 20,
+                    preloadThreshold: 1,
+                    contactFilterCandidateMultiplier: 5
+                )
+            )
+        )
+        viewModel.onAppear(in: observed)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), windowIDs)
+
+        let changedFarIDs = farIDs
+        let changedRisingID: NSManagedObjectID = risingID
+        let backgroundContext = stack.newBackgroundContext()
+        try await backgroundContext.perform {
+            for objectID in changedFarIDs {
+                let conversation = try XCTUnwrap(backgroundContext.existingObject(with: objectID) as? Conversation)
+                conversation.snippet = "updated"
+            }
+            let rising = try XCTUnwrap(backgroundContext.existingObject(with: changedRisingID) as? Conversation)
+            rising.lastMessageDate = Date(timeIntervalSince1970: 2_000)
+            try backgroundContext.save()
+        }
+
+        await waitForFilteredConversationIDs([risingID, windowIDs[0], windowIDs[1]], in: viewModel)
+        let namedForParticipants = observed.objectIDsNamed(byRequestsPrefetching: "participants")
+        XCTAssertTrue(
+            namedForParticipants.contains(risingID),
+            "Precondition: the recording sees the admitted row's prefetching read"
+        )
+        XCTAssertTrue(
+            namedForParticipants.isDisjoint(with: farIDs),
+            "No participant of a row past the window is read"
+        )
+
+        for _ in 0..<5 {
+            guard let last = viewModel.filteredConversationItems.last else { break }
+            viewModel.loadMoreIfNeeded(currentItem: last)
+        }
+        let shownFar = viewModel.filteredConversationItems.filter { farIDs.contains($0.id) }
+        XCTAssertEqual(shownFar.map(\.id), farIDs, "Paging reaches every skipped row, in order")
+        XCTAssertEqual(Set(shownFar.map(\.snapshot.snippet)), ["updated"])
     }
 
     // MARK: - didSaveObjectIDs relevance guard

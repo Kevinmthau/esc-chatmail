@@ -11,9 +11,26 @@ struct ConversationListItem: Identifiable, Equatable {
         snapshot.objectID
     }
 
-    init(conversation: Conversation) {
+    /// Nil for a row the list cannot show: one deleted in its context, or a tombstone, the
+    /// fault of a row another context deleted from the store before it fired, which reads
+    /// nil for every attribute (`shouldDeleteInaccessibleFaults`). Its non-optional `id` and
+    /// `type` would trap in the snapshot, so the check reads the ID through KVC first, and
+    /// nothing else is read when it fails. `ConversationListStore` skips such a row on a
+    /// reload and removes it on a live change (architecture review 2026-11,
+    /// conversation-list-ui#4). Never make `Conversation.id` optional for this: that is a
+    /// model change.
+    init?(conversation: Conversation) {
+        guard let stableID = Self.listableID(of: conversation) else { return nil }
         self.snapshot = ConversationSnapshot(from: conversation)
-        self.stableID = conversation.id
+        self.stableID = stableID
+    }
+
+    /// The conversation's UUID when the list can show it, read without trapping: nil for a
+    /// deleted row or a tombstone (see `init?(conversation:)`). The one definition of a row
+    /// the list can show; `ConversationWindowProvider` asks it before it sorts a row.
+    static func listableID(of conversation: Conversation) -> UUID? {
+        guard !conversation.isDeleted else { return nil }
+        return conversation.value(forKey: "id") as? UUID
     }
 
     /// This item's position in the CANONICAL chat-list order. Internal (was
@@ -46,6 +63,18 @@ struct ConversationListItem: Identifiable, Equatable {
             self.stableID = stableID
         }
 
+        /// The key of a conversation the list can show, nil for one it cannot
+        /// (`ConversationListItem.listableID(of:)`): `init(conversation:)` reads the
+        /// non-optional `id`, which traps on a tombstone.
+        init?(listableConversation conversation: Conversation) {
+            guard let stableID = ConversationListItem.listableID(of: conversation) else { return nil }
+            self.init(
+                pinned: conversation.pinned,
+                lastMessageDate: conversation.lastMessageDate,
+                stableID: stableID
+            )
+        }
+
         /// Builds the key straight from a managed `Conversation` — the
         /// counterpart of `ConversationListItem.sortKey` for rows that have
         /// no list item yet (`ConversationWindowProvider`'s pending/persisted
@@ -56,6 +85,42 @@ struct ConversationListItem: Identifiable, Equatable {
                 lastMessageDate: conversation.lastMessageDate,
                 stableID: conversation.id
             )
+        }
+
+        /// The store predicate for the rows that sort after this key: the SQL mirror of
+        /// `<`, as the window's `NSSortDescriptor`s are of its order, and evaluated by Core
+        /// Data in memory for a context's pending rows (`includesPendingChanges`), so it must
+        /// give the same answer in both places. Built here, beside `<`, so the two cannot
+        /// drift (architecture review 2026-11, conversation-list-ui#3: keyset paging).
+        ///
+        /// A row sorts after the key when it is unpinned and the key is pinned, or when it
+        /// shares the key's pin and is older, or has no date (nil sorts as `.distantPast`,
+        /// last, which is where SQLite's `DESC` puts NULL too), or has the same date and a
+        /// UUID that compares after the key's. The UUID term is a BLOB comparison in SQLite
+        /// and `-[NSUUID compare:]` in memory, the same pair the window's tie-break sort
+        /// already relies on agreeing. A comparison with a nil date is false in both, so the
+        /// nil disjunct is spelled out.
+        var storePredicateForRowsAfter: NSPredicate {
+            let pinnedValue = NSNumber(value: pinned)
+            let uuid = stableID as NSUUID
+            let samePin: NSPredicate
+            if let lastMessageDate {
+                let date = lastMessageDate as NSDate
+                samePin = NSPredicate(
+                    format: "pinned == %@ AND (lastMessageDate < %@ OR lastMessageDate == nil OR (lastMessageDate == %@ AND id > %@))",
+                    pinnedValue, date, date, uuid
+                )
+            } else {
+                samePin = NSPredicate(
+                    format: "pinned == %@ AND lastMessageDate == nil AND id > %@",
+                    pinnedValue, uuid
+                )
+            }
+            guard pinned else { return samePin }
+            return NSCompoundPredicate(orPredicateWithSubpredicates: [
+                samePin,
+                NSPredicate(format: "pinned == NO")
+            ])
         }
 
         /// "Sorts before" as `<`: pinned rows first, then later

@@ -72,7 +72,6 @@ final class ConversationListViewModel: ObservableObject {
     var listStore = ConversationListStore()
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
-    private var hasLoadedAllConversationWindow = false
     /// Set when a window fetch failed and the window on screen is the one from before
     /// it: the next `.syncCompleted` reloads, and only then (`retryOwedWindowReload`),
     /// never every sync, which would refetch the whole window on the main thread after
@@ -140,6 +139,16 @@ final class ConversationListViewModel: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.retryOwedWindowReload()
+            }
+            .store(in: &cancellables)
+
+        // The heal for rows a batch delete removed, which no change notification brings
+        // (`pruneWindowRowsGoneFromStore`): asked when a cleanup run ends, because the
+        // empty-conversation pass is a cleanup run's.
+        resolvedDependencies.notificationCenter.publisher(for: .conversationCleanupFinished)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.pruneWindowRowsGoneFromStore()
             }
             .store(in: &cancellables)
     }
@@ -420,12 +429,9 @@ final class ConversationListViewModel: ObservableObject {
             matchesVisibility: matchesVisibleConversation(_:)
         )
 
-        let trimmedIDs = listStore.trimVisibleItems(to: loadedConversationLimit)
-        if !trimmedIDs.isEmpty {
-            // A non-empty trim proves the store holds rows beyond the window, so
-            // paging must reopen even when a short initial fetch latched "all loaded".
-            hasLoadedAllConversationWindow = false
-        }
+        // A non-empty trim opens the store's edge, which reopens paging even when a
+        // short initial fetch had found the window complete.
+        _ = listStore.trimVisibleItems(to: loadedConversationLimit)
 
         if backfillConversationWindowIfNeeded() {
             return
@@ -494,10 +500,23 @@ final class ConversationListViewModel: ObservableObject {
 
     // MARK: - Lifecycle
 
-    /// Called when view appears - performs initial setup
+    /// Called when view appears - performs initial setup.
+    ///
+    /// The window is read from the store only when it is not current: a context this view
+    /// model was not observing (the first appearance), or a reload owed by a failed fetch
+    /// or an invalidate-all. The iOS list appears again on every pop from a chat, and until
+    /// 2026-11-28 each appearance re-read and re-snapshotted the whole window, however
+    /// deep the user had paged, on the main thread (architecture review 2026-11,
+    /// conversation-list-ui#3). The window stays current while hidden: the view model keeps
+    /// observing across `onDisappear`, so every change reaches it. That reload was also the
+    /// only heal for rows a batch delete removed, which `pruneWindowRowsGoneFromStore`
+    /// now is.
     func onAppear(in context: NSManagedObjectContext) {
+        let observesAnotherContext = observedConversationContext !== context
         startObservingConversationChanges(in: context)
-        reloadConversationWindowFromStore()
+        if observesAnotherContext || windowReloadOwed {
+            reloadConversationWindowFromStore()
+        }
 
         // Scheduled here rather than in deferredSetup: onDisappear cancels
         // deferredSetup, so a sheet or push in its 0.5s window used to kill
@@ -547,7 +566,6 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func recomputeFilteredConversations() {
-        hasLoadedAllConversationWindow = false
         loadedConversationLimit = windowProvider.initialLimit
         // A different query rebuilds the window from scratch: forget the
         // prefetch ledger so the new window's rows warm again.
@@ -571,7 +589,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func loadMoreIfNeeded(currentItem item: ConversationListItem) {
-        guard !hasLoadedAllConversationWindow else { return }
+        guard !listStore.isComplete else { return }
         // Page only when the appearing row sits within preloadThreshold of the
         // window's end; a row that is no longer in the window pages nothing.
         let pagingTriggerItems = filteredConversationItems.suffix(windowProvider.preloadThreshold)
@@ -579,11 +597,59 @@ final class ConversationListViewModel: ObservableObject {
 
         let previousLimit = loadedConversationLimit
         loadedConversationLimit += windowProvider.pageSize
-        if !reloadConversationWindowFromStore() {
+        if !fillWindowFromStore() {
             // Left raised, `backfillConversationWindowIfNeeded` would run the failing
-            // full reload again after every relevant merged save.
+            // fetch again after every relevant merged save.
             loadedConversationLimit = previousLimit
         }
+    }
+
+    /// Fills the window up to the limit with the rows past its edge, and returns whether it
+    /// was read: one keyset page of the missing rows (`ConversationWindowProvider.fetchPage`)
+    /// where the query's store predicate is exact (`pagesByKeyset`) and the window ends at a
+    /// known row (`ConversationListStore.pageStartKey`), else the full reload. Until
+    /// 2026-11-28 a page, and the backfill after a removal, reloaded and re-snapshotted the
+    /// whole window from its first row on the main thread (architecture review 2026-11,
+    /// conversation-list-ui#3). A search and the contact filters keep the full reload: their
+    /// rows are re-checked in memory, so the store's next rows are not the window's.
+    ///
+    /// A failed page keeps the window as it is, open, and owes the reload a failed full
+    /// fetch owes (`windowReloadOwed`).
+    @discardableResult
+    private func fillWindowFromStore() -> Bool {
+        guard observedConversationContext != nil else { return false }
+        let missingCount = loadedConversationLimit - listStore.visibleItems.count
+        guard missingCount > 0 else { return true }
+        guard windowProvider.pagesByKeyset(
+            searchText: searchService.debouncedSearchText,
+            filter: filterService.currentFilter
+        ),
+        let pageStart = listStore.pageStartKey else {
+            return reloadConversationWindowFromStore()
+        }
+
+        let page: ConversationWindowProvider.Window
+        do {
+            page = try windowProvider.fetchPage(
+                in: conversationContext,
+                after: pageStart,
+                limit: missingCount,
+                filter: filterService.currentFilter,
+                matchesVisibility: matchesVisibleConversation(_:)
+            )
+        } catch {
+            Log.error(
+                "Failed to fetch the next rows of the conversation window; keeping the one on screen until the next sync",
+                category: .conversation,
+                error: error
+            )
+            windowReloadOwed = true
+            return false
+        }
+        let appended = listStore.appendPage(page.rows, isComplete: page.isComplete)
+        publishVisibleItems()
+        prefetchPersonData(from: appended)
+        return true
     }
 
     private var conversationContext: NSManagedObjectContext {
@@ -609,9 +675,9 @@ final class ConversationListViewModel: ObservableObject {
         // (observedConversationContext is weak, so no assert).
         guard observedConversationContext != nil else { return false }
 
-        let window: [Conversation]
+        let window: ConversationWindowProvider.Window
         do {
-            window = try windowProvider.fetchWindow(
+            window = try windowProvider.fetchWindowReportingCompleteness(
                 in: conversationContext,
                 limit: loadedConversationLimit,
                 searchText: searchService.debouncedSearchText,
@@ -626,20 +692,20 @@ final class ConversationListViewModel: ObservableObject {
                 error: error
             )
             windowReloadOwed = true
-            hasLoadedAllConversationWindow = false
             if afterQueryChange {
-                listStore.replaceAll(with: [])
+                listStore.replaceAll(with: [], isComplete: false)
                 publishVisibleItems()
+            } else {
+                listStore.markOpen()
             }
             return false
         }
         windowReloadOwed = false
-        hasLoadedAllConversationWindow = window.count < loadedConversationLimit
         // Captured before replaceAll so the prefetch below targets only the
         // rows entering the window on this reload (paging's appended tail, a
         // live insert) instead of re-submitting the whole window every time.
         let previouslyVisibleIDs = Set(listStore.visibleItems.map(\.id))
-        listStore.replaceAll(with: window)
+        listStore.replaceAll(with: window.rows, isComplete: window.isComplete)
         publishVisibleItems()
         let newlyVisibleItems = listStore.visibleItems.filter { !previouslyVisibleIDs.contains($0.id) }
         prefetchPersonData(from: newlyVisibleItems)
@@ -653,17 +719,17 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     /// The observed context was reset wholesale (`NSInvalidatedAllObjectsKey`), so the
-    /// window is gone: paging reopens and a reload is owed. Nothing is fetched here: the
-    /// reset runs between the store's destroy and its reload, where a fetch traps;
-    /// `onAppear` or the next sync's end refetches. Internal (not private) for the
-    /// `+ChangeObservation` facet.
+    /// window is gone (`ConversationListStore.removeAll` opened its edge, so paging
+    /// reopens) and a reload is owed. Nothing is fetched here: the reset runs between
+    /// the store's destroy and its reload, where a fetch traps; `onAppear` or the next
+    /// sync's end refetches. Internal (not private) for the `+ChangeObservation` facet.
     func noteWindowInvalidated() {
-        hasLoadedAllConversationWindow = false
         windowReloadOwed = true
     }
 
-    /// Returns whether the reload replaced and published the window. A backfill whose
-    /// fetch failed answers false, so the caller publishes the live changes it already
+    /// Returns whether the backfill read and published the window (a keyset page of the
+    /// missing rows where it can, `fillWindowFromStore`). A backfill whose fetch failed
+    /// answers false, so the caller publishes the live changes it already
     /// applied (a deletion or an archive that opened the slot) and the row leaves the
     /// screen; the reload stays owed. Answering true there, as the first version of the
     /// failure branch did, left the removed row visible and selectable until a later
@@ -671,12 +737,54 @@ final class ConversationListViewModel: ObservableObject {
     @discardableResult
     private func backfillConversationWindowIfNeeded() -> Bool {
         guard observedConversationContext != nil,
-              !hasLoadedAllConversationWindow,
+              !listStore.isComplete,
               listStore.visibleItems.count < loadedConversationLimit else {
             return false
         }
 
-        return reloadConversationWindowFromStore()
+        return fillWindowFromStore()
+    }
+
+    /// Removes the window rows the store no longer has, which no change notification
+    /// reports. The empty-conversation pass deletes in a batch
+    /// (`DataCleanupService.removeEmptyConversations`), and a batch delete merged into this
+    /// context reaches only the rows it has registered, while the list holds snapshots of
+    /// rows that may have been let go: such a row stayed on screen, and a tap opened a chat
+    /// that was gone. Until 2026-11-28 the full reload of every iOS appearance healed it;
+    /// the Mac, which appears once, never did. Asked when a cleanup run ends: one fetch of
+    /// the window's stored rows by key, returning their IDs alone.
+    ///
+    /// An unsaved row (an optimistic send's, which may hold a permanent ID) is not in the
+    /// store and is not asked about. Nothing is asked while the context's coordinator has
+    /// no store, whose fetch answers `[]` with no error and would empty the window.
+    private func pruneWindowRowsGoneFromStore() {
+        guard let context = observedConversationContext else { return }
+        context.performAndWait {
+            MainActor.assumeIsolated {
+                guard CoreDataStack.hasAttachedStore(context) else { return }
+                let storedIDs = listStore.visibleItems.map(\.id).filter { objectID in
+                    guard !objectID.isTemporaryID else { return false }
+                    return context.registeredObject(for: objectID)?.isInserted != true
+                }
+                guard !storedIDs.isEmpty else { return }
+
+                let request = NSFetchRequest<NSManagedObjectID>(entityName: "Conversation")
+                request.resultType = .managedObjectIDResultType
+                request.predicate = NSPredicate(format: "self IN %@", storedIDs)
+                request.includesPendingChanges = false
+                let presentIDs: Set<NSManagedObjectID>
+                do {
+                    presentIDs = Set(try context.fetch(request))
+                } catch {
+                    // A failed read is not an empty answer: nothing is removed.
+                    Log.error("Failed to check the conversation window against the store", category: .conversation, error: error)
+                    return
+                }
+                let goneIDs = Set(storedIDs).subtracting(presentIDs)
+                guard !goneIDs.isEmpty else { return }
+                applyConversationChanges(deletedIDs: goneIDs)
+            }
+        }
     }
 
     // MARK: - Visibility Predicates
@@ -687,7 +795,9 @@ final class ConversationListViewModel: ObservableObject {
         )
     }
 
-    private func isSourceConversation(_ conversation: Conversation) -> Bool {
+    /// Internal (not private) so the `+ChangeObservation` facet's sibling-save path
+    /// can ask `ConversationListStore.admittance` before it prefetches participants.
+    func isSourceConversation(_ conversation: Conversation) -> Bool {
         conversation.archivedAt == nil
     }
 

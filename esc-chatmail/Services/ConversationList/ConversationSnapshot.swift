@@ -14,7 +14,26 @@ struct ConversationSnapshot: Equatable {
     let participantHash: String?
     let participantEmails: [String]
     let participantDisplayNameFingerprint: String
+    /// The participants' (normalized address, display name) pairs that
+    /// `participantDisplayNameFingerprint` is built from, sorted. Kept as
+    /// values because the joined fingerprint cannot be split back into them
+    /// (an address or a name may contain `=` or `|`), and the list asks of
+    /// them whether a changed Person's name is already the one its rows show
+    /// (`ConversationListPersonChangePolicy`). Empty for a list conversation,
+    /// whose row shows no participant.
+    let participantDisplayNames: [ParticipantDisplayName]
     let conversationType: ConversationType
+
+    /// One participant as the row's fingerprint records it: the person's
+    /// normalized address and its display name, `""` for none.
+    struct ParticipantDisplayName: Hashable, Comparable {
+        let email: String
+        let displayName: String
+
+        static func < (lhs: ParticipantDisplayName, rhs: ParticipantDisplayName) -> Bool {
+            (lhs.email, lhs.displayName) < (rhs.email, rhs.displayName)
+        }
+    }
 
     /// Derived, not stored: always `conversationType != .oneToOne`, so the
     /// synthesized `Equatable` correctly ignores it (`conversationType` itself
@@ -39,10 +58,11 @@ struct ConversationSnapshot: Equatable {
         self.displayNameHint = conversation.displayName
         self.participantHash = conversation.participantHash
         let participantFields = conversationType == .list
-            ? (emails: [], fingerprint: "")
+            ? (emails: [], fingerprint: "", displayNames: [])
             : Self.participantFields(from: conversation)
         self.participantEmails = participantFields.emails
         self.participantDisplayNameFingerprint = participantFields.fingerprint
+        self.participantDisplayNames = participantFields.displayNames
         self.conversationType = conversationType
     }
 
@@ -53,19 +73,23 @@ struct ConversationSnapshot: Equatable {
     /// aliases, not real participants, so they must not feed the fallback
     /// display name), while `fingerprint` INCLUDES them (their display data
     /// still renders in participant rollups, so a change to it must still be
-    /// detected as a fingerprint change).
+    /// detected as a fingerprint change). `displayNames` holds the same pairs
+    /// as `fingerprint`, as values.
     private static func participantFields(
         from conversation: Conversation
-    ) -> (emails: [String], fingerprint: String) {
+    ) -> (emails: [String], fingerprint: String, displayNames: [ParticipantDisplayName]) {
         var emails = Set<String>()
         var fingerprintEntries = Set<String>()
+        var displayNames = Set<ParticipantDisplayName>()
 
         for participant in conversation.participants ?? [] {
             guard let person = participant.person else { continue }
             let normalizedEmail = EmailNormalizer.normalize(person.email)
             guard !normalizedEmail.isEmpty else { continue }
 
-            fingerprintEntries.insert("\(normalizedEmail)=\(person.displayName ?? "")")
+            let displayName = person.displayName ?? ""
+            fingerprintEntries.insert("\(normalizedEmail)=\(displayName)")
+            displayNames.insert(ParticipantDisplayName(email: normalizedEmail, displayName: displayName))
 
             if !EmailNormalizer.isHideMyEmailDisplayName(person.displayName) {
                 emails.insert(normalizedEmail)
@@ -74,7 +98,8 @@ struct ConversationSnapshot: Equatable {
 
         return (
             emails: emails.sorted(),
-            fingerprint: fingerprintEntries.sorted().joined(separator: "|")
+            fingerprint: fingerprintEntries.sorted().joined(separator: "|"),
+            displayNames: displayNames.sorted()
         )
     }
 }

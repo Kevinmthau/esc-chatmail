@@ -227,6 +227,191 @@ final class ConversationWindowProviderTests: XCTestCase {
         XCTAssertEqual(visibilityChecks, 2)
     }
 
+    // MARK: - Completeness
+
+    /// A row another context deletes between the window fetch's ID query and the faulting
+    /// of its rows is a tombstone, which the window drops, so it comes back one row short
+    /// of the limit. That is not the end of the store's rows, and the window must not say
+    /// it is: counted from the rows, the list latched "all loaded" and paged no more, and
+    /// on the Mac nothing reloads (PR 527's review). The race is made deterministic by
+    /// deleting right after the fetch returns (`DeletingAfterFetchContext`), on a SQLite
+    /// store, where a deleted row is really gone.
+    // Revert-check: `isComplete: candidates.count < limit` in
+    // `fetchWindowReportingCompleteness` (counted from the returned rows, the window reads
+    // as complete).
+    func testWindow_aRowTombstonedDuringTheFetch_isNotTheEndOfTheStore() throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let setup = sqliteStack.makeMainQueueViewContext()
+        let alice = ConversationBuilder().withDisplayName("Alice").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 300)).build(in: setup)
+        let bob = ConversationBuilder().withDisplayName("Bob").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 200)).build(in: setup)
+        _ = ConversationBuilder().withDisplayName("Carol").visible()
+            .withLastMessageDate(Date(timeIntervalSince1970: 100)).build(in: setup)
+        try setup.save()
+        let context = DeletingAfterFetchContext(
+            entityName: "Conversation",
+            coordinator: sqliteStack.persistentContainer.persistentStoreCoordinator
+        )
+        context.deleteAfterNextFetch(bob.objectID, through: sqliteStack.newBackgroundContext())
+
+        let window = try ConversationWindowProvider().fetchWindowReportingCompleteness(
+            in: context,
+            limit: 2,
+            searchText: "",
+            filter: .all,
+            matchesVisibility: { _ in true }
+        )
+
+        XCTAssertEqual(window.rows.map(\.objectID), [alice.objectID], "Precondition: Bob came back a tombstone and was dropped")
+        XCTAssertFalse(window.isComplete)
+    }
+
+    func testWindow_storeShorterThanTheLimit_isComplete() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        try saveViewContext()
+
+        let window = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "",
+            filter: .all,
+            matchesVisibility: { _ in true }
+        )
+
+        XCTAssertEqual(window.rows.map(\.objectID), [alice.objectID])
+        XCTAssertTrue(window.isComplete)
+    }
+
+    /// The filtered scan is complete when it ran out of the store before finding the
+    /// limit's worth of visible rows, and not when it found them.
+    // Revert-check: the `persistedVisibleConversations.count < limit` term of
+    // `fetchFilteredWindow`'s completeness (without it a full filtered window reads as
+    // final).
+    func testFilteredWindow_completeOnlyWhenTheScanRanOutOfTheStore() throws {
+        _ = makeConversation(name: "Alice", snippet: "match", date: 300)
+        _ = makeConversation(name: "Bob", snippet: "other", date: 200)
+        try saveViewContext()
+
+        let short = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "match",
+            filter: .all,
+            matchesVisibility: { $0.snippet == "match" }
+        )
+        XCTAssertEqual(short.rows.count, 1)
+        XCTAssertTrue(short.isComplete)
+
+        _ = makeConversation(name: "Carol", snippet: "match", date: 100)
+        try saveViewContext()
+        let full = try makeProvider().fetchWindowReportingCompleteness(
+            in: viewContext,
+            limit: 2,
+            searchText: "match",
+            filter: .all,
+            matchesVisibility: { $0.snippet == "match" }
+        )
+        XCTAssertEqual(full.rows.count, 2)
+        XCTAssertFalse(full.isComplete)
+    }
+
+    // MARK: - Keyset pages
+
+    /// Keyset pages, each started after the previous one's last row, must add up to the
+    /// window a full fetch reads, in its order: on a SQLite store, where the keyset term is
+    /// SQL for stored rows and is evaluated in memory for the context's pending ones, with
+    /// pinned rows, rows sharing a date (ordered by UUID), rows with no date, an unsaved row
+    /// that ties with stored ones, and a stored row an unsaved change moved. Both filters
+    /// that page by keyset.
+    // Revert-check (one at a time, in `SortKey.storePredicateForRowsAfter`): dropping
+    // `OR lastMessageDate == nil` loses the dateless rows; `id > %@` as `id >= %@` repeats
+    // each page's last row; dropping the `pinned == NO` disjunct stops after the pinned rows.
+    func testKeysetPages_addUpToAFullFetch_withPinsDateTiesAndNoDates() throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let context = sqliteStack.makeMainQueueViewContext()
+        func row(_ name: String, date: TimeInterval?, pinned: Bool = false, unread: Int32 = 0) -> Conversation {
+            let builder = ConversationBuilder().withDisplayName(name).visible().withUnreadCount(unread)
+            if let date { _ = builder.withLastMessageDate(Date(timeIntervalSince1970: date)) }
+            if pinned { _ = builder.setPinned() }
+            let conversation = builder.build(in: context)
+            if date == nil { conversation.lastMessageDate = nil }
+            return conversation
+        }
+        _ = row("Pinned new", date: 500, pinned: true, unread: 1)
+        _ = row("Pinned undated", date: nil, pinned: true)
+        _ = row("Newest", date: 400, unread: 2)
+        for index in 0..<5 {
+            _ = row("Tie \(index)", date: 300, unread: index.isMultiple(of: 2) ? 1 : 0)
+        }
+        let moved = row("Moved", date: 200, unread: 1)
+        _ = row("Older", date: 100)
+        _ = row("Undated a", date: nil, unread: 1)
+        _ = row("Undated b", date: nil)
+        _ = row("Archived", date: 450)
+        let archived = try XCTUnwrap(
+            context.registeredObjects.compactMap { $0 as? Conversation }.first { $0.displayName == "Archived" }
+        )
+        archived.archivedAt = Date()
+        try context.save()
+        _ = row("Unsaved tie", date: 300, unread: 1)
+        moved.lastMessageDate = Date(timeIntervalSince1970: 300)
+        context.processPendingChanges()
+
+        let provider = ConversationWindowProvider()
+        for filter in [ConversationFilter.all, .unread] {
+            let visible: (Conversation) -> Bool = { filter == .unread ? $0.inboxUnreadCount > 0 : true }
+            let full = try provider.fetchWindowReportingCompleteness(
+                in: context, limit: 100, searchText: "", filter: filter, matchesVisibility: visible
+            )
+            XCTAssertTrue(full.isComplete, "\(filter)")
+            XCTAssertTrue(provider.pagesByKeyset(searchText: "", filter: filter))
+
+            // Several page sizes, so that a page boundary falls on a pinned row, inside a
+            // run of equal dates, and between dated and dateless rows.
+            for pageSize in 1...3 {
+                var paged = try provider.fetchWindowReportingCompleteness(
+                    in: context, limit: pageSize, searchText: "", filter: filter, matchesVisibility: visible
+                ).rows
+                var isComplete = false
+                var pages = 0
+                while !isComplete, let last = paged.last, pages < 30 {
+                    let page = try provider.fetchPage(
+                        in: context,
+                        after: ConversationListItem.SortKey(conversation: last),
+                        limit: pageSize,
+                        filter: filter,
+                        matchesVisibility: visible
+                    )
+                    paged += page.rows
+                    isComplete = page.isComplete
+                    pages += 1
+                }
+
+                XCTAssertTrue(isComplete, "\(filter), pages of \(pageSize): the pages reached the end")
+                XCTAssertEqual(
+                    paged.map { $0.displayName ?? "" },
+                    full.rows.map { $0.displayName ?? "" },
+                    "\(filter), pages of \(pageSize)"
+                )
+            }
+        }
+    }
+
+    /// A search and the contact filters re-check rows in memory, so the store's next rows
+    /// are not their next rows: they keep the full reload.
+    // Revert-check: `pagesByKeyset` answering true for a search (the search's pages would
+    // then be read without its predicate).
+    func testPagesByKeyset_onlyForExactStorePredicates() {
+        let provider = ConversationWindowProvider()
+
+        XCTAssertTrue(provider.pagesByKeyset(searchText: "", filter: .all))
+        XCTAssertTrue(provider.pagesByKeyset(searchText: "  ", filter: .unread))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "bob", filter: .all))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "", filter: .contacts))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "", filter: .other))
+    }
+
     // MARK: - Helpers
 
     /// Small window: `limit * contactFilterCandidateMultiplier` yields a
