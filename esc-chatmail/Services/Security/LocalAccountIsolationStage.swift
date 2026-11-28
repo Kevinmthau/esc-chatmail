@@ -18,11 +18,19 @@ enum LocalAccountIsolationStage: String, CaseIterable, Sendable {
     /// The mailbox store (its Account rows, its other rows, its files) could not be
     /// inspected. Nothing was changed.
     case storeUninspectable
-    /// The store holds mail this account must not see (another account's, or rows and
-    /// files no Account row owns), and the marker that makes its reset crash-durable could
-    /// not be written, so the reset never began. Nothing was changed yet, but the store is
-    /// not this account's to open: a retry with the same session would reset it unasked,
-    /// behind a screen saying the mail is still on the device.
+    /// The store has to be reset before this account may open it, and the marker that
+    /// makes the reset crash-durable could not be written, so this preparation began no
+    /// reset and changed nothing. Either reason for the reset makes the store not this
+    /// account's to open. The inspection found mail this account must not see (another
+    /// account's, or rows and files no Account row owns): a retry with the same session
+    /// would reset it unasked, behind a screen saying the mail is still on the device.
+    /// Or a marker an earlier sign-out or failed reset persisted already asks for the
+    /// reset, and the store was not inspected: that reset may have removed part of the
+    /// mailbox already, and its marker, which a failed write leaves in place
+    /// (`KeychainService.save` updates an existing item, never deletes it), makes the next
+    /// launch finish it. A launch restore meets the second only behind a sign-out
+    /// registered since its start, because the restore resumes an earlier reset before it
+    /// prepares the store.
     case resetRequired
     /// The reset ran after its marker was persisted and did not finish: the credentials,
     /// the store, the body or attachment files may be partly gone, and the marker makes
