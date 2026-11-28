@@ -10,9 +10,11 @@ import Foundation
 /// while Quick Look shows a file, the file has no mark, and the mark goes back on when Quick
 /// Look closes.
 ///
-/// A file left without its mark, because the app was ended with Quick Look open, is in
-/// backups until the daily orphan sweep, which marks every downloaded file it finds without
-/// one (`AttachmentDownloader.leaveOutOfBackupsIfDownloaded`). Only a file in `Attachments`
+/// A file left without its mark, because the app was ended with Quick Look open, is still left
+/// out of backups by the `Attachments` directory's mark (since 2026-11-28, `security-privacy#5`),
+/// and the daily orphan sweep gives it its own mark back
+/// (`AttachmentDownloader.leaveOutOfBackupsIfDownloaded`), which is what a copy of it carries
+/// out of the directory. Only a file in `Attachments`
 /// carries a mark of its own. A preview in `Previews` is left out by its directory's mark,
 /// which a copy does not carry, and is left alone.
 ///

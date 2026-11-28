@@ -70,6 +70,13 @@ enum AttachmentOpenCopy {
                 try fileManager.removeItem(at: folder)
             }
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+            // This can make `Attachments` itself, and every place that makes it marks it
+            // (`BackupExclusion`): left out of backups whole. Only the app's own `Attachments`;
+            // a directory a test passes is left alone.
+            let attachments = directory.deletingLastPathComponent().standardizedFileURL
+            if attachments == AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder)?.standardizedFileURL {
+                BackupExclusion.exclude(attachments, category: .attachment)
+            }
             try fileManager.copyItem(at: item.sourceURL, to: copy)
             try fileManager.setAttributes([.posixPermissions: readOnlyPermissions], ofItemAtPath: copy.path)
             markInUse(directory, at: now, fileManager: fileManager)

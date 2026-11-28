@@ -411,6 +411,7 @@ final class CoreDataStack: @unchecked Sendable {
                 self.handleStoreLoadError(error, for: container)
             } else {
                 self.stampCurrentModelOrdinal(on: container, storeURL: storeDescription.url)
+                Self.leaveStoreFilesOutOfBackups(for: storeDescription)
                 self.loadAttempts = 0
                 self.setStoreLoaded(true)
                 Log.info("Core Data store loaded successfully: \(storeDescription)", category: .coreData)
@@ -776,6 +777,7 @@ final class CoreDataStack: @unchecked Sendable {
                     if let self {
                         self.stampCurrentModelOrdinal(on: self.persistentContainer, storeURL: storeDescription.url)
                     }
+                    Self.leaveStoreFilesOutOfBackups(for: storeDescription)
                     self?.loadAttempts = 0
                     self?.setStoreLoaded(true)
                     Log.info("Core Data store loaded successfully (async): \(storeDescription)", category: .coreData)

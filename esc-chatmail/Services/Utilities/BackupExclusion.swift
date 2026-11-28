@@ -1,12 +1,20 @@
 import Foundation
 
 /// Marks what a device backup (iCloud Backup, a Finder backup, Time Machine) should leave out:
-/// mail content the app can download again, which at a large mailbox is most of what it stores.
+/// the mailbox, all of it, which at a large mailbox is most of what the app stores.
 ///
-/// What is marked (scalability review, step 7): the `Messages`, `Previews`, `Avatars` and
-/// store `Backups` directories, each whole, and inside `Attachments` the downloaded files one
-/// by one (`AttachmentPaths.applyBackupPolicy`), because the same directory holds the
-/// originals of attachments the user added to a message, which cannot be downloaded again.
+/// What is marked: the mail store's three files (`CoreDataStack.leaveStoreFilesOutOfBackups`,
+/// after every load), and the `Messages`, `Attachments`, `Previews`, `Avatars` and store
+/// `Backups` directories, each whole (scalability review, step 7; the store and `Attachments`
+/// since 2026-11-28, architecture review 2026-11, security-privacy#5, Kevin's call). Inside
+/// `Attachments` the downloaded files also carry a mark of their own
+/// (`AttachmentPaths.applyBackupPolicy`), which is what a copy of one carries out of the
+/// directory; the originals of attachments the user added carry none. So a restore brings
+/// back no mailbox: on the same device the app re-lists up to `SyncConfig.initialSyncMaxWindow`
+/// and loses drafts and queued actions, the cost Kevin accepted, and on a new device
+/// `FreshInstallHandler` wiped a restored store on first launch anyway. The store and the
+/// `local_` originals go together: a restored original with no store is a mailbox file with no
+/// row, and the isolation gate answers it with a full reset that moves the mailbox's start.
 ///
 /// Three things about the mark, each measured on macOS 27.2 (APFS) and none of them on a device:
 ///
@@ -15,7 +23,8 @@ import Foundation
 ///   and marks it each time, whether or not it made the directory: an installation from
 ///   before the mark existed has the directories already.
 /// - A file written atomically is a new file and has none, so a downloaded attachment is
-///   marked after each write (`AttachmentPaths.saveData`).
+///   marked after each write (`AttachmentPaths.saveData`), and the store's files after each
+///   load: a sign-out, a reset and a migration make them again.
 /// - `FileManager.copyItem` copies it. A marked attachment copied to a place of the user's
 ///   (Save Attachment…, a drag to the Finder) would be left out of the user's own backups
 ///   there, so such a copy has the mark taken off (`include`); and so does a copy that

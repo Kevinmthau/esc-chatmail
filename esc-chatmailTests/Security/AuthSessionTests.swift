@@ -2791,6 +2791,117 @@ final class AuthSessionTests: XCTestCase {
         )
     }
 
+    // The absent marker: a device an earlier build signed out, or one no build has prepared,
+    // keeps today's rule and moves the start (`SyncConfig.mailboxStartsAtNextSignInKey`).
+    func testAccountPreparation_interactiveSignInFindsEmptyStore_withNoMarker_restartsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        defaults.set(Date().timeIntervalSince1970 - 3 * 86_400, forKey: SyncConfig.mailboxStartTimestampKey)
+        XCTAssertNil(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey))
+        let session = makeAuthSession(userDefaults: defaults, fetchStoredAccountEmails: { [] })
+        let signInTime = Date().timeIntervalSince1970
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com", entry: .interactiveSignIn)
+
+        XCTAssertGreaterThanOrEqual(defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), signInTime)
+    }
+
+    // Revert-check: the `signInMovesMailboxStart` condition in
+    // `prepareLocalStoreForAuthenticatedAccount`. Without it a store lost to a restore that left
+    // it out of the backup, with a sign-in after the restore could not publish, has its start
+    // moved to now and keeps five minutes of mail where 30 days were Kevin's rule.
+    func testAccountPreparation_interactiveSignInFindsAStoreLostWhileSignedIn_keepsMailboxStartTime() async throws {
+        let defaults = makeDefaults()
+        let mailboxStart = Date().timeIntervalSince1970 - 60 * 86_400
+        defaults.set(mailboxStart, forKey: SyncConfig.mailboxStartTimestampKey)
+        defaults.set(false, forKey: SyncConfig.mailboxStartsAtNextSignInKey)
+        let session = makeAuthSession(userDefaults: defaults, fetchStoredAccountEmails: { [] })
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com", entry: .interactiveSignIn)
+
+        XCTAssertEqual(defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), mailboxStart)
+    }
+
+    // Revert-check: the `recordMailboxStart(movesAtNextSignIn: true)` in
+    // `performDurableLocalCleanup`. Without it the marker a prepared session wrote stays false,
+    // and the sign-in after a sign-out brings back mail from before it.
+    func testSignOut_thenInteractiveSignIn_movesTheStartPastAMarkerThatSaidKeep() async throws {
+        let defaults = makeDefaults()
+        defaults.set(false, forKey: SyncConfig.mailboxStartsAtNextSignInKey)
+        let session = makeAuthSession(userDefaults: defaults, fetchStoredAccountEmails: { [] })
+
+        await session.signOut()
+        XCTAssertEqual(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool, true)
+        defaults.set(Date().timeIntervalSince1970 - 3 * 86_400, forKey: SyncConfig.mailboxStartTimestampKey)
+        let signInTime = Date().timeIntervalSince1970
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com", entry: .interactiveSignIn)
+
+        XCTAssertGreaterThanOrEqual(defaults.double(forKey: SyncConfig.mailboxStartTimestampKey), signInTime)
+        XCTAssertEqual(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool, false)
+    }
+
+    // Revert-check: the `recordMailboxStart(movesAtNextSignIn: false)` in the `guard resetRequired`
+    // branch of `prepareLocalStoreForAuthenticatedAccount`. Without it a restore leaves the
+    // marker absent, and the next lost store moves its start.
+    func testAccountPreparation_restore_recordsThatALostStoreKeepsItsStart() async throws {
+        let defaults = makeDefaults()
+        let session = makeAuthSession(userDefaults: defaults, fetchStoredAccountEmails: { ["person@example.com"] })
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+
+        XCTAssertEqual(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool, false)
+    }
+
+    // Revert-check: the `recordMailboxStart(movesAtNextSignIn: false)` after the reset in
+    // `prepareLocalStoreForAuthenticatedAccount`. Without it the cleanup's `true` stays, and a
+    // store this account later loses has its start moved.
+    func testAccountPreparation_afterAResetForAnotherAccount_recordsThatALostStoreKeepsItsStart() async throws {
+        let defaults = makeDefaults()
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            userDefaults: defaults,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { ["first@example.com"] }
+        )
+
+        try await session.prepareLocalStoreForAuthenticatedAccount("second@example.com")
+
+        XCTAssertEqual(resetScript.attemptCount, 1)
+        XCTAssertEqual(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool, false)
+    }
+
+    // HONEST SCOPE: nothing in `clearFailedGoogleSession` or `clearAccountScopedSyncDefaults`
+    // touches the marker, so nothing can be removed to make this fail; it pins that neither ever
+    // will. A restore rejected with revoked credentials is the case the marker is for: the
+    // sign-in after it must keep the start of the store the device lost.
+    func testRestoreWithRevokedCredentials_leavesTheMarkerAsItWas() async {
+        let defaults = makeDefaults()
+        defaults.set(false, forKey: SyncConfig.mailboxStartsAtNextSignInKey)
+        let session = makeAuthSession(
+            hasPreviousGoogleSignIn: { true },
+            restorePreviousGoogleSignIn: { completion in
+                completion(nil, NSError(domain: kGIDSignInErrorDomain, code: -4))
+            },
+            userDefaults: defaults
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .terminalNoSession)
+        XCTAssertEqual(defaults.object(forKey: SyncConfig.mailboxStartsAtNextSignInKey) as? Bool, false)
+    }
+
+    // HONEST SCOPE: from source. `FreshInstallHandler`'s tests inject its fresh-install seam,
+    // because the real cleanup empties `UserDefaults.standard`, so this pins the write instead.
+    func testFreshInstall_recordsThatItsFirstSignInMovesTheStart() throws {
+        let source = try repositorySource("esc-chatmail/App/FreshInstallHandler.swift")
+        let start = try XCTUnwrap(source.range(of: "private func setupNewInstallation()"))
+        let end = try XCTUnwrap(source.range(of: "\n    }\n", range: start.upperBound..<source.endIndex))
+        XCTAssertTrue(
+            source[start.lowerBound..<end.upperBound]
+                .contains("userDefaults.set(true, forKey: SyncConfig.mailboxStartsAtNextSignInKey)")
+        )
+    }
+
     // Revert-check: fails if the `entry == .interactiveSignIn` condition is
     // dropped from `prepareLocalStoreForAuthenticatedAccount`. A launch after
     // a sign-in whose first sync saved nothing finds the store empty too, and

@@ -148,22 +148,23 @@ final class BackupExclusionTests: XCTestCase {
 
     // MARK: - Attachments and previews
 
-    // Revert-check: `BackupExclusion.exclude(previewsURL)` in `AttachmentPaths.setupDirectories`.
-    // The mark is taken off the test host's own Previews directory first, which is what a
-    // directory made again after a sign-out, or one from an earlier build, looks like.
-    func testSetupDirectories_leavesPreviewsOutOfBackups_andNotAttachments() throws {
+    // Revert-check: `BackupExclusion.exclude(previewsURL)` and `BackupExclusion.exclude(attachmentsURL)`
+    // in `AttachmentPaths.setupDirectories`, each failing its own assertion. The marks are taken
+    // off the test host's own directories first, which is what a directory made again after a
+    // sign-out, or one from an earlier build, looks like. `Attachments` is left out whole since
+    // the store is (security-privacy#5): a `local_` original restored without its store is a
+    // mailbox file with no row, which the isolation gate answers with a full reset.
+    func testSetupDirectories_leavesPreviewsAndAttachmentsOutOfBackups() throws {
         AttachmentPaths.setupDirectories()
         let previews = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.previewsFolder))
         let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
         XCTAssertTrue(BackupExclusion.include(previews))
+        XCTAssertTrue(BackupExclusion.include(attachments))
 
         AttachmentPaths.setupDirectories()
 
         XCTAssertTrue(BackupExclusion.isExcluded(previews))
-        XCTAssertFalse(
-            BackupExclusion.isExcluded(attachments),
-            "Attachments also holds originals the user added, which cannot be downloaded again"
-        )
+        XCTAssertTrue(BackupExclusion.isExcluded(attachments))
     }
 
     // Revert-check: the `isRedownloadable` branch of `AttachmentPaths.saveData`, and that it
@@ -205,12 +206,33 @@ final class BackupExclusionTests: XCTestCase {
         XCTAssertFalse(AttachmentPaths.isRedownloadable(AttachmentPaths.previewPath(messageId: "m", attachmentId: "a")))
     }
 
+    // Revert-check: the `BackupExclusion.exclude(attachments, …)` in `AttachmentOpenCopy.prepare`.
+    // Without it an Open that makes the copies' folder leaves `Attachments` as it found it, here
+    // with its mark taken off, which is what a directory that copy made would look like.
+    func testOpenCopy_marksTheAttachmentsDirectoryItMayHaveMade() throws {
+        AttachmentPaths.setupDirectories()
+        let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
+        let source = directory.appendingPathComponent("remote_open_copy_\(UUID().uuidString).pdf")
+        try Data("report".utf8).write(to: source)
+        let openedDirectory = try XCTUnwrap(AttachmentOpenCopy.defaultDirectory())
+        XCTAssertTrue(BackupExclusion.include(attachments))
+
+        let copy = try AttachmentOpenCopy.prepare(
+            AttachmentExportItem(sourceURL: source, filename: "Report \(UUID().uuidString).pdf"),
+            in: openedDirectory
+        )
+        defer { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
+
+        XCTAssertTrue(BackupExclusion.isExcluded(attachments))
+    }
+
     // MARK: - Quick Look
 
     // Revert-check: `QuickLookBackupMark.handOver`, and the `applyBackupPolicy` in
     // `QuickLookBackupMark.takeBack`. Without the first the downloaded file keeps its mark
-    // while Quick Look's share button can copy it; without the second it is left in backups
-    // after Quick Look closes, until the daily orphan sweep.
+    // while Quick Look's share button can copy it; without the second it has no mark of its
+    // own after Quick Look closes, until the daily orphan sweep (the `Attachments` directory's
+    // mark still keeps it out of backups, but a copy of it would not carry that).
     func testQuickLook_takesTheMarkOffWhatItShows_andPutsItBackByTheFilesName() throws {
         AttachmentPaths.setupDirectories()
         let downloadedPath = AttachmentPaths.originalPath(

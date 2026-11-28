@@ -106,6 +106,7 @@
         "ReplyFieldKeyPolicyTests",
         "SandboxTripwirePolicyTests",
         "SandboxTripwireTests",
+        "StoreBackupExclusionTests",
         "WKWebViewPlatformTests",
         "WebViewRepresentableTests"
       ],
