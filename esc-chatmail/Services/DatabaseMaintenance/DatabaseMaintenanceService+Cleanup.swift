@@ -94,7 +94,7 @@ extension DatabaseMaintenanceService {
             Log.info("Database cleanup cancelled before its orphan-file sweeps", category: .coreData)
             return false
         }
-        await Self.cleanupOrphanedHTMLFiles(
+        let bodySweep = await Self.cleanupOrphanedHTMLFiles(
             in: context,
             htmlContentHandler: htmlContentHandler,
             expectedGeneration: htmlAccountGeneration
@@ -103,7 +103,14 @@ extension DatabaseMaintenanceService {
             Log.info("Database cleanup cancelled before its attachment-file sweep", category: .coreData)
             return false
         }
+        // A body sweep that stopped early (an unreadable chunk, an account
+        // transition) leaves the attachment sweep its own read; the cleanup
+        // is still reported as not done.
         await sweepOrphanedAttachmentFiles()
+        guard bodySweep == .completed else {
+            Log.info("Database cleanup's orphaned body sweep did not complete", category: .coreData)
+            return false
+        }
         return true
     }
 
@@ -132,39 +139,40 @@ extension DatabaseMaintenanceService {
         }
     }
 
-    /// A failed ID read cannot prove that any body is orphaned. Keep the
-    /// generation captured before maintenance began so old work cannot prune
-    /// a replacement account's files after an asynchronous database operation.
-    static func cleanupOrphanedHTMLFiles(
+    /// The daily sweep of `Messages` for bodies no stored row names. It runs off the main
+    /// actor (`nonisolated`), awaited in the maintenance run's own task, never a detached one:
+    /// the run's cancellation (a background task's expiration, a sign-out's quiescence) reaches
+    /// it between chunks only through that task, and the run must not end while it unlinks,
+    /// or a sync could write a body before its row is saved and see it removed
+    /// (`StoreMaintenanceCoordinatorTests`). Until 2026-11-28 it fetched every message ID into
+    /// one set and then swept the whole directory on the main actor under the HTML boundary's
+    /// lock (architecture review 2026-11, attachments-storage-disk#6).
+    ///
+    /// The store is asked a chunk at a time (`HTMLContentHandler.cleanupOrphanedFiles`), each
+    /// time behind `CoreDataStack.requireAttachedStore(in:)`, which stays outside the
+    /// injectable fetch: on a coordinator with no store the fetch answers [] and every body
+    /// would be an orphan. A failed read removes nothing and stops the sweep. A nil generation (the
+    /// boundary was closed when maintenance began) sweeps nothing, and the generation it was
+    /// given keeps old work from pruning a replacement account's files.
+    nonisolated static func cleanupOrphanedHTMLFiles(
         in context: NSManagedObjectContext,
         htmlContentHandler: HTMLContentHandler,
         expectedGeneration: HTMLContentAccountGeneration?,
-        fetchMessageIDs: @escaping @Sendable (NSManagedObjectContext) throws -> [NSDictionary] = { context in
-            let request = NSFetchRequest<NSDictionary>(entityName: "Message")
-            request.resultType = .dictionaryResultType
-            request.propertiesToFetch = ["id"]
-            return try context.fetch(request)
+        chunkSize: Int = 100,
+        fetchLiveMessageIDs: @escaping @Sendable (Set<String>, NSManagedObjectContext) throws -> Set<String> = { ids, context in
+            try DeletedRowFileReclamation.liveMessageIDs(among: ids, in: context)
         }
-    ) async {
-        guard let expectedGeneration else { return }
-
-        let validMessageIds: Set<String>? = await context.perform {
-            do {
-                // Outside the injectable fetch: with no store attached the
-                // fetch answers [] and every body would be an orphan.
-                try CoreDataStack.requireAttachedStore(in: context)
-                let results = try fetchMessageIDs(context)
-                return Set(results.compactMap { $0["id"] as? String })
-            } catch {
-                Log.error("Skipping orphaned HTML cleanup because message IDs could not be read", category: .coreData, error: error)
-                return nil
+    ) async -> OrphanedBodySweepOutcome {
+        guard let expectedGeneration else { return .accountChanged }
+        return htmlContentHandler.cleanupOrphanedFiles(
+            expectedGeneration: expectedGeneration,
+            chunkSize: chunkSize,
+            liveMessageIDs: { ids in
+                try context.performAndWait {
+                    try CoreDataStack.requireAttachedStore(in: context)
+                    return try fetchLiveMessageIDs(ids, context)
+                }
             }
-        }
-
-        guard let validMessageIds else { return }
-        htmlContentHandler.cleanupOrphanedFiles(
-            validMessageIds: validMessageIds,
-            expectedGeneration: expectedGeneration
         )
     }
 }
