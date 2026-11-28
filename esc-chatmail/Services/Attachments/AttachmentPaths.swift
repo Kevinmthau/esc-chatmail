@@ -29,10 +29,16 @@ struct AttachmentPaths {
 
         FileSystemErrorHandler.createDirectory(at: attachmentsURL, category: .attachment)
         FileSystemErrorHandler.createDirectory(at: previewsURL, category: .attachment)
-        // Previews are made from the files beside them and are left out of backups whole.
-        // `Attachments` is not: it also holds the originals of attachments the user added
-        // to a message, so its downloaded files are marked one by one (`applyBackupPolicy`).
-        // Marked on every call, not only when created (`BackupExclusion`).
+        // Both are left out of backups whole, marked on every call, not only when created
+        // (`BackupExclusion`). `Attachments` also holds the `local_` originals of attachments
+        // the user added, which cannot be downloaded again. They are left out with the store
+        // they belong to (`CoreDataStack.leaveStoreFilesOutOfBackups`): restored without it,
+        // a `local_` original is a mailbox file with no row, and the isolation gate
+        // (`AccountScopedMailboxFileInspector`) answers a restored session with a full reset
+        // that moves the mailbox's start to now. Until 2026-11-28 `Attachments` was not
+        // marked and only its downloaded files were, one by one, which they still are
+        // (`applyBackupPolicy`) (architecture review 2026-11, security-privacy#5).
+        BackupExclusion.exclude(attachmentsURL, category: .attachment)
         BackupExclusion.exclude(previewsURL, category: .attachment)
     }
 
@@ -57,16 +63,19 @@ struct AttachmentPaths {
     /// Whether the file at `relativePath` is an attachment the app can download again.
     /// Read from the name alone, so a sweep can ask it of a file with no row at hand.
     /// A `local_` original of an attachment the user added answers false; so does a file
-    /// still on a legacy ID-only path, which is left in backups until it is stored again.
+    /// still on a legacy ID-only path. Neither carries a mark of its own; the directory's
+    /// keeps both out of backups (`setupDirectories`).
     static func isRedownloadable(_ relativePath: String) -> Bool {
         guard relativePath.hasPrefix("\(attachmentsFolder)/") else { return false }
         return (relativePath as NSString).lastPathComponent.hasPrefix(remoteStoragePrefix)
     }
 
-    /// Gives a file just written or copied to `relativePath` its backup mark: left out where
-    /// it can be downloaded again, and backed up otherwise, with a mark that came with a
-    /// copy taken off (`BackupExclusion`). A file in `Previews` is left alone: its directory
-    /// is marked.
+    /// Gives a file just written or copied to `relativePath` its own backup mark: set where
+    /// it can be downloaded again, and otherwise none, with a mark that came with a copy
+    /// taken off (`BackupExclusion`). While the file is in `Attachments` the directory's
+    /// mark keeps it out of backups either way; the file's own mark is what a copy of it
+    /// carries out of the directory. A file in `Previews` is left alone: its directory is
+    /// marked.
     static func applyBackupPolicy(toFileAt relativePath: String) {
         guard relativePath.hasPrefix("\(attachmentsFolder)/"),
               let url = fullURL(for: relativePath) else {

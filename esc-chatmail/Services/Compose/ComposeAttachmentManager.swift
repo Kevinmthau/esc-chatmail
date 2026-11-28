@@ -223,7 +223,9 @@ final class ComposeAttachmentManager: ObservableObject {
             guard let destinationURL = AttachmentPaths.fullURL(for: newPath) else {
                 throw CocoaError(.fileWriteInvalidFileName)
             }
-            try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            // Makes `Attachments` and `Previews` where they are missing, and marks both: each
+            // is left out of backups whole, and a directory made here would have no mark.
+            AttachmentPaths.setupDirectories()
             try FileManager.default.copyItem(at: originalURL, to: destinationURL)
             // The copy is this draft's own original now, and a copy carries the mark of the
             // downloaded file it was made from (`BackupExclusion`). Without this a restored
@@ -241,7 +243,6 @@ final class ComposeAttachmentManager: ObservableObject {
         if let originalPreviewURL = AttachmentPaths.fullURL(for: snapshot.previewURL),
            let previewURL = AttachmentPaths.fullURL(for: previewPath) {
             do {
-                try FileManager.default.createDirectory(at: previewURL.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try FileManager.default.copyItem(at: originalPreviewURL, to: previewURL)
                 newPreviewPath = previewPath
             } catch {

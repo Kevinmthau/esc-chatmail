@@ -148,22 +148,23 @@ final class BackupExclusionTests: XCTestCase {
 
     // MARK: - Attachments and previews
 
-    // Revert-check: `BackupExclusion.exclude(previewsURL)` in `AttachmentPaths.setupDirectories`.
-    // The mark is taken off the test host's own Previews directory first, which is what a
-    // directory made again after a sign-out, or one from an earlier build, looks like.
-    func testSetupDirectories_leavesPreviewsOutOfBackups_andNotAttachments() throws {
+    // Revert-check: `BackupExclusion.exclude(previewsURL)` and `BackupExclusion.exclude(attachmentsURL)`
+    // in `AttachmentPaths.setupDirectories`, each failing its own assertion. The marks are taken
+    // off the test host's own directories first, which is what a directory made again after a
+    // sign-out, or one from an earlier build, looks like. `Attachments` is left out whole since
+    // the store is (security-privacy#5): a `local_` original restored without its store is a
+    // mailbox file with no row, which the isolation gate answers with a full reset.
+    func testSetupDirectories_leavesPreviewsAndAttachmentsOutOfBackups() throws {
         AttachmentPaths.setupDirectories()
         let previews = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.previewsFolder))
         let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
         XCTAssertTrue(BackupExclusion.include(previews))
+        XCTAssertTrue(BackupExclusion.include(attachments))
 
         AttachmentPaths.setupDirectories()
 
         XCTAssertTrue(BackupExclusion.isExcluded(previews))
-        XCTAssertFalse(
-            BackupExclusion.isExcluded(attachments),
-            "Attachments also holds originals the user added, which cannot be downloaded again"
-        )
+        XCTAssertTrue(BackupExclusion.isExcluded(attachments))
     }
 
     // Revert-check: the `isRedownloadable` branch of `AttachmentPaths.saveData`, and that it
