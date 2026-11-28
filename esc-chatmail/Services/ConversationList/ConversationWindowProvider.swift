@@ -14,12 +14,19 @@ struct ConversationWindowProvider {
         self.contactFilterCandidateMultiplier = configuration.contactFilterCandidateMultiplier
     }
 
-    /// Throws when the store cannot be read. A failed read is not an empty mailbox
-    /// (CLAUDE.md): answered as `[]`, as until 2026-11-27, it was the same value as a
-    /// genuinely empty store, so the list latched "all loaded" on it, replaced a
-    /// populated window with nothing and paged no more (architecture review 2026-11,
-    /// conversation-list-ui#6). The two `[]` returns that stay are deliberate: nothing
-    /// asked for, and a filter that can match nothing.
+    /// A window read from the store: its rows, and whether they are every row that
+    /// matches the query.
+    struct Window {
+        let rows: [Conversation]
+        /// Read from what the store returned, never from `rows.count`: a row the list
+        /// cannot show (a tombstone, `ConversationListItem.listableID(of:)`) is dropped
+        /// from `rows` after the fetch, and a window one row short of the limit for it
+        /// is not the end of the store's rows (PR 527's review: counted from `rows`, a
+        /// tombstone closed paging for good, and on the Mac nothing reloads).
+        let isComplete: Bool
+    }
+
+    /// The window's rows (`fetchWindowReportingCompleteness(...).rows`).
     func fetchWindow(
         in context: NSManagedObjectContext,
         limit: Int,
@@ -28,8 +35,33 @@ struct ConversationWindowProvider {
         canMatchCurrentFilter: Bool = true,
         matchesVisibility: (Conversation) -> Bool
     ) throws -> [Conversation] {
-        guard limit > 0 else { return [] }
-        guard canMatchCurrentFilter else { return [] }
+        try fetchWindowReportingCompleteness(
+            in: context,
+            limit: limit,
+            searchText: searchText,
+            filter: filter,
+            canMatchCurrentFilter: canMatchCurrentFilter,
+            matchesVisibility: matchesVisibility
+        ).rows
+    }
+
+    /// Throws when the store cannot be read. A failed read is not an empty mailbox
+    /// (CLAUDE.md): answered as `[]`, as until 2026-11-27, it was the same value as a
+    /// genuinely empty store, so the list latched "all loaded" on it, replaced a
+    /// populated window with nothing and paged no more (architecture review 2026-11,
+    /// conversation-list-ui#6). The two empty answers that stay are deliberate: nothing
+    /// asked for (not complete, as before: `0 < 0` never latched), and a filter that can
+    /// match nothing (complete).
+    func fetchWindowReportingCompleteness(
+        in context: NSManagedObjectContext,
+        limit: Int,
+        searchText: String,
+        filter: ConversationFilter,
+        canMatchCurrentFilter: Bool = true,
+        matchesVisibility: (Conversation) -> Bool
+    ) throws -> Window {
+        guard limit > 0 else { return Window(rows: [], isComplete: false) }
+        guard canMatchCurrentFilter else { return Window(rows: [], isComplete: true) }
 
         let request = NSFetchRequest<Conversation>(entityName: "Conversation")
         // SQL mirror of ConversationListItem.SortKey's `<` — the CANONICAL
@@ -63,15 +95,22 @@ struct ConversationWindowProvider {
 
         request.fetchLimit = limit
         let candidates = try context.fetch(request)
-        return Array(candidates.lazy.filter(matchesVisibility).prefix(limit))
+        return Window(
+            rows: Array(candidates.filter { Self.isListable($0) && matchesVisibility($0) }.prefix(limit)),
+            isComplete: candidates.count < limit
+        )
     }
 
+    /// Complete when the scan ran out of the store's rows before it found `limit`
+    /// visible ones (the loop below leaves early only on reaching `limit`) and the
+    /// context's pending rows, merged in, still fit: a dropped tombstone is not counted,
+    /// so it keeps the scan going instead of ending it.
     private func fetchFilteredWindow(
         request: NSFetchRequest<Conversation>,
         in context: NSManagedObjectContext,
         limit: Int,
         matchesVisibility: (Conversation) -> Bool
-    ) throws -> [Conversation] {
+    ) throws -> Window {
         let pendingObjects = context.insertedObjects
             .union(context.updatedObjects)
             .union(context.deletedObjects)
@@ -79,7 +118,7 @@ struct ConversationWindowProvider {
         let pendingIDs = Set(pendingConversations.map(\.objectID))
         let pendingVisibleConversations = pendingConversations
             .filter { conversation in
-                !conversation.isDeleted &&
+                Self.isListable(conversation) &&
                     conversation.archivedAt == nil &&
                     matchesVisibility(conversation)
             }
@@ -106,6 +145,7 @@ struct ConversationWindowProvider {
             for conversation in candidates {
                 guard !pendingIDs.contains(conversation.objectID),
                       persistedVisibleIDs.insert(conversation.objectID).inserted,
+                      Self.isListable(conversation),
                       matchesVisibility(conversation) else {
                     continue
                 }
@@ -125,11 +165,22 @@ struct ConversationWindowProvider {
             conversationsByID[conversation.objectID] = conversation
         }
 
-        return Array(
-            conversationsByID.values
-                .sorted(by: sortsBefore(_:_:))
-                .prefix(limit)
+        return Window(
+            rows: Array(
+                conversationsByID.values
+                    .sorted(by: sortsBefore(_:_:))
+                    .prefix(limit)
+            ),
+            isComplete: persistedVisibleConversations.count < limit && conversationsByID.count <= limit
         )
+    }
+
+    /// Whether the list can show the row (`ConversationListItem.listableID(of:)`): a
+    /// returned fault whose row another context deleted before it fired is a tombstone,
+    /// and `SortKey(conversation:)` below and the list item would trap on its nil `id`.
+    /// Asked before the sort and the visibility check, so neither reads one.
+    private static func isListable(_ conversation: Conversation) -> Bool {
+        ConversationListItem.listableID(of: conversation) != nil
     }
 
     /// Delegates to `ConversationListItem.SortKey` (the CANONICAL chat-list
