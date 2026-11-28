@@ -143,12 +143,10 @@ enum SynthesizedInlineAttachmentRecovery {
                         return []
                     }
 
-                    let filenameExtension = (candidate.payload.filename as NSString)
-                        .pathExtension
-                        .lowercased()
-                    let ext = filenameExtension.isEmpty
-                        ? AttachmentPaths.fileExtension(for: candidate.payload.mimeType)
-                        : filenameExtension
+                    let ext = AttachmentPaths.storedFileExtension(
+                        filename: candidate.payload.filename,
+                        mimeType: candidate.payload.mimeType
+                    )
                     let originalPath = AttachmentPaths.originalPath(
                         messageId: messageId,
                         attachmentId: candidate.attachmentId,
@@ -372,6 +370,12 @@ final class AttachmentDownloader: ObservableObject {
     // rendered change.
     private var downloadProgressByKey: [AttachmentDownloadKey: Double] = [:]
     @Published private var activeDownloadKeys: Set<AttachmentDownloadKey> = []
+    /// The attachments whose last download was refused, or stopped, for want of space
+    /// (`AttachmentDownloadSpacePolicy`, `AttachmentWriteResult.outOfSpace`). In memory only: the
+    /// row's stored state is left as it was, and the views show "Not enough storage" with a
+    /// Retry from this (`AttachmentDownloadIndicatorPolicy`). Cleared when a download of it is
+    /// admitted, and for every attachment at an account transition (`cleanupAll`).
+    @Published private var spaceRefusedKeys: Set<AttachmentDownloadKey> = []
 
     private let apiClient: any GmailAPIClientProtocol
     private let coreDataStack: CoreDataStack
@@ -470,6 +474,7 @@ final class AttachmentDownloader: ObservableObject {
     func cleanupAll() {
         downloadProgressByKey.removeAll()
         activeDownloadKeys.removeAll()
+        spaceRefusedKeys.removeAll()
         let waiters = activeDownloadWaiters.values.flatMap { $0.values }
         activeDownloadWaiters.removeAll()
         waiters.forEach { $0.resume() }
@@ -483,6 +488,29 @@ final class AttachmentDownloader: ObservableObject {
                 attachmentId: attachmentId
             )
         )
+    }
+
+    /// Whether the attachment's last download was refused, or stopped, for want of space.
+    func isRefusedForSpace(messageId: String?, attachmentId: String?) -> Bool {
+        guard let messageId, let attachmentId else { return false }
+        return spaceRefusedKeys.contains(
+            AttachmentDownloadKey(messageId: messageId, attachmentId: attachmentId)
+        )
+    }
+
+    private func recordSpaceRefusal(messageId: String, attachmentId: String) {
+        let key = AttachmentDownloadKey(messageId: messageId, attachmentId: attachmentId)
+        if !spaceRefusedKeys.contains(key) {
+            spaceRefusedKeys.insert(key)
+        }
+    }
+
+    private func clearSpaceRefusal(messageId: String, attachmentId: String) {
+        let key = AttachmentDownloadKey(messageId: messageId, attachmentId: attachmentId)
+        // `Set.remove` of an absent key still publishes.
+        if spaceRefusedKeys.contains(key) {
+            spaceRefusedKeys.remove(key)
+        }
     }
 
     func downloadProgress(messageId: String?, attachmentId: String?) -> Double? {
@@ -572,7 +600,7 @@ final class AttachmentDownloader: ObservableObject {
     /// (`AttachmentDownloadSpacePolicy`), asked before anything is fetched. A refusal writes
     /// nothing to the row: a received attachment's `queued` is its resting state, and the next
     /// showing asks again.
-    private func hasRoomToDownload(byteSize: Int64, attachmentId: String) async -> Bool {
+    private func hasRoomToDownload(byteSize: Int64, messageId: String, attachmentId: String) async -> Bool {
         let availableBytes = await availableStorageBytes()
         guard AttachmentDownloadSpacePolicy.admitsDownload(
             byteSize: byteSize,
@@ -582,8 +610,10 @@ final class AttachmentDownloader: ObservableObject {
                 "Not downloading attachment \(Log.hashIdentifier(attachmentId)): the disk is below its free-space floor",
                 category: .attachment
             )
+            recordSpaceRefusal(messageId: messageId, attachmentId: attachmentId)
             return false
         }
+        clearSpaceRefusal(messageId: messageId, attachmentId: attachmentId)
         return true
     }
     
@@ -738,6 +768,11 @@ final class AttachmentDownloader: ObservableObject {
                 ) as? Attachment else {
                     return (false, 0)
                 }
+                // The recovery writes every synthesized sibling of the message, so the floor is
+                // asked about all of them, not this row alone.
+                let siblingsBytes = attachment.message?.attachmentsArray
+                    .filter { $0.id?.hasPrefix("local_inline_") == true }
+                    .reduce(Int64(0)) { $0 + max(0, $1.byteSize) } ?? attachment.byteSize
                 context.refresh(attachment, mergeChanges: true)
                 guard let localURL = attachment.localURL,
                       AttachmentPaths.isReadableStoragePath(
@@ -747,7 +782,7 @@ final class AttachmentDownloader: ObservableObject {
                       ),
                       let fileURL = AttachmentPaths.fullURL(for: localURL),
                       FileManager.default.fileExists(atPath: fileURL.path) else {
-                    return (false, attachment.byteSize)
+                    return (false, siblingsBytes)
                 }
                 attachment.state = .downloaded
                 attachment.lastDownloadFailedAt = nil
@@ -756,13 +791,13 @@ final class AttachmentDownloader: ObservableObject {
                         operation: "confirm synthesized inline attachment storage",
                         category: .attachment
                     ),
-                    attachment.byteSize
+                    siblingsBytes
                 )
             }
             guard isActive(generation) else { return }
             if storage.alreadyReadable { return }
             // The recovery fetches the whole message and writes every synthesized sibling.
-            guard await hasRoomToDownload(byteSize: storage.byteSize, attachmentId: attachmentId),
+            guard await hasRoomToDownload(byteSize: storage.byteSize, messageId: messageId, attachmentId: attachmentId),
                   isActive(generation) else {
                 return
             }
@@ -787,7 +822,7 @@ final class AttachmentDownloader: ObservableObject {
                 )
             }
             guard isActive(generation) else { return }
-            guard await hasRoomToDownload(byteSize: attachmentInfo.byteSize, attachmentId: attachmentId),
+            guard await hasRoomToDownload(byteSize: attachmentInfo.byteSize, messageId: messageId, attachmentId: attachmentId),
                   isActive(generation) else {
                 return
             }
@@ -808,13 +843,18 @@ final class AttachmentDownloader: ObservableObject {
             // Generate file extension and paths
             // Prefer extension from original filename, fall back to MIME type mapping
             let mimeType = attachmentInfo.mimeType
-            let filenameExt = (attachmentInfo.filename as NSString).pathExtension.lowercased()
-            let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: mimeType) : filenameExt
+            let ext = AttachmentPaths.storedFileExtension(filename: attachmentInfo.filename, mimeType: mimeType)
             let originalPath = AttachmentPaths.originalPath(
                 messageId: messageId,
                 attachmentId: attachmentId,
                 ext: ext
             )
+            // A row whose original is already on disk here can be downloaded again (a legacy
+            // preview path makes it `needsRedownload`); a download that then finds no room leaves
+            // that original as it was.
+            let originalExistedBefore = AttachmentPaths.fullURL(for: originalPath).map {
+                FileManager.default.fileExists(atPath: $0.path)
+            } ?? false
             let previewPath = AttachmentPaths.previewPath(
                 messageId: messageId,
                 attachmentId: attachmentId
@@ -905,14 +945,26 @@ final class AttachmentDownloader: ObservableObject {
             // preview for good (`AttachmentThumbnailLoader.load` reads only the preview).
             if processedResult.outOfSpace {
                 Log.warning(
-                    "Attachment \(Log.hashIdentifier(attachmentId)) did not fit on the disk; left queued",
+                    "Attachment \(Log.hashIdentifier(attachmentId)) did not fit on the disk; left as it was",
                     category: .attachment
                 )
-                await rollbackPartialDownload(
-                    messageId: messageId,
-                    attachmentId: attachmentId,
-                    exactOriginalPath: originalPath
-                )
+                recordSpaceRefusal(messageId: messageId, attachmentId: attachmentId)
+                if originalExistedBefore {
+                    // The original the row already had is kept; only a preview this download
+                    // wrote goes. An atomic write that found no room left the file it would have
+                    // replaced in place.
+                    AttachmentPaths.deleteFile(at: previewPath)
+                    await AttachmentCacheActor.shared.removeFromCache(
+                        messageId: messageId,
+                        attachmentId: attachmentId
+                    )
+                } else {
+                    await rollbackPartialDownload(
+                        messageId: messageId,
+                        attachmentId: attachmentId,
+                        exactOriginalPath: originalPath
+                    )
+                }
                 return
             }
 
@@ -1124,8 +1176,14 @@ final class AttachmentDownloader: ObservableObject {
     ) async {
         guard isActive(generation) else { return }
         // A row with no id names no Gmail attachment to retry.
-        guard let message = attachment.message, attachment.id != nil else { return }
+        guard let message = attachment.message, let attachmentId = attachment.id else { return }
         let attachmentObjectID = attachment.objectID
+        // Asked before the row is touched: a Retry the floor refuses leaves a failed row failed,
+        // with its Retry, never `queued` with nothing to tap.
+        guard await admitsByFreeSpace(attachment, messageId: message.id, attachmentId: attachmentId),
+              isActive(generation) else {
+            return
+        }
 
         let context = coreDataStack.newBackgroundContext()
         let saveSucceeded = await context.perform {
@@ -1173,6 +1231,14 @@ final class AttachmentDownloader: ObservableObject {
                            attachment.needsRedownload
 
         guard needsDownload, let message = attachment.message else { return }
+        // Asked before the row is touched: the redownload path below writes `queued` over a
+        // `downloaded` row, which a refusal must not leave behind.
+        if let attachmentId = attachment.id {
+            guard await admitsByFreeSpace(attachment, messageId: message.id, attachmentId: attachmentId),
+                  isActive(generation) else {
+                return
+            }
+        }
 
         if attachment.needsRedownload {
             Log.info("Attachment \(attachment.id ?? "unknown") marked as downloaded but file missing - re-downloading", category: .attachment)
@@ -1211,6 +1277,23 @@ final class AttachmentDownloader: ObservableObject {
         )
     }
     
+    /// Whether the floor admits downloading `attachment` (`hasRoomToDownload`). An attachment the
+    /// user added is never downloaded, so it is never asked about.
+    private func admitsByFreeSpace(
+        _ attachment: Attachment,
+        messageId: String,
+        attachmentId: String
+    ) async -> Bool {
+        if attachmentId.hasPrefix("local_"), !attachmentId.hasPrefix("local_inline_") {
+            return true
+        }
+        return await hasRoomToDownload(
+            byteSize: attachment.byteSize,
+            messageId: messageId,
+            attachmentId: attachmentId
+        )
+    }
+
     /// Cleans up any partial download artifacts to prevent orphaned files.
     /// Called when a download fails to ensure clean state for retry.
     private func rollbackPartialDownload(
