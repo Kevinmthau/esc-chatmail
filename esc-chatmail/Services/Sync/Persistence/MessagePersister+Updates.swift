@@ -216,6 +216,37 @@ extension MessagePersister {
             var senderHeaderDisplayNameUpdateEmails = Set<String>()
             var senderHeaderDisplayNameUpdateConversationIDs = Set<NSManagedObjectID>()
             let shouldPreserveLocalMailboxState = HistoryProcessor.hasPendingLocalModification(message: existingMessage)
+            // Worked out before anything about the row changes, its body file
+            // included, so that a label read that fails leaves the row as it
+            // was and is a failed lookup, which holds the cursor
+            // (`ExistingMessageLabelDiff`). Nil while a local change is
+            // pending: the user's mailbox state wins until it reaches Gmail.
+            let labelDiff: ExistingMessageLabelDiff?
+            if shouldPreserveLocalMailboxState {
+                labelDiff = nil
+            } else {
+                do {
+                    labelDiff = try ExistingMessageLabelDiff.plan(
+                        storedLabels: existingMessage.labels ?? [],
+                        incomingLabelIds: processedMessage.labelIds,
+                        availableLabelIds: labelIds,
+                        fetchLabels: { try self.fetchLabelsByIdsOrThrow($0, in: context) }
+                    )
+                } catch {
+                    Log.error("Failed to read labels for a message update", category: .coreData, error: error)
+                    return MessageUpdateResult(
+                        didUpdate: false,
+                        lookupFailed: true,
+                        modifiedConversationID: nil,
+                        reroutedFromConversationID: nil,
+                        shouldInvalidateRenderedContent: false,
+                        htmlSourceDidChange: false,
+                        changedHTMLSourceSignature: nil,
+                        participantDisplayNameUpdateEmails: [],
+                        participantDisplayNameUpdateConversationIDs: []
+                    )
+                }
+            }
             let canonicalHTML = processedMessage.storedHTML
             let previousHTMLSourceSignature = canonicalHTML == nil ? nil : htmlContentHandler.canonicalHTMLSourceSignature(
                 messageId: processedMessage.id,
@@ -414,26 +445,24 @@ extension MessagePersister {
                 )
             }
 
-            let messageLabelIds = Set(processedMessage.labelIds)
-            if shouldPreserveLocalMailboxState {
+            if let labelDiff {
+                // Each write is made only where something changed: an equal
+                // assignment still marks the row updated, and a label write
+                // reads the label's whole membership (`ExistingMessageLabelDiff`).
+                if existingMessage.isUnread != processedMessage.isUnread {
+                    existingMessage.isUnread = processedMessage.isUnread
+                }
+                for label in labelDiff.removals {
+                    existingMessage.removeFromLabels(label)
+                }
+                for label in labelDiff.additions {
+                    existingMessage.addToLabels(label)
+                }
+            } else {
                 Log.debug(
                     "Preserving local mailbox state for message \(processedMessage.id) while pending action exists",
                     category: .sync
                 )
-            } else {
-                existingMessage.isUnread = processedMessage.isUnread
-                existingMessage.labels = nil
-                // An empty prefetched set means the label lookup failed, not that
-                // the store has no labels; treating it as authoritative would
-                // strip every label relationship and let the rollup recompute
-                // persist a durable zero unread count.
-                let availableLabelIds = labelIds.flatMap { $0.isEmpty ? nil : messageLabelIds.intersection($0) } ?? messageLabelIds
-                let effectiveLabelCache = self.fetchLabelsByIds(availableLabelIds, in: context)
-                for labelId in processedMessage.labelIds {
-                    if let label = effectiveLabelCache[labelId] {
-                        existingMessage.addToLabels(label)
-                    }
-                }
             }
             let currentHasInboxLabel = existingMessage.labels?.contains { $0.id == "INBOX" } ?? false
 
