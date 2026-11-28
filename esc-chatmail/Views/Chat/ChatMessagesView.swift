@@ -76,6 +76,11 @@ struct ChatMessagesView: View {
     @State private var isBottomAnchorVisible = false
     @GestureState private var isScrollGestureActive = false
     @ObservedObject private var keyboard = KeyboardResponder.shared
+    /// Carried in every geometry report (`ChatScrollGeometry`), so the
+    /// coordinator knows the first report under a new text size by the report
+    /// itself (`ChatTranscriptTextSizeFollowPolicy`). Read on the Mac too, where
+    /// no change of it was tried.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Namespace private var bottomID
 
     @MainActor
@@ -490,7 +495,8 @@ struct ChatMessagesView: View {
                     bottomAnchorFrame: frame,
                     contentFrame: contentFrame,
                     viewportSize: geometryProxy.size,
-                    isNewestRowRealized: scrollState.isNewestVisibleRowRealized
+                    isNewestRowRealized: scrollState.isNewestVisibleRowRealized,
+                    dynamicTypeSize: dynamicTypeSize
                 )
                 Color.clear
                     .id(scrollState.latestWindowLayoutID)
@@ -892,7 +898,8 @@ struct ChatMessagesView: View {
             contentHeight: geometry.contentFrame.isNull
                 ? nil
                 : geometry.contentFrame.height,
-            viewportHeight: geometry.viewportSize.height
+            viewportHeight: geometry.viewportSize.height,
+            textSize: geometry.dynamicTypeSize
         ) { performBottomAnchor($0, proxy: scrollProxy) }
 
         // Read after the coordinator handled this report: a reveal happens
@@ -1231,6 +1238,11 @@ private struct ChatScrollGeometry: Equatable {
     /// (`VirtualScrollState.isNewestVisibleRowRealized`). Part of the
     /// geometry so its change re-reports through the same `onChange`.
     let isNewestRowRealized: Bool
+    /// The text size the report was laid out under. In the report itself,
+    /// not read from `onChange(of: dynamicTypeSize)`: the report carrying a
+    /// new size's growth ran before that `onChange` in the same update
+    /// (`ChatTranscriptTextSizeFollowPolicy`).
+    let dynamicTypeSize: DynamicTypeSize
 }
 
 private struct ChatScrollGeometryPreferenceKey: PreferenceKey {

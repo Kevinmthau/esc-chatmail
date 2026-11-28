@@ -1,6 +1,7 @@
 import XCTest
 import CoreData
 import Combine
+import SwiftUI
 @testable import esc_chatmail
 
 /// Every fixture, save, and assertion goes through the suite's `viewContext`, a
@@ -911,6 +912,257 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
                     logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
                 )
             ]
+        )
+    }
+
+    // MARK: - Text size (architecture review 2026-11, gap-accessibility-architecture#4)
+
+    /// The reader is at rest at the bottom, the reveal's follow long expired, and changes the text
+    /// size: the first report under the new size carries the growth with the anchor pushed off,
+    /// and the follow that change arms answers it with one unanimated scroll to the bottom.
+    ///
+    /// Revert-check: deleting `armFreshPostRevealBottomFollow()` from
+    /// `ChatMessagesCoordinator.armBottomFollowForTextSizeChangeIfDue` fails this (no scroll).
+    func testTextSizeChange_atRestAtTheBottomAfterTheFollowExpired_scrollsToTheBottomOnce() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+
+        XCTAssertEqual(anchorSteps, [Self.postRevealLayoutScroll])
+    }
+
+    /// The same growth under an unchanged text size goes unanswered: an expired follow stays deaf
+    /// to ordinary growth, and only a change of size arms a new one.
+    ///
+    /// Revert-check: setting `isFirstReportUnderNewTextSize` to `true` for every report in
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` fails this.
+    func testGrowthUnderTheSameTextSize_afterTheFollowExpired_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .large
+        ) { _ in
+            XCTFail("Growth with no change of text size must not revive an expired follow")
+        }
+    }
+
+    /// The follow a change of size arms is an ordinary bounded one: it answers later growth (the
+    /// composer's, a row the lazy stack measures again) within its grace, and nothing after it.
+    ///
+    /// Revert-check: lengthening the grace in `ChatMessagesCoordinator.armFreshPostRevealBottomFollow`
+    /// (`postRevealBottomFollowGracePeriod` replaced by `maximumPostRevealBottomFollowLifetime`)
+    /// fails the last assertion.
+    func testTextSizeChange_armsABoundedFollow_thatAnswersLaterGrowthOnlyWithinItsGrace() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -400,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in XCTFail("The scroll landing at the bottom must not scroll again") }
+
+        clock.now += 1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -400,
+            contentHeight: 560,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+        XCTAssertEqual(anchorSteps, [Self.postRevealLayoutScroll, Self.postRevealLayoutScroll])
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -460,
+            contentHeight: 560,
+            textSize: .accessibility2
+        ) { _ in XCTFail("The scroll landing at the bottom must not scroll again") }
+
+        clock.now += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -460,
+            contentHeight: 620,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+        XCTAssertEqual(anchorSteps.count, 2, "The follow must expire like any other: \(anchorSteps)")
+    }
+
+    /// A reader moved into history by a trackpad, a mouse wheel or VoiceOver has no takeover;
+    /// what keeps them there is that the anchor was not on screen before the change.
+    ///
+    /// Revert-check: dropping `wasBottomAnchorVisible` from
+    /// `ChatTranscriptTextSizeFollowPolicy.armsFollow` fails this.
+    func testTextSizeChange_withTheAnchorOffscreenBeforeTheChange_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -100,
+            contentHeight: 300,
+            textSize: .large
+        ) { _ in XCTFail("A scroll into history must not be answered") }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -100,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in
+            XCTFail("A reader in history must not be pulled to the bottom by a change of text size")
+        }
+    }
+
+    /// Revert-check: dropping `isUserScrollTakeoverActive` from
+    /// `ChatTranscriptTextSizeFollowPolicy.armsFollow` fails this.
+    func testTextSizeChange_duringAUserScrollTakeover_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        coordinator.handleUserScrollInteraction()
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in XCTFail("A takeover must keep the change of text size from scrolling") }
+    }
+
+    /// Revert-check: dropping `isUserScrollInteractionActive` from
+    /// `ChatTranscriptTextSizeFollowPolicy.armsFollow` fails this.
+    func testTextSizeChange_withAFingerOnTheTranscript_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            isUserScrollInteractionActive: true,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in XCTFail("A finger on the transcript must keep the change of text size from scrolling") }
+    }
+
+    /// Revert-check: dropping `isScrollPhaseUserDriven` from
+    /// `ChatTranscriptTextSizeFollowPolicy.armsFollow` fails this.
+    func testTextSizeChange_inAUserDrivenScrollPhase_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        coordinator.handleUserScrollPhaseChange(isUserDriven: true) { _ in
+            XCTFail("Entering a user-driven phase at the bottom must not scroll")
+        }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in XCTFail("A user-driven scroll phase must keep the change of text size from scrolling") }
+    }
+
+    /// Revert-check: dropping `isChatVisible` from `ChatTranscriptTextSizeFollowPolicy.armsFollow`
+    /// fails this (a disappeared chat keeps its reveal and its last anchor reading).
+    func testTextSizeChange_afterTheChatDisappeared_scrollsNothing() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        coordinator.handleDisappear()
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { _ in XCTFail("A chat that is not on screen must not scroll for a change of text size") }
+    }
+
+    /// The hidden pass owns scrolling until the reveal: a change of size during it arms no
+    /// follow, which would take the pass's reports from it, and the pass answers the report itself.
+    ///
+    /// Revert-check: dropping `isTranscriptRevealed` from
+    /// `ChatTranscriptTextSizeFollowPolicy.armsFollow` fails this (the step is the follow's).
+    func testTextSizeChange_duringTheHiddenPass_leavesTheReportToThePass() async throws {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in }
+        )
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { anchorSteps.append($0) }
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: 0,
+            contentHeight: 100,
+            viewportHeight: 100,
+            textSize: .large
+        ) { anchorSteps.append($0) }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 300,
+            viewportHeight: 100,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+
+        XCTAssertFalse(
+            anchorSteps.contains(Self.postRevealLayoutScroll),
+            "A follow must not take the hidden pass's reports: \(anchorSteps)"
+        )
+    }
+
+    /// During a compensated shift the hold's settle check owns the anchor: the report carrying
+    /// the new size's growth starts no scroll of its own, follow armed or not.
+    ///
+    /// Revert-check: deleting `if isPostRevealBottomFollowArmed { return }` from the
+    /// compensated-shift branch of `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate`
+    /// fails this. HONEST SCOPE: it passes with the text-size arm deleted too; it pins only that
+    /// the arm starts no scroll mid-shift.
+    func testTextSizeChange_duringACompensatedShift_leavesTheAnchorToTheSettleCheck() async throws {
+        let clock = TextSizeTestClock()
+        let coordinator = try await makeRevealedCoordinatorAtRestWithExpiredFollow(clock: clock)
+        var anchorSteps: [ChatMessagesCoordinator.BottomAnchorStep] = []
+        coordinator.handleCompensatedInsetGrowth(settlingIn: 0.5) { anchorSteps.append($0) }
+
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: -200,
+            contentHeight: 500,
+            textSize: .accessibility2
+        ) { anchorSteps.append($0) }
+
+        XCTAssertFalse(
+            anchorSteps.contains(Self.postRevealLayoutScroll),
+            "Mid-shift the settle check owns the anchor: \(anchorSteps)"
         )
     }
 
@@ -5973,7 +6225,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
                 hasBottomAnchorGeometry: false,
-                isNewestRowRealized: true
+                isNewestRowRealized: true,
+                textSize: .large
             ) { step in
                 anchorSteps.append(step)
             }
@@ -6575,7 +6828,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
                 hasBottomAnchorGeometry: false,
-                isNewestRowRealized: true
+                isNewestRowRealized: true,
+                textSize: .large
             ) { step in
                 anchorSteps.append(step)
             }
@@ -6592,7 +6846,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false,
             hasBottomAnchorGeometry: false,
-            isNewestRowRealized: true
+            isNewestRowRealized: true,
+            textSize: .large
         ) { _ in
             XCTFail("The wall-clock fallback reveal must not issue an initial scroll")
         }
@@ -7314,7 +7569,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
                 hasBottomAnchorGeometry: false,
-                isNewestRowRealized: false
+                isNewestRowRealized: false,
+                textSize: .large
             ) { anchorSteps.append($0) }
             XCTAssertEqual(anchorSteps.dropFirst(2 * probe).first, Self.realizationNudgeStep)
             XCTAssertFalse(
@@ -7360,7 +7616,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             coordinator.handleBottomAnchorGeometryUpdate(
                 isBottomAnchorVisible: false,
                 hasBottomAnchorGeometry: false,
-                isNewestRowRealized: false
+                isNewestRowRealized: false,
+                textSize: .large
             ) { anchorSteps.append($0) }
             await waitUntil {
                 coordinator.initialAnchorGeometryCheckID != geometryCheckID
@@ -7373,7 +7630,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         coordinator.handleBottomAnchorGeometryUpdate(
             isBottomAnchorVisible: false,
             hasBottomAnchorGeometry: false,
-            isNewestRowRealized: false
+            isNewestRowRealized: false,
+            textSize: .large
         ) { anchorSteps.append($0) }
         await waitUntil {
             coordinator.initialAnchorGeometryCheckID != geometryCheckID
@@ -8178,6 +8436,59 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         return (conversation, messages)
     }
 
+    /// The text-size tests' clock, which the coordinator reads through its `now`.
+    private final class TextSizeTestClock {
+        var now: TimeInterval = 1_000
+    }
+
+    private static let postRevealLayoutScroll = ChatMessagesCoordinator.BottomAnchorStep(
+        delay: 0,
+        animated: false,
+        logMessage: "ChatView post-reveal layout scroll -> bottom anchor"
+    )
+
+    /// A revealed transcript whose reveal follow has expired, at rest with the bottom anchor on
+    /// screen under the default text size: content 300 points tall from -200 in a 100-point
+    /// viewport, so its end is the viewport's bottom.
+    private func makeRevealedCoordinatorAtRestWithExpiredFollow(
+        clock: TextSizeTestClock,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws -> ChatMessagesCoordinator {
+        let (_, messages) = try makeConversationWithMessages(senderEmails: [
+            "first@example.com",
+            "second@example.com"
+        ])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            now: { clock.now }
+        )
+        coordinator.handleAppear(
+            messageCount: messages.count,
+            lastMessage: messages.last,
+            visibleMessages: rows,
+            senderGroupingMessages: rows,
+            totalMessageCount: messages.count,
+            isInitialWindowLoaded: true
+        ) { _ in
+            XCTFail("A visible initial anchor must not request a scroll", file: file, line: line)
+        }
+        await confirmInitialBottomAnchor(coordinator, file: file, line: line)
+
+        clock.now += 3.1
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: true,
+            contentMinY: -200,
+            contentHeight: 300,
+            textSize: .large
+        ) { _ in
+            XCTFail("An expired follow must not answer growth", file: file, line: line)
+        }
+        return coordinator
+    }
+
     private func makeUnreadCoordinator(
         markConversationAsReadIfNeeded: @escaping () -> Void,
         markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void,
@@ -8421,6 +8732,9 @@ private extension ChatMessagesCoordinator {
     /// callers pass the view's realization evidence explicitly, while the
     /// vast majority of coordinator tests model a tail the lazy stack has
     /// realized (the state every test predating the evidence assumed).
+    /// `textSize` defaults to the default text size for the same reason
+    /// again: only the text-size tests change it (a test that calls the
+    /// production method for `hasBottomAnchorGeometry: false` passes it).
     func handleBottomAnchorGeometryUpdate(
         isBottomAnchorVisible: Bool,
         isNewestRowRealized: Bool = true,
@@ -8428,6 +8742,7 @@ private extension ChatMessagesCoordinator {
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
         viewportHeight: CGFloat? = nil,
+        textSize: DynamicTypeSize = .large,
         scrollAction: @escaping BottomAnchorAction
     ) {
         handleBottomAnchorGeometryUpdate(
@@ -8438,6 +8753,7 @@ private extension ChatMessagesCoordinator {
             contentMinY: contentMinY,
             contentHeight: contentHeight,
             viewportHeight: viewportHeight,
+            textSize: textSize,
             scrollAction: scrollAction
         )
     }

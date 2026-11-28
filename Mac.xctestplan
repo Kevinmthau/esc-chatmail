@@ -45,6 +45,7 @@
         "ChatSheetHandOverSourceTests",
         "ChatTimestampSeparatorPolicyTests",
         "ChatTranscriptRunPolicyTests",
+        "ChatTranscriptTextSizeFollowPolicyTests",
         "ChatViewExitTests",
         "ContactsAppLinkTests",
         "ConversationRowMetricsTests",

@@ -2,6 +2,7 @@ import Foundation
 import CoreData
 import CoreGraphics
 import Combine
+import SwiftUI
 
 @MainActor
 final class ChatMessagesCoordinator: ObservableObject {
@@ -334,6 +335,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     private var trackedContentMinY: CGFloat?
     private var trackedContentHeight: CGFloat?
     private var trackedViewportHeight: CGFloat?
+    /// The text size of the latest geometry update. A report under another
+    /// size is the first under the new one, and the reading before it is the
+    /// one `ChatTranscriptTextSizeFollowPolicy` decides from. Nil before the
+    /// first report.
+    private var trackedTextSize: DynamicTypeSize?
     /// The reader's finger is on the transcript, as of the latest geometry
     /// update (the view re-reports geometry when its drag state changes).
     private var isTrackedUserScrollInteractionActive = false
@@ -706,11 +712,18 @@ final class ChatMessagesCoordinator: ObservableObject {
         contentMinY: CGFloat? = nil,
         contentHeight: CGFloat? = nil,
         viewportHeight: CGFloat? = nil,
+        // Deliberately no default: the first report under a new text size is
+        // known by its size alone (`ChatTranscriptTextSizeFollowPolicy`).
+        // (Tests use a defaulted overload in their own target.)
+        textSize: DynamicTypeSize,
         scrollAction: @escaping BottomAnchorAction
     ) {
         let previousContentMinY = trackedContentMinY
         let previousContentHeight = trackedContentHeight
         let previousViewportHeight = trackedViewportHeight
+        let wasBottomAnchorVisible = isTrackedBottomAnchorVisible
+        let isFirstReportUnderNewTextSize = trackedTextSize.map { $0 != textSize } ?? false
+        trackedTextSize = textSize
         // Before any branch below, the ones that return early included: a
         // report an armed follow or a compensated shift swallows is still a
         // report this pass received.
@@ -774,6 +787,15 @@ final class ChatMessagesCoordinator: ObservableObject {
         // stays bounded. Not slid in .checkingAfterScroll: the in-flight
         // validation task matches on the exact deadline to detect staleness.
         let didObserveGrowth = contentHeightIncreased || viewportHeightDecreased
+
+        // Before the follow below reads its state, so this very report, which
+        // usually carries the growth, is the first the new follow answers.
+        if isFirstReportUnderNewTextSize {
+            armBottomFollowForTextSizeChangeIfDue(
+                wasBottomAnchorVisible: wasBottomAnchorVisible,
+                isUserScrollInteractionActive: isUserScrollInteractionActive
+            )
+        }
 
         if isHoldingForCompensatedShift {
             if didObserveGrowth {
@@ -1895,6 +1917,41 @@ final class ChatMessagesCoordinator: ObservableObject {
         // growth while a real user scroll still cancels the behavior. Fresh
         // also means over a follow scroll still being validated: replacing
         // that case cancels the validation and drops its growth latch.
+        armFreshPostRevealBottomFollow()
+    }
+
+    /// A report that is the first under a new text size, from a reader at
+    /// rest at the bottom of a revealed transcript, arms a fresh follow
+    /// (`ChatTranscriptTextSizeFollowPolicy`), which answers the growth the
+    /// new size brings as it answers a bubble's late load. Its state is the
+    /// follow's own case, like every follow's.
+    private func armBottomFollowForTextSizeChangeIfDue(
+        wasBottomAnchorVisible: Bool,
+        isUserScrollInteractionActive: Bool
+    ) {
+        guard ChatTranscriptTextSizeFollowPolicy.armsFollow(
+            wasBottomAnchorVisible: wasBottomAnchorVisible,
+            isTranscriptRevealed: isReadyToShow,
+            isChatVisible: isVisible,
+            isUserScrollTakeoverActive: isUserScrollTakeoverActive,
+            isUserScrollInteractionActive: isUserScrollInteractionActive,
+            isScrollPhaseUserDriven: isTrackedScrollPhaseUserDriven
+        ) else {
+            return
+        }
+        armFreshPostRevealBottomFollow()
+        Log.diagnostic(
+            .chatView,
+            level: .info,
+            "ChatView text size changed at the bottom -> fresh bottom follow",
+            category: .ui
+        )
+    }
+
+    /// A new post-reveal follow with its own arm time and the full grace,
+    /// over whatever follow was live: an old arm time would cap every slide
+    /// at a lifetime that may already have run out.
+    private func armFreshPostRevealBottomFollow() {
         let armedAt = now()
         postRevealBottomFollowState = .following(
             BottomFollow(
