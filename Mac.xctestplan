@@ -96,6 +96,7 @@
         "MailboxMenuPolicyTests",
         "MessageBubbleRowPolicyTests",
         "MessageBubbleStyleTests",
+        "MessageRowAccessibilityPolicyTests",
         "MessageSendStatusLinePolicyTests",
         "MessageTextWidthCapLayoutTests",
         "PastedImageEncoderTests",

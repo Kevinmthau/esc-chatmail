@@ -216,6 +216,18 @@ struct MessageBubble: View {
         let recoveryPrompt = message.isFromMe
             ? FailedSendRecoveryPolicy.prompt(for: message.outboundSendDeliveryState)
             : nil
+        // Who wrote the row, its send state and its time, said before its content: never
+        // content text (`MessageRowAccessibilityPolicy`).
+        let accessibilityPrefix = MessageRowAccessibilityPolicy.labelPrefix(
+            speaker: MessageRowAccessibilityPolicy.speaker(
+                isFromMe: message.isFromMe,
+                loadedSenderName: viewModel.senderName,
+                headerSenderName: message.senderName,
+                senderEmail: message.effectiveSenderEmail
+            ),
+            statusLabel: statusLine?.label,
+            time: TimestampFormatter.format(message.internalDate)
+        )
         // The column holds text at the style's text width (the text's own cap where an image
         // can be wider: `MessageTextWidthCap`) and everything else at its own cap
         // (cards at `maxBubbleWidth`, images at `imageMaxWidth(transcriptWidth:)`), so it is as wide as the
@@ -232,12 +244,15 @@ struct MessageBubble: View {
         HStack(alignment: recoveryPrompt == nil ? .bottom : Self.sendRecoveryBadgeAlignment, spacing: 8) {
             if !message.isFromMe {
                 leadingContent
+                    // The column's label names the sender (`MessageRowAccessibilityPolicy`).
+                    .accessibilityHidden(true)
             } else {
                 Spacer()
             }
 
             VStack(alignment: message.isFromMe ? .trailing : .leading, spacing: 4) {
                 senderNameView
+                    .accessibilityHidden(true)
 
                 // The subject is text, and keeps to the text's width as the bubble under it
                 // does: at the column's width it ran past that bubble's edge wherever an
@@ -279,7 +294,17 @@ struct MessageBubble: View {
                 .alignmentGuide(Self.sendRecoveryBadgeAlignment) { $0[VerticalAlignment.center] }
 
                 metadataLine(statusLine: statusLine, sendStatus: sendStatus)
+                    // Its status and time are the column label's prefix.
+                    .accessibilityHidden(true)
             }
+            // One element for VoiceOver: who wrote it, its send state and its time, then the
+            // column's own text, the subject, the attachments and the bubble (architecture
+            // review 2026-11, gap-accessibility-architecture#1). The column only: combined at
+            // the row it would swallow the Mac's time line, a header of its own, and merge the
+            // bubble's button with the recovery badge beside the column into one activation.
+            // Modifiers only, always applied, so a mounted row's height and structure stay.
+            .accessibilityElement(children: .combine)
+            .modifier(MessageRowAccessibilityLabel(prefix: accessibilityPrefix))
             .frame(maxWidth: columnMaxWidth, alignment: message.isFromMe ? .trailing : .leading)
             // Room for the bubble's tail on the row's own side, in every row of a style with
             // tails, so a bubble with one and a bubble without line up. Nothing where the
