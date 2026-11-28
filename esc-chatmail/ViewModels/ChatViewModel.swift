@@ -262,6 +262,12 @@ final class ChatViewModel: ObservableObject {
     /// composer created for the chat in that time takes the draft from this
     /// one (`handOverOwedReplyDraft`).
     private var replyDraftSaveIsOwed = false
+    /// The composer changed after a draft save last read it: the 350 ms
+    /// debounce owes it a save. Set on every `objectWillChange` of the
+    /// composer, the publisher the debounce follows, and cleared where a save
+    /// reads the composer. Only the quit's flush asks
+    /// (`saveReplyDraftChangeForTermination`).
+    private var composerChangedSinceDraftRead = false
     /// Unsent replies waiting for the cleanup gate to merge them into the
     /// stored draft (`handOffUnsentReply`), with the text this composer
     /// received after the tap and the send registration the merge ends.
@@ -360,6 +366,11 @@ final class ChatViewModel: ObservableObject {
         // Before `present` below: the draft may come from the composer that
         // owns it until then.
         let tookOverOwedDraft = restoreReplyDraft()
+        // Undebounced, beside the debounce: what a quit within the 350 ms
+        // must save at once (`saveReplyDraftChangeForTermination`).
+        composerState.objectWillChange
+            .sink { [weak self] _ in self?.composerChangedSinceDraftRead = true }
+            .store(in: &cancellables)
         composerState.objectWillChange
             .debounce(for: .milliseconds(350), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.scheduleReplyDraftSave() }
@@ -1278,7 +1289,10 @@ final class ChatViewModel: ObservableObject {
             return
         }
         unsentRepliesAwaitingDraftMerge.append((snapshot, typedSinceSend, notice, unpersistedSend))
+        // A draft write the quit waits for, like a save.
+        let draftWrite = composerDirectory.draftWriteTracker.beginWrite()
         taskManager.run("mergeUnsentReply-\(UUID().uuidString)") { [self] in
+            defer { draftWrite.end() }
             do {
                 try await conversationMutationSerializer.performThrowingCleanupSensitiveMutation { [self] in
                     try await mergeUnsentRepliesIntoDraftWithoutCleanupInterleaving()
@@ -1408,12 +1422,30 @@ final class ChatViewModel: ObservableObject {
     }
 
     /// Every scheduled draft save starts here, so `replyDraftSaveIsOwed`
-    /// covers the whole wait for the cleanup gate.
+    /// covers the whole wait for the cleanup gate, and the quit's
+    /// `draftWriteTracker` counts the save until its task returns: saved,
+    /// skipped by a guard, failed, or cancelled by the next request.
     private func startReplyDraftSave() {
         replyDraftSaveIsOwed = true
+        let draftWrite = composerDirectory.draftWriteTracker.beginWrite()
         taskManager.run("saveReplyDraft") { [self] in
+            defer { draftWrite.end() }
             await saveReplyDraft()
         }
+    }
+
+    /// The save this composer's debounce still owes, started now, because
+    /// the app is quitting (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`).
+    ///
+    /// Nothing when no change has reached the composer since a save last read
+    /// it, or when a save is already waiting to read it
+    /// (`replyDraftSaveIsOwed`), which then reads this change too and is
+    /// counted already: a request here would only cancel it and queue again
+    /// at the back of the gate. Off screen `scheduleReplyDraftSave` is the
+    /// no-op it always is.
+    func saveReplyDraftChangeForTermination() {
+        guard composerChangedSinceDraftRead, !replyDraftSaveIsOwed else { return }
+        scheduleReplyDraftSave()
     }
 
     /// Whether this composer is the one on screen for its conversation.
@@ -1461,6 +1493,7 @@ final class ChatViewModel: ObservableObject {
         // holds the composer, the draft is another composer's) is not this
         // request's to hand on either.
         replyDraftSaveIsOwed = false
+        composerChangedSinceDraftRead = false
         // Read live state only after acquiring cleanup's gate: a queued save
         // must not resurrect content that was sent or explicitly discarded.
         // `sendReply` clears the composer at tap, so a save scheduled by a

@@ -217,16 +217,37 @@ final class AppLifecyclePolicyTests: XCTestCase {
 
     // MARK: - Termination
 
-    func testTerminationDecision_noOutstandingSends_terminatesNow() {
-        XCTAssertEqual(AppLifecyclePolicy.terminationDecision(hasOutstandingSends: false), .terminateNow)
+    func testTerminationDecision_noOutstandingSendsOrDraftWrites_terminatesNow() {
+        XCTAssertEqual(
+            AppLifecyclePolicy.terminationDecision(hasOutstandingSends: false, hasOutstandingDraftWrites: false),
+            .terminateNow
+        )
     }
 
     // Revert-check: fails if `AppLifecyclePolicy.terminationDecision` stops
     // holding the quit for a send in flight, or drops the bound on the wait.
     func testTerminationDecision_outstandingSends_waitsAtMostTenSeconds() {
         XCTAssertEqual(
-            AppLifecyclePolicy.terminationDecision(hasOutstandingSends: true),
-            .terminateAfterOutstandingSends(timeout: 10)
+            AppLifecyclePolicy.terminationDecision(hasOutstandingSends: true, hasOutstandingDraftWrites: false),
+            .terminateAfterOutstandingWork(timeout: 10)
+        )
+    }
+
+    // Revert-check: fails if `AppLifecyclePolicy.terminationDecision` ignores
+    // `hasOutstandingDraftWrites`: the quit then lets the process exit with a
+    // reply draft's save still waiting for the cleanup gate, and the words
+    // typed since the last save are gone at the next launch.
+    func testTerminationDecision_outstandingDraftWritesOnly_waitsAtMostTenSeconds() {
+        XCTAssertEqual(
+            AppLifecyclePolicy.terminationDecision(hasOutstandingSends: false, hasOutstandingDraftWrites: true),
+            .terminateAfterOutstandingWork(timeout: 10)
+        )
+    }
+
+    func testTerminationDecision_outstandingSendsAndDraftWrites_waitsOnceUnderOneDeadline() {
+        XCTAssertEqual(
+            AppLifecyclePolicy.terminationDecision(hasOutstandingSends: true, hasOutstandingDraftWrites: true),
+            .terminateAfterOutstandingWork(timeout: 10)
         )
     }
 }

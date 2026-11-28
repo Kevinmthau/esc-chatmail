@@ -28,6 +28,7 @@
     {
       "selectedTests" : [
         "AppLifecyclePolicyTests",
+        "AppTerminationWaitTests",
         "AttachmentDragPolicyTests",
         "AttachmentExportItemTests",
         "AttachmentExportPolicyTests",
@@ -97,9 +98,9 @@
         "MessageBubbleStyleTests",
         "MessageSendStatusLinePolicyTests",
         "MessageTextWidthCapLayoutTests",
-        "OutboundSendTerminationWaitTests",
         "PastedImageEncoderTests",
         "PastedImageFileTests",
+        "ReplyDraftWriteTrackerTests",
         "ReplyFieldFocusBridgeTests",
         "ReplyFieldPastePolicyTests",
         "ReplyFieldPasteSourceTests",

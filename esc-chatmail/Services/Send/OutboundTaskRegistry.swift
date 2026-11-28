@@ -261,7 +261,7 @@ final class OutboundTaskRegistry {
     /// touching any of them — unlike `cancelAndAwaitAll()`, which account
     /// teardown uses. Returns early, leaving every send alone, when the
     /// calling task is cancelled; the Mac's quit path relies on that to bound
-    /// its wait (`OutboundSendTerminationWait`).
+    /// its wait (`AppTerminationWait`).
     func waitUntilOutstandingSendsFinish() async {
         guard !entries.isEmpty else { return }
 
