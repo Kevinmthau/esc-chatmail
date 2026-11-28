@@ -663,6 +663,7 @@ extension DataCleanupService {
             do {
                 participationsByPerson = try Self.messageParticipations(
                     of: candidates.map(\.person),
+                    prefetchingMessages: true,
                     in: context
                 )
             } catch {

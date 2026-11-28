@@ -131,7 +131,7 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         await runRepair()
 
         // Revert-check: the senderEmail guard in the `.from` case of
-        // DataCleanupService.recoveredHeaderDisplayName(for:email:).
+        // DataCleanupService.recoveredHeaderDisplayName(fromParticipations:email:).
         let name = try await storedDisplayName(forEmail: jake)
         XCTAssertEqual(name, jake)
     }
@@ -167,7 +167,7 @@ final class AddressShapedPersonNameRepairTests: XCTestCase {
         await runRepair()
 
         // Revert-check: the newest-first `candidates.sort` in
-        // DataCleanupService.recoveredHeaderDisplayName(for:email:) (oldest-first
+        // DataCleanupService.recoveredHeaderDisplayName(fromParticipations:email:) (oldest-first
         // keeps "Jakey").
         let name = try await storedDisplayName(forEmail: jake)
         XCTAssertEqual(name, "Jacob")
