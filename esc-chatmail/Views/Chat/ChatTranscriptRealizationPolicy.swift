@@ -65,4 +65,34 @@ enum ChatTranscriptRealizationPolicy {
         guard rowCount >= 2 else { return nil }
         return rowCount - 2
     }
+
+    /// How a pass logs a nudge it has just issued.
+    enum NudgeLog: Equatable {
+        /// A chat-view diagnostic: Debug builds launched with
+        /// ESC_LOG_DIAGNOSTICS=chat-view only.
+        case diagnostic
+        /// The always-on warning, which persists in the device log.
+        case warning
+    }
+
+    /// How the pass logs its nudge number `nudgesIssued` (1 for its first),
+    /// or nil for none. One nudge is the usual path, not a failure: on the
+    /// iOS 27.0 simulator every confirmed reveal of the hosted transcript took
+    /// exactly one (`ChatTranscriptRevealHostedTests`, 2026-11-28, in a
+    /// `NavigationStack` and in a bare window), so as a warning it would be
+    /// written at every chat open and hide the opens that went wrong. A second
+    /// nudge is the first that one did not realize the tail, which is the
+    /// field signal this log exists for, so it warns; the rest of the pass's
+    /// nudges are the same event. A pass that runs out of attempts warns on
+    /// its own (`ChatMessagesCoordinator.completeInitialReveal`).
+    static func nudgeLog(nudgesIssued: Int) -> NudgeLog? {
+        switch nudgesIssued {
+        case 1:
+            return .diagnostic
+        case 2:
+            return .warning
+        default:
+            return nil
+        }
+    }
 }

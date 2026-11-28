@@ -99,11 +99,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         /// fallback otherwise assumes, so that fallback still arms
         /// bottom-follow after one.
         var didObserveParkedPastEnd = false
-        /// The pass has logged its first realization nudge; the rest of its
-        /// nudges are the same event.
-        var didLogRealizationNudge = false
         /// Nudges the pass has issued, against
-        /// `maximumRealizationNudgesPerInitialPass`.
+        /// `maximumRealizationNudgesPerInitialPass`; also decides how each
+        /// is logged (`ChatTranscriptRealizationPolicy.nudgeLog`).
         var realizationNudgesIssued = 0
 
         init(revealDeadline: TimeInterval) {
@@ -1042,22 +1040,33 @@ final class ChatMessagesCoordinator: ObservableObject {
             : chargedAttempts
         pass.scrollAttempts = nextAttempt
         pass.phase = .checkingAfterScroll
+        var nudgeLog: ChatTranscriptRealizationPolicy.NudgeLog?
         if probeKind == .realizationNudge {
             pass.realizationNudgesIssued += 1
-        }
-        let logsFirstRealizationNudge =
-            probeKind == .realizationNudge && !pass.didLogRealizationNudge
-        if logsFirstRealizationNudge {
-            pass.didLogRealizationNudge = true
+            nudgeLog = ChatTranscriptRealizationPolicy.nudgeLog(
+                nudgesIssued: pass.realizationNudgesIssued
+            )
         }
         initialRevealState = .pending(pass)
-        if logsFirstRealizationNudge {
-            // Always logged, like the fallback reveals: the one field signal
-            // that the lazy stack left the tail unrealized on this open.
-            Log.warning(
+        switch nudgeLog {
+        case .diagnostic:
+            // The usual path where it was measured, so not a warning
+            // (`ChatTranscriptRealizationPolicy.nudgeLog`).
+            Log.diagnostic(
+                .chatView,
+                level: .info,
                 "ChatView initial anchor: newest row not realized at the content end; nudging the transcript; \(trackedGeometryDescription)",
                 category: .ui
             )
+        case .warning:
+            // Always logged, like the fallback reveals: the field signal that
+            // one nudge did not realize the tail on this open.
+            Log.warning(
+                "ChatView initial anchor: newest row still not realized after a nudge; nudging the transcript again; \(trackedGeometryDescription)",
+                category: .ui
+            )
+        case nil:
+            break
         }
         taskManager.run(TaskKey.initialGeometryCheck) { [weak self, sleep] in
             guard !Task.isCancelled else { return }
@@ -2531,8 +2540,9 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// Together with the reveal, correction and realization-nudge warnings,
     /// it splits the next device report of a blank open: a reveal or
     /// correction warning names a scroll position problem, a nudge warning
-    /// names a lazy stack that left the tail unrealized
-    /// (`ChatTranscriptRealizationPolicy`). No warning at all means the last
+    /// names a lazy stack that left the tail unrealized through a first
+    /// nudge (`ChatTranscriptRealizationPolicy.nudgeLog`: one nudge is the
+    /// usual path and is a diagnostic only). No warning at all means the last
     /// geometry the coordinator received read as correct, with the newest
     /// row in the hierarchy, while nothing showed, which points at drawing
     /// rather than position or realization, unless geometry deliveries

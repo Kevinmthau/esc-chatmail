@@ -43,4 +43,26 @@ final class ChatTranscriptRealizationPolicyTests: XCTestCase {
         XCTAssertEqual(ChatTranscriptRealizationPolicy.nudgeTargetIndex(rowCount: 2), 0)
         XCTAssertEqual(ChatTranscriptRealizationPolicy.nudgeTargetIndex(rowCount: 20), 18)
     }
+
+    /// A pass's first nudge is the usual path where it was measured (every
+    /// hosted reveal on the iOS 27.0 simulator took one), so it is a
+    /// diagnostic, not the always-on warning.
+    ///
+    /// Revert-check: `case 1: return .warning` in
+    /// `ChatTranscriptRealizationPolicy.nudgeLog` fails this.
+    func testNudgeLog_firstNudge_isADiagnostic() {
+        XCTAssertEqual(ChatTranscriptRealizationPolicy.nudgeLog(nudgesIssued: 1), .diagnostic)
+    }
+
+    /// A second nudge means the first did not realize the tail: that is the
+    /// field signal, logged once per pass.
+    ///
+    /// Revert-check: `case 2: return .diagnostic` in
+    /// `ChatTranscriptRealizationPolicy.nudgeLog` fails the first assertion;
+    /// warning for every nudge past the first fails the second.
+    func testNudgeLog_secondNudgeWarnsOnceAndLaterNudgesLogNothing() {
+        XCTAssertEqual(ChatTranscriptRealizationPolicy.nudgeLog(nudgesIssued: 2), .warning)
+        XCTAssertNil(ChatTranscriptRealizationPolicy.nudgeLog(nudgesIssued: 3))
+        XCTAssertNil(ChatTranscriptRealizationPolicy.nudgeLog(nudgesIssued: 0))
+    }
 }
