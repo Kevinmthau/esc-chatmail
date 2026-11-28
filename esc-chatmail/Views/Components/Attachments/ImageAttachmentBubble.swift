@@ -111,10 +111,14 @@ struct ImageAttachmentBubble: View {
                 isImage: true
             )
         } else {
+            // Decoded to cover the frame this bubble reserved, not at the preview's own size
+            // (`ThumbnailDecodeSize`): a 1,600 px photo drawn 840 px wide decodes about 2.4 MB,
+            // not 7.7 MB.
             thumbnailLoader.load(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                previewPath: attachment.readablePreviewURLValue
+                previewPath: attachment.readablePreviewURLValue,
+                decodeSize: ThumbnailDecodeSize(points: size, displayScale: displayScale)
             )
         }
     }

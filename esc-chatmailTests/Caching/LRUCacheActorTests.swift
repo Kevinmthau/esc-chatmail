@@ -228,23 +228,67 @@ final class LRUCacheActorTests: XCTestCase {
 
     // MARK: - Memory Limits
 
-    func testEviction_respectsMaxMemoryBytes() async {
-        // Note: evictIfNeeded() checks memory BEFORE inserting the new entry
-        // So set maxMemoryBytes such that 2 entries exceed it, triggering eviction on 3rd insert
+    // Revert-check: `fitWithinLimits(sparing:)` after the insert in `LRUCacheActor.set`. Check
+    // the budget before the insert, as it was, and two 50-byte entries are held under an 80-byte
+    // budget: the cache was over its budget after every insert that needed room.
+    func testEviction_respectsMaxMemoryBytes_afterTheInsert() async {
         let config = CacheConfiguration(maxItems: 100, maxMemoryBytes: 80)
         let cache = LRUCacheActor<String, String>(config: config)
 
-        // Add entries with size tracking (each 50 bytes)
         await cache.set("key1", value: "value1", sizeBytes: 50)
         await cache.set("key2", value: "value2", sizeBytes: 50)
-        // After key2: memory = 100, which > 80
-
-        // This should trigger eviction since current memory (100) > maxMemoryBytes (80)
         await cache.set("key3", value: "value3", sizeBytes: 50)
 
         let stats = await cache.getStatistics()
-        XCTAssertEqual(stats.currentItemCount, 2, "Should evict to stay within memory limit")
-        XCTAssertGreaterThan(stats.evictions, 0, "Should have evicted at least one item")
+        XCTAssertEqual(stats.currentItemCount, 1, "50 bytes is all an 80-byte budget holds")
+        XCTAssertEqual(stats.evictions, 2)
+        let newest = await cache.get("key3")
+        XCTAssertEqual(newest, "value3", "The entry just inserted is the one kept")
+    }
+
+    // Revert-check: `where key != keptKey` in `LRUCacheActor.evictLeastRecentlyUsed(sparing:)`.
+    // Without it an entry larger than the whole budget evicts everything and then itself.
+    func testSet_anEntryLargerThanTheWholeBudget_isKeptAlone() async {
+        let cache = LRUCacheActor<String, String>(config: CacheConfiguration(maxItems: 100, maxMemoryBytes: 80))
+
+        await cache.set("small1", value: "a", sizeBytes: 30)
+        await cache.set("small2", value: "b", sizeBytes: 30)
+        await cache.set("large", value: "c", sizeBytes: 100)
+
+        let stats = await cache.getStatistics()
+        XCTAssertEqual(stats.currentItemCount, 1)
+        let large = await cache.get("large")
+        XCTAssertEqual(large, "c")
+    }
+
+    // Revert-check: the `removeEntry(forKey: key)` before the insert in `LRUCacheActor.set`.
+    // Without it a replaced entry's bytes stay in the running total, and the next insert evicts
+    // an entry the budget has room for.
+    func testSet_replacingAnEntry_countsOnlyItsNewSize() async {
+        let cache = LRUCacheActor<String, String>(config: CacheConfiguration(maxItems: 100, maxMemoryBytes: 100))
+
+        await cache.set("replaced", value: "large", sizeBytes: 60)
+        await cache.set("replaced", value: "small", sizeBytes: 10)
+        await cache.set("other", value: "other", sizeBytes: 80)
+
+        let stats = await cache.getStatistics()
+        XCTAssertEqual(stats.currentItemCount, 2)
+        let replaced = await cache.get("replaced")
+        XCTAssertEqual(replaced, "small")
+    }
+
+    func testRemoveAndClear_releaseTheirBytes() async {
+        let cache = LRUCacheActor<String, String>(config: CacheConfiguration(maxItems: 100, maxMemoryBytes: 100))
+
+        await cache.set("a", value: "a", sizeBytes: 90)
+        await cache.remove("a")
+        await cache.set("b", value: "b", sizeBytes: 90)
+        await cache.clear()
+        await cache.set("c", value: "c", sizeBytes: 90)
+        await cache.set("d", value: "d", sizeBytes: 10)
+
+        let stats = await cache.getStatistics()
+        XCTAssertEqual(stats.currentItemCount, 2)
     }
 
     func testSet_withSizeTracking_calculatesCorrectly() async {

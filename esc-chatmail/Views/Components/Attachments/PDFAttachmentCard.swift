@@ -5,7 +5,15 @@ struct PDFAttachmentCard: View {
     @ObservedObject var downloader: AttachmentDownloader
     let onTap: () -> Void
     @Environment(\.emailPreviewCardMetrics) private var metrics
+    @Environment(\.displayScale) private var displayScale
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
+
+    /// The first page's frame, which its preview is decoded to cover (`ThumbnailDecodeSize`).
+    private static let thumbnailFrame = CGSize(width: 60, height: 80)
+
+    private var thumbnailDecodeSize: ThumbnailDecodeSize? {
+        ThumbnailDecodeSize(points: Self.thumbnailFrame, displayScale: displayScale)
+    }
 
     var body: some View {
         Button(action: onTap) {
@@ -15,7 +23,7 @@ struct PDFAttachmentCard: View {
                     Image(platformImage: image)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 60, height: 80)
+                        .frame(width: Self.thumbnailFrame.width, height: Self.thumbnailFrame.height)
                         .cornerRadius(8)
                         .overlay(
                             RoundedRectangle(cornerRadius: 8)
@@ -24,7 +32,7 @@ struct PDFAttachmentCard: View {
                 } else {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(Color.gray.opacity(0.1))
-                        .frame(width: 60, height: 80)
+                        .frame(width: Self.thumbnailFrame.width, height: Self.thumbnailFrame.height)
                         .overlay(
                             Group {
                                 if thumbnailLoader.isLoading {
@@ -85,7 +93,8 @@ struct PDFAttachmentCard: View {
             thumbnailLoader.load(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                previewPath: attachment.previewURL
+                previewPath: attachment.previewURL,
+                decodeSize: thumbnailDecodeSize
             )
             // Download if queued, failed, or file is missing from disk
             if attachment.state == .queued || attachment.state == .failed || attachment.needsRedownload {
@@ -103,7 +112,8 @@ struct PDFAttachmentCard: View {
             thumbnailLoader.load(
                 attachmentId: attachment.id,
                 messageId: attachment.message?.id,
-                previewPath: newValue
+                previewPath: newValue,
+                decodeSize: thumbnailDecodeSize
             )
         }
     }

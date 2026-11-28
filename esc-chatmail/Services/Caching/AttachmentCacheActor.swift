@@ -29,11 +29,13 @@ actor AttachmentCacheActor: MemoryWarningHandler {
     init(
         loadAttachmentData: @escaping @Sendable (String?) async -> Data? = { path in
             AttachmentPaths.loadData(from: path)
-        }
+        },
+        thumbnailCacheConfiguration: CacheConfiguration = .thumbnailCache()
     ) {
         self.loadAttachmentData = loadAttachmentData
-        // Thumbnail cache: ~50MB (assuming ~100KB per thumbnail)
-        self.thumbnailCache = LRUCacheActor(config: .thumbnailCache())
+        // Thumbnail cache: 50 MB of decoded pixels (`PlatformImage.estimatedCacheCost`), 500
+        // entries at most.
+        self.thumbnailCache = LRUCacheActor(config: thumbnailCacheConfiguration)
 
         // Full image cache: ~100MB (for viewing)
         self.fullImageCache = LRUCacheActor(config: .fullImageCache())
@@ -119,10 +121,21 @@ actor AttachmentCacheActor: MemoryWarningHandler {
 
     // MARK: - Thumbnail Loading
 
+    /// The stored preview at `path`, decoded to the least size that covers `decodeSize`
+    /// (`ThumbnailDecodeSize`), or at its own size where that is nil.
+    ///
+    /// The decode is forced inside the deduplicated operation, off this actor
+    /// (`kCGImageSourceShouldCacheImmediately`), and the entry is charged what the bitmap
+    /// holds (`PlatformImage.estimatedCacheCost`). Until 2026-11-28 the preview was decoded
+    /// whole through `PlatformImage(data:)`, lazily, and charged the size of a JPEG re-encode
+    /// made on this actor at every miss: the encode was what forced the decode, and the 50 MB
+    /// budget counted a few hundred kilobytes for a bitmap of 7.7 MB (architecture review
+    /// 2026-11, caching-memory#1).
     func loadThumbnail(
         for attachmentId: String,
         messageId: String? = nil,
-        from path: String?
+        from path: String?,
+        decodeSize: ThumbnailDecodeSize? = nil
     ) async -> PlatformImage? {
         guard acceptsAccountWork,
               let path,
@@ -141,6 +154,7 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         let cacheKey = Self.thumbnailCacheKey(
             cacheIdentity,
             sourcePath: path,
+            decodeSize: decodeSize,
             generation: generation
         )
 
@@ -158,16 +172,14 @@ actor AttachmentCacheActor: MemoryWarningHandler {
                 return nil
             }
 
-            // Decode image
-            return PlatformImage(data: data)
+            return Self.decodedThumbnail(from: data, decodeSize: decodeSize)
         }
 
         guard acceptsAccountWork, generation == accountGeneration else { return nil }
 
         // Cache the result
         if let image = result {
-            let cost = image.jpegData(compressionQuality: 0.8)?.count ?? 0
-            await thumbnailCache.set(cacheKey, value: image, sizeBytes: cost)
+            await thumbnailCache.set(cacheKey, value: image, sizeBytes: image.estimatedCacheCost)
             guard acceptsAccountWork, generation == accountGeneration else {
                 await thumbnailCache.remove(cacheKey)
                 return nil
@@ -241,8 +253,8 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         guard acceptsAccountWork, generation == accountGeneration else { return nil }
 
         if let image = result {
-            let cost = image.jpegData(compressionQuality: 0.8)?.count ?? 0
-            await thumbnailCache.set(cacheKey, value: image, sizeBytes: cost)
+            // What the frame's bitmap holds, as for every thumbnail; never a JPEG re-encode.
+            await thumbnailCache.set(cacheKey, value: image, sizeBytes: image.estimatedCacheCost)
             guard acceptsAccountWork, generation == accountGeneration else {
                 await thumbnailCache.remove(cacheKey)
                 return nil
@@ -338,8 +350,9 @@ actor AttachmentCacheActor: MemoryWarningHandler {
 
         // Cache the downsampled image
         if let image = image {
-            let cost = Int(targetSize.width * targetSize.height * 4)
-            await fullImageCache.set(cacheKey, value: image, sizeBytes: cost)
+            // The bitmap's pixels: the target size is in points, so a cost made from it
+            // counted a ninth of a 3x display's bitmap.
+            await fullImageCache.set(cacheKey, value: image, sizeBytes: image.estimatedCacheCost)
             guard acceptsAccountWork, generation == accountGeneration else {
                 await fullImageCache.remove(cacheKey)
                 return nil
@@ -348,6 +361,34 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         }
 
         return image
+    }
+
+    /// A preview's bytes decoded, upright, to the least size that covers `decodeSize`, or at the
+    /// image's own size where that is nil, with the decode forced now
+    /// (`kCGImageSourceShouldCacheImmediately`) rather than at the image's first draw on the
+    /// main thread. An image past the source-pixel budget is refused, as every decode of a
+    /// sender's image is (`ImageProcessor.isWithinDecodeBudget`). What ImageIO cannot read as
+    /// an image falls back to `PlatformImage(data:)`, as before, which is lazy.
+    nonisolated static func decodedThumbnail(from data: Data, decodeSize: ThumbnailDecodeSize?) -> PlatformImage? {
+        let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
+        guard !data.isEmpty,
+              let source = CGImageSourceCreateWithData(data as CFData, sourceOptions),
+              let sourcePixelSize = ImageProcessor.sourcePixelSize(of: source) else {
+            return PlatformImage(data: data)
+        }
+        guard ImageProcessor.isWithinDecodeBudget(sourcePixelSize) else { return nil }
+        let longerSide = decodeSize?.longerSide(forSourceOf: sourcePixelSize)
+            ?? max(sourcePixelSize.width, sourcePixelSize.height)
+        let options = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: longerSide
+        ] as CFDictionary
+        guard let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else {
+            return PlatformImage(data: data)
+        }
+        return PlatformImage(cgImage: thumbnail)
     }
 
     private nonisolated func downsampleImage(
@@ -680,7 +721,8 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         return await loadThumbnail(
             for: attachmentId,
             messageId: messageId,
-            from: path
+            from: path,
+            decodeSize: nil
         )
     }
 
@@ -733,12 +775,17 @@ actor AttachmentCacheActor: MemoryWarningHandler {
         await dataCache.remove(Self.dataCacheKey(cacheIdentity, generation: generation))
     }
 
+    /// Keeps the thumbnail prefix, which identity-based invalidation and the aggressive clear
+    /// find entries by, and names the decoded size after the path, so a preview drawn at two
+    /// sizes is two entries.
     private nonisolated static func thumbnailCacheKey(
         _ attachmentId: String,
         sourcePath: String,
+        decodeSize: ThumbnailDecodeSize?,
         generation: UInt64
     ) -> String {
-        "\(thumbnailCachePrefix(attachmentId, generation: generation))\(sourcePath)"
+        let size = decodeSize?.cacheKeyComponent ?? ""
+        return "\(thumbnailCachePrefix(attachmentId, generation: generation))\(sourcePath)\(size)"
     }
 
     private nonisolated static func thumbnailCachePrefix(

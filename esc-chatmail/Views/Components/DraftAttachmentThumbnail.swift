@@ -7,6 +7,10 @@ struct DraftAttachmentThumbnail: View {
 
     @StateObject private var thumbnailLoader = AttachmentThumbnailLoader()
     @State private var activeLoadKey: LoadKey?
+    @Environment(\.displayScale) private var displayScale
+
+    /// The thumbnail's frame, which its preview is decoded to cover (`ThumbnailDecodeSize`).
+    private static let thumbnailFrame = CGSize(width: 60, height: 60)
 
     private struct LoadKey: Equatable {
         let objectIdentity: ObjectIdentifier
@@ -30,12 +34,12 @@ struct DraftAttachmentThumbnail: View {
                 Image(platformImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 60, height: 60)
+                    .frame(width: Self.thumbnailFrame.width, height: Self.thumbnailFrame.height)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
             } else {
                 RoundedRectangle(cornerRadius: 8)
                     .fill(Color.gray.opacity(0.2))
-                    .frame(width: 60, height: 60)
+                    .frame(width: Self.thumbnailFrame.width, height: Self.thumbnailFrame.height)
                     .overlay(
                         Image(systemName: placeholderIconName)
                             .foregroundColor(.gray)
@@ -57,7 +61,8 @@ struct DraftAttachmentThumbnail: View {
             thumbnailLoader.load(
                 attachmentId: loadKey.attachmentId,
                 messageId: loadKey.messageId,
-                previewPath: loadKey.previewPath
+                previewPath: loadKey.previewPath,
+                decodeSize: ThumbnailDecodeSize(points: Self.thumbnailFrame, displayScale: displayScale)
             )
             activeLoadKey = loadKey
         }
