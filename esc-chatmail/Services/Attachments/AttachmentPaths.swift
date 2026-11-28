@@ -371,7 +371,15 @@ struct AttachmentPaths {
     /// is never a file cut short: readers take a file's presence as its validity. A staging file
     /// a killed process left starts with `.clone-`, never `remote_` or `local_`, so it is no
     /// attachment by its name, and the orphan sweep removes it. The result is classified as a
-    /// write's is, and the destination gets its backup mark (`applyBackupPolicy`).
+    /// write's is. The clone carries the source's own backup mark, which `clonefile` and the
+    /// `copyItem` fallback both copy (measured on macOS 27.2), and `applyBackupPolicy` then sets
+    /// the mark a file in `Attachments` should have; a preview in `Previews` is left with the
+    /// copied mark, and its directory's mark keeps it out of backups either way. And the clone
+    /// keeps its source's dates, which the orphan sweep's grace period
+    /// (`AttachmentDownloader.isOldEnoughToSweep`) and the deleted-row check
+    /// (`DeletedRowFileReclamation.wasWrittenAfter`) read, so the staging file's modification
+    /// date is set to now before the rename: a preview cloned from an older original is a file
+    /// written now, never one the sweep could take before its row is saved.
     static func storeClone(ofFileAt sourcePath: String, at destinationPath: String) -> AttachmentWriteResult {
         guard let source = fullURL(for: sourcePath),
               let destination = fullURL(for: destinationPath) else {
@@ -395,6 +403,7 @@ struct AttachmentPaths {
                 return result
             }
         }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: staging.path)
         guard rename(staging.path, destination.path) == 0 else {
             return storeCloneFailure(posixCode: errno)
         }
