@@ -86,4 +86,22 @@ final class PrivilegeDeclarationsTests: XCTestCase {
             "Something registers for remote notifications; it needs the push entitlement back"
         )
     }
+
+    // MARK: - App Transport Security
+
+    /// Neither app declares `NSAllowsLocalNetworking`. ATS has exempted IP literals, unqualified
+    /// names and `.local` since iOS 10 and macOS 10.12, so the key granted nothing: measured on the
+    /// iOS 27.0 simulator with it gone from the built Info.plist, a plain-http request to
+    /// `127.0.0.1` and to `localhost` still reached a loopback listener. Arbitrary loads stay off
+    /// for the app's own requests and on for web content, as before.
+    ///
+    /// Revert-check: putting `NSAllowsLocalNetworking` back in either plist fails this.
+    func testATS_declaresNoLocalNetworkingException_andKeepsItsOtherKeys() throws {
+        for path in ["esc-chatmail/Resources/Info.plist", "esc-chatmail/Resources/Info-macOS.plist"] {
+            let ats = try XCTUnwrap(try plist(path)["NSAppTransportSecurity"] as? [String: Any], path)
+            XCTAssertNil(ats["NSAllowsLocalNetworking"], path)
+            XCTAssertEqual(ats["NSAllowsArbitraryLoads"] as? Bool, false, path)
+            XCTAssertEqual(ats["NSAllowsArbitraryLoadsInWebContent"] as? Bool, true, path)
+        }
+    }
 }
