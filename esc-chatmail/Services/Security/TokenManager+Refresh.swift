@@ -57,17 +57,18 @@ extension TokenManager {
                     tokens = try await tokenRefresher.forceRefreshTokens()
                 }
 
-                // Save the new tokens (drops silently if sign-out raced the
+                // Adopt the new token (drops silently if sign-out raced the
                 // refresh). The cache is populated synchronously inside
-                // saveTokens, so concurrent getCurrentToken callers see the
+                // adoptTokens, so concurrent getCurrentToken callers see the
                 // fresh token immediately without a separate publish step.
-                let saved = try saveTokens(
+                // The refresh token is GoogleSignIn's to keep, in its own
+                // keychain item; the app stores neither.
+                let adopted = adoptTokens(
                     access: tokens.accessToken,
-                    refresh: tokens.refreshToken,
                     expirationDate: tokens.expirationDate,
                     ifCacheEpochMatches: epochAtStart
                 )
-                if !saved {
+                if !adopted {
                     Log.info("Token refresh completed for a retired session; discarding tokens", category: .auth)
                     throw CancellationError()
                 }
@@ -129,10 +130,6 @@ extension TokenManager {
             self.lastRefreshError = finalError
         }
         throw finalError
-    }
-
-    func loadTokenInfo() throws -> TokenInfo {
-        return try keychainService.loadCodable(TokenInfo.self, for: KeychainService.Key.googleAccessToken.rawValue)
     }
 
     func isRetryableError(_ error: Error) -> Bool {

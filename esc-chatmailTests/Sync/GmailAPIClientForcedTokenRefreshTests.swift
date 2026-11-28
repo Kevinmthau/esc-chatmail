@@ -25,8 +25,8 @@ private final class CountingTokenManager: TokenManagerProtocol, @unchecked Senda
         return try await base.refreshToken(rejecting: rejectedAccessToken)
     }
 
-    func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {
-        try base.saveTokens(access: access, refresh: refresh, expirationDate: expirationDate)
+    func adoptTokens(access: String, expirationDate: Date) {
+        base.adoptTokens(access: access, expirationDate: expirationDate)
     }
 
     func clearTokens() throws { try base.clearTokens() }
@@ -137,9 +137,8 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
 
         // The token Gmail will reject, held as fresh by the device's clock
         // (a clock set back), and what GoogleSignIn's plain refresh hands back.
-        try tokenManager.saveTokens(
+        tokenManager.adoptTokens(
             access: Self.rejectedToken,
-            refresh: "refresh-token",
             expirationDate: Date().addingTimeInterval(3_600)
         )
         refresher.accessToken = Self.rejectedToken
@@ -205,13 +204,9 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         )
         XCTAssertEqual(refresher.callCount, 1, "GoogleSignIn's own refresh is asked first")
         XCTAssertEqual(refresher.forcedCallCount, 1, "Exactly one forced refresh")
-        let stored = try keychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
-        )
-        XCTAssertEqual(stored.accessToken, Self.forcedToken, "The forced token is saved")
         let current = try await tokenManager.getCurrentToken()
         XCTAssertEqual(current, Self.forcedToken)
+        XCTAssertEqual(refresher.callCount, 1, "The forced token was adopted: asking again refreshes nothing")
     }
 
     // Revert-check: fails if `performTokenRefresh` forces a refresh whenever
@@ -272,9 +267,8 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
             )]
         )
         let manager = TokenManager(keychainService: keychain, authSession: authSession, tokenRefresher: stepped)
-        try manager.saveTokens(
+        manager.adoptTokens(
             access: Self.rejectedToken,
-            refresh: "refresh-token",
             expirationDate: Date().addingTimeInterval(3_600)
         )
         StubURLProtocol.script = [.status(401), .data(200, Self.messageBody)]
@@ -309,9 +303,8 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
             sendOutcomes: [skewRefusal, skewRefusal, skewRefusal]
         )
         let manager = TokenManager(keychainService: keychain, authSession: authSession, tokenRefresher: stepped)
-        try manager.saveTokens(
+        manager.adoptTokens(
             access: Self.rejectedToken,
-            refresh: "refresh-token",
             expirationDate: Date().addingTimeInterval(3_600)
         )
         StubURLProtocol.script = [.status(401), .data(200, Self.messageBody)]
@@ -332,11 +325,9 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
         XCTAssertFalse(authSession.requiresReauthentication, "Nobody is asked to sign in again")
         XCTAssertTrue(authSession.canAccessMailbox)
-        let stored = try keychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
-        )
-        XCTAssertEqual(stored.accessToken, Self.rejectedToken, "The credentials are kept")
+        let kept = try await manager.getCurrentToken()
+        XCTAssertEqual(kept, Self.rejectedToken, "The credentials are kept")
+        XCTAssertEqual(stepped.sendCount, 1, "The kept token is served from the cache, with no further request")
     }
 
     // MARK: - Concurrent 401s on one token
@@ -384,11 +375,11 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
 
     // MARK: - Sign-out during the forced refresh
 
-    // Revert-check: fails if `performTokenRefresh` saves its tokens ungated
+    // Revert-check: fails if `performTokenRefresh` adopts its token ungated
     // (`ifCacheEpochMatches: nil` in place of `epochAtStart`): the forced
-    // token would be saved for the signed-out account and the request sent
+    // token would be adopted for the signed-out account and the request sent
     // again with it.
-    func testGetMessage_signOutDuringTheForcedRefresh_savesNothingAndSendsNothingMore() async throws {
+    func testGetMessage_signOutDuringTheForcedRefresh_adoptsNothingAndSendsNothingMore() async throws {
         let manager = tokenManager!
         refresher.onForcedRefresh = {
             try? manager.clearTokens()
@@ -410,8 +401,8 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(StubURLProtocol.requestCount, 1)
         XCTAssertEqual(refresher.forcedCallCount, 1)
         XCTAssertFalse(
-            keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue),
-            "The forced token of a retired generation is never saved"
+            tokenManager.isAuthenticated(),
+            "The forced token of a retired generation is never adopted"
         )
         let deadline = Date().addingTimeInterval(5)
         while authSession.accessToken != nil, Date() < deadline {
