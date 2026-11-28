@@ -152,13 +152,22 @@ final class SyncEngineRunLeaseTests: XCTestCase {
 
     /// UIKit's expiration cancels the run and ends the lease before it
     /// returns, awaiting nothing; the run then unwinds and releases the
-    /// boundary, having stored nothing.
+    /// boundary.
     ///
     /// Revert-check: the `syncRunTask.task.cancel()` in the expiration that
     /// `SyncEngine.triggerIncrementalSyncIfPossible` gives the lease (the run
     /// waits out its request and the boundary stays held past the deadline),
     /// and the `self.end()` in `SyncRunBackgroundLease.begin`'s expiration
     /// handler (the grant is ended only once the chain unwinds).
+    ///
+    /// HONEST SCOPE: what a cancelled run leaves in the store is not pinned
+    /// here. The run is cancelled in its first request, before it has staged
+    /// anything, so the store would be empty whether or not the cancellation
+    /// rolled anything back; an assertion that no account was stored could
+    /// not fail. `IncrementalSyncCursorTests`
+    /// (`testCancellationDuringMessageFetchRetainsCheckpointAndFreshRunResumes`)
+    /// pins that a cancelled run leaves the cursor, the checkpoint and the
+    /// failure counter as they were.
     func testTriggerIncrementalSync_leaseExpiration_cancelsTheRunAndEndsTheLeaseAtOnce() async throws {
         let coordinator = SyncRunCoordinator()
         let lease = SyncRunBackgroundTaskManagerSpy()
@@ -179,8 +188,6 @@ final class SyncEngineRunLeaseTests: XCTestCase {
         XCTAssertEqual(lease.endCount, 1, "Ended once: the chain's own end is a no-op")
         XCTAssertEqual(engine.syncStatus, "Sync cancelled")
         XCTAssertFalse(engine.isSyncing)
-        let accounts = try await accountCount()
-        XCTAssertEqual(accounts, 0, "The cancelled run stored no account and no cursor")
     }
 
     // MARK: - Helpers
@@ -222,12 +229,6 @@ final class SyncEngineRunLeaseTests: XCTestCase {
             availableStorageBytes: { StoreVolumeFreeSpace.lowStorageThresholdBytes * 100 },
             runBackgroundTaskManager: runBackgroundTaskManager
         )
-    }
-
-    private func accountCount() async throws -> Int {
-        try await testStack.performBackgroundTask { context in
-            try context.count(for: Account.fetchRequest())
-        }
     }
 
     private func waitUntil(
