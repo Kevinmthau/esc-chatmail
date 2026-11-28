@@ -3,7 +3,7 @@
 // Ports the token-lifecycle invariants from the iOS app
 // (esc-chatmail/Services/Security/TokenManager.swift + AuthSession.swift):
 //   - 5-minute expiry horizon: a token within 5 minutes of expiry is treated as
-//     expired and renewed before use (TokenInfo.isExpiringSoon).
+//     expired and renewed before use (TokenManager's CachedToken.isExpiringSoon).
 //   - Single-flight renewal: concurrent callers share ONE renewal
 //     (TaskCoordinator.getOrCreateTask).
 //   - Epoch guard: sign-out bumps a monotonically increasing epoch in the same

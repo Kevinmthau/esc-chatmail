@@ -20,16 +20,13 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
     /// Error to throw on refreshToken() (resets after throwing)
     var refreshError: Error?
 
-    /// Error to throw on saveTokens() (resets after throwing)
-    var saveError: Error?
-
     /// Error to throw on clearTokens() (resets after throwing)
     var clearError: Error?
 
     /// Tracks method calls for verification
     private(set) var getCurrentTokenCallCount = 0
     private(set) var refreshTokenCallCount = 0
-    private(set) var saveTokensCallCount = 0
+    private(set) var adoptTokensCallCount = 0
     private(set) var clearTokensCallCount = 0
     private(set) var isAuthenticatedCallCount = 0
 
@@ -37,10 +34,9 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
     /// the 401 path read from the request Gmail refused.
     private(set) var rejectedAccessTokens: [String] = []
 
-    /// Last saved tokens for inspection
-    private(set) var lastSavedAccessToken: String?
-    private(set) var lastSavedRefreshToken: String?
-    private(set) var lastSavedExpirationDate: Date?
+    /// Last adopted token for inspection
+    private(set) var lastAdoptedAccessToken: String?
+    private(set) var lastAdoptedExpirationDate: Date?
 
     /// Delay to simulate network latency (in seconds)
     var artificialDelay: TimeInterval = 0
@@ -52,17 +48,15 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
         isAuthenticatedValue = true
         getTokenError = nil
         refreshError = nil
-        saveError = nil
         clearError = nil
         getCurrentTokenCallCount = 0
         refreshTokenCallCount = 0
-        saveTokensCallCount = 0
+        adoptTokensCallCount = 0
         clearTokensCallCount = 0
         isAuthenticatedCallCount = 0
         rejectedAccessTokens = []
-        lastSavedAccessToken = nil
-        lastSavedRefreshToken = nil
-        lastSavedExpirationDate = nil
+        lastAdoptedAccessToken = nil
+        lastAdoptedExpirationDate = nil
         artificialDelay = 0
     }
 
@@ -108,17 +102,10 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
         return try await refreshToken()
     }
 
-    func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {
-        saveTokensCallCount += 1
-
-        if let error = saveError {
-            saveError = nil
-            throw error
-        }
-
-        lastSavedAccessToken = access
-        lastSavedRefreshToken = refresh
-        lastSavedExpirationDate = expirationDate
+    func adoptTokens(access: String, expirationDate: Date) {
+        adoptTokensCallCount += 1
+        lastAdoptedAccessToken = access
+        lastAdoptedExpirationDate = expirationDate
         currentToken = access
     }
 
@@ -131,9 +118,8 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
         }
 
         currentToken = ""
-        lastSavedAccessToken = nil
-        lastSavedRefreshToken = nil
-        lastSavedExpirationDate = nil
+        lastAdoptedAccessToken = nil
+        lastAdoptedExpirationDate = nil
         isAuthenticatedValue = false
     }
 

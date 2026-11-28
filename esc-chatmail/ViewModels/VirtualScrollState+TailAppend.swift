@@ -19,7 +19,9 @@ extension VirtualScrollState {
     ///
     /// Deliberately narrow; every other change keeps the full reload, which is
     /// also the healing path for rows changed without a precise notification
-    /// (so cached rows are reused only here, not wholesale). It requires:
+    /// (so a dataset change never reuses cached rows wholesale: only this
+    /// append, and a scroll slide over the current window's rows, reuse any).
+    /// It requires:
     /// - no load in flight (a load owns the user's current scroll intent) and a
     ///   loaded initial window;
     /// - a window that follows the latest messages and genuinely abuts the
@@ -104,11 +106,14 @@ extension VirtualScrollState {
     ) {
         let appendedRows = ChatMessageRowModelMapper.map(messages)
         let appendedMessageIDs = messages.map(\.objectID)
+        // At the tail, so no row below; the row above stays the window's, or
+        // a front trim drops a new one.
         let extendedWindow = MessageWindow(
             startIndex: window.startIndex,
             endIndex: window.endIndex + appendedMessageIDs.count,
             messageIDs: window.messageIDs + appendedMessageIDs,
-            isLoading: false
+            isLoading: false,
+            previousNeighborID: window.previousNeighborID
         ).frontTrimmed(to: configuration.maxWindowSize)
 
         setMessageWindow(extendedWindow)

@@ -402,6 +402,53 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
         manager.clear()
     }
 
+    /// A row on screen warms the prepared HTML and builds no off-screen WebView, which would load the
+    /// original's remote images and open pixels for mail the user has not opened
+    /// (architecture review 2026-11, `security-privacy#3`). The second warm, of another message at
+    /// a width, is the control: with adoption on, the same manager does build an entry for it.
+    ///
+    /// Revert-check: giving `FullEmailOpening.warmVisibleRow` a width (`warm(…, width: 390)`) fails
+    /// this.
+    /// HONEST SCOPE: no network request is observed here; what is pinned is that no WebView exists.
+    func testWarmVisibleRow_adoptionEnabled_storesPreparedPayloadAndBuildsNoWebView() async throws {
+        let previousDisable = getenv(FullEmailWebViewAdoptionPolicy.disableEnvironmentKey).map { String(cString: $0) }
+        _ = unsetenv(FullEmailWebViewAdoptionPolicy.disableEnvironmentKey)
+        defer {
+            if let previousDisable {
+                _ = setenv(FullEmailWebViewAdoptionPolicy.disableEnvironmentKey, previousDisable, 1)
+            }
+        }
+        XCTAssertTrue(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
+
+        let messagesDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "FullEmailWebViewManagerTests-\(UUID().uuidString)"
+        )
+        let contentHandler = HTMLContentHandler(messagesDirectory: messagesDirectory)
+        defer {
+            try? FileManager.default.removeItem(at: messagesDirectory)
+        }
+        let rowMessageId = "visible-row-\(UUID().uuidString)"
+        let controlMessageId = "visible-row-control-\(UUID().uuidString)"
+        _ = contentHandler.saveHTML(simpleHTML(title: "Visible row"), for: rowMessageId)
+        _ = contentHandler.saveHTML(simpleHTML(title: "Control"), for: controlMessageId)
+
+        let manager = FullEmailWebViewManager(loader: makeLoader(contentHandler: contentHandler))
+        defer { manager.clear() }
+
+        await manager.warmVisibleRow(request: makeRequest(messageId: rowMessageId), message: nil)
+
+        XCTAssertTrue(manager.hasPreparedPayloadForTesting(messageId: rowMessageId))
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: rowMessageId))
+
+        await manager.warm(request: makeRequest(messageId: controlMessageId), message: nil, width: 390)
+
+        XCTAssertTrue(
+            manager.hasPrerenderedWebViewEntryForTesting(messageId: controlMessageId),
+            "Control: a warm given a width does build a WebView in this host"
+        )
+        XCTAssertFalse(manager.hasPrerenderedWebViewEntryForTesting(messageId: rowMessageId))
+    }
+
     func testPrepaintAfterExplicitOpenCreatesWebViewEntryByDefault() {
         withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
             XCTAssertTrue(
@@ -1161,27 +1208,6 @@ final class FullEmailWebViewAdoptionPolicyTests: XCTestCase {
         withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
             withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
                 XCTAssertTrue(EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption)
-            }
-        }
-    }
-
-    func testVisibleRowWarmWidthEstimateIsNilWhenAdoptionDisabled() {
-        withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
-            withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
-                XCTAssertNil(
-                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(readerWidthEstimate: 390)
-                )
-            }
-        }
-    }
-
-    func testVisibleRowWarmWidthEstimateUsesSceneWidthWhenAdoptionEnabled() {
-        withEnvironmentValue("1", for: FullEmailWebViewAdoptionPolicy.enableEnvironmentKey) {
-            withEnvironmentValue(nil, for: FullEmailWebViewAdoptionPolicy.disableEnvironmentKey) {
-                XCTAssertEqual(
-                    EmailReaderRenderingConfiguration.visibleRowWarmWidthEstimate(readerWidthEstimate: 390),
-                    390
-                )
             }
         }
     }

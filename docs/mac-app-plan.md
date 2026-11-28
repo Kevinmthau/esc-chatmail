@@ -210,7 +210,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 - **Background-time leases.** `OutboundSendBackgroundLease` and `SceneBackgroundAssertionLatch` wrap `UIApplication.beginBackgroundTask`. macOS doesn't suspend apps, so on the Mac the lease becomes a `ProcessInfo.beginActivity`, which keeps App Nap and idle sleep from stalling a send, with no expiration.
   - That means `backgroundTimeExpiredWithoutTeardown` never fires on macOS.
   - Don't add a Mac substitute that rolls sends back.
-- **Quitting.** In `applicationShouldTerminate`, answer `.terminateLater` while an outbound send is between reservation and outcome. Wait at most about 10 s, then let the app quit. A forced quit is still safe, because cold recovery converts the markers and never resends. Since 2026-11-27 (architecture review 2026-11, mac-platform#3) it also waits, under the same 10 s, for reply-draft saves: it first starts the save each on-screen composer's 350 ms debounce still owes (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`), then waits for every draft write `ReplyDraftWriteTracker` counts. Not run in the app.
+- **Quitting.** In `applicationShouldTerminate`, answer `.terminateLater` while an outbound send is between reservation and outcome. Wait at most about 10 s, then let the app quit. A forced quit is still safe, because cold recovery converts the markers and never resends. Since 2026-11-27 (architecture review 2026-11, mac-platform#3) it also waits, under the same 10 s, for reply-draft saves: it first starts the save each on-screen composer still owes (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`: the one its 350 ms debounce has not made yet, one that failed, or one for files still importing), then waits for every draft write `ReplyDraftWriteTracker` counts. Not run in the app.
 - **Smaller pieces:**
   - Replace `@UIApplicationDelegateAdaptor` with `@NSApplicationDelegateAdaptor`.
   - The `UIApplication.shared.applicationState` check in `initializeApp()` treats the Mac as always in the foreground.
@@ -299,7 +299,7 @@ After PR 371 the Mac app compiled with 0 errors. PRs B, D and E were compile-che
 | `jpegData(compressionQuality: 0.82)` | `NSBitmapImageRep(cgImage:).representation(using: .jpeg, properties: [.compressionFactor: 0.82])` |
 | `layoutIfNeeded()` | `layoutSubtreeIfNeeded()` |
 | An offscreen `UIWindow` past the left edge of the screen | A borderless `NSWindow` at (-30000, -30000) with `ignoresMouseEvents`. It doesn't need to be ordered in |
-| Visible-row warm width from the screen's width (`currentVisibleRowWarmWidthEstimate`) | The reader's own width. A Mac screen is far wider than the reader, so a web view warmed at screen width never matches a checkout. Warming after an explicit open already uses the reader's width |
+| Visible-row warm width from the screen's width (`currentVisibleRowWarmWidthEstimate`) | The reader's own width. A Mac screen is far wider than the reader, so a web view warmed at screen width never matches a checkout. Warming after an explicit open already uses the reader's width. Since 2026-11-28 neither platform warms a web view for a visible row (`warmVisibleRow`, architecture review `security-privacy#3`), so the estimate is gone |
 | `UIApplication.didReceiveMemoryWarningNotification` | PR B's memory-pressure source |
 | `UIApplication.shared.open(url)` | `NSWorkspace.shared.open(url)` |
 

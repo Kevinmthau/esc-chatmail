@@ -248,6 +248,15 @@ final class TestCoreDataStack: @unchecked Sendable {
         return context
     }
 
+    /// Retires a main-queue context a suite made itself (a subclass that records its fetches,
+    /// say) to the graveyard, as `makeMainQueueViewContext()` retires its own, so work that
+    /// outlives the test cannot reach a context in `_dispose:`.
+    func retire(_ context: NSManagedObjectContext) {
+        Self.creationLock.lock()
+        Self.graveyard.append(context)
+        Self.creationLock.unlock()
+    }
+
     /// Creates a new background context for testing background operations
     func newBackgroundContext() -> NSManagedObjectContext {
         let context = persistentContainer.newBackgroundContext()
