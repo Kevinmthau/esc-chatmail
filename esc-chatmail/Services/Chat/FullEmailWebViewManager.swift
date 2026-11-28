@@ -16,8 +16,18 @@ import WebKit
 /// flash) the moment it was adopted into the full-view reader, defeating the point of warming.
 enum FullInteractiveEmailWebView {
     /// Builds the `WKWebViewConfiguration` for full original-email rendering.
-    static func makeConfiguration(cidHandler: CIDSchemeHandler) -> WKWebViewConfiguration {
+    ///
+    /// The private-network rule list is attached here when it is compiled, so the reader and the
+    /// pool get it together and an adopted view renders as a live one would. While it compiles,
+    /// the pool pre-renders nothing and the reader's coordinator attaches it before its first load
+    /// (`EmailWebContentNetworkRules`).
+    @MainActor
+    static func makeConfiguration(
+        cidHandler: CIDSchemeHandler,
+        networkRules: EmailWebContentNetworkRules? = nil
+    ) -> WKWebViewConfiguration {
         let configuration = WKWebViewConfiguration()
+        (networkRules ?? .shared).attach(to: configuration.userContentController)
         // Register cid: scheme handler for inline attachments.
         configuration.setURLSchemeHandler(cidHandler, forURLScheme: "cid")
         configuration.applyFullReaderMediaAndDataDetectorSettings()
@@ -1025,6 +1035,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     private let capacity: Int
     private let loader: OriginalEmailSourceLoader
+    /// The private-network rule list every pooled view is made with. The pool makes no view while
+    /// it compiles, so it never hands out a view warmed without it (`canMakeEntryWithNetworkRules`).
+    private let networkRules: EmailWebContentNetworkRules
     /// Held for the manager's lifetime: its `deinit` ends the observation.
     private let memoryPressureEventSource: MemoryPressureEventSource
     private let host = OffscreenWebViewHost()
@@ -1053,10 +1066,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     init(
         capacity: Int = 4,
         loader: OriginalEmailSourceLoader = .shared,
-        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource()
+        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource(),
+        networkRules: EmailWebContentNetworkRules? = nil
     ) {
         self.capacity = max(1, capacity)
         self.loader = loader
+        self.networkRules = networkRules ?? .shared
         self.bookkeeping = FullEmailWebViewPoolBookkeeping(capacity: capacity)
         self.memoryPressureEventSource = memoryPressureEventSource
 
@@ -1200,6 +1215,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
+        guard canMakeEntryWithNetworkRules(messageId: request.messageId) else {
+            return
+        }
         let entry = makeEntry(
             key: key,
             request: request,
@@ -1304,6 +1322,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             request: request,
             payload: warmingPayload
         )
+        guard canMakeEntryWithNetworkRules(messageId: request.messageId) else {
+            applyEvictions(bookkeeping.touch(request.messageId))
+            return
+        }
         let entry = makeEntry(
             key: key,
             request: request,
@@ -1735,7 +1757,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         html: String
     ) -> Entry {
         let cidHandler = CIDSchemeHandler(message: message)
-        let configuration = FullInteractiveEmailWebView.makeConfiguration(cidHandler: cidHandler)
+        let configuration = FullInteractiveEmailWebView.makeConfiguration(
+            cidHandler: cidHandler,
+            networkRules: networkRules
+        )
         let webView = LayoutAwareWKWebView(
             frame: CGRect(x: 0, y: 0, width: width, height: host.preferredHeight()),
             configuration: configuration
@@ -1765,6 +1790,25 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         let baseURL = FullInteractiveEmailWebView.baseURL(message: message, senderEmail: senderEmail)
         webView.loadHTMLString(html, baseURL: baseURL)
         return entry
+    }
+
+    /// Whether the pool may make a view now: not while the private-network rule list compiles.
+    /// A view made then would load its email with nothing refusing loopback and LAN hosts, and a
+    /// reader that adopted it would show it as it is. The payload is kept; the next warm or
+    /// prepaint of the message makes the view. Nothing waits for the list here: an await inside a
+    /// warm's counted operation would hold a sign-out's drain on WebKit.
+    private func canMakeEntryWithNetworkRules(messageId: String) -> Bool {
+        guard networkRules.permitsLoading else {
+            networkRules.prepare()
+            Log.diagnostic(
+                .htmlPreview,
+                level: .info,
+                "FullEmailWebViewManager prerender_skipped message=\(Log.hashIdentifier(messageId)) reason=network_rules_pending",
+                category: .ui
+            )
+            return false
+        }
+        return true
     }
 
     private func canCheckoutActiveWebView(messageId: String) -> Bool {

@@ -51,6 +51,9 @@ struct BaseEmailWebView: WebViewRepresentable {
 
     private func makePreviewWebView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        // The private-network rule list, when it is compiled; the coordinator attaches it before
+        // its first load otherwise (`EmailWebContentNetworkRules`).
+        context.coordinator.networkRules.attach(to: configuration.userContentController)
 
         // Register cid: scheme handler for inline attachments.
         let cidHandler = CIDSchemeHandler(message: message, localResources: inlineResources)
@@ -95,9 +98,18 @@ struct BaseEmailWebView: WebViewRepresentable {
         private var previewMeasurementGeneration = 0
         /// Holds strong reference to the cid: scheme handler.
         var cidHandler: CIDSchemeHandler?
+        let networkRules: EmailWebContentNetworkRules
+        /// A load is deferred until the private-network rule list compiles, and a callback to load
+        /// then is registered once (`loadWhenNetworkRulesPermit`).
+        private var isAwaitingNetworkRules = false
+        /// Set once the rules have answered that this coordinator's web view may load, so later
+        /// updates do not ask again: `WKWebView.configuration` makes a copy on every read, and
+        /// `updateWebView` runs on every SwiftUI update.
+        private var networkRulesPermitLoading = false
 
-        init(_ parent: BaseEmailWebView) {
+        init(_ parent: BaseEmailWebView, networkRules: EmailWebContentNetworkRules? = nil) {
             self.parent = parent
+            self.networkRules = networkRules ?? .shared
         }
 
         var lastLoadedContent: String {
@@ -156,11 +168,24 @@ struct BaseEmailWebView: WebViewRepresentable {
             let windowPresent = webView.window != nil
             let width = webView.bounds.width
             let height = webView.bounds.height
+            if !networkRulesPermitLoading {
+                networkRulesPermitLoading = networkRules.attach(
+                    to: webView.configuration.userContentController
+                )
+            }
 
-            switch loadReadiness(windowPresent: windowPresent, width: width, height: height) {
+            switch loadReadiness(
+                windowPresent: windowPresent,
+                width: width,
+                height: height,
+                networkRulesPermitLoading: networkRulesPermitLoading
+            ) {
             case .ready:
                 loadContent(in: webView)
             case .deferred(let reason):
+                if reason == EmailWebViewLoadCoordination.networkRulesPendingReason {
+                    loadWhenNetworkRulesPermit(webView)
+                }
                 logDeferredLoad(
                     reason: reason,
                     windowPresent: windowPresent,
@@ -171,14 +196,33 @@ struct BaseEmailWebView: WebViewRepresentable {
             }
         }
 
-        func loadReadiness(windowPresent: Bool, width: CGFloat, height: CGFloat) -> LoadReadiness {
+        func loadReadiness(
+            windowPresent: Bool,
+            width: CGFloat,
+            height: CGFloat,
+            networkRulesPermitLoading: Bool
+        ) -> LoadReadiness {
             coordination.loadReadiness(
                 needsReload: needsReload,
                 isLoading: isLoading,
+                networkRulesPermitLoading: networkRulesPermitLoading,
                 windowPresent: windowPresent,
                 width: width,
                 height: height
             )
+        }
+
+        /// Loads once the rule list has compiled. The callback holds this coordinator and the view
+        /// weakly.
+        private func loadWhenNetworkRulesPermit(_ webView: WKWebView) {
+            guard !isAwaitingNetworkRules else { return }
+            isAwaitingNetworkRules = true
+            networkRules.notifyWhenLoadingPermitted { [weak self, weak webView] in
+                guard let self else { return }
+                self.isAwaitingNetworkRules = false
+                guard let webView else { return }
+                self.loadContentIfReady(in: webView)
+            }
         }
 
         private func logDeferredLoad(

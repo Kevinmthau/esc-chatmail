@@ -107,7 +107,9 @@ enum PrivateNetworkAddressDetector {
 
     // MARK: - Reserved names
 
-    private static let reservedHostnames: Set<String> = [
+    /// Also the source of `EmailWebContentNetworkRuleSource`'s name rules, which is why it is not
+    /// private: WebKit's subresource loads are refused by the same list.
+    static let reservedHostnames: Set<String> = [
         "localhost",
         "localhost.localdomain",
         "broadcasthost",
@@ -122,8 +124,9 @@ enum PrivateNetworkAddressDetector {
 
     // RFC 6761 / RFC 6762 / RFC 8375 — not resolvable to routable public
     // addresses. `.onion` (Tor) is included because resolving it through the
-    // default resolver leaks the query.
-    private static let reservedTLDs: Set<String> = [
+    // default resolver leaks the query. Not private for the same reason as
+    // `reservedHostnames`.
+    static let reservedTLDs: Set<String> = [
         "local",
         "localhost",
         "lan",
@@ -204,27 +207,29 @@ enum PrivateNetworkAddressDetector {
         return address
     }
 
-    private static func isPrivateIPv4(_ addr: UInt32) -> Bool {
-        // (network, mask) in host byte order.
-        let ranges: [(UInt32, UInt32)] = [
-            (0x00000000, 0xFF000000),   // 0.0.0.0/8         "this network"
-            (0x0A000000, 0xFF000000),   // 10.0.0.0/8        private
-            (0x64400000, 0xFFC00000),   // 100.64.0.0/10     CGNAT
-            (0x7F000000, 0xFF000000),   // 127.0.0.0/8       loopback
-            (0xA9FE0000, 0xFFFF0000),   // 169.254.0.0/16    link-local (incl. 169.254.169.254 metadata)
-            (0xAC100000, 0xFFF00000),   // 172.16.0.0/12     private
-            (0xC0000000, 0xFFFFFFF8),   // 192.0.0.0/29      protocol assignments
-            (0xC0000200, 0xFFFFFF00),   // 192.0.2.0/24      TEST-NET-1
-            (0xC0A80000, 0xFFFF0000),   // 192.168.0.0/16    private
-            (0xC6120000, 0xFFFE0000),   // 198.18.0.0/15     benchmarking
-            (0xC6336400, 0xFFFFFF00),   // 198.51.100.0/24   TEST-NET-2
-            (0xCB007100, 0xFFFFFF00),   // 203.0.113.0/24    TEST-NET-3
-            (0xE0000000, 0xF0000000),   // 224.0.0.0/4       multicast
-            (0xF0000000, 0xF0000000),   // 240.0.0.0/4       reserved
-            (0xFFFFFFFF, 0xFFFFFFFF)    // 255.255.255.255   limited broadcast
-        ]
+    /// The IPv4 ranges refused, as (network, mask) in host byte order. Also the source of
+    /// `EmailWebContentNetworkRuleSource`'s address rules, which is why it is not private: WebKit's
+    /// subresource loads are refused by the same ranges.
+    static let privateIPv4Ranges: [(network: UInt32, mask: UInt32)] = [
+        (0x00000000, 0xFF000000),   // 0.0.0.0/8         "this network"
+        (0x0A000000, 0xFF000000),   // 10.0.0.0/8        private
+        (0x64400000, 0xFFC00000),   // 100.64.0.0/10     CGNAT
+        (0x7F000000, 0xFF000000),   // 127.0.0.0/8       loopback
+        (0xA9FE0000, 0xFFFF0000),   // 169.254.0.0/16    link-local (incl. 169.254.169.254 metadata)
+        (0xAC100000, 0xFFF00000),   // 172.16.0.0/12     private
+        (0xC0000000, 0xFFFFFFF8),   // 192.0.0.0/29      protocol assignments
+        (0xC0000200, 0xFFFFFF00),   // 192.0.2.0/24      TEST-NET-1
+        (0xC0A80000, 0xFFFF0000),   // 192.168.0.0/16    private
+        (0xC6120000, 0xFFFE0000),   // 198.18.0.0/15     benchmarking
+        (0xC6336400, 0xFFFFFF00),   // 198.51.100.0/24   TEST-NET-2
+        (0xCB007100, 0xFFFFFF00),   // 203.0.113.0/24    TEST-NET-3
+        (0xE0000000, 0xF0000000),   // 224.0.0.0/4       multicast
+        (0xF0000000, 0xF0000000),   // 240.0.0.0/4       reserved
+        (0xFFFFFFFF, 0xFFFFFFFF)    // 255.255.255.255   limited broadcast
+    ]
 
-        for (network, mask) in ranges where (addr & mask) == network {
+    private static func isPrivateIPv4(_ addr: UInt32) -> Bool {
+        for (network, mask) in privateIPv4Ranges where (addr & mask) == network {
             return true
         }
         return false

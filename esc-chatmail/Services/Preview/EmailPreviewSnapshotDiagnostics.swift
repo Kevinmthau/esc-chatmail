@@ -157,6 +157,8 @@ enum EmailPreviewSnapshotDiagnostics {
                 return "timeout"
             case .snapshotUnavailable:
                 return "snapshot-unavailable"
+            case .networkRulesPending:
+                return "network-rules-pending"
             }
         }
 

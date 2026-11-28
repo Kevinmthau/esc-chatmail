@@ -253,7 +253,7 @@ final class BaseEmailWebViewTests: XCTestCase {
     func testScaledPreviewLoadReadinessStillRequiresMeasuredHeight() {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .scaledPreview(scale: 0.5)))
 
-        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5, networkRulesPermitLoading: true)
 
         XCTAssertEqual(readiness, .deferred(reason: "missing-height"))
     }
@@ -261,7 +261,7 @@ final class BaseEmailWebViewTests: XCTestCase {
     func testSimplePreviewLoadReadinessStillRequiresMeasuredHeight() {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .simplePreview))
 
-        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5)
+        let readiness = coordinator.loadReadiness(windowPresent: true, width: 320, height: 0.5, networkRulesPermitLoading: true)
 
         XCTAssertEqual(readiness, .deferred(reason: "missing-height"))
     }
@@ -270,11 +270,11 @@ final class BaseEmailWebViewTests: XCTestCase {
         let coordinator = BaseEmailWebView.Coordinator(makeWebView(message: nil, mode: .simplePreview))
 
         XCTAssertEqual(
-            coordinator.loadReadiness(windowPresent: false, width: 320, height: 200),
+            coordinator.loadReadiness(windowPresent: false, width: 320, height: 200, networkRulesPermitLoading: true),
             .deferred(reason: "missing-window")
         )
         XCTAssertEqual(
-            coordinator.loadReadiness(windowPresent: true, width: 0.5, height: 200),
+            coordinator.loadReadiness(windowPresent: true, width: 0.5, height: 200, networkRulesPermitLoading: true),
             .deferred(reason: "missing-width")
         )
     }

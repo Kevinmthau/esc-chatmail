@@ -63,6 +63,22 @@ struct esc_chatmailApp: App {
         AttachmentPaths.setupDirectories()
         logStartupTiming("Directories setup")
 
+        // The private-network rule list every email web view loads with. It compiles in a few
+        // milliseconds, and a web view made before it is ready waits for it rather than loading
+        // without it (`EmailWebContentNetworkRules`), so it starts here, ahead of the first one.
+        EmailWebContentNetworkRules.shared.prepare()
+        if isRunningUnitTests {
+            // The unit-test host waits for it (bounded), so no test sees a load deferred for a
+            // compile still in flight: tests load web views synchronously and expect them ready.
+            // Before `UIApplicationMain` nothing else runs on the main queue, so this only lets
+            // the compile's callback in.
+            let deadline = Date(timeIntervalSinceNow: 5)
+            while !EmailWebContentNetworkRules.shared.permitsLoading, Date() < deadline {
+                RunLoop.main.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+            }
+            logStartupTiming("Unit test host — email web content network rules \(EmailWebContentNetworkRules.shared.state)")
+        }
+
         // Before any restore can publish or drop a session, background launches
         // included. Not in the unit-test host, whose tests must not write the
         // host app's real defaults.

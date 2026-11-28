@@ -132,6 +132,9 @@ private struct HTMLDebugWebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
+        // Every configuration takes the private-network rule list. This one renders the fixed
+        // sample above in an Xcode preview, never a message, so it does not wait for the compile.
+        EmailWebContentNetworkRules.shared.attach(to: configuration.userContentController)
         configuration.defaultWebpagePreferences.allowsContentJavaScript = false
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
