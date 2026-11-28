@@ -8062,12 +8062,213 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(waits, [4_000_000_000, 500_000_000, 1_000_000_000])
     }
 
+    // MARK: - Reveal outcome
+
+    /// A pass that sees the anchor and the newest row through its
+    /// stabilization reports `.confirmed`, once, after it has revealed.
+    ///
+    /// Revert-check: reporting `.timeLimitReached` for every reveal in
+    /// `ChatMessagesCoordinator.completeInitialReveal` (in place of its
+    /// `outcome`) fails the comparison.
+    func testRevealOutcome_confirmedPass_reportsConfirmedOnceAfterTheReveal() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        var wasReadyAtReport: [Bool] = []
+        var coordinatorForReport: ChatMessagesCoordinator?
+        let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcome in
+            outcomes.append(outcome)
+            wasReadyAtReport.append(coordinatorForReport?.isReadyToShow ?? false)
+        })
+        coordinatorForReport = coordinator
+
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("A visible initial anchor must not request a scroll")
+        }
+        XCTAssertEqual(outcomes, [], "Nothing is reported before the reveal")
+        await confirmInitialBottomAnchor(coordinator)
+
+        XCTAssertEqual(outcomes, [.confirmed])
+        XCTAssertEqual(wasReadyAtReport, [true], "Reported once `isReadyToShow` is published")
+    }
+
+    /// Offscreen reports with no growth spend the retry budget, and the
+    /// reveal that ends it reports `.attemptsExhausted`.
+    ///
+    /// Revert-check: `outcome: .attemptsExhausted` in the budget branch of
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` replaced by
+    /// `.confirmed` fails the comparison.
+    func testRevealOutcome_retryBudgetSpent_reportsAttemptsExhausted() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcomes.append($0) })
+        appear(coordinator, rows: rows) { _ in }
+
+        for _ in 0..<2 {
+            let geometryCheckID = coordinator.initialAnchorGeometryCheckID
+            coordinator.handleBottomAnchorGeometryUpdate(isBottomAnchorVisible: false) { _ in }
+            await waitUntil { coordinator.initialAnchorGeometryCheckID != geometryCheckID }
+        }
+        coordinator.handleBottomAnchorGeometryUpdate(isBottomAnchorVisible: false) { _ in }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(outcomes, [.attemptsExhausted])
+    }
+
+    /// A geometry report after the pass's wall-clock deadline reveals it and
+    /// reports `.timeLimitReached`.
+    ///
+    /// Revert-check: `outcome: .timeLimitReached` in the deadline branch of
+    /// `ChatMessagesCoordinator.handleBottomAnchorGeometryUpdate` replaced by
+    /// `.attemptsExhausted` fails the comparison.
+    func testRevealOutcome_reportPastTheDeadline_reportsTimeLimitReached() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        var currentTime: TimeInterval = 1_000
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            now: { currentTime },
+            onInitialReveal: { outcomes.append($0) }
+        )
+        appear(coordinator, rows: rows) { _ in }
+
+        currentTime = 1_003.2
+        coordinator.handleBottomAnchorGeometryUpdate(
+            isBottomAnchorVisible: false,
+            contentMinY: 0,
+            contentHeight: 100
+        ) { _ in
+            XCTFail("The time-limit reveal must not scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(outcomes, [.timeLimitReached])
+    }
+
+    /// A pass that no geometry report reaches by its deadline is revealed by
+    /// its watchdog, which reports `.watchdog`.
+    ///
+    /// Revert-check: `outcome: .watchdog` in
+    /// `ChatMessagesCoordinator.armInitialRevealWatchdog` replaced by
+    /// `.timeLimitReached` fails the comparison.
+    func testRevealOutcome_noGeometryByTheDeadline_reportsWatchdog() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let watchdogGate = ParkedSleepGate()
+        var currentTime: TimeInterval = 1_000
+        let (coordinator, rows) = try makeParkedTestCoordinator(
+            now: { currentTime },
+            watchdogSleep: { _ in
+                while await !watchdogGate.isReleased(), !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
+                }
+            },
+            onInitialReveal: { outcomes.append($0) }
+        )
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("Without geometry nothing may scroll")
+        }
+
+        currentTime = 1_003.5
+        await watchdogGate.release()
+        await waitUntil { coordinator.isReadyToShow }
+
+        XCTAssertEqual(outcomes, [.watchdog])
+    }
+
+    /// A drag during the pass reveals the transcript at once and reports
+    /// `.userScroll`; a second drag, with the transcript revealed, reports
+    /// nothing.
+    ///
+    /// Revert-check: dropping `onInitialReveal(.userScroll)` from
+    /// `ChatMessagesCoordinator.handleUserScrollInteraction` fails the
+    /// comparison.
+    func testRevealOutcome_userScrollDuringThePass_reportsUserScrollOnce() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcomes.append($0) })
+        appear(coordinator, rows: rows) { _ in }
+        XCTAssertFalse(coordinator.isReadyToShow)
+
+        coordinator.handleUserScrollInteraction()
+        coordinator.handleUserScrollInteraction()
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(outcomes, [.userScroll])
+    }
+
+    /// A conversation with no messages is revealed with nothing to anchor and
+    /// reports `.emptyConversation`; the pass its first message restarts
+    /// reports again when it reveals.
+    ///
+    /// Revert-check: dropping `onInitialReveal(.emptyConversation)` from
+    /// `ChatMessagesCoordinator.startInitialAnchorIfPossible` fails the first
+    /// comparison.
+    func testRevealOutcome_emptyConversationThenFirstMessage_reportsEachReveal() async throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let (coordinator, rows) = try makeParkedTestCoordinator(onInitialReveal: { outcomes.append($0) })
+        coordinator.handleAppear(
+            messageCount: 0,
+            lastMessage: nil,
+            visibleMessages: [],
+            senderGroupingMessages: [],
+            totalMessageCount: 0,
+            isInitialWindowLoaded: true
+        ) { _ in }
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(outcomes, [.emptyConversation])
+
+        coordinator.handleMessageCountChange(
+            oldCount: 0,
+            newCount: rows.count,
+            lastMessage: nil,
+            visibleMessages: rows,
+            totalMessageCount: rows.count,
+            stabilizeBottomAnchor: false,
+            isInitialWindowLoaded: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: false
+        ) { _ in }
+        XCTAssertFalse(coordinator.isReadyToShow, "The first message restarts a hidden pass")
+        await confirmInitialBottomAnchor(coordinator)
+
+        XCTAssertEqual(outcomes, [.emptyConversation, .confirmed])
+    }
+
+    /// A top-anchored presentation reveals its rows without a pass and
+    /// reports `.revealedAtTop`.
+    ///
+    /// Revert-check: dropping `onInitialReveal(.revealedAtTop)` from
+    /// `ChatMessagesCoordinator.startInitialAnchorIfPossible` fails the
+    /// comparison.
+    func testRevealOutcome_topPresentation_reportsRevealedAtTop() throws {
+        var outcomes: [ChatMessagesCoordinator.InitialRevealOutcome] = []
+        let (_, messages) = try makeConversationWithMessages(senderEmails: ["first@example.com"])
+        let rows = messages.map { ChatMessageRowModelMapper.map($0) }
+        let coordinator = ChatMessagesCoordinator(
+            initialPresentationAnchor: .top,
+            loadLatestWindowIfNeeded: { _ in },
+            markConversationAsReadIfNeeded: {},
+            initializeReplyingTo: { _ in },
+            updateReplyingToIfNewSubject: { _ in },
+            loadResolvedDisplayName: {},
+            prefetchSenderContacts: { _ in },
+            cancelPrefetch: {},
+            loadSenderGroupingKeys: { _ in [:] },
+            invalidateContactsCache: {},
+            clearPersonCache: {},
+            sleep: { _ in },
+            onInitialReveal: { outcomes.append($0) }
+        )
+
+        appear(coordinator, rows: rows) { _ in
+            XCTFail("A top-anchored reveal must not scroll")
+        }
+
+        XCTAssertTrue(coordinator.isReadyToShow)
+        XCTAssertEqual(outcomes, [.revealedAtTop])
+    }
+
     private func makeParkedTestCoordinator(
         sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
         now: @escaping ChatMessagesCoordinator.Now = {
             ProcessInfo.processInfo.systemUptime
         },
-        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep,
+        onInitialReveal: @escaping (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
     ) throws -> (ChatMessagesCoordinator, [ChatMessageRowModel]) {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",
@@ -8078,7 +8279,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             markUnreadInboxMessagesAsReadIfNeeded: { _ in },
             sleep: sleep,
             now: now,
-            watchdogSleep: watchdogSleep
+            watchdogSleep: watchdogSleep,
+            onInitialReveal: onInitialReveal
         )
         return (coordinator, messages.map { ChatMessageRowModelMapper.map($0) })
     }
@@ -8191,7 +8393,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         isMessagePublished: @escaping ChatMessagesCoordinator.MessagePublicationCheck = {
             _ in false
         },
-        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep
+        watchdogSleep: @escaping ChatMessagesCoordinator.Sleep = ChatMessagesCoordinator.systemSleep,
+        onInitialReveal: @escaping (ChatMessagesCoordinator.InitialRevealOutcome) -> Void = { _ in }
     ) -> ChatMessagesCoordinator {
         ChatMessagesCoordinator(
             loadLatestWindowIfNeeded: { _ in },
@@ -8209,7 +8412,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             now: now,
             ensureVisibleMessage: ensureVisibleMessage,
             isMessagePublished: isMessagePublished,
-            watchdogSleep: watchdogSleep
+            watchdogSleep: watchdogSleep,
+            onInitialReveal: onInitialReveal
         )
     }
 

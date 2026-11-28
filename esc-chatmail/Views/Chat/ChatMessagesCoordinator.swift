@@ -42,6 +42,37 @@ final class ChatMessagesCoordinator: ObservableObject {
         }
     }
 
+    /// How the transcript came to be revealed: each way `initialRevealState`
+    /// becomes `.ready`, reported through `onInitialReveal` once it has
+    /// (architecture review 2026-11, chat-transcript-ui#3). The reveal rests on
+    /// how the lazy stack realizes rows and where `scrollTo` lands, which the
+    /// hidden pass infers from geometry; only `.confirmed` is the pass seeing
+    /// the newest row realized and the bottom anchor on screen. The others are
+    /// the bounded ways out of a pass that did not.
+    enum InitialRevealOutcome: Equatable {
+        /// The hidden pass saw the bottom anchor on screen, the newest row's
+        /// view in the hierarchy, through its stabilization.
+        case confirmed
+        /// The pass's wall-clock deadline passed at a geometry report
+        /// (`initialAnchorRevealTimeLimit`).
+        case timeLimitReached
+        /// The probes' retry budget ran out with the anchor still off screen
+        /// (`maximumInitialScrollAttempts`).
+        case attemptsExhausted
+        /// The deadline passed with no geometry report to reveal at, and the
+        /// pass's watchdog revealed it (`armInitialRevealWatchdog`).
+        case watchdog
+        /// The reader moved the transcript during the pass, which reveals it
+        /// at once (`handleUserScrollInteraction`).
+        case userScroll
+        /// The conversation had no messages, so there was nothing to anchor.
+        /// A first message restarts a hidden pass, which reports again.
+        case emptyConversation
+        /// A top-anchored presentation, which reveals its rows without a
+        /// pass (`InitialPresentationAnchor.top`).
+        case revealedAtTop
+    }
+
     private enum InitialRevealPhase: Equatable {
         case awaitingGeometry
         case checkingAfterScroll
@@ -310,6 +341,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     private let watchdogSleep: Sleep
     private let now: Now
     private let initialPresentationAnchor: InitialPresentationAnchor
+    /// Told how each reveal happened, right after `isReadyToShow` became
+    /// true for it (`InitialRevealOutcome`). Once per reveal: an empty
+    /// conversation's reveal and the pass a first message restarts are two.
+    /// The app passes nothing; the hosted reveal test reads it.
+    private let onInitialReveal: (InitialRevealOutcome) -> Void
     private let taskManager = ViewModelTaskManager()
     /// The one writer of `isReadyToShow`: the transcript is revealed exactly
     /// while this is `.ready`. The hidden pass's own state lives inside
@@ -416,7 +452,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         initialPresentationAnchor: InitialPresentationAnchor,
         sleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
-        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
+        onInitialReveal: @escaping (InitialRevealOutcome) -> Void = { _ in }
     ) {
         self.loadLatestWindowIfNeeded = { knownTotalCount in
             await scrollState.loadLatestWindowIfNeeded(knownTotalCount: knownTotalCount)
@@ -457,6 +494,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.watchdogSleep = watchdogSleep
         self.now = now
         self.initialPresentationAnchor = initialPresentationAnchor
+        self.onInitialReveal = onInitialReveal
     }
 
     init(
@@ -476,7 +514,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
         ensureVisibleMessage: @escaping MessageVisibilityEnsurer = { _ in true },
         isMessagePublished: @escaping MessagePublicationCheck = { _ in false },
-        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
+        watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
+        onInitialReveal: @escaping (InitialRevealOutcome) -> Void = { _ in }
     ) {
         self.loadLatestWindowIfNeeded = loadLatestWindowIfNeeded
         self.ensureVisibleMessage = ensureVisibleMessage
@@ -495,6 +534,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.watchdogSleep = watchdogSleep
         self.now = now
         self.initialPresentationAnchor = initialPresentationAnchor
+        self.onInitialReveal = onInitialReveal
     }
 
     func handleAppear(
@@ -897,7 +937,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         if isBottomAnchorVisible && !isTrackedContentParkedPastEnd {
             if phase == .validatingVisibility {
                 if isNewestRowRealized {
-                    completeInitialReveal(wasVisiblyConfirmed: true)
+                    completeInitialReveal(outcome: .confirmed)
                     return
                 }
                 // The anchor reads at the content end, yet the newest row's
@@ -1000,7 +1040,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         // the signal cannot be trusted to drive further scrolls.
         if now() >= pass.revealDeadline {
             completeInitialReveal(
-                wasVisiblyConfirmed: false,
+                outcome: .timeLimitReached,
                 armsBottomFollowAfterFallback: pass.hasObservedBottomAnchorGeometry,
                 fallbackReason: "time limit reached"
             )
@@ -1029,7 +1069,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 // bubble growth that comes next
                 // (`InitialPass.didObserveParkedPastEnd`).
                 completeInitialReveal(
-                    wasVisiblyConfirmed: false,
+                    outcome: .attemptsExhausted,
                     armsBottomFollowAfterFallback: pass.didObserveParkedPastEnd,
                     fallbackReason: "attempts exhausted"
                 )
@@ -1352,6 +1392,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             "ChatView initial anchor cancelled by user scroll",
             category: .ui
         )
+        onInitialReveal(.userScroll)
     }
 
     func handleMessageCountChange(
@@ -2031,6 +2072,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 "ChatView initial anchor skipped for empty conversation reason=\(reason)",
                 category: .ui
             )
+            onInitialReveal(.emptyConversation)
             return
         }
 
@@ -2062,6 +2104,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 "ChatView initial rows revealed at top reason=\(reason) messages=\(anchorMessageCount)",
                 category: .ui
             )
+            onInitialReveal(.revealedAtTop)
             return
         }
 
@@ -2146,7 +2189,7 @@ final class ChatMessagesCoordinator: ObservableObject {
                 String(format: "%.2fs ago", self.now() - $0)
             } ?? "never"
             self.completeInitialReveal(
-                wasVisiblyConfirmed: false,
+                outcome: .watchdog,
                 armsBottomFollowAfterFallback: pass.hasObservedBottomAnchorGeometry,
                 fallbackReason: "time limit passed with no geometry report revealing it (watchdog; last report \(lastReport))"
             )
@@ -2469,15 +2512,22 @@ final class ChatMessagesCoordinator: ObservableObject {
         return "anchorVisible=\(isTrackedBottomAnchorVisible) newestRowRealized=\(isTrackedNewestRowRealized) contentMaxY=\(describe(contentMaxY)) contentHeight=\(describe(trackedContentHeight)) viewportHeight=\(describe(trackedViewportHeight))"
     }
 
+    /// Ends the hidden pass with a reveal.
+    ///
+    /// - Parameter outcome: how the pass ended: `.confirmed`, or one of its
+    ///   bounded fallbacks (`.timeLimitReached`, `.attemptsExhausted`,
+    ///   `.watchdog`). Reported through `onInitialReveal` once the reveal is
+    ///   published.
     /// - Parameter fallbackReason: why an unconfirmed reveal happened, for its
     ///   log line.
     private func completeInitialReveal(
-        wasVisiblyConfirmed: Bool,
+        outcome: InitialRevealOutcome,
         armsBottomFollowAfterFallback: Bool = false,
         fallbackReason: String? = nil
     ) {
         guard case .pending = initialRevealState else { return }
 
+        let wasVisiblyConfirmed = outcome == .confirmed
         let armsBottomFollow = wasVisiblyConfirmed || armsBottomFollowAfterFallback
         if armsBottomFollow {
             let armedAt = now()
@@ -2515,6 +2565,7 @@ final class ChatMessagesCoordinator: ObservableObject {
             Log.warning("\(logMessage); \(trackedGeometryDescription)", category: .ui)
         }
         schedulePostRevealAudit()
+        onInitialReveal(outcome)
     }
 
     /// Looks at the transcript once more `postRevealAuditDelay` after an
