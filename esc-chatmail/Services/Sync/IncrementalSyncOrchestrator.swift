@@ -423,12 +423,12 @@ final class IncrementalSyncOrchestrator {
             timing.finish(labelTimer, detail: "records=\(historyResult.records.count)")
             if phaseContext.allowsIntermediateContextSaves {
                 let flushTimer = timing.start("intermediateFlush")
-                let intermediateRollupConversationIDs = await ModificationTracker.shared
-                    .modifiedConversations(in: modificationTransaction)
-                let trackedIntermediateDisplayNameConversationIDs = await ModificationTracker.shared
-                    .displayNameOnlyConversations(in: modificationTransaction)
-                let intermediateDisplayNameConversationIDs = trackedIntermediateDisplayNameConversationIDs
-                    .subtracting(intermediateRollupConversationIDs)
+                // Claimed, not read: the final save rolls up and renames only
+                // what was tracked after this flush (`claimPendingConversationUpdates`).
+                let claimedUpdates = await ModificationTracker.shared
+                    .claimPendingConversationUpdates(in: modificationTransaction)
+                let intermediateRollupConversationIDs = claimedUpdates.rollupIDs
+                let intermediateDisplayNameConversationIDs = claimedUpdates.displayNameOnlyIDs
                 let intermediateAffectedConversationIDs = intermediateRollupConversationIDs
                     .union(intermediateDisplayNameConversationIDs)
                 let conversationManager = self.conversationManager

@@ -207,43 +207,17 @@ struct LabelOperationProcessor {
             if conversation.hidden {
                 conversation.hidden = false
             }
-        } else if previousHasInboxLabel {
-            refreshInboxIndicators(for: conversation)
         }
-    }
-
-    private static func refreshInboxIndicators(for conversation: Conversation) {
-        guard let messages = conversation.messages else {
-            conversation.hasInbox = false
-            conversation.inboxUnreadCount = 0
-            conversation.latestInboxDate = nil
-            return
-        }
-
-        var hasInbox = false
-        var unreadCount: Int32 = 0
-        var latestInboxDate: Date?
-
-        for message in messages {
-            let isInbox = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
-            guard isInbox else { continue }
-
-            hasInbox = true
-            if message.isUnread {
-                unreadCount = min(Int32.max, unreadCount + 1)
-            }
-            if let currentLatestDate = latestInboxDate {
-                if message.internalDate > currentLatestDate {
-                    latestInboxDate = message.internalDate
-                }
-            } else {
-                latestInboxDate = message.internalDate
-            }
-        }
-
-        conversation.hasInbox = hasInbox
-        conversation.inboxUnreadCount = unreadCount
-        conversation.latestInboxDate = latestInboxDate
+        // A message that left INBOX changes nothing more here: `hasInbox` and
+        // `latestInboxDate` come from the rollup that runs, inside the
+        // conversations' turns, before every save that persists this change
+        // (the conversation is returned, and tracked, for exactly that).
+        // Until 2026-11-28 each such record walked every message of the
+        // conversation and read each one's labels, which the rollup then
+        // overwrote: a bulk archive in another client, k removals in a chat
+        // of n messages, cost k walks of n (architecture review 2026-11,
+        // sync-persist-path#2). No reader in the run routes on these two
+        // fields before that rollup.
     }
 
 }

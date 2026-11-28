@@ -324,9 +324,16 @@ extension MessagePersister {
     }
 
     @discardableResult
+    /// - Parameter persistedMessageConversationID: the conversation of the
+    ///   message being persisted, which the caller tracks for the run's rollup;
+    ///   it is not rolled up here. Nil where nothing is persisted (an excluded
+    ///   echo is deleted).
+    /// - Returns: every conversation the consumption touched, for the caller
+    ///   to track.
     nonisolated func consumeRemoteCommittedSendMutation(
         _ resolution: RemoteCommittedSendMutationResolution?,
         requiresResolvedPersistenceRoute: Bool = true,
+        persistedMessageConversationID: NSManagedObjectID? = nil,
         in context: NSManagedObjectContext
     ) -> Set<NSManagedObjectID> {
         guard let resolution,
@@ -381,6 +388,19 @@ extension MessagePersister {
 
         for (_, (conversation, wasNewlyInserted)) in affectedConversations
             where !conversation.isDeleted {
+            // The persisted message's own conversation is rolled up by the run:
+            // the caller tracks it, and a run that dies after a batch save and
+            // replays the slice refetches that message and tracks it again.
+            // Until 2026-11-28 it was also rolled up here, over every message
+            // with no labels prefetched, and the run's rollup then did it
+            // again (architecture review 2026-11, sync-persist-path#2). Any
+            // other conversation the optimistic row was in keeps its rollup
+            // here: the message fetch phase saves each batch before the run's
+            // rollup, and a replay does not reach it, since the record that
+            // named it is gone with that save.
+            if conversation.objectID == persistedMessageConversationID {
+                continue
+            }
             let remainingMessages = conversation.messages?.filter { !$0.isDeleted } ?? []
             if wasNewlyInserted && remainingMessages.isEmpty && !draftConversationIDs.contains(conversation.id) {
                 context.delete(conversation)
@@ -639,7 +659,12 @@ extension MessagePersister {
     }
 
     /// Applies list-critical rollup fields immediately when an existing message is updated.
-    /// Falls back to a scoped inbox recomputation when INBOX membership changes.
+    /// A message that left INBOX moves only the unread count here: `hasInbox` and
+    /// `latestInboxDate` come from the rollup the run makes before the save that
+    /// persists the update, as for a history label removal
+    /// (`LabelOperationProcessor.applyFastInboxIndicators`). Until 2026-11-28 it
+    /// walked every message of the conversation, labels included, for values the
+    /// rollup then overwrote (architecture review 2026-11, sync-persist-path#2).
     nonisolated func applyFastConversationListUpdateForExistingMessage(
         _ message: Message,
         in conversation: Conversation,
@@ -675,9 +700,6 @@ extension MessagePersister {
                 conversation,
                 shouldReactivate: true
             )
-        } else if previousHadInboxLabel {
-            // This message left INBOX; recompute inbox-only indicators for correctness.
-            refreshConversationInboxIndicators(conversation)
         }
 
         if let existingLastDate = conversation.lastMessageDate,
@@ -697,51 +719,5 @@ extension MessagePersister {
            conversation.snippet != previewText {
             conversation.snippet = previewText
         }
-    }
-
-    /// Recomputes inbox-specific conversation indicators from the conversation's message set.
-    /// Note: For best performance, prefetch "messages" and "messages.labels" on the
-    /// conversation's fetch request via relationshipKeyPathsForPrefetching before calling this.
-    nonisolated func refreshConversationInboxIndicators(_ conversation: Conversation) {
-        // Prefetch labels for all messages to avoid N individual faults
-        if let context = conversation.managedObjectContext, let messages = conversation.messages, !messages.isEmpty {
-            let messageIDs = messages.compactMap { $0.objectID }
-            let prefetchRequest = Message.fetchRequest()
-            prefetchRequest.predicate = NSPredicate(format: "SELF IN %@", messageIDs)
-            prefetchRequest.relationshipKeyPathsForPrefetching = ["labels"]
-            _ = try? context.fetch(prefetchRequest)
-        }
-
-        guard let messages = conversation.messages else {
-            conversation.hasInbox = false
-            conversation.inboxUnreadCount = 0
-            conversation.latestInboxDate = nil
-            return
-        }
-
-        var hasInbox = false
-        var unreadCount: Int32 = 0
-        var latestInboxDate: Date?
-
-        for message in messages {
-            let isInbox = message.labels?.contains(where: { $0.id == "INBOX" }) ?? false
-            guard isInbox else { continue }
-
-            hasInbox = true
-            if message.isUnread {
-                unreadCount = min(Int32.max, unreadCount + 1)
-            }
-            if let currentLatestInboxDate = latestInboxDate {
-                if message.internalDate > currentLatestInboxDate {
-                    latestInboxDate = message.internalDate
-                }
-            } else {
-                latestInboxDate = message.internalDate
-            }
-        }
-
-        conversation.hasInbox = hasInbox
-        conversation.inboxUnreadCount = unreadCount
-        conversation.latestInboxDate = latestInboxDate
     }
 }

@@ -1052,6 +1052,62 @@ final class IncrementalSyncCursorTests: XCTestCase {
         XCTAssertNil(lastSuccess)
     }
 
+    /// A run whose slice admits the intermediate flush rolls each touched
+    /// conversation up there, and the final save rolls up only what was
+    /// tracked after the flush (architecture review 2026-11, data-model#4).
+    /// Until 2026-11-28 the flush read the tracker without claiming, and the
+    /// final save fetched the same conversations again with every message and
+    /// its labels prefetched.
+    ///
+    /// Revert-check: `claimPendingConversationUpdates` at the intermediate
+    /// flush in `IncrementalSyncOrchestrator.performSync`. Put back the reads
+    /// (`modifiedConversations`, `displayNameOnlyConversations`) and the
+    /// conversation is fetched for a rollup twice.
+    @MainActor
+    func testIntermediateFlush_rollsEachConversationUpOnce_notAgainAtTheFinalSave() async throws {
+        apiClient.setHistoryResponsesByPageToken([
+            (
+                pageToken: nil,
+                response: HistoryResponse(
+                    history: [
+                        HistoryRecord(
+                            id: "5000",
+                            messages: nil,
+                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-flush"))],
+                            messagesDeleted: nil,
+                            labelsAdded: nil,
+                            labelsRemoved: nil
+                        )
+                    ],
+                    nextPageToken: nil,
+                    historyId: "2000"
+                )
+            )
+        ])
+        apiClient.getMessageResponses["m-flush"] = makeFullMessage(id: "m-flush")
+        let context = RollupFetchRecordingContext(
+            coordinator: testStack.persistentContainer.persistentStoreCoordinator
+        )
+
+        _ = try await makeOrchestrator(makeSyncContext: { context }).performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+        let conversationID = try await context.perform {
+            let request = Message.fetchRequest()
+            request.predicate = MessagePredicates.id("m-flush")
+            return try XCTUnwrap(try context.fetch(request).first?.conversation?.objectID)
+        }
+        XCTAssertEqual(
+            context.rollupFetchCount(naming: conversationID),
+            1,
+            "The conversation was rolled up at the flush and again at the final save"
+        )
+    }
+
     @MainActor
     func testFailedContinuationSaveRetainsPriorTokenCounterAndCursor() async throws {
         try await seedHistoryCheckpoint(pageToken: "p-old")
@@ -3931,5 +3987,45 @@ private final class SyncContextRecorder: @unchecked Sendable {
         }
         observer = nil
         lock.withLock { isRecording = false }
+    }
+}
+
+/// A sync context that records each rollup fetch (`Conversation`, `SELF IN`,
+/// with the conversations' messages and their labels prefetched:
+/// `ConversationRollupUpdater.updateRollupsForModified`) and the
+/// conversations it names.
+///
+/// `@unchecked Sendable`: `lock` guards `rollupFetches`; Core Data's own state
+/// stays on the context's private queue.
+private final class RollupFetchRecordingContext: NSManagedObjectContext, @unchecked Sendable {
+    private let lock = NSLock()
+    private var rollupFetches: [[NSManagedObjectID]] = []
+
+    init(coordinator: NSPersistentStoreCoordinator) {
+        super.init(concurrencyType: .privateQueueConcurrencyType)
+        persistentStoreCoordinator = coordinator
+        mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("not supported in tests")
+    }
+
+    func rollupFetchCount(naming conversationID: NSManagedObjectID) -> Int {
+        lock.withLock { rollupFetches.filter { $0.contains(conversationID) }.count }
+    }
+
+    /// `executeFetchRequest:error:` is `NS_REFINED_FOR_SWIFT`; the generic
+    /// `fetch(_:)` overlay calls through to this underscored `__execute(_:)`.
+    override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
+        let result = try super.__execute(request)
+        if request.entityName == "Conversation",
+           request.relationshipKeyPathsForPrefetching?.contains("messages.labels") == true,
+           let predicate = request.predicate as? NSComparisonPredicate,
+           predicate.predicateOperatorType == .in,
+           let named = predicate.rightExpression.constantValue as? Set<NSManagedObjectID> {
+            lock.withLock { rollupFetches.append(Array(named)) }
+        }
+        return result
     }
 }

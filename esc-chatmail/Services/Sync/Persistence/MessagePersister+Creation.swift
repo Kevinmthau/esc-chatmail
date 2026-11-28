@@ -6,6 +6,9 @@ import CoreData
 private struct MessageCreationResult {
     let participantEmails: [String]
     let modifiedConversationID: NSManagedObjectID
+    /// The conversations a consumed send echo touched, which the run must
+    /// roll up (`consumeRemoteCommittedSendMutation`).
+    let echoConversationIDs: Set<NSManagedObjectID>
 }
 
 extension MessagePersister {
@@ -192,14 +195,16 @@ extension MessagePersister {
             // and mutation-record deletion cross one context save together.
             // A crash before that save leaves the durable route available for
             // the next sync retry.
-            self.consumeRemoteCommittedSendMutation(
+            let echoConversationIDs = self.consumeRemoteCommittedSendMutation(
                 remoteCommittedSendMutation,
+                persistedMessageConversationID: conversation.objectID,
                 in: context
             )
 
             return MessageCreationResult(
                 participantEmails: participantEmails,
-                modifiedConversationID: conversation.objectID
+                modifiedConversationID: conversation.objectID,
+                echoConversationIDs: echoConversationIDs
             )
         }
 
@@ -215,8 +220,8 @@ extension MessagePersister {
             }
         }
 
-        await ModificationTracker.shared.trackModifiedConversation(
-            result.modifiedConversationID,
+        await ModificationTracker.shared.trackModifiedConversations(
+            result.echoConversationIDs.union([result.modifiedConversationID]),
             in: modificationTransaction
         )
     }
