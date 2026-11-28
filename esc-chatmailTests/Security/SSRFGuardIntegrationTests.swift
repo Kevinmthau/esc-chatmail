@@ -120,7 +120,8 @@ final class SSRFGuardIntegrationTests: XCTestCase {
     /// Measured on the iOS 27.0 simulator against a loopback listener: `getaddrinfo` resolves the
     /// dotted address and `https://127.0.0.1.:<port>/` opened a connection, but App Transport
     /// Security refused `http://127.0.0.1.:<port>/` (`NSURLErrorDomain` -1022, no connection),
-    /// which is the spelling these URLs use.
+    /// which is the spelling these URLs use. First measured with `NSAllowsLocalNetworking` in
+    /// Info.plist; measured again on 2026-11-28 with it gone, unchanged.
     func testRemoteImageFetcher_rejectsTrailingDotPrivateIPBeforeNetwork() async {
         await assertFetcherRejectsBeforeNetwork([
             "http://169.254.169.254./latest/meta-data/",
@@ -132,7 +133,9 @@ final class SSRFGuardIntegrationTests: XCTestCase {
     /// trailing-dot spelling, this one was reachable over plain http: measured on the iOS 27.0
     /// simulator, a `URLSession` GET of `http://0127.0.0.1:<port>/` returned 200 from a loopback
     /// listener. App Transport Security did not refuse it, and the resolver read the host as
-    /// decimal 127.0.0.1 while the detector read it as octal 87.0.0.1.
+    /// decimal 127.0.0.1 while the detector read it as octal 87.0.0.1. First measured with
+    /// `NSAllowsLocalNetworking` in Info.plist; measured again on 2026-11-28 with it gone,
+    /// unchanged (200 from the listener).
     ///
     /// Revert-check: returning only the `inet_aton` reading from
     /// `PrivateNetworkAddressDetector.ipv4Readings(of:)`, without the dotted-decimal one, makes

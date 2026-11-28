@@ -17,32 +17,41 @@ final class PrivilegeDeclarationsTests: XCTestCase {
 
     // MARK: - Data protection
 
+    #if os(iOS)
     /// The iOS store is opened as complete until first user authentication, so that a background
-    /// task on a locked phone (after the first unlock) can read and write it.
+    /// task on a locked phone (after the first unlock) can read and write it. (The suite is not in
+    /// `Mac.xctestplan`; the Mac's store has no protection classes.)
     ///
     /// Revert-check: removing the `setOption` in `CoreDataStack.applyFileProtection(to:)` fails
-    /// this on iOS.
+    /// this.
     func testStoreDescription_iOSFileProtection_isCompleteUntilFirstUserAuthentication() {
         let description = NSPersistentStoreDescription()
         CoreDataStack.applyFileProtection(to: description)
-        #if os(iOS)
         XCTAssertEqual(
             description.options[NSPersistentStoreFileProtectionKey] as? String,
             FileProtectionType.completeUntilFirstUserAuthentication.rawValue
         )
-        #else
-        XCTAssertTrue(description.options.isEmpty, "The Mac's store has no protection classes")
-        #endif
     }
 
-    /// The production container is configured through it.
+    /// The store the app has open carries the class: the iOS test host loads
+    /// `CoreDataStack.shared` synchronously, and a store's options are the ones it was added with,
+    /// so this reads what the production container did, not its source (a commented-out call, or
+    /// one moved after the load, would leave the source looking right).
     ///
     /// Revert-check: removing `Self.applyFileProtection(to: description)` from
-    /// `CoreDataStack.persistentContainer` fails this.
-    func testPersistentContainer_appliesTheFileProtection() throws {
-        let source = try repositorySource("esc-chatmail/Services/CoreData/CoreDataStack.swift")
-        XCTAssertTrue(source.contains("Self.applyFileProtection(to: description)"))
+    /// `CoreDataStack.persistentContainer`, or moving it after `loadPersistentStores(for:)`, fails
+    /// this.
+    func testPersistentContainer_loadedStore_hasTheFileProtection() throws {
+        let store = try XCTUnwrap(
+            CoreDataStack.shared.persistentContainer.persistentStoreCoordinator.persistentStores.first,
+            "The test host's shared store is attached"
+        )
+        XCTAssertEqual(
+            store.options?[NSPersistentStoreFileProtectionKey] as? String,
+            FileProtectionType.completeUntilFirstUserAuthentication.rawValue
+        )
     }
+    #endif
 
     /// No default data-protection class is declared for the iOS app, or only the same class the
     /// store names: Xcode's Data Protection capability defaults to Complete, which would lock every

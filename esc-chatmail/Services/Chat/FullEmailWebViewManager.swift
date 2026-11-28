@@ -982,15 +982,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     }
 
     private final class Entry {
-        enum PrepaintSource {
-            case visibleRowWarm
-            case explicitOpen
-        }
-
         let key: FullEmailWebViewPreRenderKey
         var request: OriginalEmailWarmRequest
         var payload: FullEmailOpenPayload
-        var prepaintSource: PrepaintSource
         let webView: LayoutAwareWKWebView
         let cidHandler: CIDSchemeHandler
         let delegate: WarmNavigationDelegate
@@ -1007,7 +1001,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             key: FullEmailWebViewPreRenderKey,
             request: OriginalEmailWarmRequest,
             payload: FullEmailOpenPayload,
-            prepaintSource: PrepaintSource,
             webView: LayoutAwareWKWebView,
             cidHandler: CIDSchemeHandler,
             delegate: WarmNavigationDelegate
@@ -1015,7 +1008,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             self.key = key
             self.request = request
             self.payload = payload
-            self.prepaintSource = prepaintSource
             self.webView = webView
             self.cidHandler = cidHandler
             self.delegate = delegate
@@ -1206,7 +1198,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             key: key,
             request: request,
             payload: payload,
-            prepaintSource: .visibleRowWarm,
             message: message,
             senderEmail: request.senderEmail,
             width: width,
@@ -1291,7 +1282,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
                 )
                 existing.request = request
                 existing.payload = updatedPayload
-                existing.prepaintSource = .explicitOpen
                 applyEvictions(bookkeeping.touch(request.messageId))
                 return
             }
@@ -1310,7 +1300,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             key: key,
             request: request,
             payload: warmingPayload,
-            prepaintSource: .explicitOpen,
             message: message,
             senderEmail: request.senderEmail,
             width: width,
@@ -1730,7 +1719,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         key: FullEmailWebViewPreRenderKey,
         request: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
-        prepaintSource: Entry.PrepaintSource,
         message: Message?,
         senderEmail: String?,
         width: CGFloat,
@@ -1751,7 +1739,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             key: key,
             request: request,
             payload: payload,
-            prepaintSource: prepaintSource,
             webView: webView,
             cidHandler: cidHandler,
             delegate: delegate
@@ -1803,8 +1790,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// warm and idle off screen). The entry is dropped so it is never handed out as ready, and so a
     /// warm that never finished cannot block the next warm of that message, which keeps a same-key
     /// entry. Nothing is warmed again here: a warm is new account work, made only by a caller that
-    /// captured the account generation (`warm`, `prepaintAfterExplicitOpen`), so the message is
-    /// warmed again when its row next asks. The prepared payload and its LRU slot are kept.
+    /// captured the account generation (`warm`, `prepaintAfterExplicitOpen`). A row's warm builds
+    /// no web view (`warmVisibleRow`), so a pooled view that died comes back only at the message's
+    /// next open. The prepared payload and its LRU slot are kept.
     ///
     /// A checked-out entry is the reader's, which is then the view's delegate and drops it through
     /// `discard`; one marked here only because it was checked out at the time is dropped by

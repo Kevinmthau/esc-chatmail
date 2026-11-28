@@ -119,7 +119,7 @@ A session applied this phase with explicit permission to edit `project.pbxproj`;
   - `ENABLE_APP_SANDBOX = YES` was already set. Phase 0 added macOS-scoped `ENABLE_OUTGOING_NETWORK_CONNECTIONS`, `ENABLE_RESOURCE_ACCESS_CONTACTS`, `ENABLE_USER_SELECTED_FILES = readwrite` and `ENABLE_HARDENED_RUNTIME`.
   - These settings look like leftovers in an iOS project, but they are what sandboxes the Mac build. **Never remove them.**
 - **Entitlements.** `CODE_SIGN_ENTITLEMENTS[sdk=macosx*]` points at `esc-chatmail/Resources/esc_chatmail-macOS.entitlements`. That file holds only `keychain-access-groups` = `$(AppIdentifierPrefix)com.esc.inboxchat`, which GoogleSignIn's README requires on macOS.
-  - There is no push entitlement. Nothing in the app registers for remote notifications (there is no `registerForRemoteNotifications` or `UNUserNotificationCenter` anywhere), so the iOS `aps-environment` entitlement is unused.
+  - There is no push entitlement. Nothing in the app registers for remote notifications (there is no `registerForRemoteNotifications` or `UNUserNotificationCenter` anywhere), so the iOS `aps-environment` entitlement was unused. It was removed 2026-11-28, with the iOS `remote-notification` background mode (architecture review 2026-11, `security-privacy#6`).
 - **Runpath.** `LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]` is `@executable_path/../Frameworks`, the location of frameworks in a Mac app bundle.
 
 **Checked:**

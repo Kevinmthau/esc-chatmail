@@ -31,9 +31,10 @@ import Foundation
 /// The Mac refuses all of those. That includes the two queried schemes: the Mac has no Google app,
 /// and an email link should not feed the app's own sign-in redirect. iOS refuses the app's own
 /// schemes too (`appURLSchemes`), before it asks `canOpenURL`, which accepts them (architecture
-/// review 2026-11, `security-privacy#6`). The rest of what `canOpenURL` accepts on iOS (`maps:`,
-/// `webcal:`, `itms-apps:`, `shortcuts:`, `smb:`) still opens there: narrowing iOS to the Mac's
-/// list is a product decision nobody has made.
+/// review 2026-11, `security-privacy#6`). The rest of what `canOpenURL` accepts on iOS (the
+/// measured `maps:`, `shortcuts:`, `smb:`, `x-apple-reminderkit:` and `app-settings:`, and
+/// whatever else an Apple app claims; `webcal:` and `itms-apps:` were not tried) still opens
+/// there: narrowing iOS to the Mac's list is a product decision nobody has made.
 ///
 /// The policy has no platform code, so the iOS-hosted unit tests pin it.
 enum EmailLinkSchemePolicy {

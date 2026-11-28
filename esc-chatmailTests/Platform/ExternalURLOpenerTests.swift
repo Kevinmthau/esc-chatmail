@@ -1,7 +1,7 @@
 import XCTest
 @testable import esc_chatmail
 
-/// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)` runs both platforms' scheme rules under
+/// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)` runs both platforms' scheme rules under
 /// the iOS test plan, with recording closures in place of `UIApplication.canOpenURL` and of
 /// `NSWorkspace.open` / `UIApplication.open`.
 ///
@@ -33,7 +33,7 @@ final class ExternalURLOpenerTests: XCTestCase {
     /// The Mac never asks the system: even a query that would answer yes does not widen its list.
     ///
     /// Revert-check: removing the `.macOS` guard from
-    /// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)` makes this fail; the Mac then hands
+    /// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)` makes this fail; the Mac then hands
     /// `smb:` to `NSWorkspace.open`, which mounts the share.
     func testOpen_onMac_otherAppScheme_neverReachesSystem() throws {
         try open("smb://attacker.example/share", on: .macOS, systemCanOpen: true)
@@ -55,7 +55,7 @@ final class ExternalURLOpenerTests: XCTestCase {
     /// no Mail, Phone or FaceTime to claim them, so iOS must not ask it for the shared list.
     ///
     /// Revert-check: dropping `opensOnEveryPlatform ||` from the `.iOS` guard in
-    /// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)`, so every link waits on the query
+    /// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)`, so every link waits on the query
     /// again, makes this fail.
     func testOpen_oniOS_everyPlatformScheme_opensWithoutAskingSystem() throws {
         let links = [
@@ -77,7 +77,7 @@ final class ExternalURLOpenerTests: XCTestCase {
     }
 
     /// Revert-check: opening unconditionally on iOS (dropping the `.iOS` guard in
-    /// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)`) makes this fail.
+    /// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)`) makes this fail.
     func testOpen_oniOS_otherScheme_systemRefuses_neverReachesSystem() throws {
         try open("zoommtg://zoom.us/join?confno=123", on: .iOS, systemCanOpen: false)
 
@@ -89,7 +89,7 @@ final class ExternalURLOpenerTests: XCTestCase {
     /// Files app claims it), where the Mac refuses it.
     ///
     /// Revert-check: applying the Mac's rule on every platform in
-    /// `ExternalURLOpener.open(_:on:systemCanOpen:systemOpen:)` makes this fail.
+    /// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)` makes this fail.
     func testOpen_oniOS_otherScheme_systemAccepts_reachesSystem() throws {
         try open("smb://fileserver.example.com/share", on: .iOS, systemCanOpen: true)
 
