@@ -492,7 +492,7 @@ final class ScaleQueryPlanTests: XCTestCase {
 
             XCTAssertEqual(Set(matched.map(\.objectID)), Set(windowIDs), "\(statistics)")
             let rowsPlan = try XCTUnwrap(
-                plans.first { $0.reads("ZCONVERSATION") && $0.sql.contains("carray") },
+                plans.first { $0.reads("ZCONVERSATION") && $0.bindsAnIDList },
                 "\(statistics):\n\(plans)"
             )
             XCTAssertEqual(rowsPlan.scans(of: "ZCONVERSATION"), [], "\(statistics): \(rowsPlan)")

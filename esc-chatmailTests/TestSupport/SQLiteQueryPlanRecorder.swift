@@ -45,6 +45,16 @@ enum SQLiteQueryPlanRecorder {
             !aliases(of: table).isEmpty
         }
 
+        /// Whether the statement binds a list of object IDs (an `IN %@` over
+        /// `NSManagedObjectID`s), which Core Data spells two ways: `IN carray(?)`
+        /// (seen on the iOS 27.0 simulator, locally) and
+        /// `IN (SELECT * FROM _Z_intarray0)`, a temporary table (seen on CI's iOS 26
+        /// runtime), both 2026-11-28. Both plan the IDs as a list subquery, and a test
+        /// picking a plan out by its ID list must match either.
+        var bindsAnIDList: Bool {
+            sql.contains("carray") || sql.contains("_Z_intarray")
+        }
+
         /// The aliases Core Data gave `table` in this statement (`t0`).
         func aliases(of table: String) -> [String] {
             let pattern = "\\b\(NSRegularExpression.escapedPattern(for: table)) (t[0-9]+)\\b"
