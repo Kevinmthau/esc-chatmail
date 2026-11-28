@@ -97,6 +97,9 @@ final class SyncEngine: ObservableObject, Sendable {
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
     private let availableStorageBytes: @Sendable () -> Int64?
+    /// Background time for each foreground-entry run (`SyncRunBackgroundLease`):
+    /// UIKit's on iOS, none on the Mac.
+    private let runBackgroundTaskManager: any SyncRunBackgroundTaskManaging
     /// Runs the store-wide maintenance passes, if their 6-hour cadence is
     /// due, as a run of their own (`DataCleanupService.runStoreMaintenanceIfDue`),
     /// after an incremental run that succeeded.
@@ -151,7 +154,8 @@ final class SyncEngine: ObservableObject, Sendable {
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
         availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
-        storeMaintenanceCoordinator: StoreMaintenanceCoordinator? = nil
+        storeMaintenanceCoordinator: StoreMaintenanceCoordinator? = nil,
+        runBackgroundTaskManager: (any SyncRunBackgroundTaskManaging)? = nil
     ) {
         let reconciliation = SyncReconciliation(
             messageFetcher: messageFetcher
@@ -163,6 +167,7 @@ final class SyncEngine: ObservableObject, Sendable {
         self.syncRunCoordinator = syncRunCoordinator
         self.clock = clock
         self.availableStorageBytes = availableStorageBytes
+        self.runBackgroundTaskManager = runBackgroundTaskManager ?? PlatformSyncRunBackgroundTaskManager()
         // The maintenance takes its exclusive run on the coordinator this
         // engine's own runs use. The shared engine is given the shared
         // maintenance coordinator, which the daily database tasks also go
@@ -231,13 +236,28 @@ final class SyncEngine: ObservableObject, Sendable {
         await runSyncTask(syncRunTask, syncType: "Initial")
     }
 
+    /// Starts a foreground-entry incremental run, if the boundary is free, and
+    /// returns once it is admitted.
+    ///
+    /// Each admitted run holds a `SyncRunBackgroundLease` until its chain
+    /// (the run, the completion and any store maintenance after it) has
+    /// ended. On iOS that is UIKit background time: a run still going when
+    /// the app goes to the background finishes or, at the grant's
+    /// expiration, is cancelled and rolls back, where it used to freeze at
+    /// suspension holding the boundary. On the Mac it is nothing.
     func triggerIncrementalSyncIfPossible(
         completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult {
         let resultRecorder = IncrementalSyncResultRecorder()
-        switch await prepareIncrementalSync(resultRecorder: resultRecorder) {
+        switch await prepareIncrementalSync(kind: .foregroundIncremental, resultRecorder: resultRecorder) {
         case .started(let syncRunTask):
-            Task { @MainActor [weak self] in
+            let lease = SyncRunBackgroundLease(manager: runBackgroundTaskManager)
+            let chain = Task { @MainActor [weak self] in
+                // Once the whole chain has ended: the run's `endRun`, inside
+                // `runSyncTask`, and the store maintenance below. That can
+                // start after the app has gone to the background, because a
+                // stopped coordinator queues no continuation.
+                defer { lease.end() }
                 guard let self else { return }
                 let outcome = await self.runSyncTask(
                     syncRunTask,
@@ -256,6 +276,14 @@ final class SyncEngine: ObservableObject, Sendable {
                 guard !continuationQueued else { return }
                 await self.runStoreMaintenanceAfterSync()
             }
+            // In the turn the run was admitted, before the chain can start:
+            // it is main-actor work too. The expiration cancels the run's
+            // registered task and the chain, which reaches the maintenance's
+            // own registered task, and awaits neither.
+            lease.begin {
+                syncRunTask.task.cancel()
+                chain.cancel()
+            }
             return .started
         case .alreadyInProgress:
             log.debug("Sync already in progress, skipping incremental sync")
@@ -270,11 +298,26 @@ final class SyncEngine: ObservableObject, Sendable {
     /// Runs the same model-v3 incremental executor for a system background
     /// launch, but keeps ownership of the concrete run task so cancelling the
     /// awaiting `BGTask` wrapper cannot leave mailbox work running past expiry.
+    ///
+    /// The run is a `.background` run, so a background wake that finds the
+    /// boundary held can tell another background task's sync, which covers
+    /// it, from a foreground run, which does not
+    /// (`BackgroundSyncManager.shouldScheduleRetryWhenBlocked`). It was
+    /// `.foregroundIncremental` like every other incremental run, so a wake
+    /// that met a foreground run frozen by suspension reported success and
+    /// scheduled no catch-up (architecture review 2026-11, background-energy#2).
+    ///
+    /// Nothing here waits for the boundary: `beginRunWithTask` answers at
+    /// once, and the store maintenance after the run takes its own with the
+    /// cancellation-aware `acquireRunWithTask`. A wait added here must be
+    /// cancellation-aware too, never `waitUntilIdle` or `acquireRun`: a fired
+    /// task is completed only once its handler returns.
     func performIncrementalSyncForBackground(
         budget: BackgroundMailboxSyncBudget
     ) async -> BackgroundMailboxSyncExecutionResult {
         let resultRecorder = IncrementalSyncResultRecorder()
         switch await prepareIncrementalSync(
+            kind: .background,
             resultRecorder: resultRecorder,
             historyPageLimit: budget.historyPageLimit,
             historyPageSize: budget.historyPageSize,
@@ -493,7 +536,11 @@ final class SyncEngine: ObservableObject, Sendable {
         case skippedInsufficientStorage
     }
 
+    /// - Parameter kind: what the run holds the boundary as. The foreground
+    ///   entry's is `.foregroundIncremental` and a background task's is
+    ///   `.background`; it has no default, so each entry says which it is.
     private func prepareIncrementalSync(
+        kind: SyncRunKind,
         resultRecorder: IncrementalSyncResultRecorder? = nil,
         historyPageLimit: Int? = nil,
         historyPageSize: Int? = nil,
@@ -515,7 +562,7 @@ final class SyncEngine: ObservableObject, Sendable {
             return .skippedNoNetwork
         }
 
-        let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: .foregroundIncremental) {
+        let syncRunTask = await syncRunCoordinator.beginRunWithTask(kind: kind) {
             Task { [weak self] in
                 guard let self else {
                     // This can happen if app is backgrounded/terminated during incremental sync setup
