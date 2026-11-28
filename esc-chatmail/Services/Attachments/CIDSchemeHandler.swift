@@ -52,13 +52,17 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
     private let messageReference: MessageReference
     private let activeTasks = ActiveSchemeTaskRegistry()
     private let fetchCoalescer = CIDAttachmentFetchCoalescer()
+    /// Reads an attachment's bytes, given its stored relative path. Called off the main actor
+    /// (`readOffMainActor`); a seam so a test can see where it runs.
+    private let loadData: @Sendable (String) -> Data?
 
     init(
         message: Message?,
         localResources: [LocalResource] = [],
         coreDataStack: CoreDataStack = .shared,
         apiClient: (any GmailAPIClientProtocol)? = nil,
-        makeBackgroundContext: (@Sendable () -> NSManagedObjectContext)? = nil
+        makeBackgroundContext: (@Sendable () -> NSManagedObjectContext)? = nil,
+        loadData: @escaping @Sendable (String) -> Data? = { AttachmentPaths.loadData(from: $0) }
     ) {
         self.messageReference = MessageReference(message: message)
         self.message = message
@@ -67,6 +71,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             coreDataStack.newBackgroundContext()
         }
         self.apiClientOverride = apiClient
+        self.loadData = loadData
         super.init()
     }
 
@@ -122,7 +127,9 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
         if let resource = localResources.first(where: {
             EmailDocument.normalizedContentID($0.contentID) == contentId
         }) {
-            if let data = AttachmentPaths.loadData(from: resource.localURL) {
+            let data = await readOffMainActor(resource.localURL)
+            guard activeTasks.isActive(taskID) else { return }
+            if let data {
                 respond(urlSchemeTask, taskID: taskID, with: data, mimeType: resource.mimeType)
             } else {
                 recordUnavailableImage()
@@ -143,7 +150,8 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             return
         }
 
-        // Load attachment data from disk first.
+        // Load attachment data from disk first, off the main actor. The readable-path check stays
+        // in front of the read, as `readableLocalURLValue` requires.
         if let attachmentId = attachment.attachmentId,
            let localPath = attachment.localURL,
            AttachmentPaths.isReadableStoragePath(
@@ -151,7 +159,7 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
                messageId: attachment.messageId,
                attachmentId: attachmentId
            ),
-           let data = AttachmentPaths.loadData(from: localPath) {
+           let data = await readOffMainActor(localPath) {
             guard activeTasks.isActive(taskID) else { return }
             Log.debug("CIDSchemeHandler: local hit for Content-ID: \(contentId)", category: .ui)
             respond(urlSchemeTask, taskID: taskID, with: data, mimeType: attachment.mimeType)
@@ -171,6 +179,19 @@ final class CIDSchemeHandler: NSObject, WKURLSchemeHandler {
             recordUnavailableImage()
             respondWithTransparentPixel(urlSchemeTask, taskID: taskID)
         }
+    }
+
+    /// Reads a file's bytes on a detached task, so a large inline image is not read on the main
+    /// actor (architecture review 2026-11, `web-content-rendering#4`, step 4): the scheme handler's
+    /// work inherits the main actor from WebKit's call. Only the read moves: the caller checks
+    /// `activeTasks.isActive` after it and answers the task on the main actor with no suspension
+    /// between the check and the answer, because WebKit raises if a task is answered after it was
+    /// stopped.
+    private func readOffMainActor(_ relativePath: String) async -> Data? {
+        let loadData = loadData
+        return await Task.detached(priority: .userInitiated) {
+            loadData(relativePath)
+        }.value
     }
 
     /// Extracts the Content-ID from a cid: URL
