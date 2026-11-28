@@ -29,8 +29,11 @@ import Foundation
 /// list under `LSApplicationQueriesSchemes`: `google` and the app's own Google OAuth redirect
 /// scheme (`GOOGLE_REDIRECT_URI`). A third-party app's undeclared scheme (`zoommtg:`) is refused.
 /// The Mac refuses all of those. That includes the two queried schemes: the Mac has no Google app,
-/// and an email link should not feed the app's own sign-in redirect. Only the Mac enforces that;
-/// on iOS the redirect scheme still passes `canOpenURL`.
+/// and an email link should not feed the app's own sign-in redirect. iOS refuses the app's own
+/// schemes too (`appURLSchemes`), before it asks `canOpenURL`, which accepts them (architecture
+/// review 2026-11, `security-privacy#6`). The rest of what `canOpenURL` accepts on iOS (`maps:`,
+/// `webcal:`, `itms-apps:`, `shortcuts:`, `smb:`) still opens there: narrowing iOS to the Mac's
+/// list is a product decision nobody has made.
 ///
 /// The policy has no platform code, so the iOS-hosted unit tests pin it.
 enum EmailLinkSchemePolicy {
@@ -58,10 +61,33 @@ enum EmailLinkSchemePolicy {
         "tel"
     ]
 
+    /// The lowercased URL schemes this app registers in `CFBundleURLTypes`: today the Google OAuth
+    /// redirect scheme (`GOOGLE_REDIRECT_URI`). A link with one of them would be handed to the
+    /// app's own sign-in redirect handling, which no email may feed, so iOS never opens one
+    /// (`ExternalURLOpener`); the Mac refuses it as it refuses every scheme outside its list.
+    static let appURLSchemes: Set<String> = appURLSchemes(in: .main)
+
+    /// The URL schemes `bundle`'s Info.plist registers, lowercased.
+    static func appURLSchemes(in bundle: Bundle) -> Set<String> {
+        guard let types = bundle.object(forInfoDictionaryKey: "CFBundleURLTypes") as? [[String: Any]] else {
+            return []
+        }
+        return Set(
+            types
+                .flatMap { ($0["CFBundleURLSchemes"] as? [String]) ?? [] }
+                .map { $0.lowercased() }
+        )
+    }
+
     /// Whether `url`'s scheme, compared case-insensitively, is in `schemesOpenedOnEveryPlatform`.
     /// A URL with no scheme is refused.
     static func opensOnEveryPlatform(_ url: URL) -> Bool {
         schemeIsAllowed(url, in: schemesOpenedOnEveryPlatform)
+    }
+
+    /// Whether `url`'s scheme, compared case-insensitively, is one of `appSchemes`.
+    static func usesAppURLScheme(_ url: URL, appSchemes: Set<String>) -> Bool {
+        schemeIsAllowed(url, in: appSchemes)
     }
 
     /// Whether `url`'s scheme, compared case-insensitively, is in `amazonSESDestinationSchemes`. A
