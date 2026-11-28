@@ -93,7 +93,9 @@ final class SyncEngine: ObservableObject, Sendable {
     private let incrementalSyncOrchestrator: IncrementalSyncOrchestrator
     private let messageFetcher: MessageFetcher
     private let coreDataStack: CoreDataStack
-    private let networkMonitor: NetworkMonitorService
+    /// Asked before every run; only a path known to be unsatisfied skips it
+    /// (`NetworkMonitorService`).
+    private let networkMonitor: any SyncNetworkPathMonitoring
     private let syncRunCoordinator: SyncRunCoordinator
     private let clock: any SyncClock
     private let availableStorageBytes: @Sendable () -> Int64?
@@ -133,7 +135,7 @@ final class SyncEngine: ObservableObject, Sendable {
             dataCleanupService: DataCleanupService(),
             conversationManager: ConversationManager(),
             coreDataStack: CoreDataStack.shared,
-            networkMonitor: NetworkMonitorService(),
+            networkMonitor: NetworkMonitorService.shared,
             syncRunCoordinator: .shared,
             storeMaintenanceCoordinator: .shared
         )
@@ -150,7 +152,7 @@ final class SyncEngine: ObservableObject, Sendable {
         dataCleanupService: DataCleanupService,
         conversationManager: ConversationManager,
         coreDataStack: CoreDataStack,
-        networkMonitor: NetworkMonitorService,
+        networkMonitor: any SyncNetworkPathMonitoring,
         syncRunCoordinator: SyncRunCoordinator,
         clock: any SyncClock = SystemSyncClock(),
         availableStorageBytes: @escaping @Sendable () -> Int64? = { StoreVolumeFreeSpace.availableBytes() },
@@ -556,7 +558,11 @@ final class SyncEngine: ObservableObject, Sendable {
         case .boundaryBusy:
             return .alreadyInProgress
         }
-        guard await networkMonitor.isNetworkAvailable() else {
+        // Only a path known to be unsatisfied. The read session waits for
+        // connectivity itself, so a run started offline would hold the
+        // exclusive boundary for minutes; a path that requires a connection,
+        // or has not been reported yet, is tried.
+        guard networkMonitor.isPathUsable else {
             log.info("Network not available, skipping sync")
             uiState.update(isSyncing: false, status: "Network unavailable")
             return .skippedNoNetwork
