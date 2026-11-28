@@ -1111,9 +1111,10 @@ final class AttachmentDownloader: ObservableObject {
             // the row is left as it was, never marked failed.
             if StorageErrorClassifier.isOutOfSpace(error) {
                 Log.warning(
-                    "Attachment \(Log.hashIdentifier(attachmentId)) did not fit on the disk while it downloaded; left queued",
+                    "Attachment \(Log.hashIdentifier(attachmentId)) did not fit on the disk while it downloaded; left as it was",
                     category: .attachment
                 )
+                recordSpaceRefusal(messageId: messageId, attachmentId: attachmentId)
                 await rollbackPartialDownload(
                     messageId: messageId,
                     attachmentId: attachmentId

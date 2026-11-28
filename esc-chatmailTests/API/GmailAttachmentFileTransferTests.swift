@@ -433,6 +433,9 @@ final class GmailAttachmentFileTransferTests: XCTestCase {
         }
         XCTAssertEqual(row.0, .queued)
         XCTAssertNil(row.1)
+        // Revert-check: the `recordSpaceRefusal` in that branch. Without it the row is left
+        // queued with no "Not enough storage" and nothing to tap.
+        XCTAssertTrue(downloader.isRefusedForSpace(messageId: messageID, attachmentId: "transfer-full-attachment"))
     }
 
     // MARK: - Helpers
