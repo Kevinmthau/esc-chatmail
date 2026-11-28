@@ -90,9 +90,12 @@ final class DuplicatePersonMergeTests: XCTestCase {
 
     /// Both Person relationships delete-cascade, so the merge must end with
     /// every participation still present and pointing at the survivor rather
-    /// than stranding a participant-less conversation. Note this pins the
-    /// outcome, not the repoint-before-delete ordering: Core Data defers
-    /// cascades to processPendingChanges, so reversing that order still passes.
+    /// than stranding a participant-less conversation.
+    ///
+    /// Revert-check: the repoint-before-delete order in
+    /// `DataCleanupService.mergeDuplicatePersons`. Delete the loser before its
+    /// repoint and the repoint's first fetch processes the delete, whose
+    /// cascade takes the loser's participant row: 1 participant instead of 2.
     func testRepointsParticipationsInsteadOfCascadingThemAway() async throws {
         let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
         let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
@@ -148,6 +151,11 @@ final class DuplicatePersonMergeTests: XCTestCase {
 
     /// Message participations move too, and a same-message/same-role row is
     /// likewise collapsed rather than duplicated.
+    ///
+    /// Revert-check: the repoint-before-delete order in
+    /// `DataCleanupService.mergeDuplicatePersons`. Delete the loser before its
+    /// repoint and the repoint's first fetch processes the delete, whose
+    /// cascade takes `msg-loser-only`'s row with it.
     func testMovesMessageParticipationsAndCollapsesRedundantOnes() async throws {
         let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
         let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
@@ -174,6 +182,118 @@ final class DuplicatePersonMergeTests: XCTestCase {
             Set(participations.compactMap { $0.message?.id }),
             ["msg-shared", "msg-loser-only"]
         )
+    }
+
+    /// The participations are read by fetches
+    /// (`DataCleanupService.messageParticipations(of:in:)`), not through
+    /// `Person.messageParticipations`, which model 9 drops, and a fetch can
+    /// fail. A loser whose participations could not be read must not be
+    /// deleted: its cascade would take them along, and the messages would lose
+    /// their participant rows. Both rows stay for the next cleanup.
+    ///
+    /// Revert-check: the `continue` in `mergeDuplicatePersons`' catch. Fall
+    /// through to the delete and the loser goes with its participation.
+    func testParticipationFetchFails_keepsTheLoserAndItsParticipations() async throws {
+        let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
+        let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
+        let conversation = ConversationBuilder().withParticipantHash("hash-fetch-fails").visible().build(in: context)
+        let message = MessageBuilder().withId("msg-fetch-fails").inConversation(conversation).build(in: context)
+        addMessageParticipant(person: survivor, to: message, kind: "to")
+        addMessageParticipant(person: loser, to: message, kind: "from")
+        try context.save()
+        let loserID = loser.objectID
+        let failingContext = EntityFetchFailingContext(
+            failingEntityName: "MessageParticipant",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator,
+            concurrencyType: .mainQueueConcurrencyType
+        )
+
+        await makeService().mergeDuplicatePersons(in: failingContext)
+
+        XCTAssertEqual(failingContext.failedFetches, 1)
+        context.refreshAllObjects()
+        XCTAssertEqual(try personRows(forEmail: Self.alice).count, 2)
+        let participations = try context.fetch(MessageParticipant.fetchRequest())
+        XCTAssertEqual(participations.count, 2, "The loser's participation was deleted with it")
+        XCTAssertEqual(
+            participations.first { $0.kind == "from" }?.person?.objectID,
+            loserID,
+            "Nothing is moved when the reads fail"
+        )
+    }
+
+    /// Three rows for one address, and both losers are the sender of the same
+    /// message: the first loser's row moves onto the survivor, and the second
+    /// loser's check must see that unsaved move and drop its own row, or the
+    /// message lists the sender twice. The survivor's participations are read
+    /// as this context has them (`DataCleanupService.messageParticipationKeys`).
+    ///
+    /// Revert-check: the in-memory `participation.person` filter in
+    /// `messageParticipationKeys(of:among:in:)`. Filter on the stored person
+    /// (`committedValues(forKeys: ["person"])`) and the second loser's row is
+    /// moved too: two `from` rows on the message.
+    func testTwoLosersOnOneMessage_collapseToOneRowOnTheSurvivor() async throws {
+        let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
+        let firstLoser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
+        let secondLoser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
+        let conversation = ConversationBuilder().withParticipantHash("hash-two-losers").visible().build(in: context)
+        let message = MessageBuilder().withId("msg-two-losers").inConversation(conversation).build(in: context)
+        addMessageParticipant(person: firstLoser, to: message, kind: "from")
+        addMessageParticipant(person: secondLoser, to: message, kind: "from")
+        try context.save()
+
+        await makeService().mergeDuplicatePersons(in: context)
+
+        let rows = try personRows(forEmail: Self.alice)
+        XCTAssertEqual(rows.map(\.objectID), [survivor.objectID])
+        let participations = try context.fetch(MessageParticipant.fetchRequest())
+        XCTAssertEqual(participations.count, 1, "The sender is listed once on the message")
+        XCTAssertEqual(participations.first?.person?.objectID, survivor.objectID)
+        XCTAssertEqual(participations.first?.kind, "from")
+    }
+
+    /// The survivor's participations are the merge's second read. When it
+    /// fails, nothing has moved yet: both rows stay, every participation stays
+    /// where it was, and the context is left with no changes for a later save
+    /// to commit.
+    ///
+    /// Revert-check: the survivor read ahead of the conversation repoint in
+    /// `repointParticipations`. Read it after the loser's conversation
+    /// participation was moved and the failure leaves that move in the
+    /// context.
+    func testSurvivorParticipationFetchFails_keepsBothRowsAndChangesNothing() async throws {
+        let survivor = PersonBuilder().withEmail(Self.alice).withDisplayName("Alice Smith").build(in: context)
+        let loser = PersonBuilder().withEmail(Self.alice).noDisplayName().build(in: context)
+        let conversation = ConversationBuilder().withParticipantHash("hash-second-read").visible().build(in: context)
+        let message = MessageBuilder().withId("msg-second-read").inConversation(conversation).build(in: context)
+        addParticipant(person: loser, to: conversation)
+        addMessageParticipant(person: survivor, to: message, kind: "to")
+        addMessageParticipant(person: loser, to: message, kind: "from")
+        let otherMessage = MessageBuilder().withId("msg-second-read-2").inConversation(conversation).build(in: context)
+        addMessageParticipant(person: loser, to: otherMessage, kind: "from")
+        try context.save()
+        let loserID = loser.objectID
+        let failingContext = EntityFetchFailingContext(
+            failingEntityName: "MessageParticipant",
+            coordinator: stack.persistentContainer.persistentStoreCoordinator,
+            concurrencyType: .mainQueueConcurrencyType,
+            succeedingFirst: 1
+        )
+
+        await makeService().mergeDuplicatePersons(in: failingContext)
+
+        XCTAssertEqual(failingContext.failedFetches, 1)
+        XCTAssertFalse(failingContext.hasChanges, "A failed read left a partial merge in the context")
+        context.refreshAllObjects()
+        XCTAssertEqual(try personRows(forEmail: Self.alice).count, 2)
+        let participations = try context.fetch(MessageParticipant.fetchRequest())
+        XCTAssertEqual(participations.count, 3)
+        XCTAssertEqual(
+            Set(participations.filter { $0.kind == "from" }.compactMap { $0.person?.objectID }),
+            [loserID]
+        )
+        let conversationParticipants = try context.fetch(ConversationParticipant.fetchRequest())
+        XCTAssertEqual(conversationParticipants.map { $0.person?.objectID }, [loserID])
     }
 
     /// Rows written before PersonFactory normalized its input differ only by

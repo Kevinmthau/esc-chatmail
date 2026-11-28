@@ -627,7 +627,6 @@ extension DataCleanupService {
             request.predicate = NSPredicate(format: "displayName CONTAINS %@", "@")
             request.fetchBatchSize = 100
             request.relationshipKeyPathsForPrefetching = [
-                "messageParticipations.message",
                 "conversationParticipations.conversation"
             ]
 
@@ -641,23 +640,45 @@ extension DataCleanupService {
                 return nil
             }
 
+            // The `forEmail:` form also matches the person's own dotless,
+            // internationalized or domain-literal address
+            // (`"ops@intranet" <ops@intranet>`), which a header could
+            // store as the name but the bare-address pattern misses; the
+            // context-free test would leave those rows unrepaired. The
+            // recovered-name check below uses the same form so the two
+            // agree on what counts as an address.
+            let candidates: [(person: Person, email: String, storedName: String)] = persons.compactMap { person in
+                let email = EmailNormalizer.normalize(person.email)
+                guard let storedName = person.displayName,
+                      EmailNormalizer.isEmailAddressShapedDisplayName(storedName, forEmail: email) else {
+                    return nil
+                }
+                return (person, email, storedName)
+            }
+
+            // The candidates' message participations, read by a fetch and not
+            // through `Person.messageParticipations`, the inverse model 9
+            // drops (architecture review 2026-11, data-model#3).
+            let participationsByPerson: [NSManagedObjectID: [MessageParticipant]]
+            do {
+                participationsByPerson = try Self.messageParticipations(
+                    of: candidates.map(\.person),
+                    prefetchingMessages: true,
+                    in: context
+                )
+            } catch {
+                Log.error("Address-shaped person name repair participation fetch failed", category: .coreData, error: error)
+                return nil
+            }
+
             var changedPersonEmails: Set<String> = []
             var conversationIDs: Set<NSManagedObjectID> = []
             var unrecoveredCount = 0
-            for person in persons {
-                let email = EmailNormalizer.normalize(person.email)
-                // The `forEmail:` form also matches the person's own dotless,
-                // internationalized or domain-literal address
-                // (`"ops@intranet" <ops@intranet>`), which a header could
-                // store as the name but the bare-address pattern misses; the
-                // context-free test would leave those rows unrepaired. The
-                // recovered-name check below uses the same form so the two
-                // agree on what counts as an address.
-                guard let storedName = person.displayName,
-                      EmailNormalizer.isEmailAddressShapedDisplayName(storedName, forEmail: email) else {
-                    continue
-                }
-                guard let recoveredName = Self.recoveredHeaderDisplayName(for: person, email: email),
+            for (person, email, storedName) in candidates {
+                guard let recoveredName = Self.recoveredHeaderDisplayName(
+                    fromParticipations: participationsByPerson[person.objectID] ?? [],
+                    email: email
+                ),
                       !EmailNormalizer.isEmailAddressShapedDisplayName(recoveredName, forEmail: email),
                       EmailNormalizer.isBetterDisplayName(recoveredName, than: storedName, forEmail: email) else {
                     unrecoveredCount += 1
@@ -740,8 +761,12 @@ extension DataCleanupService {
     /// Email labels, raw local parts and address-shaped names. The survivors
     /// are folded newest-first through `isBetterDisplayName`, starting from
     /// nil, so of two equally good names the newer one wins.
-    /// Call on `person`'s context queue.
-    private static func recoveredHeaderDisplayName(for person: Person, email: String) -> String? {
+    /// `participations` are the person's message participations
+    /// (`messageParticipations(of:in:)`). Call on their context's queue.
+    private static func recoveredHeaderDisplayName(
+        fromParticipations participations: [MessageParticipant],
+        email: String
+    ) -> String? {
         struct Candidate {
             let name: String
             let date: Date
@@ -754,7 +779,7 @@ extension DataCleanupService {
         }
 
         var candidates: [Candidate] = []
-        for participation in person.messageParticipations ?? [] {
+        for participation in participations {
             guard let message = participation.message else { continue }
 
             let headerNames: [String?]
