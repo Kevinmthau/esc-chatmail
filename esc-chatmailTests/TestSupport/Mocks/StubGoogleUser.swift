@@ -13,8 +13,12 @@ import GoogleSignIn
 /// `accessToken` and `refreshToken`. Every other property reads the superclass's empty
 /// state, so nothing under test may ask for `configuration`, `idToken` or
 /// `fetcherAuthorizer`. `refreshTokensIfNeeded` answers with `refreshError` where one is
-/// given, on the main queue as GoogleSignIn does; without one it is GoogleSignIn's own,
-/// which needs an auth state this user lacks, so nothing may ask for it then.
+/// given, on the main queue as GoogleSignIn does. Without one it is GoogleSignIn's own
+/// (9.0.0), which answers with this user, on the main queue and asking nothing, while
+/// `accessToken` is more than 60 s from its expiry, and otherwise starts a token request
+/// from the auth state this user lacks. So a test that is asked for a refresh and gives no
+/// `refreshError` keeps `accessTokenExpirationDate` more than 60 s ahead (the default is an
+/// hour ahead).
 ///
 /// Make it inside the stub closure that hands it over, never outside it: it is not
 /// `Sendable`, and CI's Swift 6.2 refuses a capture of a non-`Sendable` value in a

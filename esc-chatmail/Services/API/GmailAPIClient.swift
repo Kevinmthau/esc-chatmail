@@ -664,24 +664,24 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
     /// `authenticationDidRecover` (architecture review 2026-11, `networking#3`;
     /// the first step of `concurrency-model#1`).
     ///
-    /// `invalidCredentials` is `.credentialsRevoked`: `TokenManager` has
-    /// already published `requireReauthentication`, so the parked queue is
-    /// released by the sign-in that follows. Every other failure
-    /// (`noValidToken`, `tokenExpired`, `refreshFailed`, `networkUnavailable`,
+    /// `invalidCredentials` is `.credentialsRevoked`: `TokenManager` has already
+    /// published `requireReauthentication`, so the parked queue is released by
+    /// the sign-in that follows. Every other failure (`noValidToken`,
+    /// `tokenExpired`, `refreshFailed`, `networkUnavailable`,
     /// `refreshedIDTokenRefused`, an unknown error) is `.authenticationError`:
     /// an account-scoped abort that sync records no verdicts for, and that the
     /// pending-action queue retries behind its bounded authentication timer,
     /// never a park, because nothing has asked the user to sign in again. Not
-    /// `.networkError`: `MessageFetcher` would run the refresh again on each
-    /// of its retry passes and still stage per-message failures. A `CancellationError` (a
-    /// refresh whose epoch a sign-out retired) passes through unchanged, and so
-    /// does an `APIError`. Mapped here, at the client's boundary, never inside
-    /// `TokenManager`: its errors are its own contract (`GoogleTokenRefresher`
-    /// throws them, and a retired generation is a `CancellationError` that must
-    /// stay one), and the client is where `APIError` is the language every
-    /// caller classifies. Nothing else consumes `TokenManagerError`: the other
-    /// callers of `getCurrentToken` (`WebKitPrewarmer`, `ChatViewModel`) catch
-    /// generically or `try?`.
+    /// `.networkError`: `MessageFetcher` would run the refresh again on each of
+    /// its retry passes and still stage per-message failures. A
+    /// `CancellationError` (a refresh whose epoch a sign-out retired) passes
+    /// through unchanged, and so does an `APIError`. Mapped here, at the
+    /// client's boundary, never inside `TokenManager`: its errors are its own
+    /// contract (`GoogleTokenRefresher` throws them, and a retired generation is
+    /// a `CancellationError` that must stay one), and the client is where
+    /// `APIError` is the language every caller classifies. Nothing else consumes
+    /// `TokenManagerError`: the other callers of `getCurrentToken`
+    /// (`WebKitPrewarmer`, `ChatViewModel`) catch generically or `try?`.
     /// The 401 branch of `performRetryingRequest` keeps its own mapping, which
     /// does not pass cancellation through: a `CancellationError` there would
     /// reach `isAmbiguousSendFailure`, and a send Gmail refused with 401 would
