@@ -72,17 +72,82 @@ final class FullEmailReaderHandOverTests: XCTestCase {
         XCTAssertNil(webView.navigationDelegate)
     }
 
-    /// Content the view does not show yet (it changed after the load) is not offered.
+    /// Content the view does not show yet (it changed after the load) is not offered. Only the
+    /// content changes: the message is the same.
+    ///
+    /// Revert-check: dropping `!needsReload` from `handOverLiveWebViewIfPossible`'s guard fails
+    /// this.
     func testDismantle_readerAwaitingAReload_isScrubbed() {
         let adopter = RecordingHandOverAdopter(accepts: true)
         let (coordinator, webView, _) = makeLoadedReader(adopter: adopter)
         coordinator.webView(webView, didFinish: nil)
-        coordinator.updateParent(makeReader(adopter: adopter, html: html + "<!-- changed -->"))
+        coordinator.updateParent(
+            makeReader(adopter: adopter, html: html + "<!-- changed -->", message: coordinator.parent.message)
+        )
 
         FullEmailReaderWebView.dismantleUIView(webView, coordinator: coordinator)
 
         XCTAssertTrue(adopter.handOvers.isEmpty)
         XCTAssertNil(webView.navigationDelegate)
+    }
+
+    /// An adopted view whose checkin the pool refuses is scrubbed and never offered as a live
+    /// render: it was not one.
+    ///
+    /// Revert-check: putting back `reclaimPrerenderedWebViewIfNeeded(webView) ||
+    /// handOverLiveWebViewIfPossible(webView)` in `FullEmailReaderWebView.dismantleWebView` fails
+    /// this.
+    func testDismantle_adoptedViewWhoseCheckinIsRefused_isScrubbedAndNotOffered() {
+        let adopter = RecordingHandOverAdopter(accepts: true)
+        let (coordinator, webView, _) = makeLoadedReader(adopter: adopter)
+        coordinator.webView(webView, didFinish: nil)
+        coordinator.adoptAlreadyLoadedContent(html, messageId: coordinator.parent.message?.id)
+        XCTAssertTrue(coordinator.hasAdoptedPrerenderedWebViewForTesting, "Precondition: the view reads as adopted")
+
+        FullEmailReaderWebView.dismantleUIView(webView, coordinator: coordinator)
+
+        XCTAssertEqual(adopter.checkinCount, 1)
+        XCTAssertTrue(adopter.handOvers.isEmpty)
+        XCTAssertNil(webView.navigationDelegate)
+    }
+
+    /// An adopted view that loads other content gives the adoption up: the pool drops its entry,
+    /// and at its close the view is offered as a live render of what it shows instead of being
+    /// checked in under the key of what it was adopted with.
+    ///
+    /// Revert-check: removing the `discard` from `Coordinator.loadContent` fails this.
+    func testAdoptedView_loadingOtherContent_givesTheAdoptionUp() {
+        let adopter = RecordingHandOverAdopter(accepts: true)
+        let (coordinator, webView, _) = makeLoadedReader(adopter: adopter)
+        coordinator.webView(webView, didFinish: nil)
+        coordinator.adoptAlreadyLoadedContent(html, messageId: coordinator.parent.message?.id)
+        let changed = html + "<!-- changed -->"
+
+        coordinator.updateParent(makeReader(adopter: adopter, html: changed, message: coordinator.parent.message))
+        coordinator.loadContentIfReady(in: webView)
+
+        XCTAssertEqual(adopter.discardCount, 1)
+        XCTAssertFalse(coordinator.hasAdoptedPrerenderedWebViewForTesting)
+
+        coordinator.webView(webView, didFinish: nil)
+        FullEmailReaderWebView.dismantleUIView(webView, coordinator: coordinator)
+
+        XCTAssertEqual(adopter.checkinCount, 0)
+        XCTAssertEqual(adopter.handOvers.map(\.wrappedHTML), [changed])
+    }
+
+    /// A prepared open and its loaded state are one case of the reader's switch, so the move from
+    /// one to the other keeps the reader's web view (`FullEmailReaderView.content`).
+    ///
+    /// Revert-check: splitting the case in two again fails this.
+    /// HONEST SCOPE: pinned from source. That two cases rebuild the view, the new one made before
+    /// the old one is dismantled, was measured with a throwaway hosted probe, not with the reader.
+    func testReaderView_preparedAndLoadedArtifacts_shareOneCase() throws {
+        let source = try repositorySource("esc-chatmail/Views/Chat/FullEmailReaderView.swift")
+        XCTAssertTrue(source.contains(
+            "case .preparedArtifact(let artifact, placeholder: _), .loadedArtifact(let artifact, placeholder: _):"
+        ))
+        XCTAssertEqual(source.components(separatedBy: "case .loadedArtifact").count, 1)
     }
 
     /// A view the pool refuses is scrubbed as before.
@@ -99,15 +164,24 @@ final class FullEmailReaderHandOverTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func makeReader(adopter: RecordingHandOverAdopter, html: String? = nil) -> FullEmailReaderWebView {
-        let stack = TestCoreDataStack()
-        let message = MessageBuilder()
-            .withId("live-reader-\(UUID().uuidString)")
-            .withSubject("Subject")
-            .withSender(email: "sender@example.com", name: "Sender")
-            .withBody("Body")
-            .build(in: stack.viewContext)
-        retainedStacks.append(stack)
+    private func makeReader(
+        adopter: RecordingHandOverAdopter,
+        html: String? = nil,
+        message existingMessage: Message? = nil
+    ) -> FullEmailReaderWebView {
+        let message: Message
+        if let existingMessage {
+            message = existingMessage
+        } else {
+            let stack = TestCoreDataStack()
+            message = MessageBuilder()
+                .withId("live-reader-\(UUID().uuidString)")
+                .withSubject("Subject")
+                .withSender(email: "sender@example.com", name: "Sender")
+                .withBody("Body")
+                .build(in: stack.viewContext)
+            retainedStacks.append(stack)
+        }
         return FullEmailReaderWebView(
             htmlContent: html ?? self.html,
             sourceSignature: "sha256:live",
@@ -168,6 +242,8 @@ private final class RecordingHandOverAdopter: FullEmailWebViewAdopting {
 
     private let accepts: Bool
     private(set) var handOvers: [HandOver] = []
+    private(set) var checkinCount = 0
+    private(set) var discardCount = 0
 
     init(accepts: Bool) {
         self.accepts = accepts
@@ -183,11 +259,15 @@ private final class RecordingHandOverAdopter: FullEmailWebViewAdopting {
         nil
     }
 
+    /// Refuses every checkin, as a pool that dropped the entry meanwhile does.
     func checkin(messageId: String, webView: WKWebView) -> Bool {
-        false
+        checkinCount += 1
+        return false
     }
 
-    func discard(messageId: String, webView: WKWebView) {}
+    func discard(messageId: String, webView: WKWebView) {
+        discardCount += 1
+    }
 
     func adoptClosedReaderWebView(
         messageId: String,

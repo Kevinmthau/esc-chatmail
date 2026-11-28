@@ -418,22 +418,6 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         return source
     }
 
-    /// The reader has a width. If its email is not loaded yet, this prepares the email's HTML for
-    /// a later open (`prewarmOnOpen`, no width: no web view). It renders nothing off screen while
-    /// the reader shows the email (architecture review 2026-11, `web-content-rendering#2`, step 4):
-    /// a second copy rendered beside the live one cost every open two renders and two loads of
-    /// each remote resource. A reopen is still adopted, because the reader hands the view it
-    /// rendered to the pool as it closes (`FullEmailWebViewAdopting.adoptClosedReaderWebView`).
-    func prepareForMeasuredReaderWidth(_ width: CGFloat) {
-        guard !isInvalidatedForAccountTransition,
-              width > 1,
-              let message,
-              readerState.artifact == nil else {
-            return
-        }
-        fullEmailOpener?.prewarmOnOpen(message: message, width: nil)
-    }
-
     @discardableResult
     func loadOriginalEmail(
         for request: OriginalEmailLoadRequest,

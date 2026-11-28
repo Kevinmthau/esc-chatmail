@@ -549,8 +549,9 @@ extension FullEmailOpening {
     /// original is prepared with `.preferHTML`, which skips the tracking-pixel pass the preview
     /// runs, and the CSP has no `img-src`. Pre-rendered for every rich row that rested on screen
     /// for 200 ms, it told senders that the user had read mail the user only scrolled past.
-    /// A web view is made only once the user opens the email (`prepaintAfterExplicitOpen`,
-    /// `prewarmOnOpen`), so the first open of an email renders live and a reopen is still adopted.
+    /// The pool's web views are the reader's own: the first open of an email renders it live, and
+    /// the reader hands that view to the pool as it closes (`adoptClosedReaderWebView`), so a
+    /// reopen is still adopted.
     ///
     /// Deliberately an extension method and not a requirement, so no conformer can give it a width.
     func warmVisibleRow(request: OriginalEmailWarmRequest, message: Message?) async {
@@ -1168,10 +1169,13 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
     /// payload ready for the reader. Given a width, and unless the adoption kill switch is set
     /// (`FullEmailWebViewAdoptionPolicy.isEnabled` is false), also pre-renders an off-screen WebView.
-    /// Only an open's own warm passes a width: a visible row calls `warmVisibleRow`, which passes
+    /// No caller in the app passes a width now: a visible row calls `warmVisibleRow`, which passes
     /// none, because a WebView fetches every remote resource of the original (its open pixels
     /// included: the original is not run through the preview's tracking-pixel pass, and the CSP has
-    /// no `img-src`). Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
+    /// no `img-src`), and an open's prewarm passes none either, because the reader renders the
+    /// email live and hands its view to the pool (`adoptClosedReaderWebView`). A width remembered
+    /// for the remote-image fallback's re-warm comes from an earlier warm, so it is nil too. Cheap
+    /// to call repeatedly: it no-ops when up-to-date state is already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
         guard acceptsAccountWork else { return }
         let warmOperationID = UUID()
@@ -1621,9 +1625,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// Keeps the web view of a reader that rendered an email live and has closed, so the next
     /// open of that email adopts it instead of rendering it again (architecture review 2026-11,
     /// `web-content-rendering#2`, step 4). Before, the open itself pre-rendered a second copy off
-    /// screen while the live reader showed the first (`prepaintAfterExplicitOpen`, from
-    /// `FullEmailOpenSession.prepareForMeasuredReaderWidth`): two renders, and two loads of every
-    /// remote resource, for each open. The view the user saw is the pooled view now, so the adopted
+    /// screen while the live reader showed the first (`prepaintAfterExplicitOpen`, at each width the
+    /// reader was laid out at): two renders, and two loads of every remote resource, for each
+    /// open. The view the user saw is the pooled view now, so the adopted
     /// render is the live one by construction.
     ///
     /// The pool takes it only as it would have made it: for the message's current prepared

@@ -29,13 +29,12 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
-    /// The open renders nothing off screen beside the live reader, at any measured width and after
-    /// the artifact is updated (architecture review 2026-11, `web-content-rendering#2`, step 4):
-    /// the reader hands its own view to the pool as it closes instead
-    /// (`FullEmailWebViewAdopting.adoptClosedReaderWebView`).
+    /// An open with its artifact prepared renders nothing off screen and prewarms nothing
+    /// (architecture review 2026-11, `web-content-rendering#2`, step 4): the reader hands its own
+    /// view to the pool as it closes instead (`FullEmailWebViewAdopting.adoptClosedReaderWebView`).
     ///
-    /// Revert-check: putting back `prepareForMeasuredReaderWidth`'s call of
-    /// `prepaintAfterExplicitOpen` for a shown artifact fails this.
+    /// Revert-check: dropping `if prepared == nil` around `openSession`'s `prewarmOnOpen` fails
+    /// this.
     func testOpenSession_readyPreparedArtifact_isPresentableAndRendersNothingOffScreen() async {
         let message = makeMessage(
             id: "prepared-message",
@@ -60,10 +59,6 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertEqual(opener.preparedPayloadRequests.first?.request.messageId, "prepared-message")
         XCTAssertNil(opener.preparedPayloadRequests.first?.width)
-
-        session.prepareForMeasuredReaderWidth(390)
-        session.prepareForMeasuredReaderWidth(390.4)
-        session.prepareForMeasuredReaderWidth(412)
 
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
@@ -113,36 +108,11 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             onSourceLoaded: { _, _ in }
         )
 
-        session.prepareForMeasuredReaderWidth(390)
         _ = await session.loadOriginalEmail(for: session.loadRequest)
-        session.prepareForMeasuredReaderWidth(390)
 
         XCTAssertEqual(session.readerState.artifact?.sourceSignature, "updated-source")
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
-    }
-
-    /// A reader measured before its email has loaded prepares the HTML for a later open, with no
-    /// width, so no web view is built for it.
-    ///
-    /// Revert-check: passing the measured width to `prewarmOnOpen` again fails this.
-    func testOpenSession_measuredBeforeTheEmailLoaded_prewarmsHTMLOnly() {
-        let message = makeMessage(
-            id: "measured-before-load",
-            subject: "Subject",
-            senderEmail: "sender@example.com",
-            senderName: "Sender",
-            snippet: "Snippet"
-        )
-        let opener = MockFullEmailReaderOpener(preparedArtifact: nil)
-        let session = FullEmailReaderCoordinator(fullEmailOpener: opener).openSession(for: message)
-        let prewarmsAtOpen = opener.prewarmedMessages.count
-
-        session.prepareForMeasuredReaderWidth(390)
-
-        XCTAssertEqual(opener.prewarmedMessages.count, prewarmsAtOpen + 1)
-        XCTAssertNil(opener.prewarmedMessages.last?.width)
-        XCTAssertTrue(opener.prepaintRequests.isEmpty)
     }
 
     func testOpenSession_payloadMissCreatesPlaceholderAndStartsPrewarmFollowUp() {

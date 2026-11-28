@@ -139,6 +139,22 @@ final class FullEmailWebViewManagerReaderHandOverTests: XCTestCase {
         }
     }
 
+    /// The event sources listen to centers of their own, so nothing posted in the test host
+    /// reaches this manager (a memory warning or a background notification there would release
+    /// the pool under the test). The Mac's take no center: its background source delivers
+    /// nothing, and its memory-pressure source is a dispatch source no test can raise.
+    private func makeManager() -> FullEmailWebViewManager {
+        #if os(iOS)
+        FullEmailWebViewManager(
+            loader: makeLoader(),
+            memoryPressureEventSource: MemoryPressureEventSource(notificationCenter: NotificationCenter()),
+            backgroundEventSource: AppBackgroundEventSource(notificationCenter: NotificationCenter())
+        )
+        #else
+        FullEmailWebViewManager(loader: makeLoader())
+        #endif
+    }
+
     /// A manager holding a prepared payload for one message, as a visible row's warm leaves it.
     private func makeFixture() async throws -> Fixture {
         let messageId = "hand-over-\(UUID().uuidString)"
@@ -153,7 +169,7 @@ final class FullEmailWebViewManagerReaderHandOverTests: XCTestCase {
             senderEmail: "sender@example.com",
             subject: "Subject"
         )
-        let manager = FullEmailWebViewManager(loader: makeLoader())
+        let manager = makeManager()
         await manager.warm(request: request, message: nil, width: nil)
         let prepared = try XCTUnwrap(manager.preparedOpenArtifact(request: request, message: nil, width: 390))
         guard case .html(let html) = prepared.artifact.body else {
