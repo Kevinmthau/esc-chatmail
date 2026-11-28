@@ -2,7 +2,30 @@ import Foundation
 
 // MARK: - Token Refresh Implementation
 extension TokenManager {
-    func performTokenRefresh(ifCacheEpochMatches epochAtStart: UInt64) async throws -> String {
+    /// `rejectedAccessToken` is set for the 401 path's refresh
+    /// (`refreshToken(rejecting:)`): where GoogleSignIn's own refresh hands
+    /// that token back, which it does while the token's device-clock expiry
+    /// looks distant (a clock set back), the refresher is asked again with
+    /// `forceRefreshTokens()`, and only that answer is saved. The comparison
+    /// is here and not in `GoogleTokenRefresher` so that it runs in tests,
+    /// which replace the refresher.
+    func performTokenRefresh(
+        ifCacheEpochMatches epochAtStart: UInt64,
+        rejecting rejectedAccessToken: String? = nil
+    ) async throws -> String {
+        // A refresh for a rejected token that starts after another one has
+        // already replaced it (its caller read the cache before that save and
+        // reached the coordinator after its entry was cleared) asks Google
+        // nothing. Only within its own generation: a retired one falls
+        // through to the loop's guard and is cancelled.
+        if let rejectedAccessToken,
+           let replacement = cachedReplacement(
+               for: rejectedAccessToken,
+               ifCacheEpochMatches: epochAtStart
+           ) {
+            return replacement
+        }
+
         var lastError: Error?
         var retryBackoff = ExponentialBackoff()
 
@@ -22,7 +45,17 @@ extension TokenManager {
                 }
 
                 // Attempt to refresh using the token refresher
-                let tokens = try await tokenRefresher.refreshTokens()
+                var tokens = try await tokenRefresher.refreshTokens()
+                if let rejectedAccessToken, tokens.accessToken == rejectedAccessToken {
+                    guard cacheEpochMatches(epochAtStart) else {
+                        throw CancellationError()
+                    }
+                    Log.info("GoogleSignIn returned the token Gmail rejected; forcing a token refresh", category: .auth)
+                    // Its errors take the same path as the plain refresh's:
+                    // an invalid_grant here is `invalidCredentials` and a
+                    // published revocation, a transient one is retried.
+                    tokens = try await tokenRefresher.forceRefreshTokens()
+                }
 
                 // Save the new tokens (drops silently if sign-out raced the
                 // refresh). The cache is populated synchronously inside
@@ -108,7 +141,7 @@ extension TokenManager {
             switch tokenError {
             case .networkUnavailable, .rateLimitExceeded:
                 return true
-            case .noValidToken, .invalidCredentials, .tokenExpired:
+            case .noValidToken, .invalidCredentials, .tokenExpired, .refreshedIDTokenRefused:
                 return false
             case .refreshFailed(let underlying):
                 // Check for invalid_grant error - this means the refresh token is revoked

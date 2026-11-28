@@ -506,33 +506,20 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                     if !hasAttemptedTokenRefresh {
                         hasAttemptedTokenRefresh = true
                         Log.info("Received 401, attempting token refresh", category: .api)
+                        // The bearer this attempt sent, which Gmail has just
+                        // rejected. Passed down so that a refresh which hands
+                        // it back is not taken for a new token: GoogleSignIn's
+                        // refresh asks Google only by the device's clock, and
+                        // with the clock set back it returned this token, so
+                        // every request drew two 401s until the token's real
+                        // expiry (architecture review 2026-11,
+                        // `gap-wall-clock-time#2`). Every request here is
+                        // built by `authenticatedRequest`, so there is always
+                        // one; without it any fresh token answers.
+                        let rejectedToken = Self.bearerToken(of: currentRequest) ?? ""
+                        let newToken: String
                         do {
-                            _ = try await tokenManager.refreshToken()
-                            // Update request with refreshed token
-                            let newToken = try await tokenManager.getCurrentToken()
-                            currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
-                            // The refresh consumed this attempt; grant one more so
-                            // the refreshed token always gets its request (bounded:
-                            // hasAttemptedTokenRefresh makes this once-only).
-                            allowedAttempts += 1
-                            // A 401 proves the server rejected this attempt.
-                            // Recorded so that, if the breaker trips before
-                            // the refreshed request goes out, it throws that
-                            // definite rejection and not `APIError.timeout`:
-                            // a send's first attempt can now outlast the
-                            // breaker's 120 s by itself (`sendResourceTimeout`),
-                            // and `sendMessage` classifies a timeout as
-                            // ambiguous, so a send Gmail refused ended as
-                            // "Delivery unknown" instead of "Not sent". Only
-                            // for a request that may not be retransmitted: a
-                            // read whose refresh succeeded keeps reporting what
-                            // it reported before, because `authenticationError`
-                            // aborts a sync run and parks the pending-action
-                            // queue as if the credentials had failed.
-                            if !behavior.allowsRetransmission {
-                                lastError = lastError ?? APIError.authenticationError
-                            }
-                            continue
+                            newToken = try await tokenManager.refreshToken(rejecting: rejectedToken)
                         } catch TokenManagerError.invalidCredentials {
                             Log.error("Refresh token revoked, user must re-authenticate", category: .api)
                             throw APIError.credentialsRevoked
@@ -540,6 +527,39 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
                             Log.error("Token refresh failed during 401 recovery: \(error.localizedDescription)", category: .api)
                             throw APIError.authenticationError
                         }
+                        // Even a forced refresh can come back with the token
+                        // Gmail refused; sending it again could only draw the
+                        // same 401, so this attempt's rejection stands.
+                        guard newToken != rejectedToken else {
+                            Log.warning("Token refresh after 401 returned the rejected token; not resending", category: .api)
+                            throw APIError.authenticationError
+                        }
+                        // Update request with refreshed token
+                        currentRequest.setValue("Bearer \(newToken)", forHTTPHeaderField: "Authorization")
+                        // The refresh consumed this attempt; grant one more so
+                        // the refreshed token always gets its request (bounded:
+                        // hasAttemptedTokenRefresh makes this once-only, and a
+                        // forced refresh is inside that one round, never a
+                        // second refresh-and-resend for messages.send).
+                        allowedAttempts += 1
+                        // A 401 proves the server rejected this attempt.
+                        // Recorded so that, if the breaker trips before
+                        // the refreshed request goes out, it throws that
+                        // definite rejection and not `APIError.timeout`:
+                        // a send's first attempt can now outlast the
+                        // breaker's 120 s by itself (`sendResourceTimeout`),
+                        // and `sendMessage` classifies a timeout as
+                        // ambiguous, so a send Gmail refused ended as
+                        // "Delivery unknown" instead of "Not sent". Only
+                        // for a request that may not be retransmitted: a
+                        // read whose refresh succeeded keeps reporting what
+                        // it reported before, because `authenticationError`
+                        // aborts a sync run and parks the pending-action
+                        // queue as if the credentials had failed.
+                        if !behavior.allowsRetransmission {
+                            lastError = lastError ?? APIError.authenticationError
+                        }
+                        continue
                     }
                     throw APIError.authenticationError
 
@@ -674,6 +694,18 @@ final class GmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             return APIError.credentialsRevoked
         }
         return APIError.authenticationError
+    }
+
+    /// The access token a request carries, as `authenticatedRequest` and the
+    /// 401 branch write it (`Bearer <token>`); nil for a request with no
+    /// bearer.
+    nonisolated static func bearerToken(of request: URLRequest) -> String? {
+        let prefix = "Bearer "
+        guard let value = request.value(forHTTPHeaderField: "Authorization"),
+              value.hasPrefix(prefix) else {
+            return nil
+        }
+        return String(value.dropFirst(prefix.count))
     }
 
     private nonisolated func gmailErrorDetail(from data: Data) -> GmailErrorResponse.GmailErrorDetail? {

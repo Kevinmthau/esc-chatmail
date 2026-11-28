@@ -13,6 +13,7 @@ private final class AlwaysFailingTokenManager: TokenManagerProtocol, @unchecked 
 
     func getCurrentToken() async throws -> String { throw error }
     func refreshToken() async throws -> String { throw error }
+    func refreshToken(rejecting rejectedAccessToken: String) async throws -> String { throw error }
     func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {}
     func clearTokens() throws {}
     func isAuthenticated() -> Bool { true }

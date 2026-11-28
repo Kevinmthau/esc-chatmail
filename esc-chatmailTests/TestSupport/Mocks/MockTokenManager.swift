@@ -33,6 +33,10 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
     private(set) var clearTokensCallCount = 0
     private(set) var isAuthenticatedCallCount = 0
 
+    /// The tokens `refreshToken(rejecting:)` was given, in call order: what
+    /// the 401 path read from the request Gmail refused.
+    private(set) var rejectedAccessTokens: [String] = []
+
     /// Last saved tokens for inspection
     private(set) var lastSavedAccessToken: String?
     private(set) var lastSavedRefreshToken: String?
@@ -55,6 +59,7 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
         saveTokensCallCount = 0
         clearTokensCallCount = 0
         isAuthenticatedCallCount = 0
+        rejectedAccessTokens = []
         lastSavedAccessToken = nil
         lastSavedRefreshToken = nil
         lastSavedExpirationDate = nil
@@ -92,6 +97,15 @@ final class MockTokenManager: TokenManagerProtocol, @unchecked Sendable {
 
         currentToken = refreshedToken
         return refreshedToken
+    }
+
+    /// Counted with `refreshToken()` in `refreshTokenCallCount`, and behaves
+    /// as it does: a mock has no GoogleSignIn to hand the rejected token back.
+    /// The real comparison is `TokenManager`'s, tested through
+    /// `MockTokenRefresher` (`GmailAPIClientForcedTokenRefreshTests`).
+    func refreshToken(rejecting rejectedAccessToken: String) async throws -> String {
+        rejectedAccessTokens.append(rejectedAccessToken)
+        return try await refreshToken()
     }
 
     func saveTokens(access: String, refresh: String?, expirationDate: Date) throws {

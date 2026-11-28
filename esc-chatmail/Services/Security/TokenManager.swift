@@ -2,8 +2,21 @@ import Foundation
 import GoogleSignIn
 import Combine
 
+/// What a refresh was started for, which decides who may join it.
+enum TokenRefreshPurpose: Equatable, Sendable {
+    /// Any token that is fresh by the device's clock: `getCurrentToken`'s
+    /// refresh of a token that is missing or about to expire.
+    case freshToken
+    /// A token other than this one, which Gmail has just answered with 401
+    /// (`TokenManager.refreshToken(rejecting:)`). Its refresh asks Google
+    /// again, past GoogleSignIn's device-clock check, when GoogleSignIn hands
+    /// back this very token.
+    case replacing(rejectedAccessToken: String)
+}
+
 struct TokenRefreshTaskHandle: Sendable {
     let id: UUID
+    let purpose: TokenRefreshPurpose
     let task: Task<String, Error>
 }
 
@@ -20,6 +33,22 @@ actor TokenRefreshCoordinator {
         forGeneration generation: UInt64,
         factory: () -> Task<String, Error>
     ) -> TokenRefreshTaskHandle {
+        getOrCreateTask(forGeneration: generation, purpose: .freshToken, factory: factory)
+    }
+
+    /// Single-flight per generation. A caller joins the generation's refresh
+    /// in flight whatever it was started for, unless `joinsOnlySamePurpose`
+    /// is set, when it joins only a refresh started for the same purpose and
+    /// otherwise starts its own in the entry's place. That is the second look
+    /// of `refreshToken(rejecting:)`: a `.freshToken` refresh it joined first
+    /// handed back the rejected token, and joining it again would hand that
+    /// token back again.
+    func getOrCreateTask(
+        forGeneration generation: UInt64,
+        purpose: TokenRefreshPurpose,
+        joinsOnlySamePurpose: Bool = false,
+        factory: () -> Task<String, Error>
+    ) -> TokenRefreshTaskHandle {
         if let latestGeneration {
             if generation < latestGeneration {
                 // A caller can snapshot an old generation, suspend before
@@ -28,17 +57,19 @@ actor TokenRefreshCoordinator {
                 // evict the newer single-flight entry.
                 return TokenRefreshTaskHandle(
                     id: UUID(),
+                    purpose: purpose,
                     task: Task { throw CancellationError() }
                 )
             }
 
             if generation == latestGeneration,
-               let currentEntry {
+               let currentEntry,
+               !joinsOnlySamePurpose || currentEntry.handle.purpose == purpose {
                 return currentEntry.handle
             }
         }
 
-        let handle = TokenRefreshTaskHandle(id: UUID(), task: factory())
+        let handle = TokenRefreshTaskHandle(id: UUID(), purpose: purpose, task: factory())
         latestGeneration = generation
         currentEntry = Entry(generation: generation, handle: handle)
         return handle
@@ -61,6 +92,18 @@ enum TokenManagerError: LocalizedError {
     case rateLimitExceeded
     case invalidCredentials
     case tokenExpired
+    /// Google answered a forced refresh, but AppAuth refused the ID token in
+    /// that answer (`OIDErrorCodeIDTokenFailedValidationError`, -15): above
+    /// all because its issue time is more than 600 s from the device's clock,
+    /// or its expiry has passed by that clock (a clock set ahead). Not
+    /// `refreshFailed`, which is retried: asking again cannot change the
+    /// device's clock, so it cost three token requests for nothing. Not
+    /// `invalidCredentials` either: the grant is fine, and nothing may ask
+    /// the user to sign in again or clear the credentials for it. The 401
+    /// path maps it to `APIError.authenticationError`, as before
+    /// (`GoogleForcedTokenRefresh.refreshError(for:)`; architecture review
+    /// 2026-11, `gap-wall-clock-time#2`).
+    case refreshedIDTokenRefused(Error)
 
     var errorDescription: String? {
         switch self {
@@ -76,6 +119,8 @@ enum TokenManagerError: LocalizedError {
             return "Invalid credentials. Please sign in again"
         case .tokenExpired:
             return "Authentication token has expired"
+        case .refreshedIDTokenRefused(let error):
+            return "The refreshed sign-in token was refused: \(error.localizedDescription)"
         }
     }
 
@@ -89,6 +134,8 @@ enum TokenManagerError: LocalizedError {
             return "Please check your internet connection"
         case .rateLimitExceeded:
             return "Wait a few minutes before trying again"
+        case .refreshedIDTokenRefused:
+            return "Check that the device's date and time are set automatically"
         }
     }
 }
@@ -116,6 +163,14 @@ struct TokenInfo: Codable {
 protocol TokenManagerProtocol: Sendable {
     func getCurrentToken() async throws -> String
     func refreshToken() async throws -> String
+    /// A token to send in place of `rejectedAccessToken`, which Gmail has
+    /// just answered with 401: the cached one where another refresh already
+    /// replaced it, else a refresh that asks Google past GoogleSignIn's
+    /// device-clock check when GoogleSignIn hands back the rejected token.
+    /// Required, with no default: one that forwarded to `refreshToken()`
+    /// would bring back the outage it exists for (architecture review
+    /// 2026-11, `gap-wall-clock-time#2`).
+    func refreshToken(rejecting rejectedAccessToken: String) async throws -> String
     func saveTokens(access: String, refresh: String?, expirationDate: Date) throws
     func clearTokens() throws
     func isAuthenticated() -> Bool
@@ -168,9 +223,10 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
     ///   persistSessionForBackgroundAccess) so in-flight refreshes for the
     ///   prior credentials cancel instead of publishing. Cache populates are
     ///   epoch-gated: getCurrentToken snapshots the epoch before its
-    ///   (unserialized) keychain read, and refreshToken() snapshots it before
-    ///   entering the coordinator and passes it into performTokenRefresh's
-    ///   network call, so a token obtained under a generation that a
+    ///   (unserialized) keychain read, and refreshToken() and
+    ///   refreshToken(rejecting:) snapshot it before entering the coordinator
+    ///   and pass it into performTokenRefresh's network calls (the forced
+    ///   refresh's included), so a token obtained under a generation that a
     ///   sign-out or replacement sign-in has since retired is dropped instead
     ///   of cached — with the reader's populate serialized against the whole
     ///   clear section, no interleaving can resurrect a cleared token.
@@ -190,6 +246,30 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
 
     func cacheEpochMatches(_ epoch: UInt64) -> Bool {
         cacheLock.withLock { _cacheEpoch == epoch }
+    }
+
+    /// The cached token, where it is not `rejectedAccessToken` and its
+    /// device-clock expiry is not near: another 401's refresh has already
+    /// replaced the token this caller sent, and asking Google again would
+    /// cost a token request for nothing. Non-private so the refresh
+    /// extension asks it again as its task starts, with its generation: a
+    /// refresh whose generation was retired is answered with nothing here
+    /// (and then cancelled), never with the replacement session's token.
+    func cachedReplacement(
+        for rejectedAccessToken: String,
+        ifCacheEpochMatches epoch: UInt64? = nil
+    ) -> String? {
+        cacheLock.withLock {
+            if let epoch, _cacheEpoch != epoch {
+                return nil
+            }
+            guard let cached = _cachedToken,
+                  cached.accessToken != rejectedAccessToken,
+                  !cached.isExpiringSoon else {
+                return nil
+            }
+            return cached.accessToken
+        }
     }
 
     /// Populates the cache only if no clear happened since `epoch` was
@@ -275,24 +355,91 @@ final class TokenManager: ObservableObject, TokenManagerProtocol, @unchecked Sen
         // A replacement sign-in must never join the retired account's task.
         let generation = cacheEpoch()
         let handle = await refreshCoordinator.getOrCreateTask(
-            forGeneration: generation
+            forGeneration: generation,
+            purpose: .freshToken
         ) { [weak self] in
-            Task<String, Error> {
-                guard let self = self else {
-                    throw TokenManagerError.noValidToken
-                }
+            self?.makeRefreshTask(forGeneration: generation, rejecting: nil)
+                ?? Task<String, Error> { throw TokenManagerError.noValidToken }
+        }
+        return try await awaitRefresh(handle)
+    }
 
-                await MainActor.run {
-                    self.isRefreshing = true
-                    self.lastRefreshError = nil
-                }
-
-                return try await self.performTokenRefresh(
-                    ifCacheEpochMatches: generation
-                )
-            }
+    /// The 401 path's refresh (architecture review 2026-11,
+    /// `gap-wall-clock-time#2`). `refreshToken()` goes through
+    /// `GIDGoogleUser.refreshTokensIfNeeded`, which asks Google only when the
+    /// access token's device-clock expiry (or the ID token's `exp`) is within
+    /// 60 s, so with the clock set back it handed back the very token Gmail
+    /// had rejected, and every request drew two 401s and failed as
+    /// `authenticationError` until the token's real expiry passed.
+    ///
+    /// Three answers, cheapest first. A cached token other than the rejected
+    /// one, fresh by the device's clock, is returned at once: another 401
+    /// already replaced it. Otherwise this joins the generation's refresh in
+    /// flight, whatever it was started for, or starts one for this token
+    /// (`TokenRefreshPurpose.replacing`), whose task asks GoogleSignIn and
+    /// then, if GoogleSignIn handed back the rejected token, forces a refresh
+    /// (`performTokenRefresh`). So a burst of 401s on one token sends one token
+    /// request. A refresh it joined that was not started for this token may
+    /// hand the rejected token back (a `.freshToken` refresh of the same
+    /// stale token); then, and only then, it looks once more and joins only a
+    /// refresh for this token, or starts one. The token is saved only through
+    /// the epoch-gated save, so a sign-out during either look is a
+    /// `CancellationError` like any retired refresh. The result can still be
+    /// the rejected token, if Google itself handed it back; the caller decides
+    /// what that means (`GmailAPIClient` sends nothing more).
+    nonisolated func refreshToken(rejecting rejectedAccessToken: String) async throws -> String {
+        if let replacement = cachedReplacement(for: rejectedAccessToken) {
+            return replacement
         }
 
+        let generation = cacheEpoch()
+        let purpose = TokenRefreshPurpose.replacing(rejectedAccessToken: rejectedAccessToken)
+        let joined = await refreshCoordinator.getOrCreateTask(
+            forGeneration: generation,
+            purpose: purpose
+        ) { [weak self] in
+            self?.makeRefreshTask(forGeneration: generation, rejecting: rejectedAccessToken)
+                ?? Task<String, Error> { throw TokenManagerError.noValidToken }
+        }
+        let token = try await awaitRefresh(joined)
+        guard token == rejectedAccessToken, joined.purpose != purpose else {
+            return token
+        }
+
+        Log.info("A refresh joined after a 401 returned the rejected token; forcing one", category: .auth)
+        let forcing = await refreshCoordinator.getOrCreateTask(
+            forGeneration: generation,
+            purpose: purpose,
+            joinsOnlySamePurpose: true
+        ) { [weak self] in
+            self?.makeRefreshTask(forGeneration: generation, rejecting: rejectedAccessToken)
+                ?? Task<String, Error> { throw TokenManagerError.noValidToken }
+        }
+        return try await awaitRefresh(forcing)
+    }
+
+    private nonisolated func makeRefreshTask(
+        forGeneration generation: UInt64,
+        rejecting rejectedAccessToken: String?
+    ) -> Task<String, Error> {
+        Task<String, Error> { [weak self] in
+            guard let self = self else {
+                throw TokenManagerError.noValidToken
+            }
+
+            await MainActor.run {
+                self.isRefreshing = true
+                self.lastRefreshError = nil
+            }
+
+            return try await self.performTokenRefresh(
+                ifCacheEpochMatches: generation,
+                rejecting: rejectedAccessToken
+            )
+        }
+    }
+
+    private nonisolated func awaitRefresh(_ handle: TokenRefreshTaskHandle) async throws -> String {
         do {
             let token = try await handle.task.value
             if await refreshCoordinator.clearTask(id: handle.id) {
