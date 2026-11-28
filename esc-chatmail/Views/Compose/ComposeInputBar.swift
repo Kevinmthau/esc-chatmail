@@ -20,6 +20,10 @@ struct ComposeInputBar: View {
     let style: Style
 
     @Environment(\.managedObjectContext) private var viewContext
+    /// The New Message body's text size: 18 points at the default text size, and with Dynamic
+    /// Type beyond it (architecture review 2026-11, gap-accessibility-architecture#3). The
+    /// other style's body is `.body`, which scales by itself.
+    @ScaledMetric(relativeTo: .body) private var iMessageBodyTextSize: CGFloat = 18
     @State private var showPhotoPicker = false
     @State private var showDocumentPicker = false
     @State private var showAttachmentOptions = false
@@ -84,7 +88,7 @@ struct ComposeInputBar: View {
                     lineLimit: style == .iMessage ? 1...4 : 1...5,
                     cornerRadius: style == .iMessage ? 24 : 18,
                     backgroundColor: style == .iMessage ? iMessageFieldBackground : Color.systemGray6,
-                    textFont: style == .iMessage ? .system(size: 18) : .body,
+                    textFont: style == .iMessage ? .system(size: iMessageBodyTextSize) : .body,
                     horizontalPadding: style == .iMessage ? 16 : 12,
                     verticalPadding: style == .iMessage ? 10 : 8,
                     minHeight: style == .iMessage ? 46 : nil

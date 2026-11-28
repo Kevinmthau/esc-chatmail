@@ -361,7 +361,9 @@ struct ConversationListView: View {
 
             TextField("Search", text: $viewModel.searchText, prompt: Text("Search").foregroundColor(.secondary))
                 .textFieldStyle(.plain)
-                .font(.system(size: 17, weight: .regular))
+                // 17 points at the default text size, as it was, and with Dynamic Type beyond
+                // it (architecture review 2026-11, gap-accessibility-architecture#3).
+                .font(.body)
                 .focused($isSearchFieldFocused)
 
             if !viewModel.searchText.isEmpty {

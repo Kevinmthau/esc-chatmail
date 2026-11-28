@@ -68,7 +68,8 @@ struct RecipientInputSection: View {
     private var iMessageRecipientRow: some View {
         HStack(spacing: 8) {
             Text("To:")
-                .font(.system(size: 18))
+                // 18 points at the default text size, and with Dynamic Type beyond it.
+                .scaledSystemFont(size: 18)
                 .foregroundColor(Color.systemGray)
 
             recipientInputContent
@@ -77,7 +78,9 @@ struct RecipientInputSection: View {
                 addContactButton
             }
         }
-        .frame(height: 52)
+        // At least the row's 52 points, taller where a larger text size needs it: a fixed
+        // height clipped the scaled field.
+        .frame(minHeight: 52)
         .padding(.leading, 16)
         .padding(.trailing, 8)
         .background(
@@ -107,7 +110,7 @@ struct RecipientInputSection: View {
                     .focused(focusedField, equals: .recipient)
                     .emailAddressTextInput()
                     .autocorrectionDisabled()
-                    .font(.system(size: 18))
+                    .scaledSystemFont(size: 18)
                     .tint(Color.systemBlue)
                     .frame(minWidth: isIMessageStyle ? 80 : 120)
                     .onSubmit {

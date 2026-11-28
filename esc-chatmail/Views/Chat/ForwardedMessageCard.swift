@@ -5,6 +5,7 @@ struct ForwardedMessageCard: View {
     let subjectFallback: String?
     let isFromMe: Bool
     @Environment(\.emailPreviewCardMetrics) private var metrics
+    @Environment(\.colorSchemeContrast) private var colorSchemeContrast
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -89,23 +90,29 @@ struct ForwardedMessageCard: View {
         }
     }
 
+    /// The card's colors for its bubble and the person's contrast setting
+    /// (`ForwardedMessageCardPalette`).
+    private var palette: ForwardedMessageCardPalette {
+        ForwardedMessageCardPalette.palette(isFromMe: isFromMe, contrast: colorSchemeContrast)
+    }
+
     private var primaryTextColor: Color {
-        isFromMe ? .white : .primary
+        palette.primaryText
     }
 
     private var secondaryTextColor: Color {
-        isFromMe ? Color.white.opacity(0.82) : Color.secondary
+        palette.secondaryText
     }
 
     private var tertiaryTextColor: Color {
-        isFromMe ? Color.white.opacity(0.66) : Color.secondary.opacity(0.84)
+        palette.tertiaryText
     }
 
     private var cardBackgroundColor: Color {
-        isFromMe ? Color.white.opacity(0.14) : Color.systemBackground.opacity(0.68)
+        palette.cardBackground
     }
 
     private var strokeColor: Color {
-        isFromMe ? Color.white.opacity(0.12) : Color.primary.opacity(0.08)
+        palette.stroke
     }
 }

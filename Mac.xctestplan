@@ -80,6 +80,7 @@
         "MailboxWindowSheetTests",
         "SheetBehindFocusedWindowTests",
         "FocusedWindowSheetTests",
+        "ForwardedMessageCardPaletteTests",
         "MacSidebarFilterBadgePolicyTests",
         "MacSidebarListSelectionGuardViewTests",
         "MacSidebarRowIDTests",
