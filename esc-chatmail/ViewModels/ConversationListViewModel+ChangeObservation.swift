@@ -275,8 +275,10 @@ extension ConversationListViewModel {
         var storedIDs: [NSManagedObjectID] = []
         for item in window
         where item.snapshot.participantDisplayNames.contains(where: { changedEmails.contains($0.email) }) {
+            // An unsaved row always has changes, whatever its ID: an optimistic send gives
+            // its conversation a permanent ID before the list first sees it.
             if let registered = context.registeredObject(for: item.id) as? Conversation,
-               registered.hasChanges || item.id.isTemporaryID {
+               registered.hasChanges {
                 // A pending delete is the deletion's own notification's to remove.
                 if !registered.isDeleted {
                     affected.append(registered)

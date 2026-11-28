@@ -9,11 +9,12 @@ import Combine
 /// review 2026-11: conversation-list-ui#4, contacts-person#6, gap-message-shape-extremes#5
 /// and the list half of gap-change-propagation-pipeline#1.
 ///
-/// Every test runs on a SQLite store, where a to-many relationship that nobody read is
-/// still a fault after a fetch, so `hasFault(forRelationshipNamed:)` tells whether the
-/// list walked a Person's conversations. The observed context retains what it registers
-/// (`retainsRegisteredObjects`), so a conversation the list touched stays visible to
-/// `registeredObject(for:)` after the walk let go of it.
+/// Every test runs on a SQLite store. Whether the list walked a Person's conversations is
+/// read from what the observed context registered, which it retains
+/// (`retainsRegisteredObjects`) so nothing the list touched is let go before the
+/// assertions: a walk registers every conversation and conversation participant the
+/// Person has. `hasFault(forRelationshipNamed: "conversationParticipations")` is no
+/// witness: it read true after the old walk too (measured by PR 527's review).
 ///
 /// Every fixture, save, and assertion goes through the suite's main-queue context
 /// (`TestCoreDataStack.makeMainQueueViewContext()`), as in
@@ -57,10 +58,6 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
         XCTAssertEqual(filteredConversationIDs(in: viewModel), Array(fixture.unarchivedIDs.prefix(5)))
 
         let person = try XCTUnwrap(viewContext.existingObject(with: fixture.personID) as? Person)
-        XCTAssertTrue(
-            person.hasFault(forRelationshipNamed: "conversationParticipations"),
-            "Precondition: the window fetch did not read the Person's conversations"
-        )
 
         person.displayName = "Pat Smith"
         viewContext.processPendingChanges()
@@ -72,9 +69,10 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
                 "Every window row shows the new name"
             )
         }
-        XCTAssertTrue(
-            person.hasFault(forRelationshipNamed: "conversationParticipations"),
-            "The rename must not walk every conversation the Person joined"
+        XCTAssertLessThanOrEqual(
+            registeredConversationParticipantCount(),
+            5,
+            "Only the window rows' participants (one each) are read, not all 200 of the Person's"
         )
         let outsideWindow = fixture.archivedIDs + fixture.unarchivedIDs.dropFirst(5)
         XCTAssertEqual(
@@ -84,12 +82,44 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
         )
     }
 
-    /// An optimistic send's conversation is in the window unsaved, with a temporary ID the
-    /// store knows nothing of, so the window fetch cannot find it; it is matched in memory.
-    // Revert-check: the in-memory loop over `pendingWindowConversations` in
-    // `conversationsAffectedByPersonChanges` (without it the unsaved row keeps the old name
-    // while the stored row shows the new one).
-    func testPersonRename_refreshesAnUnsavedWindowRow() throws {
+    /// An optimistic send's conversation, as the send makes it: unsaved in the view context
+    /// and given a permanent ID before the list first sees it
+    /// (`GmailSendService.createOptimisticMessage` obtains permanent IDs before
+    /// `processPendingChanges`, and `ChatViewModel` does too). The store knows nothing of
+    /// the row, so a fetch by its ID cannot find it, and it is taken from the context.
+    // Revert-check: `registered.hasChanges` in `conversationsAffectedByPersonChanges`
+    // (without it the row goes to the stored-row fetch, which does not return it, and it
+    // keeps the old name while the stored rows show the new one). Found by PR 527's
+    // review: the temporary-ID test below alone did not catch that revert.
+    func testPersonRename_refreshesAnUnsavedWindowRowWithAPermanentID() throws {
+        let (viewModel, optimistic, person) = try makeWindowWithAnUnsavedRow(permanentID: true)
+        XCTAssertFalse(optimistic.objectID.isTemporaryID, "Precondition: a permanent ID, as an optimistic send has")
+        XCTAssertTrue(optimistic.isInserted, "Precondition: unsaved")
+
+        person.displayName = "Pat Smith"
+        viewContext.processPendingChanges()
+
+        assertEveryRowShowsTheNewName(in: viewModel, unsavedRow: optimistic)
+    }
+
+    /// The same row before it has been given a permanent ID: a temporary ID, which no
+    /// fetch may be asked about.
+    // Revert-check: `registered.hasChanges` in `conversationsAffectedByPersonChanges`
+    // (without it the row is skipped as an ID the store cannot answer for).
+    func testPersonRename_refreshesAnUnsavedWindowRowWithATemporaryID() throws {
+        let (viewModel, optimistic, person) = try makeWindowWithAnUnsavedRow(permanentID: false)
+        XCTAssertTrue(optimistic.objectID.isTemporaryID, "Precondition: a temporary ID")
+
+        person.displayName = "Pat Smith"
+        viewContext.processPendingChanges()
+
+        assertEveryRowShowsTheNewName(in: viewModel, unsavedRow: optimistic)
+    }
+
+    /// Two stored rows with Pat, and an unsaved one, newest, entering the window.
+    private func makeWindowWithAnUnsavedRow(
+        permanentID: Bool
+    ) throws -> (ConversationListViewModel, Conversation, Person) {
         let fixture = try makePersonInManyConversations(unarchived: 2, archived: 0)
         let viewModel = makeViewModel(windowLimit: 5)
         viewModel.onAppear(in: viewContext)
@@ -103,19 +133,28 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
             .withCreatedAt(Date())
             .withParticipant(person)
             .build(in: viewContext)
+        if permanentID {
+            try viewContext.obtainPermanentIDs(for: [optimistic])
+        }
         viewContext.processPendingChanges()
-        XCTAssertTrue(optimistic.objectID.isTemporaryID, "Precondition: the row is unsaved")
         XCTAssertEqual(filteredConversationIDs(in: viewModel).first, optimistic.objectID)
+        return (viewModel, optimistic, person)
+    }
 
-        person.displayName = "Pat Smith"
-        viewContext.processPendingChanges()
-
-        XCTAssertEqual(viewModel.filteredConversationItems.count, 3)
+    private func assertEveryRowShowsTheNewName(
+        in viewModel: ConversationListViewModel,
+        unsavedRow: Conversation,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(viewModel.filteredConversationItems.count, 3, file: file, line: line)
         for item in viewModel.filteredConversationItems {
             XCTAssertEqual(
                 item.snapshot.participantDisplayNames.map(\.displayName),
                 ["Pat Smith"],
-                "\(item.id == optimistic.objectID ? "The unsaved row" : "A stored row") shows the new name"
+                "\(item.id == unsavedRow.objectID ? "The unsaved row" : "A stored row") shows the new name",
+                file: file,
+                line: line
             )
         }
     }
@@ -215,10 +254,13 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
         }
 
         await waitUntil { reportsNamingThePerson > 0 }
-        let person = try XCTUnwrap(viewContext.registeredObject(for: fixture.personID) as? Person)
-        XCTAssertTrue(
-            person.hasFault(forRelationshipNamed: "conversationParticipations"),
-            "The merged change must not walk every conversation the Person joined"
+        // The window row's participant, and the saved conversation's: the sibling-save
+        // path reads that changed Conversation and its participants (measured: 2). The old
+        // walk registered all 201 of the Person's.
+        XCTAssertLessThanOrEqual(
+            registeredConversationParticipantCount(),
+            2,
+            "Only the window row's and the saved conversation's participants are read"
         )
         // The conversation the message went to is a changed Conversation of the save, which
         // the sibling-save path fetches whatever its place in the list (the admission test
@@ -305,6 +347,13 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
                 )
             )
         )
+    }
+
+    /// The conversation participants the observed context has registered, counted by type
+    /// alone so the count fires nothing. The window rows' snapshot builds register theirs;
+    /// a walk of a Person's `conversationParticipations` registers every one the Person has.
+    private func registeredConversationParticipantCount() -> Int {
+        viewContext.registeredObjects.filter { $0 is ConversationParticipant }.count
     }
 
     private func filteredConversationIDs(in viewModel: ConversationListViewModel) -> [NSManagedObjectID] {

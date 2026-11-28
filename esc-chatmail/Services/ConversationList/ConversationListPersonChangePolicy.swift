@@ -18,7 +18,9 @@ import Foundation
 /// fingerprint are made too); the list's filters read the address alone, and search reads
 /// only the conversation. So a Person can change a window row only where some row shows
 /// its address with another name. A Person whose address no row shows is in no window
-/// row, because every participant with an address is in its row's pairs; a participant
+/// row whose snapshot reads it: every participant with an address is in its row's pairs,
+/// except in a list conversation's row, which shows no participant and keeps no pairs,
+/// so no Person change can alter it; a participant
 /// newly given to a row changes the conversation's own `participants` and reaches the list
 /// as a changed Conversation, and one the duplicate-Person merge re-points to another
 /// Person keeps its address, which the row shows. Rows sharing an address with a
