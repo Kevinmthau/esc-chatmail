@@ -677,28 +677,102 @@ final class HTMLContentHandler: @unchecked Sendable {
         }
     }
 
+    /// Removes the body files no stored row names: the daily cleanup's sweep of `Messages`
+    /// (`DatabaseMaintenanceService.cleanupOrphanedHTMLFiles`).
+    ///
+    /// Shaped as `deleteHTML(forDeleted:…)`, for the same reasons. The directory is listed
+    /// with no lock held, a chunk at a time, and the store is asked about each chunk's
+    /// message IDs before the boundary's lock is taken, never with it held; the unlinks of a
+    /// chunk are then one turn under the lock, so a body load, a body write and every
+    /// context's save with something to invalidate wait for a hundred unlinks at most. Until
+    /// 2026-11-28 this was one `perform` around the whole listing and every unlink, called on
+    /// the main actor with a set of every message ID in the store, and it held the main
+    /// thread, and the lock, for as long as the directory took (architecture review 2026-11,
+    /// attachments-storage-disk#6, concurrency-model#4).
+    ///
+    /// A chunk whose question throws stops the sweep: a failed read is never "no rows", and
+    /// what is left is the next day's. A closed or retired boundary stops it too, at the next
+    /// chunk, and a file written after `startedAt` is left, so a body the reader or a
+    /// recovery writes while the sweep runs, whose row may not be saved yet, survives it.
+    ///
+    /// - Parameters:
+    ///   - expectedGeneration: The account the caller captured before it began; never nil.
+    ///   - startedAt: Taken before the first question is asked.
+    ///   - liveMessageIDs: The IDs among those given that a stored row has. Called with no
+    ///     lock held, and only while the boundary still belongs to `expectedGeneration`.
+    ///   - isCancelled: Asked before each chunk. The default is the calling task's, so the
+    ///     caller awaits this in the run's own task, never in a detached one.
+    @discardableResult
     func cleanupOrphanedFiles(
-        validMessageIds: Set<String>,
-        expectedGeneration: HTMLContentAccountGeneration? = nil
-    ) {
+        expectedGeneration: HTMLContentAccountGeneration,
+        startedAt: Date = Date(),
+        chunkSize: Int = 100,
+        liveMessageIDs: (Set<String>) throws -> Set<String>,
+        isCancelled: () -> Bool = { Task.isCancelled }
+    ) -> OrphanedBodySweepOutcome {
         #if os(macOS)
         // Outside the App Sandbox this sweep would delete every file in the
         // user's real ~/Documents/Messages (docs/mac-app-plan.md, PR C).
         guard SandboxTripwire.permitsDestructiveCleanup(.orphanedMessageBodySweep) else {
-            return
+            return .refused
         }
         #endif
-        _ = accountBoundary.perform(directoryKey: directoryKey, expectedGeneration: expectedGeneration) {
-            let contents = FileSystemErrorHandler.contentsOfDirectory(at: messagesDirectory, category: .general)
-            for fileURL in contents {
-                let messageId = fileURL.deletingPathExtension().lastPathComponent
-                guard !messageId.isEmpty else { continue }
-                if !validMessageIds.contains(messageId) {
+        guard isAccountGenerationCurrent(expectedGeneration) else { return .accountChanged }
+        // A directory that is not there has nothing to sweep, as before.
+        guard let files = FileManager.default.enumerator(
+            at: messagesDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsSubdirectoryDescendants]
+        ) else {
+            return .completed
+        }
+        let chunkSize = max(1, chunkSize)
+        var chunk: [URL] = []
+        chunk.reserveCapacity(chunkSize)
+        while true {
+            chunk.removeAll(keepingCapacity: true)
+            while chunk.count < chunkSize, let fileURL = files.nextObject() as? URL {
+                chunk.append(fileURL)
+            }
+            guard !chunk.isEmpty else { return .completed }
+            guard !isCancelled() else { return .cancelled }
+            // A retired account's sweep does not even ask the store. The lock is taken and
+            // let go here; the unlinks below check the generation again under it.
+            guard isAccountGenerationCurrent(expectedGeneration) else { return .accountChanged }
+            let live: Set<String>
+            do {
+                live = try liveMessageIDs(Set(chunk.map(Self.messageID(ofBodyFileAt:)).filter { !$0.isEmpty }))
+            } catch {
+                Log.error(
+                    "Stopping the orphaned body sweep: stored rows could not be read",
+                    category: .general,
+                    error: error
+                )
+                return .storeUnreadable
+            }
+            let admitted: Void? = accountBoundary.perform(
+                directoryKey: directoryKey,
+                expectedGeneration: expectedGeneration
+            ) {
+                for fileURL in chunk {
+                    let messageId = Self.messageID(ofBodyFileAt: fileURL)
+                    guard !messageId.isEmpty,
+                          !live.contains(messageId),
+                          !DeletedRowFileReclamation.wasWrittenAfter(startedAt, fileAt: fileURL) else {
+                        continue
+                    }
                     FileSystemErrorHandler.removeItem(at: fileURL, category: .general)
                     invalidateCaches(for: fileURL)
                 }
             }
+            // Closed, or reopened for another account: nothing later is this caller's.
+            guard admitted != nil else { return .accountChanged }
         }
+    }
+
+    /// The message a file in `Messages` is the body of: its name without the extension.
+    private static func messageID(ofBodyFileAt fileURL: URL) -> String {
+        fileURL.deletingPathExtension().lastPathComponent
     }
 
     func migrateIfNeeded(from oldPath: String) -> Bool {
