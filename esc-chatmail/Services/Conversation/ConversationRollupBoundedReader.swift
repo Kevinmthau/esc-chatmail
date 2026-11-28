@@ -125,21 +125,7 @@ enum ConversationRollupBoundedReader {
         // preview is the snippet.
         var after: ConversationRollupSnapshot.MessageInput?
         pages: while true {
-            var predicates = [MessagePredicates.visibleInChat(conversationObjectID: conversationID)]
-            if let after {
-                predicates.append(NSPredicate(
-                    format: "internalDate < %@ OR (internalDate == %@ AND id < %@)",
-                    after.internalDate as NSDate,
-                    after.internalDate as NSDate,
-                    after.id
-                ))
-            }
-            let rows = try storedMessages(
-                matching: predicates,
-                excluding: excluded,
-                limit: previewPageSize,
-                in: context
-            )
+            let rows = try visiblePage(of: conversationID, after: after, excluding: excluded, in: context)
             for row in rows {
                 let input = ConversationRollupSnapshot.MessageInput(row)
                 if accumulator.latestVisible == nil {
@@ -154,22 +140,76 @@ enum ConversationRollupBoundedReader {
             if rows.count < previewPageSize { break }
         }
 
-        accumulator.latestInbox = try storedMessages(
+        accumulator.latestInbox = try newestInboxMessage(of: conversationID, excluding: excluded, in: context)
+            .map(ConversationRollupSnapshot.MessageInput.init)
+        accumulator.inboxUnreadCount = Int32(clamping: try unreadInboxCount(of: conversationID, excluding: excluded, in: context))
+        accumulator.hasSentOrFromMeMessages = try hasSentOrFromMeMessage(of: conversationID, excluding: excluded, in: context)
+        accumulator.hasReceivedMessages = try hasReceivedMessage(of: conversationID, excluding: excluded, in: context)
+
+        for message in overlay?.messages ?? [] {
+            accumulator.add(ConversationRollupSnapshot.MessageInput(message))
+        }
+        return accumulator.snapshot
+    }
+
+    // MARK: Stored reads
+    //
+    // Each read the rollup makes, by name, so `ScaleQueryPlanTests` plans the
+    // same statements the rollup runs. Every one takes the overlay's
+    // exclusion and no pending changes.
+
+    /// One page of the conversation's visible messages, newest first, after
+    /// `after` in that order (the keyset of the walk's previous page).
+    static func visiblePage(
+        of conversationID: NSManagedObjectID,
+        after: ConversationRollupSnapshot.MessageInput?,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> [Message] {
+        var predicates = [MessagePredicates.visibleInChat(conversationObjectID: conversationID)]
+        if let after {
+            predicates.append(NSPredicate(
+                format: "internalDate < %@ OR (internalDate == %@ AND id < %@)",
+                after.internalDate as NSDate,
+                after.internalDate as NSDate,
+                after.id
+            ))
+        }
+        return try storedMessages(matching: predicates, excluding: excluded, limit: previewPageSize, in: context)
+    }
+
+    static func newestInboxMessage(
+        of conversationID: NSManagedObjectID,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> Message? {
+        try storedMessages(
             matching: [NSPredicate(format: "conversation == %@ AND ANY labels.id == %@", conversationID, "INBOX")],
             excluding: excluded,
             limit: 1,
             in: context
-        ).first.map(ConversationRollupSnapshot.MessageInput.init)
+        ).first
+    }
 
-        let unread = try storedCount(
+    static func unreadInboxCount(
+        of conversationID: NSManagedObjectID,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> Int {
+        try storedCount(
             matching: MessagePredicates.unreadInInbox(conversationObjectID: conversationID),
             excluding: excluded,
             limit: nil,
             in: context
         )
-        accumulator.inboxUnreadCount = Int32(clamping: unread)
+    }
 
-        accumulator.hasSentOrFromMeMessages = try storedCount(
+    static func hasSentOrFromMeMessage(
+        of conversationID: NSManagedObjectID,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> Bool {
+        try storedCount(
             matching: NSPredicate(
                 format: "conversation == %@ AND (isFromMe == YES OR ANY labels.id == %@)",
                 conversationID,
@@ -179,18 +219,19 @@ enum ConversationRollupBoundedReader {
             limit: 1,
             in: context
         ) > 0
+    }
 
-        accumulator.hasReceivedMessages = try storedCount(
+    static func hasReceivedMessage(
+        of conversationID: NSManagedObjectID,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> Bool {
+        try storedCount(
             matching: NSPredicate(format: "conversation == %@ AND isFromMe == NO", conversationID),
             excluding: excluded,
             limit: 1,
             in: context
         ) > 0
-
-        for message in overlay?.messages ?? [] {
-            accumulator.add(ConversationRollupSnapshot.MessageInput(message))
-        }
-        return accumulator.snapshot
     }
 
     /// Stored messages matching every predicate, newest first (then by ID),
@@ -255,21 +296,10 @@ enum ConversationRollupBoundedReader {
     ) throws -> ConversationSenderSummary {
         let conversationID = conversation.objectID
         let excluded = overlay?.excludedObjectIDs ?? []
-        let base = NSPredicate(format: "conversation == %@ AND senderEmail != nil", conversationID)
-
-        let newestDate = NSExpressionDescription()
-        newestDate.name = "newestDate"
-        newestDate.expression = NSExpression(forFunction: "max:", arguments: [NSExpression(forKeyPath: "internalDate")])
-        newestDate.expressionResultType = .dateAttributeType
-        let grouped = NSFetchRequest<NSDictionary>(entityName: "Message")
-        grouped.resultType = .dictionaryResultType
-        grouped.predicate = excludingPredicate([base], excluded)
-        grouped.propertiesToGroupBy = ["senderEmail", "senderName"]
-        grouped.propertiesToFetch = ["senderEmail", "senderName", newestDate]
 
         var stored = ConversationSenderSummary()
         var rawAddresses: [String: Set<String>] = [:]
-        for row in try context.fetch(grouped) {
+        for row in try groupedSenderRows(of: conversationID, excluding: excluded, in: context) {
             guard let senderEmail = row["senderEmail"] as? String,
                   let date = row["newestDate"] as? Date else { continue }
             rawAddresses[EmailNormalizer.normalize(senderEmail), default: []].insert(senderEmail)
@@ -299,15 +329,14 @@ enum ConversationRollupBoundedReader {
         result.merge(stored)
         for (email, dates) in tiedStoredDates {
             for date in dates {
-                let tied = NSFetchRequest<NSDictionary>(entityName: "Message")
-                tied.resultType = .dictionaryResultType
-                tied.predicate = excludingPredicate([
-                    NSPredicate(format: "conversation == %@", conversationID),
-                    NSPredicate(format: "senderEmail IN %@", Array(rawAddresses[email] ?? [])),
-                    NSPredicate(format: "internalDate == %@", date as NSDate)
-                ], excluded)
-                tied.propertiesToFetch = ["senderEmail", "senderName", "id"]
-                for row in try context.fetch(tied) {
+                let rows = try tiedSenderRows(
+                    of: conversationID,
+                    senderEmails: rawAddresses[email] ?? [],
+                    at: date,
+                    excluding: excluded,
+                    in: context
+                )
+                for row in rows {
                     guard let id = row["id"] as? String else { continue }
                     result.add(
                         senderEmail: row["senderEmail"] as? String,
@@ -320,5 +349,47 @@ enum ConversationRollupBoundedReader {
         }
         result.merge(unsaved)
         return result
+    }
+
+    /// The conversation's senders grouped by stored address and name, with
+    /// each group's newest date (`newestDate`).
+    static func groupedSenderRows(
+        of conversationID: NSManagedObjectID,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> [NSDictionary] {
+        let newestDate = NSExpressionDescription()
+        newestDate.name = "newestDate"
+        newestDate.expression = NSExpression(forFunction: "max:", arguments: [NSExpression(forKeyPath: "internalDate")])
+        newestDate.expressionResultType = .dateAttributeType
+        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+        request.resultType = .dictionaryResultType
+        request.predicate = excludingPredicate(
+            [NSPredicate(format: "conversation == %@ AND senderEmail != nil", conversationID)],
+            excluded
+        )
+        request.propertiesToGroupBy = ["senderEmail", "senderName"]
+        request.propertiesToFetch = ["senderEmail", "senderName", newestDate]
+        return try context.fetch(request)
+    }
+
+    /// The sender, name and ID of each of the conversation's messages from
+    /// `senderEmails` dated `date`: the IDs that order two names tied there.
+    static func tiedSenderRows(
+        of conversationID: NSManagedObjectID,
+        senderEmails: Set<String>,
+        at date: Date,
+        excluding excluded: [NSManagedObjectID],
+        in context: NSManagedObjectContext
+    ) throws -> [NSDictionary] {
+        let request = NSFetchRequest<NSDictionary>(entityName: "Message")
+        request.resultType = .dictionaryResultType
+        request.predicate = excludingPredicate([
+            NSPredicate(format: "conversation == %@", conversationID),
+            NSPredicate(format: "senderEmail IN %@", Array(senderEmails)),
+            NSPredicate(format: "internalDate == %@", date as NSDate)
+        ], excluded)
+        request.propertiesToFetch = ["senderEmail", "senderName", "id"]
+        return try context.fetch(request)
     }
 }

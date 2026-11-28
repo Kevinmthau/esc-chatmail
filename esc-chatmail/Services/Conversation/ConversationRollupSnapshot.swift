@@ -39,6 +39,22 @@ struct ConversationRollupSnapshot: Sendable, Equatable {
         /// `Message.conversationPreviewText`.
         let previewText: String?
 
+        init(
+            id: String,
+            internalDate: Date,
+            labelIDs: Set<String>,
+            isUnread: Bool,
+            isFromMe: Bool,
+            previewText: String?
+        ) {
+            self.id = id
+            self.internalDate = internalDate
+            self.labelIDs = labelIDs
+            self.isUnread = isUnread
+            self.isFromMe = isFromMe
+            self.previewText = previewText
+        }
+
         init(_ message: Message) {
             id = message.id
             internalDate = message.internalDate

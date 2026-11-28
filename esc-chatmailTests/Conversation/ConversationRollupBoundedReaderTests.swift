@@ -169,20 +169,31 @@ final class ConversationRollupBoundedReaderTests: XCTestCase {
     }
 
     /// Two visible messages at one date: the greater ID is the newer, in the
-    /// walk and in the store's order alike.
+    /// walk and in the store's order alike. The rule is fed the tied messages
+    /// in both orders, so the answer cannot be whichever came first.
     ///
     /// Revert-check: the ID comparison in
-    /// `ConversationRollupSnapshot.MessageInput.isNewer`. Without it the walk
-    /// keeps whichever tied message its set gives first, and the store sorts
-    /// by ID. HONEST SCOPE: so it fails by chance, 5 of 10 iterations
-    /// (`-test-iterations 10`, iOS 27.0 simulator, 2026-11-28).
+    /// `ConversationRollupSnapshot.MessageInput.isNewer`. Without it the first
+    /// tied message added wins, so one of the two orders answers "A".
     func testEqualDates_breakTiesByID() throws {
+        let date = Self.date(1)
+        let first = ConversationRollupSnapshot.MessageInput(
+            id: "tie-a", internalDate: date, labelIDs: ["INBOX"], isUnread: false, isFromMe: false, previewText: "A"
+        )
+        let second = ConversationRollupSnapshot.MessageInput(
+            id: "tie-b", internalDate: date, labelIDs: ["INBOX"], isUnread: false, isFromMe: false, previewText: "B"
+        )
+        for order in [[first, second], [second, first]] {
+            var accumulator = ConversationRollupSnapshot.Accumulator()
+            order.forEach { accumulator.add($0) }
+            XCTAssertEqual(accumulator.snapshot.snippet, "B", "order \(order.map(\.id))")
+        }
+
         let (conversationID, _) = try seed([
             Row(id: "tie-a", minutes: 1, labels: ["INBOX"], snippet: "A"),
             Row(id: "tie-b", minutes: 1, labels: ["INBOX"], snippet: "B", sender: ("alice@example.com", "Alice Smith"))
         ])
         let context = stack.newBackgroundContext()
-
         try compare(conversationID, in: context)
     }
 
@@ -260,12 +271,12 @@ final class ConversationRollupBoundedReaderTests: XCTestCase {
     /// date (the message ID orders them), and an unsaved message giving the
     /// address a name at that date too.
     ///
+    /// The reader's tied names carry the IDs that order them.
+    ///
     /// Revert-check: the tied-date ID reads in
     /// `ConversationRollupBoundedReader.senders` (`tiedStoredDates`). Without
-    /// them the tied names have no IDs and their order is the grouped
-    /// fetch's. HONEST SCOPE: so it fails by chance, 4 of 5 iterations
-    /// (`-test-iterations 5`, iOS 27.0 simulator, 2026-11-28). The overlay
-    /// half (`senders`' unsaved messages) fails it every time.
+    /// them the tied names have no IDs. The overlay half (`senders`' unsaved
+    /// messages) fails the comparison with the walk.
     func testSenderNamesWithTiedDates_andAnUnsavedNewerName_matchTheWalk() throws {
         let (conversationID, _) = try seed([
             Row(id: "s1", minutes: 1, labels: ["INBOX"], sender: ("carol@example.com", "Carol")),
@@ -275,6 +286,14 @@ final class ConversationRollupBoundedReaderTests: XCTestCase {
         ])
         let context = stack.newBackgroundContext()
         try compare(conversationID, in: context)
+        let tiedIDs = try context.performAndWait {
+            let conversation = try XCTUnwrap(context.existingObject(with: conversationID) as? Conversation)
+            let senders = try ConversationRollupBoundedReader.senders(of: conversation, overlay: nil, in: context)
+            return senders.candidatesByEmail["carol@example.com"]?.mapValues(\.id)
+        }
+        XCTAssertEqual(tiedIDs?["Carol Smith"], "s2")
+        XCTAssertEqual(tiedIDs?["C. Smith"], "s3")
+
 
         try context.performAndWait {
             let conversation = try XCTUnwrap(context.existingObject(with: conversationID) as? Conversation)
@@ -342,6 +361,92 @@ final class ConversationRollupBoundedReaderTests: XCTestCase {
         let fallenBack = try rollupFields(of: conversationID, in: failingContext)
         XCTAssertEqual(fallenBack, walked)
         XCTAssertNotNil(fallenBack.lastMessageDate)
+    }
+
+    /// A conversation whose title comes from its messages' From names: two
+    /// participants whose stored names are empty, and messages naming them.
+    private func seedTitledConversation() throws -> NSManagedObjectID {
+        let context = stack.newBackgroundContext()
+        return try context.performAndWait {
+            let inbox = LabelBuilder.inboxLabel(in: context)
+            let conversation = ConversationBuilder().withParticipantHash("p|titled").visible().build(in: context)
+            for (email, name) in [("alice@example.com", "Alice Liddell"), ("bob@example.com", "Bob Builder")] {
+                let person = PersonBuilder().withEmail(email).noDisplayName().build(in: context)
+                let participant = context.insertTestObject(ConversationParticipant.self)
+                participant.id = UUID()
+                participant.participantRole = .normal
+                participant.person = person
+                participant.conversation = conversation
+                for index in 0..<3 {
+                    let message = MessageBuilder()
+                        .withId("\(email)-\(index)")
+                        .withDate(Self.date(Double(index)))
+                        .withSender(email: email, name: name)
+                        .inConversation(conversation)
+                        .build(in: context)
+                    message.labels = [inbox]
+                }
+            }
+            conversation.displayName = "alice@example.com, bob@example.com"
+            try context.save()
+            return conversation.objectID
+        }
+    }
+
+    private func storedDisplayName(of conversationID: NSManagedObjectID, in context: NSManagedObjectContext) throws -> String? {
+        try context.performAndWait {
+            try XCTUnwrap(context.existingObject(with: conversationID) as? Conversation).displayName
+        }
+    }
+
+    /// The name-only refresh's bounded branch stores the title the walk stores,
+    /// a title made from the messages' From names.
+    ///
+    /// HONEST SCOPE: the two branches agree by construction where the reader
+    /// does; this pins that the bounded branch is wired to the title at all.
+    @MainActor
+    func testUpdateDisplayNamesForConversations_boundedBranch_storesTheWalksTitle() async throws {
+        let conversationID = try seedTitledConversation()
+        let walkedContext = stack.newBackgroundContext()
+        let boundedContext = stack.newBackgroundContext()
+        let coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
+
+        let walkedOK = await ConversationRollupUpdater(coreDataStack: coreDataStack, boundedRollupThreshold: .max)
+            .updateDisplayNamesForConversations(conversationIDs: [conversationID], in: walkedContext, myEmail: Self.me)
+        let boundedOK = await ConversationRollupUpdater(coreDataStack: coreDataStack, boundedRollupThreshold: 0)
+            .updateDisplayNamesForConversations(conversationIDs: [conversationID], in: boundedContext, myEmail: Self.me)
+
+        XCTAssertTrue(walkedOK)
+        XCTAssertTrue(boundedOK)
+        let walked = try storedDisplayName(of: conversationID, in: walkedContext)
+        XCTAssertEqual(try storedDisplayName(of: conversationID, in: boundedContext), walked)
+        XCTAssertTrue(walked?.contains("Alice") == true, "The title does not come from the From names: \(walked ?? "nil")")
+    }
+
+    /// A bounded sender read that fails walks the messages for the title.
+    ///
+    /// Revert-check: the walk in `ConversationRollupUpdater.boundedSenders`'
+    /// catch. Answer an empty summary there and the title loses the From names.
+    @MainActor
+    func testBoundedSenderReadFails_fallsBackToTheWalksTitle() async throws {
+        let conversationID = try seedTitledConversation()
+        let walkedContext = stack.newBackgroundContext()
+        let failingContext = MessageFetchFailingAfterFirstContext(
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        let coreDataStack = CoreDataStack(persistentContainerForTesting: stack.persistentContainer)
+
+        _ = await ConversationRollupUpdater(coreDataStack: coreDataStack, boundedRollupThreshold: .max)
+            .updateDisplayNamesForConversations(conversationIDs: [conversationID], in: walkedContext, myEmail: Self.me)
+        let updated = await ConversationRollupUpdater(coreDataStack: coreDataStack, boundedRollupThreshold: 0)
+            .updateDisplayNamesForConversations(conversationIDs: [conversationID], in: failingContext, myEmail: Self.me)
+
+        XCTAssertTrue(updated)
+        XCTAssertGreaterThan(failingContext.failedFetches, 0, "No bounded sender read failed")
+        XCTAssertEqual(
+            try storedDisplayName(of: conversationID, in: failingContext),
+            try storedDisplayName(of: conversationID, in: walkedContext)
+        )
     }
 
     private struct RollupFields: Equatable {

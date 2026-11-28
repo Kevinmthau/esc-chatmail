@@ -93,6 +93,7 @@ struct ConversationRollupUpdater: Sendable {
             snapshot = try ConversationRollupBoundedReader.snapshot(of: conversation, overlay: overlay, in: context)
         } catch {
             Log.error("Bounded rollup read failed; walking the conversation", category: .conversation, error: error)
+            Self.prefetchMessagesForWalk(of: conversation, labels: true, in: context)
             updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: normalizedSelfAddresses)
             return
         }
@@ -118,7 +119,28 @@ struct ConversationRollupUpdater: Sendable {
             return try ConversationRollupBoundedReader.senders(of: conversation, overlay: overlay, in: context)
         } catch {
             Log.error("Bounded sender read failed; walking the conversation", category: .conversation, error: error)
+            prefetchMessagesForWalk(of: conversation, labels: false, in: context)
             return .walking(conversation.messages ?? [])
+        }
+    }
+
+    /// Loads a bounded-route conversation's messages (and their labels, for a
+    /// rollup) in one fetch before a fallback walk: that conversation was
+    /// fetched without them, and walked bare it took a fault per message, one
+    /// more per message's labels, on a chat of thousands. A prefetch that
+    /// fails leaves the faults to the walk.
+    private static func prefetchMessagesForWalk(
+        of conversation: Conversation,
+        labels: Bool,
+        in context: NSManagedObjectContext
+    ) {
+        let request = Conversation.fetchRequest()
+        request.predicate = NSPredicate(format: "SELF == %@", conversation.objectID)
+        request.relationshipKeyPathsForPrefetching = labels ? ["messages", "messages.labels"] : ["messages"]
+        do {
+            _ = try context.fetch(request)
+        } catch {
+            Log.error("Failed to prefetch messages for a fallback rollup walk", category: .conversation, error: error)
         }
     }
 
@@ -713,8 +735,9 @@ struct ConversationRollupUpdater: Sendable {
     }
 
     /// `senders` is asked at most once, and only where the title needs the
-    /// messages' From names: a list conversation that keeps its stored title
-    /// reads no message at all. A walk passes `.walking(messages)`, a large
+    /// messages' From names, so on the bounded route a list conversation that
+    /// keeps its stored title reads no sender at all (a walk has read the
+    /// messages already). A walk passes `.walking(messages)`, a large
     /// conversation the bounded reader's grouped query.
     private func updateDisplayNameOnly(
         for conversation: Conversation,

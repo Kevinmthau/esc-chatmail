@@ -122,46 +122,147 @@ final class ScaleQueryPlanTests: XCTestCase {
     // MARK: - Bounded rollup of a large chat
 
     /// The run's rollup of a large chat reads it with bounded queries
-    /// (`ConversationRollupBoundedReader`: the stored count that routes it,
-    /// the newest-first preview walk, the newest INBOX row, the unread count,
-    /// two existence probes and the grouped sender query). Each must find the
-    /// chat's messages through an index on the conversation, never walk
-    /// ZMESSAGE, with and without statistics (architecture review 2026-11,
-    /// data-model#4).
+    /// (`ConversationRollupBoundedReader`): the stored count that routes it,
+    /// the visible walk's first page and a keyset page after it, the newest
+    /// INBOX row, the unread count, two existence probes, the grouped sender
+    /// query and the tied-date sender read. Each must find the chat's messages
+    /// through an index on the conversation and never walk ZMESSAGE, with and
+    /// without statistics, and with the overlay's exclusion empty and not:
+    /// in a sync run it almost never is, and `NOT (Z_PK IN …)` is a term
+    /// SQLite plans too (architecture review 2026-11, data-model#4).
     ///
     /// HONEST SCOPE: no one line of production code reverts this. It fails if
     /// a reader query stops being driven by the conversation.
     func testBoundedRollupReads_areDrivenByTheConversation() throws {
+        typealias Reader = ConversationRollupBoundedReader
         for statistics in Self.bothStatistics {
             let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
             let context = stack.newBackgroundContext()
-            let conversationID = manifest.largestConversationID
+            let largestID = manifest.largestConversationID
+            let (conversationID, chatMessageIDs) = try context.performAndWait {
+                () throws -> (NSManagedObjectID, [NSManagedObjectID]) in
+                let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+                request.predicate = NSPredicate(format: "id == %@", largestID as CVarArg)
+                let conversationID = try XCTUnwrap(try context.fetch(request).first).objectID
+                let messages = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
+                messages.resultType = .managedObjectIDResultType
+                messages.predicate = NSPredicate(format: "conversation == %@", conversationID)
+                messages.fetchLimit = 50
+                return (conversationID, try context.fetch(messages))
+            }
+            XCTAssertEqual(chatMessageIDs.count, 50)
 
-            var outcome = (counted: 0, hasDate: false, senderCount: 0)
-            let plans = try SQLiteQueryPlanRecorder.record {
-                outcome = try context.performAndWait {
-                    let request = NSFetchRequest<Conversation>(entityName: "Conversation")
-                    request.predicate = NSPredicate(format: "id == %@", conversationID as CVarArg)
-                    let conversation = try XCTUnwrap(try context.fetch(request).first)
-                    let counts = try ConversationRollupBoundedReader.storedMessageCounts(
-                        of: [conversation.objectID],
-                        in: context
-                    )
-                    let snapshot = try ConversationRollupBoundedReader.snapshot(of: conversation, overlay: nil, in: context)
-                    let senders = try ConversationRollupBoundedReader.senders(of: conversation, overlay: nil, in: context)
-                    return (counts[conversation.objectID] ?? 0, snapshot.lastMessageDate != nil, senders.senderEmails.count)
+            var count = 0
+            let countPlan = try messagePlan("stored count", "\(statistics)") {
+                count = try context.performAndWait {
+                    try Reader.storedMessageCounts(of: [conversationID], in: context)[conversationID] ?? 0
                 }
             }
+            XCTAssertEqual(count, manifest.largestConversationMessageCount, "\(statistics)")
+            assertDrivenByTheConversation(countPlan, statistics)
 
-            XCTAssertEqual(outcome.counted, manifest.largestConversationMessageCount, "\(statistics)")
-            XCTAssertTrue(outcome.hasDate, "\(statistics)")
-            XCTAssertGreaterThan(outcome.senderCount, 1, "\(statistics)")
-            let messagePlans = plans.filter { $0.reads("ZMESSAGE") && !$0.reads("ZCONVERSATION") }
-            XCTAssertGreaterThanOrEqual(messagePlans.count, 7, "\(statistics):\n\(plans)")
-            for plan in messagePlans {
-                assertDrivenByTheConversation(plan, statistics)
+            for excluded in [[], chatMessageIDs] {
+                let label = "\(statistics), \(excluded.count) excluded"
+
+                var firstPage: [ConversationRollupSnapshot.MessageInput] = []
+                let firstPagePlan = try messagePlan("first visible page", label) {
+                    firstPage = try context.performAndWait {
+                        try Reader.visiblePage(of: conversationID, after: nil, excluding: excluded, in: context)
+                            .map(ConversationRollupSnapshot.MessageInput.init)
+                    }
+                }
+                XCTAssertEqual(firstPage.count, Reader.previewPageSize, label)
+                let after = try XCTUnwrap(firstPage.last, label)
+
+                var secondPage: [ConversationRollupSnapshot.MessageInput] = []
+                let secondPagePlan = try messagePlan("keyset visible page", label) {
+                    secondPage = try context.performAndWait {
+                        try Reader.visiblePage(of: conversationID, after: after, excluding: excluded, in: context)
+                            .map(ConversationRollupSnapshot.MessageInput.init)
+                    }
+                }
+                XCTAssertEqual(secondPage.count, Reader.previewPageSize, label)
+                XCTAssertTrue(secondPage.allSatisfy { after.isNewer(than: $0) }, "The keyset page starts after the first: \(label)")
+
+                var newestInbox: String?
+                let inboxPlan = try messagePlan("newest INBOX row", label) {
+                    newestInbox = try context.performAndWait {
+                        try Reader.newestInboxMessage(of: conversationID, excluding: excluded, in: context)?.id
+                    }
+                }
+                XCTAssertNotNil(newestInbox, label)
+
+                var unread = 0
+                let unreadPlan = try messagePlan("unread count", label) {
+                    unread = try context.performAndWait {
+                        try Reader.unreadInboxCount(of: conversationID, excluding: excluded, in: context)
+                    }
+                }
+                XCTAssertGreaterThan(unread, 0, label)
+
+                var probes = (sent: false, received: false)
+                let sentPlan = try messagePlan("sent probe", label) {
+                    probes.sent = try context.performAndWait {
+                        try Reader.hasSentOrFromMeMessage(of: conversationID, excluding: excluded, in: context)
+                    }
+                }
+                let receivedPlan = try messagePlan("received probe", label) {
+                    probes.received = try context.performAndWait {
+                        try Reader.hasReceivedMessage(of: conversationID, excluding: excluded, in: context)
+                    }
+                }
+                XCTAssertTrue(probes.received, label)
+
+                var sender: (email: String, date: Date)?
+                let groupedPlan = try messagePlan("grouped senders", label) {
+                    sender = try context.performAndWait { () throws -> (email: String, date: Date)? in
+                        try Reader.groupedSenderRows(of: conversationID, excluding: excluded, in: context)
+                            .compactMap { row -> (email: String, date: Date)? in
+                                guard let email = row["senderEmail"] as? String,
+                                      let date = row["newestDate"] as? Date else { return nil }
+                                return (email, date)
+                            }
+                            .first
+                    }
+                }
+                let tiedSender = try XCTUnwrap(sender, label)
+                var tiedRows = 0
+                let tiedPlan = try messagePlan("tied-date senders", label) {
+                    tiedRows = try context.performAndWait {
+                        try Reader.tiedSenderRows(
+                            of: conversationID,
+                            senderEmails: [tiedSender.email],
+                            at: tiedSender.date,
+                            excluding: excluded,
+                            in: context
+                        ).count
+                    }
+                }
+                XCTAssertGreaterThan(tiedRows, 0, label)
+
+                for (name, plan) in [
+                    ("first visible page", firstPagePlan),
+                    ("keyset visible page", secondPagePlan),
+                    ("newest INBOX row", inboxPlan),
+                    ("unread count", unreadPlan),
+                    ("sent probe", sentPlan),
+                    ("received probe", receivedPlan),
+                    ("grouped senders", groupedPlan),
+                    ("tied-date senders", tiedPlan)
+                ] {
+                    XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(name), \(label): \(plan)")
+                    XCTAssertTrue(Self.isDrivenByTheConversation(plan), "\(name), \(label): \(plan)")
+                }
             }
         }
+    }
+
+    /// The one statement `body` ran on ZMESSAGE, unwrapped.
+    private func messagePlan(_ name: String, _ label: String, _ body: () throws -> Void) throws -> Plan {
+        let plans = try SQLiteQueryPlanRecorder.record(body)
+        let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
+        XCTAssertEqual(messagePlans.count, 1, "\(name), \(label): one statement on ZMESSAGE expected:\n\(plans)")
+        return try XCTUnwrap(messagePlans.first, "\(name), \(label):\n\(plans)")
     }
 
     // MARK: - Unread snapshot at chat open
