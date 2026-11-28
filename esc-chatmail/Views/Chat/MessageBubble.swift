@@ -41,28 +41,21 @@ enum MessageSendStatusPresentation: Equatable {
     }
 }
 
-struct MessageBubble: View {
-    let message: ChatMessageRowModel
-    /// Pre-loaded sender names from batch fetch (avoids N+1 queries)
-    var prefetchedSenderName: String?
-    /// Presentation mode for threads that collapse multiple emails into one contact.
-    var isEffectivelyOneToOneConversation: Bool
-    /// Bumps when local contact data changes so sender labels/avatars reload in-place.
-    var contactRefreshToken: Int = 0
-    /// Where this row sits in its run of bubbles and what it draws above itself
-    /// (`ChatTranscriptRunPolicy.placement`): the avatar's and the tail's row, the sender
-    /// name's row, the time line.
-    var runPlacement: ChatTranscriptRunPlacement = .alone
-    /// The transcript's width, for a style whose text bubbles take a share of it
-    /// (`MessageBubbleStyle.textBubbleMaxWidth`). 0 only for a caller that gives none: the
-    /// transcript passes its `GeometryReader`'s width, the width the rows are laid out in, so
-    /// a row never wraps its text at one width's cap while it is drawn in another's.
-    var transcriptWidth: CGFloat = 0
-    /// Whether this row is the conversation's newest message
-    /// (`MessageSendStatusLinePolicy.newestRowIndex`); only that row carries the "Sent" receipt.
-    var isNewestInTranscript: Bool = false
-    /// Display style configuration
-    var style: MessageBubbleStyle = .standard
+/// `Equatable` on its value inputs alone (`MessageBubbleInputs`), and shown through
+/// `.equatable()`, so the transcript re-runs a row's body only when something that row draws
+/// changed (architecture review 2026-11, chat-transcript-ui#4). Its closures and services are
+/// outside `==` and must read state when called; `MessageBubbleInputs` says why.
+struct MessageBubble: View, Equatable {
+    /// Every value this bubble draws from. A new one goes in the struct, not here.
+    let inputs: MessageBubbleInputs
+    var message: ChatMessageRowModel { inputs.message }
+    var prefetchedSenderName: String? { inputs.prefetchedSenderName }
+    var isEffectivelyOneToOneConversation: Bool { inputs.isEffectivelyOneToOneConversation }
+    var contactRefreshToken: Int { inputs.contactRefreshToken }
+    var runPlacement: ChatTranscriptRunPlacement { inputs.runPlacement }
+    var transcriptWidth: CGFloat { inputs.transcriptWidth }
+    var isNewestInTranscript: Bool { inputs.isNewestInTranscript }
+    var style: MessageBubbleStyle { inputs.style }
     private let htmlContentHandler: HTMLContentHandler
     private let fullEmailOpener: any FullEmailOpening
     private let originalEmailSourceWarmer: any OriginalEmailSourceWarming
@@ -77,10 +70,19 @@ struct MessageBubble: View {
     /// The failed-send dialog's chosen action, held until the dialog has dismissed
     /// (`FailedSendRecoveryPolicy.actionToRun`).
     @State private var pendingSendRecoveryAction: FailedSendRecoveryPolicy.Action?
+    /// Outside `==`: a row whose inputs did not change keeps the closure of an older pass, so
+    /// it must read state when called (`ChatTranscriptRowActions`).
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
     /// Runs an action the failed-send dialog offered. The caller routes it to the same view-model
-    /// path as the long-press menu; the bubble never sends anything itself.
+    /// path as the long-press menu; the bubble never sends anything itself. Outside `==`, like
+    /// `onOpenFullMessage`.
     let onSendRecoveryAction: (FailedSendRecoveryPolicy.Action) -> Void
+
+    /// The inputs alone: closures and services never compare equal across passes, and the
+    /// view model and `@State` are SwiftUI's to track.
+    nonisolated static func == (lhs: MessageBubble, rhs: MessageBubble) -> Bool {
+        lhs.inputs == rhs.inputs
+    }
 
     private var showHTMLPreview: Bool {
         guard resolvedForwardedDisplayContent == nil else {
@@ -173,17 +175,19 @@ struct MessageBubble: View {
         onOpenFullMessage: @escaping (NSManagedObjectID, EmailReaderOpenSource) -> Void,
         onSendRecoveryAction: @escaping (FailedSendRecoveryPolicy.Action) -> Void
     ) {
-        self.message = message
+        self.inputs = MessageBubbleInputs(
+            message: message,
+            prefetchedSenderName: prefetchedSenderName,
+            isEffectivelyOneToOneConversation: isEffectivelyOneToOneConversation,
+            contactRefreshToken: contactRefreshToken,
+            runPlacement: runPlacement,
+            transcriptWidth: transcriptWidth,
+            isNewestInTranscript: isNewestInTranscript,
+            style: style
+        )
         self.htmlContentHandler = htmlContentHandler
         self.fullEmailOpener = fullEmailOpener
         self.originalEmailSourceWarmer = originalEmailSourceWarmer
-        self.prefetchedSenderName = prefetchedSenderName
-        self.isEffectivelyOneToOneConversation = isEffectivelyOneToOneConversation
-        self.contactRefreshToken = contactRefreshToken
-        self.runPlacement = runPlacement
-        self.transcriptWidth = transcriptWidth
-        self.isNewestInTranscript = isNewestInTranscript
-        self.style = style
         self.onOpenFullMessage = onOpenFullMessage
         self.onSendRecoveryAction = onSendRecoveryAction
         // StateObject evaluates the request and memory-only analysis lookup once per mount.
@@ -632,12 +636,15 @@ struct MessageBubble: View {
         )
     }
 
+    /// The load's identity: the row's precomputed components, the contacts token, and the view
+    /// model's source revision, which a change of this message's HTML source on disk bumps
+    /// (`MessageBubbleViewModel.sourceRevision`). It used to read the file's signature here,
+    /// taking the process-wide HTML lock, and on a cache miss a stat, on the main thread in
+    /// every pass of every realized row; nothing here touches the file now. It starts at 0 and
+    /// moves only on a change, so a row's first pass is its first load's signature.
     private var loadSignature: String {
         message.loadSignatureComponents.signature(
-            htmlSourceSignature: htmlContentHandler.htmlSourceSignature(
-                messageId: message.id,
-                bodyStorageURI: message.bodyStorageURI
-            ),
+            sourceRevision: viewModel.sourceRevision,
             contactRefreshToken: contactRefreshToken
         )
     }
@@ -653,7 +660,7 @@ struct MessageBubble: View {
         cleanedSnippet: String? = nil,
         snippet: String?,
         hasHTMLSource: Bool,
-        htmlSourceSignature: String,
+        sourceRevision: Int,
         contactRefreshToken: Int,
         senderEmail: String? = nil,
         senderDisplayName: String? = nil,
@@ -667,7 +674,7 @@ struct MessageBubble: View {
             cleanedSnippet: cleanedSnippet,
             snippet: snippet,
             hasHTMLSource: hasHTMLSource,
-            htmlSourceSignature: htmlSourceSignature,
+            sourceRevision: sourceRevision,
             contactRefreshToken: contactRefreshToken,
             senderEmail: senderEmail,
             senderDisplayName: senderDisplayName,

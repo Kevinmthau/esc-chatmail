@@ -984,6 +984,25 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         }
     }
 
+    /// Every drag start reports a user scroll, and the session forwards each coordinator
+    /// publish to the transcript's body. A takeover that is already on publishes nothing.
+    ///
+    /// Revert-check: assigning `isUserScrollTakeoverActive = true` unconditionally in
+    /// `ChatMessagesCoordinator.handleUserScrollInteraction` publishes once more.
+    func testUserScrollInteraction_takeoverAlreadyActive_publishesNothing() async throws {
+        let (coordinator, rows) = try makeParkedTestCoordinator()
+        await revealAtContentEnd(coordinator, rows: rows)
+        coordinator.handleUserScrollInteraction()
+        XCTAssertTrue(coordinator.isUserScrollTakeoverActive)
+
+        var publishes = 0
+        let cancellable = coordinator.objectWillChange.sink { publishes += 1 }
+        coordinator.handleUserScrollInteraction()
+
+        XCTAssertEqual(publishes, 0)
+        withExtendedLifetime(cancellable) {}
+    }
+
     func testUserScrollDuringInitialRevealCancelsLatestWindowLoads() async throws {
         let (_, messages) = try makeConversationWithMessages(senderEmails: [
             "first@example.com",

@@ -1469,6 +1469,35 @@ final class MessageBubbleViewModelTests: XCTestCase {
         )
     }
 
+    // MARK: - Source revision
+
+    /// A change of the loaded message's HTML source on disk bumps the revision the bubble's
+    /// load signature carries, which reloads that row (architecture review 2026-11,
+    /// chat-transcript-ui#4); another message's change does not.
+    ///
+    /// Revert-check: dropping the `changedMessageID == loadingMessageID` term in
+    /// `MessageBubbleViewModel.handleContentSourceDidChange` bumps it for the other message
+    /// too; dropping the `contentSourceObserver` subscription leaves it at 0.
+    func testSourceRevision_postForTheLoadedMessage_bumpsAndAnotherMessagesDoesNot() async {
+        let messageID = "source-revision-\(UUID().uuidString)"
+        let viewModel = MessageBubbleViewModel(
+            loader: MockMessageBubbleLoader(senderResults: [], contentResults: [])
+        )
+        await viewModel.loadIfNeeded(using: makeContext(messageID: messageID))
+        XCTAssertEqual(viewModel.sourceRevision, 0)
+
+        HTMLContentLoader.postContentSourceDidChange(
+            messageId: "another-\(UUID().uuidString)",
+            sourceSignature: "sha256:other"
+        )
+        XCTAssertEqual(viewModel.sourceRevision, 0)
+
+        HTMLContentLoader.postContentSourceDidChange(messageId: messageID, sourceSignature: nil)
+        XCTAssertEqual(viewModel.sourceRevision, 1)
+        HTMLContentLoader.postContentSourceDidChange(messageId: messageID, sourceSignature: "sha256:new")
+        XCTAssertEqual(viewModel.sourceRevision, 2)
+    }
+
     private func makeContext(
         messageID: String = "msg-1",
         displayIdentityKey: String? = nil,
@@ -1753,7 +1782,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-one",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0
         )
         let secondSignature = MessageBubble.contentSignature(
@@ -1761,7 +1790,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: sharedPrefix + " tail-two",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0
         )
 
@@ -1775,7 +1804,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             chatPreviewText: "First chat preview",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0
         )
         let secondSignature = MessageBubble.contentSignature(
@@ -1784,42 +1813,35 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             chatPreviewText: "Second chat preview",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0
         )
 
         XCTAssertNotEqual(firstSignature, secondSignature)
     }
 
-    func testContentSignature_changesWhenCanonicalHTMLFileChangesWithoutBodyStorageURIChange() {
-        let messageId = "bubble-signature-\(UUID().uuidString)"
-        let handler = HTMLContentHandler.shared
-        handler.deleteHTML(for: messageId)
-        defer { handler.deleteHTML(for: messageId) }
-
+    /// A change of the message's HTML source on disk, with no stored field changed (a
+    /// recovered body, a rewrite under the same `bodyStorageURI`), reaches the signature as the
+    /// view model's source revision; the file itself is not read for it
+    /// (`MessageBubbleViewModel.sourceRevision`).
+    ///
+    /// Revert-check: dropping `"source:\(sourceRevision)"` from
+    /// `MessageBubbleLoadSignatureComponents.signature` makes the two equal.
+    func testContentSignature_changesWhenSourceRevisionChanges() {
         let firstSignature = MessageBubble.contentSignature(
             bodyStorageURI: "file:///tmp/stale-fallback.html",
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: true,
-            htmlSourceSignature: handler.htmlSourceSignature(
-                messageId: messageId,
-                bodyStorageURI: "file:///tmp/stale-fallback.html"
-            ),
+            sourceRevision: 0,
             contactRefreshToken: 0
         )
-
-        _ = handler.saveHTML("<html><body>Recovered</body></html>", for: messageId)
-
         let secondSignature = MessageBubble.contentSignature(
             bodyStorageURI: "file:///tmp/stale-fallback.html",
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: true,
-            htmlSourceSignature: handler.htmlSourceSignature(
-                messageId: messageId,
-                bodyStorageURI: "file:///tmp/stale-fallback.html"
-            ),
+            sourceRevision: 1,
             contactRefreshToken: 0
         )
 
@@ -1832,7 +1854,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0,
             senderEmail: "john.smith@example.com",
             senderDisplayName: nil,
@@ -1843,7 +1865,7 @@ final class MessageBubbleRenderingHelpersTests: XCTestCase {
             bodyText: "Body",
             snippet: "Snippet",
             hasHTMLSource: false,
-            htmlSourceSignature: "missing",
+            sourceRevision: 0,
             contactRefreshToken: 0,
             senderEmail: "john.smith@example.com",
             senderDisplayName: nil,

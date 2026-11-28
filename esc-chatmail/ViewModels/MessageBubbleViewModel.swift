@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 final class MessageBubbleViewModel: ObservableObject {
@@ -12,8 +13,23 @@ final class MessageBubbleViewModel: ObservableObject {
     @Published private(set) var forwardedDisplayContent: ForwardedMessageDisplayContent?
     @Published private(set) var htmlAnalysis: MessageBubbleHTMLAnalysis
     @Published private(set) var hasResolvedHTMLAnalysis = false
+    /// Counts changes of the HTML source on disk of the message this view model last loaded for
+    /// (`loadingMessageID`), as `HTMLContentLoader.contentSourceDidChangeNotification` reports
+    /// them: a recovered body, a raw-source extraction, a sync update that rewrote the file.
+    /// The bubble's load signature carries it (`MessageBubbleLoadSignatureComponents.signature`),
+    /// so such a change reloads this row and no other (architecture review 2026-11,
+    /// chat-transcript-ui#4). It replaced a read of the file's signature in every pass of the
+    /// bubble's body, which took the process-wide HTML lock on the main thread and, on a cache
+    /// miss, a stat, and which noticed a change only when something else re-ran the body. Per
+    /// row, here, never on the transcript's session or scroll state, which would redraw every
+    /// row. Starts at 0 and moves only on a change, so a row's first load is not repeated when
+    /// a cache fills (a placeholder that turned into the real value would load every row twice).
+    /// What fails silently: a new writer of a stored message's HTML that posts nothing leaves a
+    /// mounted row on its old content until the row next changes (`postContentSourceDidChange`).
+    @Published private(set) var sourceRevision = 0
 
     private let loader: any MessageBubbleLoading
+    private var contentSourceObserver: AnyCancellable?
     private var loadingMessageID: String?
     /// `MessageBubbleLoadContext.displayIdentityKey` of the most recently requested load.
     private var loadingDisplayIdentityKey: String?
@@ -39,6 +55,13 @@ final class MessageBubbleViewModel: ObservableObject {
             hasHTMLSource: initialContentRequest?.hasHTMLSource ?? initialHasHTMLSource
         )
         self.hasResolvedHTMLAnalysis = cachedAnalysis != nil
+        // Posted on the main actor (`HTMLContentLoader.postContentSourceDidChange`), so the
+        // sink runs there, in the poster's turn.
+        contentSourceObserver = NotificationCenter.default
+            .publisher(for: HTMLContentLoader.contentSourceDidChangeNotification)
+            .sink { [weak self] notification in
+                self?.handleContentSourceDidChange(notification)
+            }
     }
 
     convenience init(deps: Dependencies) {
@@ -142,6 +165,21 @@ final class MessageBubbleViewModel: ObservableObject {
         hasResolvedHTMLAnalysis = true
         hasLoadedContent = true
         appliedContentSignature = context.contentSignature
+    }
+
+    /// Bumps `sourceRevision` for a change of the message this view model last loaded for.
+    /// Before its first load it has none and ignores every post: that load reads the source as
+    /// it is then. After Gmail's echo replaces an optimistic reply under this view model, the
+    /// echo's own load (its message ID is part of the bubble's task identity) sets the ID.
+    private func handleContentSourceDidChange(_ notification: Notification) {
+        guard let loadingMessageID,
+              let changedMessageID = notification.userInfo?[
+                HTMLContentLoader.contentSourceDidChangeMessageIdUserInfoKey
+              ] as? String,
+              changedMessageID == loadingMessageID else {
+            return
+        }
+        sourceRevision &+= 1
     }
 
     private func isStillActive(_ context: MessageBubbleLoadContext) -> Bool {
