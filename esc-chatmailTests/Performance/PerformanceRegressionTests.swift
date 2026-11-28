@@ -5,8 +5,8 @@ import CoreData
 /// Every fixture and measured fetch goes through the suite's `viewContext`, a
 /// main-queue context from `TestCoreDataStack.makeMainQueueViewContext()`,
 /// never `stack.viewContext`, which is private-queue. The measured paths are
-/// `@MainActor` production paths — `ConversationListViewModel.onAppear(in:)`
-/// re-runs the window fetch (`ConversationWindowProvider.swift:60`),
+/// `@MainActor` production paths — a new `ConversationListViewModel`'s `onAppear(in:)`
+/// runs the window fetch (`ConversationWindowProvider.fetchWindowReportingCompleteness`),
 /// `ParticipantLoader` and `MessageBubbleLoader` are main-actor — and they use
 /// that context directly, which is on-queue only for a main-queue context. See
 /// that helper for what the private-queue shape races. `measureAsync` runs its
@@ -52,15 +52,6 @@ final class PerformanceRegressionTests: XCTestCase {
             contactEmailLoader: { _ in [] }
         )
         let windowProvider = ConversationWindowProvider()
-        let viewModel = ConversationListViewModel(
-            dependencies: .forTesting(
-                stack: stack,
-                viewContext: viewContext,
-                searchService: searchService,
-                filterService: filterService
-            ),
-            windowProvider: windowProvider
-        )
         let options = makePerformanceOptions(iterationCount: 3)
 
         measure(metrics: [XCTClockMetric(), XCTCPUMetric()], options: options) {
@@ -70,8 +61,19 @@ final class PerformanceRegressionTests: XCTestCase {
             let newsletterSubset = fetched.filter { filterService.matches($0, searchText: "weekly") }
 
             MainActor.assumeIsolated {
-                // Repeated onAppear(in:) re-runs the production window fetch
-                // (reloadConversationWindowFromStore) on every iteration.
+                // A new list's first appearance runs the production window fetch
+                // (reloadConversationWindowFromStore) on every iteration. Not one view
+                // model appearing again: that keeps its current window and reads nothing
+                // (conversation-list-ui#3).
+                let viewModel = ConversationListViewModel(
+                    dependencies: .forTesting(
+                        stack: stack,
+                        viewContext: viewContext,
+                        searchService: searchService,
+                        filterService: filterService
+                    ),
+                    windowProvider: windowProvider
+                )
                 viewModel.onAppear(in: context)
                 XCTAssertEqual(viewModel.filteredConversationItems.count, windowProvider.initialLimit)
             }

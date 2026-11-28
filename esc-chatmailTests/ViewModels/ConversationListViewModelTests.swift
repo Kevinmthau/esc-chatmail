@@ -849,9 +849,12 @@ final class ConversationListViewModelTests: XCTestCase {
 
     // Revert-check: request.includesPendingChanges = true on
     // ConversationWindowProvider.fetchWindow's unfiltered path — this
-    // .all/no-search re-appear takes the plain fetchLimit fetch, and only
-    // that flag lets the refetch see the unsaved optimistic row instead of
-    // replacing the live snapshot with persisted conversations only.
+    // .all/no-search window read takes the plain fetchLimit fetch, and only
+    // that flag lets it see the unsaved optimistic row instead of reading
+    // persisted conversations only. Appearing again on the same context no
+    // longer reads the window (it is current; conversation-list-ui#3), so the
+    // read here is a new list's first one, which is what every re-appearance
+    // made until then.
     func testOptimisticUnsavedConversation_survivesReAppear() async throws {
         let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
         let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
@@ -878,16 +881,23 @@ final class ConversationListViewModelTests: XCTestCase {
             in: viewModel
         )
 
-        // Simulate the View re-appearing (e.g. nav pop from ChatView, sheet dismiss).
-        // The provider-backed fetch must include the unsaved optimistic row instead of
-        // replacing the live snapshot with only persisted conversations.
+        // The View re-appearing (a pop from ChatView, a sheet dismissed) keeps the
+        // window, the optimistic row included.
         viewModel.onAppear(in: viewContext)
-
         XCTAssertEqual(
             filteredConversationIDs(in: viewModel),
             [carol.objectID, alice.objectID, bob.objectID]
         )
-        XCTAssertEqual(viewModel.filteredConversationItems.first?.snapshot.snippet, "newest optimistic")
+
+        // A window read from the store must include the unsaved optimistic row instead
+        // of persisted conversations only.
+        let freshViewModel = makeViewModel()
+        freshViewModel.onAppear(in: viewContext)
+        XCTAssertEqual(
+            filteredConversationIDs(in: freshViewModel),
+            [carol.objectID, alice.objectID, bob.objectID]
+        )
+        XCTAssertEqual(freshViewModel.filteredConversationItems.first?.snapshot.snippet, "newest optimistic")
     }
 
     // Revert-check: onDisappear's deliberate omission of

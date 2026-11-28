@@ -87,6 +87,42 @@ struct ConversationListItem: Identifiable, Equatable {
             )
         }
 
+        /// The store predicate for the rows that sort after this key: the SQL mirror of
+        /// `<`, as the window's `NSSortDescriptor`s are of its order, and evaluated by Core
+        /// Data in memory for a context's pending rows (`includesPendingChanges`), so it must
+        /// give the same answer in both places. Built here, beside `<`, so the two cannot
+        /// drift (architecture review 2026-11, conversation-list-ui#3: keyset paging).
+        ///
+        /// A row sorts after the key when it is unpinned and the key is pinned, or when it
+        /// shares the key's pin and is older, or has no date (nil sorts as `.distantPast`,
+        /// last, which is where SQLite's `DESC` puts NULL too), or has the same date and a
+        /// UUID that compares after the key's. The UUID term is a BLOB comparison in SQLite
+        /// and `-[NSUUID compare:]` in memory, the same pair the window's tie-break sort
+        /// already relies on agreeing. A comparison with a nil date is false in both, so the
+        /// nil disjunct is spelled out.
+        var storePredicateForRowsAfter: NSPredicate {
+            let pinnedValue = NSNumber(value: pinned)
+            let uuid = stableID as NSUUID
+            let samePin: NSPredicate
+            if let lastMessageDate {
+                let date = lastMessageDate as NSDate
+                samePin = NSPredicate(
+                    format: "pinned == %@ AND (lastMessageDate < %@ OR lastMessageDate == nil OR (lastMessageDate == %@ AND id > %@))",
+                    pinnedValue, date, date, uuid
+                )
+            } else {
+                samePin = NSPredicate(
+                    format: "pinned == %@ AND lastMessageDate == nil AND id > %@",
+                    pinnedValue, uuid
+                )
+            }
+            guard pinned else { return samePin }
+            return NSCompoundPredicate(orPredicateWithSubpredicates: [
+                samePin,
+                NSPredicate(format: "pinned == NO")
+            ])
+        }
+
         /// "Sorts before" as `<`: pinned rows first, then later
         /// `lastMessageDate` first (nil as `.distantPast`), then conversation
         /// UUID ascending via `NSUUID` comparison — the equal-timestamp UUID

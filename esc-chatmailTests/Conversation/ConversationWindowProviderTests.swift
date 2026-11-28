@@ -316,6 +316,102 @@ final class ConversationWindowProviderTests: XCTestCase {
         XCTAssertFalse(full.isComplete)
     }
 
+    // MARK: - Keyset pages
+
+    /// Keyset pages, each started after the previous one's last row, must add up to the
+    /// window a full fetch reads, in its order: on a SQLite store, where the keyset term is
+    /// SQL for stored rows and is evaluated in memory for the context's pending ones, with
+    /// pinned rows, rows sharing a date (ordered by UUID), rows with no date, an unsaved row
+    /// that ties with stored ones, and a stored row an unsaved change moved. Both filters
+    /// that page by keyset.
+    // Revert-check (one at a time, in `SortKey.storePredicateForRowsAfter`): dropping
+    // `OR lastMessageDate == nil` loses the dateless rows; `id > %@` as `id >= %@` repeats
+    // each page's last row; dropping the `pinned == NO` disjunct stops after the pinned rows.
+    func testKeysetPages_addUpToAFullFetch_withPinsDateTiesAndNoDates() throws {
+        let sqliteStack = TestCoreDataStack(storeKind: .sqlite)
+        let context = sqliteStack.makeMainQueueViewContext()
+        func row(_ name: String, date: TimeInterval?, pinned: Bool = false, unread: Int32 = 0) -> Conversation {
+            let builder = ConversationBuilder().withDisplayName(name).visible().withUnreadCount(unread)
+            if let date { _ = builder.withLastMessageDate(Date(timeIntervalSince1970: date)) }
+            if pinned { _ = builder.setPinned() }
+            let conversation = builder.build(in: context)
+            if date == nil { conversation.lastMessageDate = nil }
+            return conversation
+        }
+        _ = row("Pinned new", date: 500, pinned: true, unread: 1)
+        _ = row("Pinned undated", date: nil, pinned: true)
+        _ = row("Newest", date: 400, unread: 2)
+        for index in 0..<5 {
+            _ = row("Tie \(index)", date: 300, unread: index.isMultiple(of: 2) ? 1 : 0)
+        }
+        let moved = row("Moved", date: 200, unread: 1)
+        _ = row("Older", date: 100)
+        _ = row("Undated a", date: nil, unread: 1)
+        _ = row("Undated b", date: nil)
+        _ = row("Archived", date: 450)
+        let archived = try XCTUnwrap(
+            context.registeredObjects.compactMap { $0 as? Conversation }.first { $0.displayName == "Archived" }
+        )
+        archived.archivedAt = Date()
+        try context.save()
+        _ = row("Unsaved tie", date: 300, unread: 1)
+        moved.lastMessageDate = Date(timeIntervalSince1970: 300)
+        context.processPendingChanges()
+
+        let provider = ConversationWindowProvider()
+        for filter in [ConversationFilter.all, .unread] {
+            let visible: (Conversation) -> Bool = { filter == .unread ? $0.inboxUnreadCount > 0 : true }
+            let full = try provider.fetchWindowReportingCompleteness(
+                in: context, limit: 100, searchText: "", filter: filter, matchesVisibility: visible
+            )
+            XCTAssertTrue(full.isComplete, "\(filter)")
+            XCTAssertTrue(provider.pagesByKeyset(searchText: "", filter: filter))
+
+            // Several page sizes, so that a page boundary falls on a pinned row, inside a
+            // run of equal dates, and between dated and dateless rows.
+            for pageSize in 1...3 {
+                var paged = try provider.fetchWindowReportingCompleteness(
+                    in: context, limit: pageSize, searchText: "", filter: filter, matchesVisibility: visible
+                ).rows
+                var isComplete = false
+                var pages = 0
+                while !isComplete, let last = paged.last, pages < 30 {
+                    let page = try provider.fetchPage(
+                        in: context,
+                        after: ConversationListItem.SortKey(conversation: last),
+                        limit: pageSize,
+                        filter: filter,
+                        matchesVisibility: visible
+                    )
+                    paged += page.rows
+                    isComplete = page.isComplete
+                    pages += 1
+                }
+
+                XCTAssertTrue(isComplete, "\(filter), pages of \(pageSize): the pages reached the end")
+                XCTAssertEqual(
+                    paged.map { $0.displayName ?? "" },
+                    full.rows.map { $0.displayName ?? "" },
+                    "\(filter), pages of \(pageSize)"
+                )
+            }
+        }
+    }
+
+    /// A search and the contact filters re-check rows in memory, so the store's next rows
+    /// are not their next rows: they keep the full reload.
+    // Revert-check: `pagesByKeyset` answering true for a search (the search's pages would
+    // then be read without its predicate).
+    func testPagesByKeyset_onlyForExactStorePredicates() {
+        let provider = ConversationWindowProvider()
+
+        XCTAssertTrue(provider.pagesByKeyset(searchText: "", filter: .all))
+        XCTAssertTrue(provider.pagesByKeyset(searchText: "  ", filter: .unread))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "bob", filter: .all))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "", filter: .contacts))
+        XCTAssertFalse(provider.pagesByKeyset(searchText: "", filter: .other))
+    }
+
     // MARK: - Helpers
 
     /// Small window: `limit * contactFilterCandidateMultiplier` yields a

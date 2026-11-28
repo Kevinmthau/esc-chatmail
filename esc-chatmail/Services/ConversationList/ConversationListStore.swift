@@ -84,6 +84,37 @@ struct ConversationListStore {
         edge = isComplete ? .complete : .open(after: visibleItems.last?.sortKey)
     }
 
+    /// Appends a keyset page, the rows of the store that sort after the edge in order
+    /// (`ConversationWindowProvider.fetchPage`), and moves the edge to its last row, or
+    /// marks the window complete when the page reached the store's end (`isComplete`). Only an open edge
+    /// with a key can take a page; a row the list cannot show, or one the window already
+    /// holds, is passed over. Returns the items appended, for the prefetch of new rows.
+    @discardableResult
+    mutating func appendPage(_ conversations: [Conversation], isComplete: Bool) -> [ConversationListItem] {
+        guard case .open(after: .some) = edge else { return [] }
+        var appended: [ConversationListItem] = []
+        for conversation in conversations {
+            guard let item = ConversationListItem(conversation: conversation),
+                  itemsByID[item.id] == nil else { continue }
+            itemsByID[item.id] = item
+            visibleItems.append(item)
+            appended.append(item)
+        }
+        if isComplete {
+            edge = .complete
+        } else if let last = visibleItems.last {
+            edge = .open(after: last.sortKey)
+        }
+        return appended
+    }
+
+    /// The key a keyset page starts after, nil when the window cannot take one: complete,
+    /// or holding no prefix (an emptied store), which only a full reload can fill.
+    var pageStartKey: ConversationListItem.SortKey? {
+        guard case .open(after: let key?) = edge else { return nil }
+        return key
+    }
+
     /// A fetch of the window failed, so the store can no longer say the window is
     /// complete. A window that was a prefix stays one, ending at its last row; an
     /// open edge is kept as it is.
