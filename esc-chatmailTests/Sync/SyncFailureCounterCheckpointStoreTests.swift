@@ -382,6 +382,104 @@ final class SyncFailureCounterCheckpointStoreTests: XCTestCase {
         XCTAssertFalse(hasChanges)
     }
 
+    /// Staging the value a lone row already holds touches nothing, so a quiet
+    /// run's context has nothing to save. A different count or strike time,
+    /// or another spelling of the account, is still written
+    /// (architecture review 2026-11, background-energy#4).
+    ///
+    /// Revert-check: the `rows.count == 1, alreadyHolds` skip in
+    /// `SyncFailureCounterCheckpointStore.stage` (the unchanged stage has
+    /// changes), and `alreadyHolds`'s payload comparison (made to compare the
+    /// account alone, the changed count and strike times read as unchanged).
+    func testStage_theValueALoneRowHolds_leavesTheContextUnchanged() async throws {
+        // A real clock reading, fractions of a second included: the strike
+        // time is compared after its round trip through the payload's JSON.
+        let strikeAt = Date()
+        let seed = coreDataStack.newBackgroundContext()
+        try await store.stage(
+            consecutiveFailureCount: 1,
+            lastStrikeAt: strikeAt,
+            accountEmail: Self.email,
+            in: seed
+        )
+        try await coreDataStack.saveAsync(context: seed)
+
+        let unchanged = try await stagingChanges(count: 1, lastStrikeAt: strikeAt)
+        let newCount = try await stagingChanges(count: 2, lastStrikeAt: strikeAt)
+        let newStrike = try await stagingChanges(count: 1, lastStrikeAt: strikeAt.addingTimeInterval(1))
+        let noStrike = try await stagingChanges(count: 1, lastStrikeAt: nil)
+        let respelled = try await stagingChanges(count: 1, lastStrikeAt: strikeAt, accountEmail: "USER@example.com")
+
+        XCTAssertFalse(unchanged, "The row already holds it")
+        XCTAssertTrue(newCount)
+        XCTAssertTrue(newStrike)
+        XCTAssertTrue(noStrike)
+        XCTAssertTrue(respelled, "The account is written as given")
+    }
+
+    /// The skip is for a lone row: beside a duplicate the value is staged and
+    /// the duplicate removed, even where the row already holds the value. A
+    /// duplicate can only be pending, because `kind` is unique in the store.
+    ///
+    /// Revert-check: the `rows.count == 1` in
+    /// `SyncFailureCounterCheckpointStore.stage` (the stage is skipped and the
+    /// duplicate kept).
+    func testStage_theValueTheRowHoldsBesideAPendingDuplicate_removesTheDuplicate() async throws {
+        let strikeAt = Date()
+        let seed = coreDataStack.newBackgroundContext()
+        try await store.stage(
+            consecutiveFailureCount: 1,
+            lastStrikeAt: strikeAt,
+            accountEmail: Self.email,
+            in: seed
+        )
+        try await coreDataStack.saveAsync(context: seed)
+        let duplicatePayloadJSON = payloadJSON(count: 1)
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            let duplicate = SyncCheckpoint(context: context)
+            duplicate.id = UUID()
+            duplicate.kind = SyncFailureCounterCheckpoint.kind
+            duplicate.accountEmail = Self.email
+            duplicate.pendingMessageIdsJSON = duplicatePayloadJSON
+            duplicate.createdAt = Date(timeIntervalSince1970: 100)
+            duplicate.updatedAt = Date(timeIntervalSince1970: 100)
+        }
+
+        try await store.stage(
+            consecutiveFailureCount: 1,
+            lastStrikeAt: strikeAt,
+            accountEmail: Self.email,
+            in: context
+        )
+
+        let counterRows = try await context.perform {
+            try context.fetch(SyncCheckpoint.fetchRequest()).filter {
+                $0.kind == SyncFailureCounterCheckpoint.kind
+            }.count
+        }
+        XCTAssertEqual(counterRows, 1, "The duplicate is removed")
+        try await coreDataStack.saveAsync(context: context)
+        let row = try await onlyRawRow()
+        XCTAssertEqual(row.decodedPayload, Payload(version: 1, consecutiveFailureCount: 1))
+    }
+
+    /// Whether staging this value leaves a fresh context with changes to save.
+    private func stagingChanges(
+        count: Int,
+        lastStrikeAt: Date?,
+        accountEmail: String = SyncFailureCounterCheckpointStoreTests.email
+    ) async throws -> Bool {
+        let context = coreDataStack.newBackgroundContext()
+        try await store.stage(
+            consecutiveFailureCount: count,
+            lastStrikeAt: lastStrikeAt,
+            accountEmail: accountEmail,
+            in: context
+        )
+        return await context.perform { context.hasChanges }
+    }
+
     private struct Payload: Codable, Equatable {
         let version: Int
         let consecutiveFailureCount: Int
