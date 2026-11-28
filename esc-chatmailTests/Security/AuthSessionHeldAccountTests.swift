@@ -180,7 +180,7 @@ final class AuthSessionHeldAccountTests: XCTestCase {
         XCTAssertNil(session.heldAccount, "Publishing ends the hold")
         XCTAssertTrue(session.isAuthenticated)
         XCTAssertEqual(session.userEmail, storedEmail)
-        XCTAssertEqual(tokenManager.lastSavedAccessToken, "stub-access-token")
+        XCTAssertEqual(tokenManager.lastAdoptedAccessToken, "stub-access-token")
         XCTAssertEqual(tokenManager.clearTokensCallCount, 0)
         XCTAssertEqual(recoveries.value, 1, "Only a published session recovers pending actions")
     }

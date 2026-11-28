@@ -3,9 +3,11 @@ import Foundation
 /// Decides what a launch restore must do with the credentials it already staged
 /// when account-scoped work could not be reopened.
 ///
-/// `restorePreviousSignIn` persists background-readable tokens *before* the
-/// reopen sequence runs, so every refusal leaves live credentials behind and the
-/// right disposition depends entirely on why the reopen refused. This is a pure
+/// `restorePreviousSignIn` stages the session *before* the reopen sequence runs
+/// (the account's address stored, the signed-out verdict consumed, the access
+/// token adopted, beside GoogleSignIn's own session), so every refusal leaves
+/// live credentials behind and the right disposition depends entirely on why
+/// the reopen refused. This is a pure
 /// namespace so the decision is testable without a `GIDGoogleUser`.
 enum AuthRestoreReopenPolicy {
     enum RestoreDisposition: Equatable, Sendable {
@@ -37,8 +39,8 @@ enum AuthRestoreReopenPolicy {
             // outstanding, so this transition cannot publish and repeating it is
             // not expected to clear the latch. No superseding transition is
             // running either, which makes this restore the only owner of the
-            // credentials it just staged: clear them rather than leave
-            // background-readable tokens for a session that never published.
+            // credentials it just staged: clear them rather than leave a live
+            // session behind for one that never published.
             return .discardCredentials
         case .supersededByAccountRemoval:
             // A queued sign-out won the transition and performs its own
