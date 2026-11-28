@@ -161,18 +161,6 @@ final class FullEmailRemoteImageFallbackBookkeepingTests: XCTestCase {
 }
 
 final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
-    private func makeKey(
-        messageId: String = "message-1",
-        sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>"
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey.make(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            wrappedHTML: html
-        )
-    }
-
     private func makeRequest(
         messageId: String = "message-1",
         subject: String = "Subject"
@@ -205,16 +193,14 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
 
     func testStoreAndReadPreparedPayload() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
-        let key = makeKey()
         let request = makeRequest()
         let payload = makePayload()
 
-        bookkeeping.store(key: key, request: request, payload: payload)
+        bookkeeping.store(request: request, payload: payload)
 
         XCTAssertEqual(
             bookkeeping.entry(for: "message-1"),
             FullEmailPreparedOpenPayloadBookkeeping.Entry(
-                key: key,
                 request: request,
                 payload: payload
             )
@@ -225,20 +211,17 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
     func testStoreReplacesExistingPayloadForMessage() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
         bookkeeping.store(
-            key: makeKey(html: "<html>old</html>"),
             request: makeRequest(subject: "Old"),
             payload: makePayload(html: "<html>old</html>")
         )
 
-        let newKey = makeKey(sourceSignature: "sha256:new", html: "<html>new</html>")
         let newRequest = makeRequest(subject: "New")
         let newPayload = makePayload(sourceSignature: "sha256:new", html: "<html>new</html>")
-        bookkeeping.store(key: newKey, request: newRequest, payload: newPayload)
+        bookkeeping.store(request: newRequest, payload: newPayload)
 
         XCTAssertEqual(
             bookkeeping.entry(for: "message-1"),
             FullEmailPreparedOpenPayloadBookkeeping.Entry(
-                key: newKey,
                 request: newRequest,
                 payload: newPayload
             )
@@ -249,12 +232,10 @@ final class FullEmailPreparedOpenPayloadBookkeepingTests: XCTestCase {
     func testRemoveAndRemoveAllDropPreparedPayloads() {
         var bookkeeping = FullEmailPreparedOpenPayloadBookkeeping()
         bookkeeping.store(
-            key: makeKey(messageId: "message-1"),
             request: makeRequest(messageId: "message-1"),
             payload: makePayload(messageId: "message-1")
         )
         bookkeeping.store(
-            key: makeKey(messageId: "message-2"),
             request: makeRequest(messageId: "message-2"),
             payload: makePayload(messageId: "message-2")
         )
@@ -1414,17 +1395,6 @@ final class FullEmailWebViewPreRenderKeyTests: XCTestCase {
 }
 
 final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
-    private func makeKey(
-        sourceSignature: String = "sha256:source",
-        html: String = "<html>body</html>"
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey.make(
-            messageId: "message-1",
-            sourceSignature: sourceSignature,
-            wrappedHTML: html
-        )
-    }
-
     private func makePayload(
         sourceSignature: String = "sha256:source",
         html: String = "<html>body</html>"
@@ -1457,12 +1427,9 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     }
 
     func testSameHTMLSourceAndWrapperInputsAreReusable() {
-        let key = makeKey()
         let request = makeRequest()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: key,
-                expectedKey: key,
                 entryRequest: request,
                 currentRequest: request,
                 payload: makePayload(),
@@ -1473,11 +1440,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     }
 
     func testChangedBodyStorageURIDoesNotMissReuseWhenSourceAndWrapperInputsMatch() {
-        let key = makeKey()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: key,
-                expectedKey: key,
                 entryRequest: makeRequest(bodyStorageURI: nil),
                 currentRequest: makeRequest(bodyStorageURI: "file:///tmp/message-1.html"),
                 payload: makePayload(),
@@ -1488,11 +1452,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     }
 
     func testWhitespaceOnlyWrapperInputChangesAreReusable() {
-        let key = makeKey()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: key,
-                expectedKey: key,
                 entryRequest: makeRequest(senderEmail: " sender@example.com ", subject: " Subject "),
                 currentRequest: makeRequest(senderEmail: "sender@example.com", subject: "Subject"),
                 payload: makePayload(),
@@ -1503,11 +1464,8 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     }
 
     func testCanonicalEquivalentBodyTextChangesAreReusable() {
-        let key = makeKey()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: key,
-                expectedKey: key,
                 entryRequest: makeRequest(bodyText: "Hello&nbsp;=26&nbsp;team=3Cok=3E\n\n\nThanks"),
                 currentRequest: makeRequest(bodyText: "Hello & team<ok>\n\nThanks"),
                 payload: makePayload(),
@@ -1520,8 +1478,6 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     func testChangedSourceSignatureMissesReuse() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(),
-                expectedKey: makeKey(),
                 entryRequest: makeRequest(),
                 currentRequest: makeRequest(),
                 payload: makePayload(),
@@ -1532,12 +1488,9 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     }
 
     func testMissingCurrentHTMLSourceMissesReuse() {
-        let key = makeKey()
         let request = makeRequest()
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: key,
-                expectedKey: key,
                 entryRequest: request,
                 currentRequest: request,
                 payload: makePayload(),
@@ -1547,25 +1500,9 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
         )
     }
 
-    func testChangedHTMLMissesReuse() {
-        XCTAssertEqual(
-            FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(html: "<html>old</html>"),
-                expectedKey: makeKey(html: "<html>new</html>"),
-                entryRequest: makeRequest(),
-                currentRequest: makeRequest(),
-                payload: makePayload(html: "<html>old</html>"),
-                currentSourceSignature: "sha256:source"
-            ),
-            .keyMismatch
-        )
-    }
-
     func testPreparedReuseIgnoresWidthDependentAdoptionIdentity() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(),
-                expectedKey: makeKey(),
                 entryRequest: makeRequest(),
                 currentRequest: makeRequest(),
                 payload: makePayload(),
@@ -1578,8 +1515,6 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     func testChangedBodyTextMissesReuse() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(),
-                expectedKey: makeKey(),
                 entryRequest: makeRequest(bodyText: "Old body"),
                 currentRequest: makeRequest(bodyText: "New body"),
                 payload: makePayload(),
@@ -1592,8 +1527,6 @@ final class FullEmailOpenPayloadReuseValidatorTests: XCTestCase {
     func testChangedWrapperInputsMissReuse() {
         XCTAssertEqual(
             FullEmailOpenPayloadReuseValidator.decision(
-                entryKey: makeKey(),
-                expectedKey: makeKey(),
                 entryRequest: makeRequest(subject: "Old subject"),
                 currentRequest: makeRequest(subject: "New subject"),
                 payload: makePayload(),

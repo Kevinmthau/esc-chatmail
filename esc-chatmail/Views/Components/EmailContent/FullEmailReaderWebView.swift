@@ -693,7 +693,22 @@ enum InlineCIDAttachmentAvailabilityFingerprint {
     }
 
     static func referencedInlineContentIDs(in html: String) -> Set<String> {
-        EmailDocument.referencedContentIDs(in: html, terminators: EmailDocument.CIDScanTerminators.cssAndWhitespace)
+        countMainThreadScanForTesting()
+        return EmailDocument.referencedContentIDs(in: html, terminators: EmailDocument.CIDScanTerminators.cssAndWhitespace)
+    }
+
+    private static let mainThreadScanLock = NSLock()
+    private static var mainThreadScans = 0
+
+    /// How many whole-HTML `cid:` scans ran on the main thread, for the test that pins an open and
+    /// a checkout of a warmed email scanning nothing there.
+    static var mainThreadScanCountForTesting: Int {
+        mainThreadScanLock.withLock { mainThreadScans }
+    }
+
+    private static func countMainThreadScanForTesting() {
+        guard Thread.isMainThread else { return }
+        mainThreadScanLock.withLock { mainThreadScans += 1 }
     }
 
     private static func matchingAttachments(for contentID: String, in attachments: [Attachment]) -> [Attachment] {

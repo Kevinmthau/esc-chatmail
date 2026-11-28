@@ -252,34 +252,29 @@ struct FullEmailWebViewPreRenderKey: Hashable, Sendable {
         cidAvailabilityFingerprint: String,
         width: CGFloat
     ) -> FullEmailWebViewPreRenderKey {
-        FullEmailWebViewPreRenderKey(
+        make(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            htmlFingerprint: fingerprint(for: wrappedHTML),
+            htmlFingerprint: ReaderContentFingerprint.make(wrappedHTML),
             cidAvailabilityFingerprint: cidAvailabilityFingerprint,
-            widthBucket: Int(width.rounded())
+            width: width
         )
     }
 
-    private static func fingerprint(for text: String) -> String {
-        "\(text.utf8.count):\(StableFingerprint.sha256Prefix(text))"
-    }
-}
-
-struct FullEmailPreparedArtifactKey: Hashable, Sendable {
-    let messageId: String
-    let sourceSignature: String
-    let htmlFingerprint: String
-
+    /// With the wrapped HTML's fingerprint already computed (`FullEmailOpenPayload.htmlFingerprint`).
     static func make(
         messageId: String,
         sourceSignature: String,
-        wrappedHTML: String
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey(
+        htmlFingerprint: String,
+        cidAvailabilityFingerprint: String,
+        width: CGFloat
+    ) -> FullEmailWebViewPreRenderKey {
+        FullEmailWebViewPreRenderKey(
             messageId: messageId,
             sourceSignature: sourceSignature,
-            htmlFingerprint: "\(wrappedHTML.utf8.count):\(StableFingerprint.sha256Prefix(wrappedHTML))"
+            htmlFingerprint: htmlFingerprint,
+            cidAvailabilityFingerprint: cidAvailabilityFingerprint,
+            widthBucket: Int(width.rounded())
         )
     }
 }
@@ -300,6 +295,12 @@ struct FullEmailOpenPayload: Equatable, Sendable {
     let sourceLocation: CanonicalEmailSourceLocation
     let hasHTMLSource: Bool
     let checkoutAvailability: CheckoutAvailability
+    /// `html`'s `ReaderContentFingerprint` and its referenced `cid:` Content-IDs, which every key,
+    /// the checkout and the reader artifact's render signature are built from. A warm passes the
+    /// ones it computed off the main actor (`WarmedOriginalEmailHTML`); otherwise they are computed
+    /// once here, never again per key.
+    let htmlFingerprint: String
+    let referencedInlineContentIDs: Set<String>
 
     init(
         messageId: String,
@@ -309,7 +310,9 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         sourceKind: CanonicalEmailSourceKind,
         sourceLocation: CanonicalEmailSourceLocation,
         hasHTMLSource: Bool,
-        checkoutAvailability: CheckoutAvailability
+        checkoutAvailability: CheckoutAvailability,
+        htmlFingerprint: String? = nil,
+        referencedInlineContentIDs: Set<String>? = nil
     ) {
         self.messageId = messageId
         self.sourceSignature = sourceSignature
@@ -319,6 +322,9 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         self.sourceLocation = sourceLocation
         self.hasHTMLSource = hasHTMLSource
         self.checkoutAvailability = checkoutAvailability
+        self.htmlFingerprint = htmlFingerprint ?? ReaderContentFingerprint.make(html)
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+            ?? InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
     }
 
     var originalEmailSource: OriginalEmailSource {
@@ -342,13 +348,20 @@ struct FullEmailOpenPayload: Equatable, Sendable {
             sourceKind: sourceKind,
             sourceLocation: sourceLocation,
             hasHTMLSource: hasHTMLSource,
-            checkoutAvailability: checkoutAvailability
+            checkoutAvailability: checkoutAvailability,
+            htmlFingerprint: htmlFingerprint,
+            referencedInlineContentIDs: referencedInlineContentIDs
         )
     }
 
+    /// `htmlFingerprint` and `referencedInlineContentIDs` are the artifact body's, when the caller
+    /// already has them (a prepared payload for the same content); without them they are worked
+    /// out here.
     init(
         artifact: EmailReaderArtifact,
-        checkoutAvailability: CheckoutAvailability
+        checkoutAvailability: CheckoutAvailability,
+        htmlFingerprint: String? = nil,
+        referencedInlineContentIDs: Set<String>? = nil
     ) {
         self.messageId = artifact.messageID
         self.sourceSignature = artifact.sourceSignature
@@ -363,6 +376,9 @@ struct FullEmailOpenPayload: Equatable, Sendable {
         self.sourceLocation = artifact.sourceLocation
         self.hasHTMLSource = artifact.hasHTMLSource
         self.checkoutAvailability = checkoutAvailability
+        self.htmlFingerprint = htmlFingerprint ?? ReaderContentFingerprint.make(html)
+        self.referencedInlineContentIDs = referencedInlineContentIDs
+            ?? InlineCIDAttachmentAvailabilityFingerprint.referencedInlineContentIDs(in: html)
     }
 
     func artifact(
@@ -374,9 +390,10 @@ struct FullEmailOpenPayload: Equatable, Sendable {
             messageID: messageId,
             sourceSignature: sourceSignature,
             body: .html(html),
+            bodyFingerprint: htmlFingerprint,
             metadata: metadata,
-            inlineAttachmentAvailabilitySignature: InlineCIDAttachmentAvailabilityFingerprint.make(
-                html: html,
+            inlineAttachmentAvailabilitySignature: InlineCIDAttachmentAvailabilityFingerprint.fingerprint(
+                referencedContentIDs: referencedInlineContentIDs,
                 message: message
             ),
             sourceKind: sourceKind,
@@ -392,7 +409,6 @@ enum FullEmailOpenPayloadReuseDecision: Equatable {
     case missingCurrentHTMLSource
     case staleSource(currentSourceSignature: String)
     case wrapperInputsMismatch
-    case keyMismatch
 }
 
 enum FullEmailWebViewAdoptionPolicy {
@@ -473,10 +489,12 @@ private struct OriginalEmailWarmWrapperInputs: Equatable {
     }
 }
 
+/// Whether a prepared payload may be handed to the reader. There is no key check: the stored key is
+/// made from the payload's own source signature and HTML, so a key recomputed from the payload
+/// always matched it, and computing it hashed the whole HTML on the main actor at every open
+/// (architecture review 2026-11, `web-content-rendering#4`).
 enum FullEmailOpenPayloadReuseValidator {
     static func decision(
-        entryKey: FullEmailPreparedArtifactKey,
-        expectedKey: FullEmailPreparedArtifactKey,
         entryRequest: OriginalEmailWarmRequest,
         currentRequest: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload,
@@ -490,14 +508,16 @@ enum FullEmailOpenPayloadReuseValidator {
             return .missingCurrentHTMLSource
         }
 
+        // The same raw request has the same wrapper inputs; only a request that differs is
+        // normalized (its body text trimmed, folded and hashed) to see whether the difference
+        // matters.
+        guard entryRequest != currentRequest else {
+            return .reusable
+        }
         let entryWrapperInputs = OriginalEmailWarmWrapperInputs(request: entryRequest)
         let currentWrapperInputs = OriginalEmailWarmWrapperInputs(request: currentRequest)
         guard entryWrapperInputs == currentWrapperInputs else {
             return .wrapperInputsMismatch
-        }
-
-        guard entryKey == expectedKey else {
-            return .keyMismatch
         }
 
         return .reusable
@@ -924,7 +944,6 @@ struct FullEmailRemoteImageFallbackBookkeeping: Equatable {
 
 struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
     struct Entry: Equatable {
-        let key: FullEmailPreparedArtifactKey
         var request: OriginalEmailWarmRequest
         var payload: FullEmailOpenPayload
     }
@@ -932,12 +951,10 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
     private var entries: [String: Entry] = [:]
 
     mutating func store(
-        key: FullEmailPreparedArtifactKey,
         request: OriginalEmailWarmRequest,
         payload: FullEmailOpenPayload
     ) {
         entries[request.messageId] = Entry(
-            key: key,
             request: request,
             payload: payload
         )
@@ -1154,18 +1171,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
-        let preparedKey = makePreparedKey(
-            messageId: request.messageId,
-            sourceSignature: warmed.sourceSignature,
-            wrappedHTML: warmed.html
-        )
         let payload = makePayload(
             request: request,
             warmed: warmed,
             checkoutAvailability: .warming
         )
         preparedPayloads.store(
-            key: preparedKey,
             request: request,
             payload: payload
         )
@@ -1177,13 +1188,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
-        let key = makePreRenderKey(
-            messageId: request.messageId,
-            sourceSignature: warmed.sourceSignature,
-            wrappedHTML: warmed.html,
-            message: message,
-            width: width
-        )
+        let key = makePreRenderKey(payload: payload, message: message, width: width)
 
         // Already warm (or warming) for this exact content + width: keep it hot and return.
         if let existing = entries[request.messageId], existing.key == key, !existing.isCheckedOut {
@@ -1250,11 +1255,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
-        let payload = FullEmailOpenPayload(
-            artifact: artifact,
-            checkoutAvailability: .warming
-        )
-
         guard width > 1,
               request.messageId == message.id,
               artifact.messageID == request.messageId,
@@ -1262,18 +1262,15 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return
         }
 
-        let preparedKey = makePreparedKey(
-            messageId: request.messageId,
-            sourceSignature: artifact.sourceSignature,
-            wrappedHTML: html
-        )
-        let key = makePreRenderKey(
-            messageId: request.messageId,
-            sourceSignature: artifact.sourceSignature,
-            wrappedHTML: html,
-            message: message,
-            width: width
-        )
+        // The reader shows the message's view: there is nothing to prepaint, and nothing to work
+        // out for it. Before, the payload below was built first, hashing and scanning the whole
+        // HTML on the main actor at every open of an adopted view, and thrown away here.
+        if entries[request.messageId]?.isCheckedOut == true {
+            return
+        }
+
+        let payload = prepaintPayload(for: artifact, html: html)
+        let key = makePreRenderKey(payload: payload, message: message, width: width)
         if let existing = entries[request.messageId] {
             guard !existing.isCheckedOut else {
                 return
@@ -1285,7 +1282,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
                     : .warming
                 let updatedPayload = payload.withCheckoutAvailability(availability)
                 preparedPayloads.store(
-                    key: preparedKey,
                     request: request,
                     payload: updatedPayload
                 )
@@ -1302,7 +1298,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
         let warmingPayload = payload.withCheckoutAvailability(.warming)
         preparedPayloads.store(
-            key: preparedKey,
             request: request,
             payload: warmingPayload
         )
@@ -1374,19 +1369,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return nil
         }
 
-        let expectedKey = makePreparedKey(
-            messageId: request.messageId,
-            sourceSignature: preparedEntry.payload.sourceSignature,
-            wrappedHTML: preparedEntry.payload.html
-        )
         let currentSourceSignature = loader.currentHTMLSourceSignature(
             messageId: request.messageId,
             bodyStorageURI: request.bodyStorageURI
         )
 
         switch FullEmailOpenPayloadReuseValidator.decision(
-            entryKey: preparedEntry.key,
-            expectedKey: expectedKey,
             entryRequest: preparedEntry.request,
             currentRequest: request,
             payload: preparedEntry.payload,
@@ -1432,9 +1420,6 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             logOpenPayloadMiss(messageId: request.messageId, reason: "wrapper_input_mismatch")
             invalidate(messageId: request.messageId)
             return nil
-        case .keyMismatch:
-            logOpenPayloadMiss(messageId: request.messageId, reason: "key_mismatch")
-            return nil
         }
     }
 
@@ -1463,17 +1448,25 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             return nil
         }
 
-        let key = makePreRenderKey(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            wrappedHTML: wrappedHTML,
-            message: message,
-            width: width
-        )
         guard let entry = entries[messageId] else {
             logCheckoutMiss(messageId: messageId, reason: "not_warmed")
             return nil
         }
+        // The entry's key was made from its payload's tokens, so a reader showing the payload's
+        // own HTML (the same string, compared in place of hashing it again on the main actor) has
+        // the same fingerprint, and its key differs only where the source, the `cid:` availability
+        // or the width does.
+        guard entry.payload.html == wrappedHTML else {
+            logCheckoutMiss(messageId: messageId, reason: "key_mismatch")
+            return nil
+        }
+        let key = makePreRenderKey(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            payload: entry.payload,
+            message: message,
+            width: width
+        )
         guard entry.key == key else {
             logCheckoutMiss(messageId: messageId, reason: "key_mismatch")
             return nil
@@ -1654,33 +1647,44 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     // MARK: - Internals
 
-    private func makePreparedKey(
-        messageId: String,
-        sourceSignature: String,
-        wrappedHTML: String
-    ) -> FullEmailPreparedArtifactKey {
-        FullEmailPreparedArtifactKey.make(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            wrappedHTML: wrappedHTML
-        )
+    /// Keys are made from the payload's tokens and never from its HTML: hashing and `cid:`
+    /// scanning the whole HTML ran on the main actor at each warm, open and checkout
+    /// (architecture review 2026-11, `web-content-rendering#4`). Only the `cid:` availability is
+    /// read here, from the view context's attachments, as before.
+    /// A prepaint's payload for `artifact`. Where the prepared payload is for the same content
+    /// (same source signature and the same HTML, which for an artifact the prepared payload made
+    /// is the same string, compared at once), it takes that payload's fingerprint and `cid:` set,
+    /// which the warm worked out off the main actor; otherwise they are worked out here, once.
+    private func prepaintPayload(for artifact: EmailReaderArtifact, html: String) -> FullEmailOpenPayload {
+        if let prepared = preparedPayloads.entry(for: artifact.messageID)?.payload,
+           prepared.presentation == .html,
+           prepared.sourceSignature == artifact.sourceSignature,
+           prepared.html == html {
+            return FullEmailOpenPayload(
+                artifact: artifact,
+                checkoutAvailability: .warming,
+                htmlFingerprint: prepared.htmlFingerprint,
+                referencedInlineContentIDs: prepared.referencedInlineContentIDs
+            )
+        }
+        return FullEmailOpenPayload(artifact: artifact, checkoutAvailability: .warming)
     }
 
     private func makePreRenderKey(
-        messageId: String,
-        sourceSignature: String,
-        wrappedHTML: String,
+        messageId: String? = nil,
+        sourceSignature: String? = nil,
+        payload: FullEmailOpenPayload,
         message: Message?,
         width: CGFloat
     ) -> FullEmailWebViewPreRenderKey {
-        let cidFingerprint = InlineCIDAttachmentAvailabilityFingerprint.make(
-            html: wrappedHTML,
+        let cidFingerprint = InlineCIDAttachmentAvailabilityFingerprint.fingerprint(
+            referencedContentIDs: payload.referencedInlineContentIDs,
             message: message
         )
         return FullEmailWebViewPreRenderKey.make(
-            messageId: messageId,
-            sourceSignature: sourceSignature,
-            wrappedHTML: wrappedHTML,
+            messageId: messageId ?? payload.messageId,
+            sourceSignature: sourceSignature ?? payload.sourceSignature,
+            htmlFingerprint: payload.htmlFingerprint,
             cidAvailabilityFingerprint: cidFingerprint,
             width: width
         )
@@ -1699,7 +1703,9 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
             sourceKind: warmed.sourceKind,
             sourceLocation: warmed.sourceLocation,
             hasHTMLSource: warmed.hasHTMLSource,
-            checkoutAvailability: checkoutAvailability
+            checkoutAvailability: checkoutAvailability,
+            htmlFingerprint: warmed.htmlFingerprint,
+            referencedInlineContentIDs: warmed.referencedInlineContentIDs
         )
     }
 
@@ -1713,13 +1719,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
               width > 1,
               canCheckoutActiveWebView(messageId: messageId),
               let entry = entries[messageId],
-              entry.key == makePreRenderKey(
-                messageId: messageId,
-                sourceSignature: payload.sourceSignature,
-                wrappedHTML: payload.html,
-                message: message,
-                width: width
-              ) else {
+              entry.key == makePreRenderKey(payload: payload, message: message, width: width) else {
             return .warming
         }
 
