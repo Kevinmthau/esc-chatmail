@@ -442,10 +442,18 @@ final class InitialSyncOrchestrator {
                 conversationIDs: pageConversationIDs,
                 in: context
             ) {
-                if !pageConversationIDs.isEmpty {
-                    await conversationManager.updateRollupsForModifiedConversations(
-                        conversationIDs: pageConversationIDs,
-                        in: context
+                // A failed rollup applied nothing: track the page's
+                // conversations again so a later page's claim, or the final
+                // save, rolls them up instead of leaving them as the page left
+                // them.
+                if !pageConversationIDs.isEmpty,
+                   !(await conversationManager.updateRollupsForModifiedConversations(
+                       conversationIDs: pageConversationIDs,
+                       in: context
+                   )) {
+                    await ModificationTracker.shared.trackModifiedConversations(
+                        pageConversationIDs,
+                        in: modificationTransaction
                     )
                 }
                 let pageObjects = try await SyncContextPageObjectRelease.capture(in: context)

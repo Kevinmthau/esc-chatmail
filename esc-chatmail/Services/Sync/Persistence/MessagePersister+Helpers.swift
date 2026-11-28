@@ -323,13 +323,13 @@ extension MessagePersister {
         return optimisticText
     }
 
-    @discardableResult
     /// - Parameter persistedMessageConversationID: the conversation of the
     ///   message being persisted, which the caller tracks for the run's rollup;
     ///   it is not rolled up here. Nil where nothing is persisted (an excluded
     ///   echo is deleted).
     /// - Returns: every conversation the consumption touched, for the caller
     ///   to track.
+    @discardableResult
     nonisolated func consumeRemoteCommittedSendMutation(
         _ resolution: RemoteCommittedSendMutationResolution?,
         requiresResolvedPersistenceRoute: Bool = true,
@@ -660,11 +660,15 @@ extension MessagePersister {
 
     /// Applies list-critical rollup fields immediately when an existing message is updated.
     /// A message that left INBOX moves only the unread count here: `hasInbox` and
-    /// `latestInboxDate` come from the rollup the run makes before the save that
-    /// persists the update, as for a history label removal
-    /// (`LabelOperationProcessor.applyFastInboxIndicators`). Until 2026-11-28 it
-    /// walked every message of the conversation, labels included, for values the
-    /// rollup then overwrote (architecture review 2026-11, sync-persist-path#2).
+    /// `latestInboxDate` come from the run's rollup, as for a history label
+    /// removal (`LabelOperationProcessor.applyFastInboxIndicators`). That rollup
+    /// is at the intermediate flush or the final save. The incremental fetch
+    /// phase saves each batch before either, and a batch save carries the
+    /// conversation's stored values; a run killed after it replays the slice,
+    /// and the refetch tracks the conversation again. Until 2026-11-28 the
+    /// update walked every message of the conversation, labels included, for
+    /// values the rollup then overwrote (architecture review 2026-11,
+    /// sync-persist-path#2).
     nonisolated func applyFastConversationListUpdateForExistingMessage(
         _ message: Message,
         in conversation: Conversation,

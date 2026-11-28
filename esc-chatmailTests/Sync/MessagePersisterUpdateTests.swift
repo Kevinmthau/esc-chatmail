@@ -2205,10 +2205,10 @@ final class MessagePersisterUpdateTests: XCTestCase {
     }
 
     /// The update itself no longer recomputes `hasInbox` and `latestInboxDate`
-    /// for a message that left INBOX: the rollup the run makes before its save
-    /// does (`ConversationRollupUpdater.updateRollupsForModified`), and the
-    /// update tracks the conversation for it. That the update reads no other
-    /// message is `ConversationInboxWalkTests`'.
+    /// for a message that left INBOX: the run's rollup does
+    /// (`ConversationRollupUpdater.updateRollupsForModified`), and the update
+    /// tracks the conversation for it. That the update leaves those values to
+    /// the rollup is `SyncConversationWalkTests`'.
     func testUpdateExistingMessage_removingInboxLabel_rollupClearsConversationInboxIndicators() async {
         let inboxLabel = LabelBuilder.inboxLabel(in: context)
         let messageDate = Date(timeIntervalSince1970: 1_700_002_000)

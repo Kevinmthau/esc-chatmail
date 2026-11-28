@@ -1069,22 +1069,17 @@ final class IncrementalSyncCursorTests: XCTestCase {
             (
                 pageToken: nil,
                 response: HistoryResponse(
-                    history: [
-                        HistoryRecord(
-                            id: "5000",
-                            messages: nil,
-                            messagesAdded: [HistoryMessageAdded(message: makeHistoryStub(id: "m-flush"))],
-                            messagesDeleted: nil,
-                            labelsAdded: nil,
-                            labelsRemoved: nil
-                        )
-                    ],
+                    history: [Self.flushRecord(adding: "m-flush")],
                     nextPageToken: nil,
                     historyId: "2000"
                 )
             )
         ])
         apiClient.getMessageResponses["m-flush"] = makeFullMessage(id: "m-flush")
+        XCTAssertTrue(
+            IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [Self.flushRecord(adding: "m-flush")]),
+            "The fixture's slice no longer admits the flush, so the count below proves nothing"
+        )
         let context = RollupFetchRecordingContext(
             coordinator: testStack.persistentContainer.persistentStoreCoordinator
         )
@@ -1106,6 +1101,102 @@ final class IncrementalSyncCursorTests: XCTestCase {
             1,
             "The conversation was rolled up at the flush and again at the final save"
         )
+        XCTAssertGreaterThanOrEqual(context.saveCount, 2, "The flush's save and the final save")
+    }
+
+    private static func flushRecord(adding messageID: String) -> HistoryRecord {
+        HistoryRecord(
+            id: "5000",
+            messages: nil,
+            messagesAdded: [HistoryMessageAdded(message: GmailMessage(
+                id: messageID,
+                threadId: "t-\(messageID)",
+                labelIds: ["INBOX"],
+                snippet: nil,
+                historyId: nil,
+                internalDate: nil,
+                payload: nil,
+                sizeEstimate: nil
+            ))],
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: nil
+        )
+    }
+
+    /// A rollup at the flush that cannot read its conversations applies
+    /// nothing, and what the flush claimed is tracked again, so the final save
+    /// rolls it up. Here Gmail archived a chat's only INBOX message elsewhere:
+    /// label processing moves only the unread count, so without the final
+    /// save's rollup the chat stayed in the inbox with no INBOX message.
+    ///
+    /// Revert-check: the re-tracking after a failed
+    /// `updateRollupsForModifiedConversations` at the intermediate flush in
+    /// `IncrementalSyncOrchestrator.performSync`. Without it the final save
+    /// skips the conversation and `hasInbox` stays true.
+    @MainActor
+    func testIntermediateFlush_rollupReadFails_theFinalSaveRollsTheConversationUp() async throws {
+        let conversationID = try await seedInboxConversation(messageID: "m-archived-elsewhere")
+        let record = HistoryRecord(
+            id: "5000",
+            messages: nil,
+            messagesAdded: nil,
+            messagesDeleted: nil,
+            labelsAdded: nil,
+            labelsRemoved: [HistoryLabelRemoved(
+                message: MessageListItem(id: "m-archived-elsewhere", threadId: nil),
+                labelIds: ["INBOX"]
+            )]
+        )
+        XCTAssertTrue(IncrementalSyncOrchestrator.allowsIntermediateContextSaves(for: [record]))
+        apiClient.setHistoryResponsesByPageToken([
+            (pageToken: nil, response: HistoryResponse(history: [record], nextPageToken: nil, historyId: "2000"))
+        ])
+        let context = RollupFetchRecordingContext(
+            coordinator: testStack.persistentContainer.persistentStoreCoordinator,
+            failsFirstRollupFetch: true
+        )
+
+        _ = try await makeOrchestrator(makeSyncContext: { context }).performSync(
+            progressHandler: { _, _ in },
+            initialSyncFallback: { XCTFail("Account has a cursor; initial fallback must not run") }
+        )
+
+        XCTAssertEqual(context.failedRollupFetchCount, 1, "The flush's rollup read did not fail")
+        XCTAssertEqual(context.rollupFetchCount(naming: conversationID), 1, "The final save did not roll it up")
+        let historyId = await fetchAccountHistoryId()
+        XCTAssertEqual(historyId, "2000")
+        let readContext = coreDataStack.newBackgroundContext()
+        let hasInbox = try await readContext.perform {
+            try XCTUnwrap(readContext.existingObject(with: conversationID) as? Conversation).hasInbox
+        }
+        XCTAssertFalse(hasInbox, "The chat is still in the inbox with no INBOX message")
+    }
+
+    /// A stored conversation in the inbox whose only message carries INBOX,
+    /// dated well before any reconciliation window.
+    private func seedInboxConversation(messageID: String) async throws -> NSManagedObjectID {
+        let context = coreDataStack.newBackgroundContext()
+        let conversationID = try await context.perform {
+            let inbox = LabelBuilder.inboxLabel(in: context)
+            let conversation = ConversationBuilder()
+                .withParticipantHash("p|archived-elsewhere")
+                .hasInboxMessages(true)
+                .visible()
+                .build(in: context)
+            let message = MessageBuilder()
+                .withId(messageID)
+                .withDate(Date().addingTimeInterval(-60 * 86_400))
+                .inConversation(conversation)
+                .build(in: context)
+            message.labels = [inbox]
+            conversation.lastMessageDate = message.internalDate
+            conversation.latestInboxDate = message.internalDate
+            try context.obtainPermanentIDs(for: [conversation])
+            return conversation.objectID
+        }
+        try await coreDataStack.saveAsync(context: context)
+        return conversationID
     }
 
     @MainActor
@@ -4000,8 +4091,13 @@ private final class SyncContextRecorder: @unchecked Sendable {
 private final class RollupFetchRecordingContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private var rollupFetches: [[NSManagedObjectID]] = []
+    private var failedRollupFetches = 0
+    private var saves = 0
+    /// Whether the first rollup fetch throws, as a store read that fails.
+    private let failsFirstRollupFetch: Bool
 
-    init(coordinator: NSPersistentStoreCoordinator) {
+    init(coordinator: NSPersistentStoreCoordinator, failsFirstRollupFetch: Bool = false) {
+        self.failsFirstRollupFetch = failsFirstRollupFetch
         super.init(concurrencyType: .privateQueueConcurrencyType)
         persistentStoreCoordinator = coordinator
         mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
@@ -4015,17 +4111,37 @@ private final class RollupFetchRecordingContext: NSManagedObjectContext, @unchec
         lock.withLock { rollupFetches.filter { $0.contains(conversationID) }.count }
     }
 
+    var failedRollupFetchCount: Int { lock.withLock { failedRollupFetches } }
+
+    /// How many saves went through: the fetch phase's batch saves, the
+    /// intermediate flush and the final save.
+    var saveCount: Int { lock.withLock { saves } }
+
+    override func save() throws {
+        try super.save()
+        lock.withLock { saves += 1 }
+    }
+
     /// `executeFetchRequest:error:` is `NS_REFINED_FOR_SWIFT`; the generic
     /// `fetch(_:)` overlay calls through to this underscored `__execute(_:)`.
     override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
-        let result = try super.__execute(request)
-        if request.entityName == "Conversation",
-           request.relationshipKeyPathsForPrefetching?.contains("messages.labels") == true,
-           let predicate = request.predicate as? NSComparisonPredicate,
-           predicate.predicateOperatorType == .in,
-           let named = predicate.rightExpression.constantValue as? Set<NSManagedObjectID> {
-            lock.withLock { rollupFetches.append(Array(named)) }
+        guard request.entityName == "Conversation",
+              request.relationshipKeyPathsForPrefetching?.contains("messages.labels") == true,
+              let predicate = request.predicate as? NSComparisonPredicate,
+              predicate.predicateOperatorType == .in,
+              let named = predicate.rightExpression.constantValue as? Set<NSManagedObjectID> else {
+            return try super.__execute(request)
         }
+        let fails: Bool = lock.withLock {
+            guard failsFirstRollupFetch, failedRollupFetches == 0 else { return false }
+            failedRollupFetches += 1
+            return true
+        }
+        if fails {
+            throw NSError(domain: "RollupFetchRecordingContext", code: 1)
+        }
+        let result = try super.__execute(request)
+        lock.withLock { rollupFetches.append(Array(named)) }
         return result
     }
 }
