@@ -27,12 +27,26 @@ final class BackgroundSyncManagerTests: XCTestCase {
         super.tearDown()
     }
 
-    func testBlockedBackgroundSync_schedulesRetryOnlyForPendingActions() {
+    /// Only another background task's mailbox sync satisfies a wake. A foreground holder used
+    /// to, while background runs were `.foregroundIncremental` too; now a foreground run met by
+    /// a wake is one the app started before it was suspended, and the wake schedules its
+    /// catch-up (architecture review 2026-11, background-energy#2).
+    ///
+    /// Revert-check: the `.foregroundInitial, .foregroundIncremental` arm of
+    /// `BackgroundSyncManager.shouldScheduleRetryWhenBlocked` (moved to the `.background` arm,
+    /// the two foreground assertions fail).
+    func testBlockedBackgroundSync_schedulesRetryForEveryHolderButABackgroundSync() {
         XCTAssertTrue(
             BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .pendingActions)
         )
-        XCTAssertFalse(
+        XCTAssertTrue(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .maintenance)
+        )
+        XCTAssertTrue(
             BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .foregroundIncremental)
+        )
+        XCTAssertTrue(
+            BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .foregroundInitial)
         )
         XCTAssertFalse(
             BackgroundSyncManager.shouldScheduleRetryWhenBlocked(by: .background)
@@ -657,6 +671,7 @@ final class BackgroundSyncManagerTests: XCTestCase {
             ("failed", .failed),
             ("quiescence-blocked", .blocked(by: nil)),
             ("pending-actions-blocked", .blocked(by: .pendingActions)),
+            ("foreground-blocked", .blocked(by: .foregroundIncremental)),
             ("needs-follow-up", .needsFollowUp)
         ]
 
@@ -970,7 +985,8 @@ final class BackgroundSyncManagerTests: XCTestCase {
             (.failed, .failed),
             (.deferredForInsufficientStorage, .deferredForInsufficientStorage),
             (.blocked(by: nil), .blockedRetrying),
-            (.blocked(by: .foregroundIncremental), .blockedNoRetry)
+            (.blocked(by: .foregroundIncremental), .blockedRetrying),
+            (.blocked(by: .background), .blockedNoRetry)
         ]
         for (result, expected) in cases {
             let executor = await MainActor.run { BackgroundMailboxSyncExecutorSpy(result: result) }
@@ -1702,8 +1718,32 @@ final class BackgroundSyncManagerTests: XCTestCase {
         XCTAssertEqual(taskScheduler.retryBackoffs, [BackgroundSyncManager.catchUpRetryDelay])
     }
 
-    func testModelV3Executor_activeMailboxSyncSatisfiesTaskWithoutCatchUp() async {
-        for activeKind in [SyncRunKind.foregroundInitial, .foregroundIncremental, .background] {
+    // Revert-check: `BackgroundSyncManager.shouldScheduleRetryWhenBlocked` answering false
+    // for `.background` (made true, the task fails and schedules a catch-up).
+    func testModelV3Executor_activeBackgroundMailboxSyncSatisfiesTaskWithoutCatchUp() async {
+        let executor = await MainActor.run {
+            BackgroundMailboxSyncExecutorSpy(result: .blocked(by: .background))
+        }
+        let manager = makeManager(
+            authoritativeSyncExecutor: executor
+        )
+
+        let success = await manager.performAuthoritativeSync()
+
+        XCTAssertTrue(success, "Another background task's mailbox sync satisfies this one")
+        XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+    }
+
+    /// A foreground run that holds the boundary at a background wake was started before the
+    /// app was suspended: cancelled by its lease's expiration and still unwinding, or frozen
+    /// with no grant. It syncs nothing for this wake, which used to report success with no
+    /// catch-up (architecture review 2026-11, background-energy#2, startup-lifecycle#3).
+    ///
+    /// Revert-check: the `.foregroundInitial, .foregroundIncremental` arm of
+    /// `BackgroundSyncManager.shouldScheduleRetryWhenBlocked` (moved to the `.background` arm,
+    /// the task reports success and schedules nothing).
+    func testModelV3Executor_foregroundRunHoldingTheBoundary_schedulesCatchUpAndFailsTask() async {
+        for activeKind in [SyncRunKind.foregroundInitial, .foregroundIncremental] {
             taskScheduler = BackgroundTaskSchedulerSpy()
             let executor = await MainActor.run {
                 BackgroundMailboxSyncExecutorSpy(result: .blocked(by: activeKind))
@@ -1712,10 +1752,15 @@ final class BackgroundSyncManagerTests: XCTestCase {
                 authoritativeSyncExecutor: executor
             )
 
-            let success = await manager.performAuthoritativeSync()
+            let outcome = await manager.performAuthoritativeSyncOutcome()
 
-            XCTAssertTrue(success, "Expected \(activeKind.rawValue) to satisfy background mailbox sync")
-            XCTAssertTrue(taskScheduler.retryBackoffs.isEmpty)
+            XCTAssertEqual(outcome, .blockedRetrying, activeKind.rawValue)
+            XCTAssertFalse(outcome.reportsSuccess, activeKind.rawValue)
+            XCTAssertEqual(
+                taskScheduler.retryBackoffs,
+                [BackgroundSyncManager.catchUpRetryDelay],
+                activeKind.rawValue
+            )
         }
     }
 

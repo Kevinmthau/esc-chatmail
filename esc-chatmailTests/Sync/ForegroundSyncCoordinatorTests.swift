@@ -36,7 +36,7 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
     // scheduleImmediateFollowUp's (reached FIRST on the completion path) and
     // requestSyncIfNeeded's — revert to `isAuthenticated`; each alone is
     // masked by the other, because whichever survives still kills the
-    // needsFollowUp continuation before dead credentials re-trigger a sync.
+    // continuation before dead credentials re-trigger a sync.
     // HONEST SCOPE: no single-hunk revert fails this test; it pins the pair.
     func testReauthenticationRequirementSuppressesActiveSessionContinuation() async {
         let syncEngine = MockForegroundSyncEngine()
@@ -58,7 +58,7 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         await fulfillment(of: [initialSyncStarted], timeout: 1.0)
 
         authSession.requiresReauthentication = true
-        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+        syncEngine.completeRequest(at: 0, hasDurableContinuation: true)
         try? await Task.sleep(nanoseconds: 100_000_000)
 
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
@@ -152,7 +152,7 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         await fulfillment(of: [firstSliceStarted], timeout: 1.0)
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 1)
 
-        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+        syncEngine.completeRequest(at: 0, hasDurableContinuation: true)
 
         await fulfillment(of: [continuationStarted], timeout: 1.0)
         XCTAssertEqual(
@@ -161,7 +161,7 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
             "The durable next-page checkpoint should be consumed without waiting for the periodic timer"
         )
 
-        syncEngine.completeRequest(at: 1, needsFollowUp: false)
+        syncEngine.completeRequest(at: 1, hasDurableContinuation: false)
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(syncEngine.triggerIncrementalSyncIfPossibleCalls, 2)
     }
@@ -170,8 +170,8 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
     // returns, which the completion hands back to the engine. The engine
     // leaves the 6-hour store maintenance to the last run of a chain
     // (`SyncEngine.triggerIncrementalSyncIfPossible`): answer true where no
-    // continuation was queued (the limit, here) and a mailbox whose cursor is
-    // held never runs the maintenance after a foreground sync; answer false
+    // continuation was queued (the limit, here) and the last run of a long
+    // chain of history slices never runs the maintenance; answer false
     // where one was and the maintenance takes the exclusive run ahead of the
     // continuation, which then waits for every store-wide pass.
     func testCompletion_answersWhetherAContinuationWasQueued() async {
@@ -200,17 +200,17 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         await fulfillment(of: [firstSliceStarted], timeout: 1.0)
 
         XCTAssertTrue(
-            syncEngine.completeRequest(at: 0, needsFollowUp: true),
+            syncEngine.completeRequest(at: 0, hasDurableContinuation: true),
             "A continuation was queued: the run boundary is left to it"
         )
         await fulfillment(of: [continuationStarted], timeout: 1.0)
 
         XCTAssertFalse(
-            syncEngine.completeRequest(at: 1, needsFollowUp: true),
+            syncEngine.completeRequest(at: 1, hasDurableContinuation: true),
             "The limit is reached and nothing was queued: this run is the last of its chain"
         )
         XCTAssertFalse(
-            syncEngine.completeRequest(at: 1, needsFollowUp: false),
+            syncEngine.completeRequest(at: 1, hasDurableContinuation: false),
             "A run that needs no follow-up queues none"
         )
         try? await Task.sleep(nanoseconds: 100_000_000)
@@ -246,21 +246,21 @@ final class ForegroundSyncCoordinatorTests: XCTestCase {
         coordinator.start(reason: "appInitialized", triggerImmediateSync: true)
         await fulfillment(of: [firstSliceStarted], timeout: 1.0)
 
-        syncEngine.completeRequest(at: 0, needsFollowUp: true)
+        syncEngine.completeRequest(at: 0, hasDurableContinuation: true)
         await fulfillment(of: [secondSliceStarted], timeout: 1.0)
 
-        syncEngine.completeRequest(at: 1, needsFollowUp: true)
+        syncEngine.completeRequest(at: 1, hasDurableContinuation: true)
         await fulfillment(of: [thirdSliceStarted], timeout: 1.0)
 
-        syncEngine.completeRequest(at: 2, needsFollowUp: true)
+        syncEngine.completeRequest(at: 2, hasDurableContinuation: true)
         await fulfillment(of: [fourthSliceStarted], timeout: 1.0)
 
-        syncEngine.completeRequest(at: 3, needsFollowUp: true)
+        syncEngine.completeRequest(at: 3, hasDurableContinuation: true)
         try? await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertEqual(
             syncEngine.triggerIncrementalSyncIfPossibleCalls,
             4,
-            "Persistent held progress must fall back to the periodic loop instead of spinning forever"
+            "A chain of continuations must fall back to the periodic loop instead of spinning forever"
         )
     }
 

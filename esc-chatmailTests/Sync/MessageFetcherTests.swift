@@ -171,19 +171,30 @@ final class MessageFetcherTests: XCTestCase {
 
     // MARK: - fetchAbandonedMessages
 
+    /// A timeout, network error, 5xx or 429 is no verdict on the message: it
+    /// goes to `transientlyFailedIds`, which spend none of the drain's retries
+    /// (architecture review 2026-11, sync-persist-path#6). A message-scoped
+    /// error stays in `failedIds`.
+    ///
+    /// Revert-check: `exhaustedRetryIds` moved back into `failedIds` in
+    /// `MessageFetcher.fetchAbandonedMessages`.
     func testFetchAbandonedMessages_classifiesOutcomes() async throws {
         let mockAPI = MockGmailAPIClient()
         mockAPI.getMessageResponses["ok"] = GmailMessageBuilder().withId("ok").build()
         mockAPI.getMessageErrors["gone"] = APIError.notFound("gone")
         mockAPI.getMessageErrors["transient"] = APIError.timeout
+        mockAPI.getMessageErrors["undecodable"] = APIError.decodingError(
+            NSError(domain: "MessageFetcherTests", code: 1)
+        )
 
         let fetcher = await MainActor.run { MessageFetcher(apiClient: mockAPI) }
-        let result = try await fetcher.fetchAbandonedMessages(["ok", "gone", "transient"])
+        let result = try await fetcher.fetchAbandonedMessages(["ok", "gone", "transient", "undecodable"])
 
         XCTAssertEqual(result.fetched.map(\.id), ["ok"])
         XCTAssertEqual(result.goneIds, ["gone"])
-        XCTAssertEqual(result.failedIds, ["transient"])
-        XCTAssertEqual(mockAPI.getMessageCallCount, 3, "Abandoned retries make a single attempt per ID, no retry loop")
+        XCTAssertEqual(result.failedIds, ["undecodable"])
+        XCTAssertEqual(result.transientlyFailedIds, ["transient"])
+        XCTAssertEqual(mockAPI.getMessageCallCount, 4, "Abandoned retries make a single attempt per ID, no retry loop")
     }
 
     func testFetchAbandonedMessages_messageScopedPermanentErrorIsFailedNotGone() async throws {

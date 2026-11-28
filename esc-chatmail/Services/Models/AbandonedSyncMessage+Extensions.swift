@@ -13,6 +13,14 @@ import CoreData
 /// failed drain attempt stamps an exponential backoff via
 /// `SyncFailureTracker.stageAbandonedRetryOutcome`, enforced in the drain
 /// predicate. Re-capturing a row as deferred clears it.
+///
+/// `retryCount` counts the drain's message-scoped failures only (a 4xx, an
+/// undecodable or unprocessable payload, a failed persist, and any transport
+/// error `MessageFetcher.isRetriableError` does not name, a TLS failure
+/// included). A timeout, a dropped or refused connection, a 5xx or a 429
+/// says nothing about the message: it spends nothing and waits as long as
+/// the row has been abandoned, from 15 minutes to 12 hours
+/// (`SyncFailureTracker.transientRetryBackoffInterval`).
 extension AbandonedSyncMessage {
     @NSManaged public var id: UUID
     @NSManaged public var gmailMessageId: String
@@ -36,6 +44,49 @@ extension AbandonedSyncMessage {
         case deferred = "deferred"
         /// The cursor advanced past it; only the drain can recover it.
         case abandoned = "abandoned"
+        /// The drain gave up on it: `SyncConfig.maxAbandonedMessageRetries`
+        /// message-scoped failures (`SyncFailureTracker.stageAbandonedRetryOutcome`).
+        /// Kept with `retryCount` at the cap, never deleted, so the
+        /// conversation list can say the message was not downloaded
+        /// (architecture review 2026-11, sync-persist-path#6). The drain's
+        /// `retryCount <` term excludes it, in earlier builds too, which read
+        /// an unknown state as not deferred. It leaves the ledger when a
+        /// Message with its ID is stored, or when the user's Retry gives it
+        /// back to the drain. Find these rows with `exhaustedPredicate`, never
+        /// by this state alone.
+        case exhausted = "exhausted"
+    }
+
+    /// The rows the drain has given up on: `retryCount` at the cap and not
+    /// deferred. Counted by the retry count, not by `state == exhausted`: a
+    /// re-scan can make an exhausted row deferred again, and the escape hatch
+    /// then abandoned, with its spent budget kept, so the drain never offers it
+    /// either. A deferred row is the frozen cursor's to retry. The `state ==
+    /// nil` disjunct is load-bearing on SQLite, where a legacy row has no state.
+    static var exhaustedPredicate: NSPredicate {
+        NSPredicate(
+            format: "retryCount >= %d AND (state == nil OR state != %@)",
+            SyncConfig.maxAbandonedMessageRetries,
+            State.deferred.rawValue
+        )
+    }
+
+    /// The rows the conversation list counts as not downloaded: the exhausted
+    /// ones, and the stalled ones, which the drain still retries but which
+    /// have failed there (`nextRetryAt` is set only by a failed drain attempt)
+    /// and were abandoned more than `SyncConfig.abandonedMessageStalledAge`
+    /// ago. A transient failure spends no retry, so a message that always
+    /// answers 5xx is never exhausted and only this brings it to the user. A
+    /// row the drain has not tried yet (an app not opened for days) is not
+    /// stalled. The drain's own predicate is untouched: a stalled row is still
+    /// offered whenever its backoff runs out.
+    static func undownloadablePredicate(now: Date) -> NSPredicate {
+        NSPredicate(
+            format: "(state == nil OR state != %@) AND (retryCount >= %d OR (nextRetryAt != nil AND abandonedAt <= %@))",
+            State.deferred.rawValue,
+            SyncConfig.maxAbandonedMessageRetries,
+            now.addingTimeInterval(-SyncConfig.abandonedMessageStalledAge) as NSDate
+        )
     }
 
     /// Why the message entered the ledger (coarse blocking-failure buckets).

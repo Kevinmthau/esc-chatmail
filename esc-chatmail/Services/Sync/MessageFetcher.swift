@@ -49,10 +49,19 @@ struct AbandonedRetryFetchResult {
     let fetched: [GmailMessage]
     /// The server returned 404 — the message no longer exists server-side
     let goneIds: [String]
-    /// Failed for any other reason — worth retrying on a future sync
+    /// Failed for a reason the fetcher does not retry (a 4xx other than 404,
+    /// an undecodable response, and any transport error `isRetriableError`
+    /// does not name, a TLS failure or `dataNotAllowed` among them): spends
+    /// one of the drain's retries, as every failure did before.
     let failedIds: [String]
+    /// Failed for a reason the fetcher would retry, which says nothing about
+    /// the message (a timeout, a dropped or refused connection, a 5xx, a 429):
+    /// stamps the drain's backoff and spends no retry
+    /// (`SyncFailureTracker.stageAbandonedRetryOutcome`; architecture review
+    /// 2026-11, sync-persist-path#6).
+    let transientlyFailedIds: [String]
 
-    static let empty = AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: [])
+    static let empty = AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: [], transientlyFailedIds: [])
 }
 
 /// Handles fetching messages from the Gmail API with retry logic and timeout handling
@@ -340,7 +349,8 @@ final class MessageFetcher: @unchecked Sendable {
         return AbandonedRetryFetchResult(
             fetched: chronologicallySorted(result.successfulMessages),
             goneIds: result.notFoundIds,
-            failedIds: result.permanentlyFailedIds + result.retriableFailedIds + result.exhaustedRetryIds
+            failedIds: result.permanentlyFailedIds,
+            transientlyFailedIds: result.retriableFailedIds + result.exhaustedRetryIds
         )
     }
 

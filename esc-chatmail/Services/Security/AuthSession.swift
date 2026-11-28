@@ -702,10 +702,46 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             // A previous account's store must be repaired before
                             // authenticated UI can expose any local rows.
                             try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)
+                        } catch {
+                            Log.error("Failed to isolate restored account state", category: .auth, error: error)
+                            // A sign-out queued while the preparation was suspended owns
+                            // the teardown, credentials included: its cleanup's
+                            // `CancellationError` arrives here as a failed reset, and
+                            // clearing the session as well would race that teardown.
                             guard !self.isAccountRemovalRequested else {
                                 restoredUser.restoreOutcome = .retryableFailure
                                 return
                             }
+                            switch AuthRestorePreparationPolicy.restoreDisposition(afterPreparationFailure: error) {
+                            case .retryKeepingCredentials:
+                                // Nothing was changed (a marker that could not be read, a
+                                // store that could not be inspected), and nothing of this
+                                // session was persisted yet: the credentials of the last
+                                // launch stay, and the account is held, as for a reopen
+                                // that failed, until an attempt can check the mailbox.
+                                let stageName = (error as? AuthError)?.localAccountIsolationStage?.rawValue ?? "unclassified"
+                                Log.warning(
+                                    "Launch restore kept the session: the mailbox could not be checked (\(stageName))",
+                                    category: .auth
+                                )
+                                restoredUser.restoreOutcome = .retryableFailure
+                                restoredUser.heldFailure = .couldNotRestore
+                            case .discardCredentials, .publishSession:
+                                // A reset was required or did not finish, or the account
+                                // has no address: rejected, as every refusal was before the
+                                // stages. A refusal is never answered `.publishSession`; it
+                                // would fail closed here with the rest.
+                                restoredUser.didClearGoogleSession = true
+                                _ = self.clearFailedGoogleSession()
+                                restoredUser.restoreOutcome = .retryableFailure
+                            }
+                            return
+                        }
+                        guard !self.isAccountRemovalRequested else {
+                            restoredUser.restoreOutcome = .retryableFailure
+                            return
+                        }
+                        do {
                             try self.persistSessionForBackgroundAccess(
                                 accessToken: user.accessToken.tokenString,
                                 refreshToken: user.refreshToken.tokenString,
@@ -713,7 +749,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                                 email: user.profile?.email
                             )
                         } catch {
-                            Log.error("Failed to isolate restored account state", category: .auth, error: error)
+                            // Not asked of the policy: once the credential transaction's
+                            // marker may be persisted, the next launch rejects this
+                            // session by design, so the outcome stays a rejection.
+                            Log.error("Failed to persist the restored session's credentials", category: .auth, error: error)
                             restoredUser.didClearGoogleSession = true
                             _ = self.clearFailedGoogleSession()
                             restoredUser.restoreOutcome = .retryableFailure
@@ -1304,7 +1343,9 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             // A Keychain read failure cannot prove that a crash-durable reset
             // marker is absent. Refuse to publish an account until a later
             // attempt can distinguish "missing" from "temporarily unreadable."
-            throw AuthError.localAccountIsolationFailed(error)
+            // Nothing has been changed, so a launch restore keeps its session
+            // for that attempt (`AuthRestorePreparationPolicy`).
+            throw AuthError.localAccountIsolationFailed(.markerUnreadable, error)
         }
         var resetRequired = hasCleanupRequirement
         var foundEmptyStore = false
@@ -1314,7 +1355,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             do {
                 storeInspection = try await inspectLocalMailboxStore()
             } catch {
-                throw AuthError.localAccountIsolationFailed(error)
+                throw AuthError.localAccountIsolationFailed(.storeUninspectable, error)
             }
 
             // This app owns one account-wide store. A matching row is not
@@ -1354,7 +1395,7 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             do {
                 try await removeMailboxFilesLeftByStoreRecovery()
             } catch {
-                throw AuthError.localAccountIsolationFailed(error)
+                throw AuthError.localAccountIsolationFailed(.recoveryFileRemovalFailed, error)
             }
             return
         }
@@ -1374,9 +1415,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         // skip the remaining store/file cleanup.
         do {
             try persistLocalCleanupRequirement()
+        } catch {
+            throw AuthError.localAccountIsolationFailed(.resetRequired, error)
+        }
+        do {
             try await performDurableLocalCleanup()
         } catch {
-            throw AuthError.localAccountIsolationFailed(error)
+            throw AuthError.localAccountIsolationFailed(.resetFailed, error)
         }
 
     }
@@ -1386,11 +1431,14 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// still holds the previous session's account at this point (the new
     /// session's is saved only after this gate), names `normalizedEmail`. A
     /// keychain that cannot be read is not that proof, and gets the full
-    /// cleanup, as before this exception existed. Throwing instead would not
-    /// leave the question to a later attempt: a restore that fails here clears
-    /// the failed Google session (`clearFailedGoogleSession`), which deletes
-    /// the keychain's account, so the next attempt would run the full cleanup
-    /// anyway, with the user signed out as well.
+    /// cleanup, as before this exception existed. Throwing instead was ruled
+    /// out when every failed preparation cleared the failed Google session
+    /// (`clearFailedGoogleSession`), which deletes the keychain's account, so
+    /// the next attempt would have run the full cleanup anyway, with the user
+    /// signed out as well. A restore now keeps the session for a stage that
+    /// changed nothing (`AuthRestorePreparationPolicy`), so an unreadable
+    /// keychain here could be thrown as one and left to a later attempt; that
+    /// has not been decided, and the full cleanup stays.
     private func isStoreRecoveryOfAccount(_ normalizedEmail: String) -> Bool {
         guard StoreRecoveryResetMarker.isMarked(in: userDefaults),
               let persisted = try? keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue),
@@ -1409,9 +1457,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     /// next initial sync lists up to `SyncConfig.initialSyncMaxWindow` from
     /// the start the mailbox already had. No durable marker is written: a
     /// crash here leaves the recovery marker, and the next launch takes this
-    /// branch again. A throw here fails the restore, whose catch clears the
-    /// failed Google session and with it the keychain's account, so the next
-    /// attempt runs the full cleanup: a failure costs what the full cleanup
+    /// branch again. A throw here fails the restore
+    /// (`LocalAccountIsolationStage.recoveryFileRemovalFailed`), whose catch
+    /// clears the failed Google session and with it the keychain's account, so
+    /// the next attempt runs the full cleanup: a failure costs what the full cleanup
     /// always cost, never isolation. The account-scoped sync defaults are kept,
     /// as a ladder reset with no files on disk always kept them, and the
     /// initial sync that refills the store does not read the last-sync time.
@@ -2362,7 +2411,11 @@ enum AuthError: LocalizedError {
     case noUser
     case noAccessToken
     case missingAccountEmail
-    case localAccountIsolationFailed(Error)
+    /// `prepareLocalStoreForAuthenticatedAccount` refused the account. The stage says
+    /// whether anything was changed, which decides what a launch restore does with the
+    /// session it restored (`AuthRestorePreparationPolicy`); interactive sign-in clears
+    /// it whatever the stage.
+    case localAccountIsolationFailed(LocalAccountIsolationStage, Error)
     case cleanupPrerequisitePersistenceFailed(Error)
     case missingRequiredScopes
     case tokenPersistenceFailed(Error)
@@ -2375,7 +2428,7 @@ enum AuthError: LocalizedError {
             return "Failed to get access token"
         case .missingAccountEmail:
             return "The signed-in Google account did not provide an email address"
-        case .localAccountIsolationFailed(let underlyingError):
+        case .localAccountIsolationFailed(_, let underlyingError):
             return "Could not safely isolate local mail for this account: \(underlyingError.localizedDescription)"
         case .cleanupPrerequisitePersistenceFailed(let underlyingError):
             return "Could not safely begin account cleanup: \(underlyingError.localizedDescription)"
@@ -2384,5 +2437,11 @@ enum AuthError: LocalizedError {
         case .tokenPersistenceFailed(let underlyingError):
             return "Failed to save authentication tokens: \(underlyingError.localizedDescription)"
         }
+    }
+
+    /// The stage a refused account preparation stopped at, nil for every other error.
+    var localAccountIsolationStage: LocalAccountIsolationStage? {
+        guard case .localAccountIsolationFailed(let stage, _) = self else { return nil }
+        return stage
     }
 }

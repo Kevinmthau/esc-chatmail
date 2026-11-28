@@ -147,6 +147,11 @@ extension MessagePersister {
                 throw AccountPersisterError.fetchFailed(error)
             }
             guard let account else { throw AccountPersisterError.accountMissing }
+            // Assigned only when it moves. An equal value still marks the row
+            // updated, so a run whose history had nothing new saved its
+            // context for the cursor it already had (architecture review
+            // 2026-11, background-energy#4).
+            guard account.historyId != historyId else { return }
             account.historyId = historyId
             Log.debug("Set historyId to \(historyId) in context (pending save)", category: .sync)
         }

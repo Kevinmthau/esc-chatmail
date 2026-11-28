@@ -3,10 +3,12 @@ import Foundation
 @MainActor
 protocol ForegroundSyncPerforming: AnyObject {
     /// - Parameter completion: called once a started run has succeeded, with
-    ///   whether the run left work for a follow-up. It answers whether the
-    ///   caller queued that follow-up to run at once. The engine then leaves
-    ///   the run boundary to it and asks for nothing of its own after this
-    ///   run (`SyncEngine.runStoreMaintenanceAfterSync()`).
+    ///   whether the run staged a continuation of its history slice
+    ///   (`IncrementalSyncResult.hasDurableContinuation`; never true for a
+    ///   held run, which the periodic loop follows). It answers whether the
+    ///   caller queued that continuation to run at once. The engine then
+    ///   leaves the run boundary to it and asks for nothing of its own after
+    ///   this run (`SyncEngine.runStoreMaintenanceAfterSync()`).
     func triggerIncrementalSyncIfPossible(
         completion: @escaping @MainActor @Sendable (Bool) -> Bool
     ) async -> ForegroundSyncRequestResult
@@ -29,12 +31,18 @@ final class ForegroundSyncCoordinator {
 
     private let syncEngine: any ForegroundSyncPerforming
     private let authSession: any ForegroundSyncAuthenticationProviding
+    /// The path whose return asks for a sync: the one `SyncEngine.shared`
+    /// asks before each run (`NetworkMonitorService.shared`).
+    private let networkPath: any SyncNetworkPathMonitoring
     private let periodicInterval: TimeInterval
     private let minimumSyncGap: TimeInterval
     private let maxImmediateFollowUpRuns: Int
     private let log = LogCategory.sync.logger
 
     private var periodicTask: Task<Void, Never>?
+    /// Hears the path come back, from `start` to `stop`
+    /// (`startUsablePathObservation()`).
+    private var usablePathTask: Task<Void, Never>?
     private var deferredSyncTask: Task<Void, Never>?
     private var deferredSyncTaskID: UUID?
     private var lastSyncTriggerAt: Date?
@@ -42,12 +50,14 @@ final class ForegroundSyncCoordinator {
     init(
         syncEngine: (any ForegroundSyncPerforming)? = nil,
         authSession: (any ForegroundSyncAuthenticationProviding)? = nil,
+        networkPath: (any SyncNetworkPathMonitoring)? = nil,
         periodicInterval: TimeInterval = 60,
         minimumSyncGap: TimeInterval = 30,
         maxImmediateFollowUpRuns: Int = 3
     ) {
         self.syncEngine = syncEngine ?? SyncEngine.shared
         self.authSession = authSession ?? AuthSession.shared
+        self.networkPath = networkPath ?? NetworkMonitorService.shared
         self.periodicInterval = periodicInterval
         self.minimumSyncGap = minimumSyncGap
         self.maxImmediateFollowUpRuns = max(0, maxImmediateFollowUpRuns)
@@ -62,6 +72,7 @@ final class ForegroundSyncCoordinator {
         }
 
         let startedPeriodicLoop = startPeriodicLoopIfNeeded()
+        startUsablePathObservation()
 
         if triggerImmediateSync {
             // Only force when we are starting a fresh foreground loop (e.g. cold launch or
@@ -76,6 +87,8 @@ final class ForegroundSyncCoordinator {
     func stop(reason: String) {
         periodicTask?.cancel()
         periodicTask = nil
+        usablePathTask?.cancel()
+        usablePathTask = nil
         deferredSyncTask?.cancel()
         deferredSyncTask = nil
         deferredSyncTaskID = nil
@@ -228,6 +241,30 @@ final class ForegroundSyncCoordinator {
         return true
     }
 
+    /// Asks for a sync when the path comes back after it was known to be
+    /// down (`SyncNetworkPathMonitoring.usablePathReturns()`). A run skipped
+    /// for no network used to wait for the next 60-second tick or the next
+    /// activation, while pending actions resumed at once (architecture review
+    /// 2026-11, background-energy#5).
+    ///
+    /// Subscribed in `start` and cancelled in `stop`, so the iOS app in the
+    /// background, a Mac asleep or a signed-out session starts nothing. The
+    /// request is an ordinary `triggerSync(force: false)` on the main actor,
+    /// never a call into the engine from the monitor's queue: the mailbox
+    /// gate applies, and so does the minimum gap, so a link that flaps does
+    /// not sync at every return.
+    private func startUsablePathObservation() {
+        guard usablePathTask == nil else { return }
+        let returns = networkPath.usablePathReturns()
+        usablePathTask = Task { [weak self] in
+            for await _ in returns {
+                guard let self else { return }
+                guard !Task.isCancelled, self.periodicTask != nil else { continue }
+                self.triggerSync(reason: "networkPathBecameUsable", force: false)
+            }
+        }
+    }
+
     private enum SyncTriggerOutcome: Equatable {
         case started
         case alreadyInProgress
@@ -252,8 +289,8 @@ final class ForegroundSyncCoordinator {
         }
 
         switch await syncEngine.triggerIncrementalSyncIfPossible(
-            completion: { [weak self] needsFollowUp in
-                guard needsFollowUp, let self else { return false }
+            completion: { [weak self] hasDurableContinuation in
+                guard hasDurableContinuation, let self else { return false }
                 return self.scheduleImmediateFollowUp(
                     after: reason,
                     remainingImmediateFollowUps: remainingImmediateFollowUps
@@ -279,9 +316,8 @@ final class ForegroundSyncCoordinator {
 
     /// - Returns: whether a continuation was queued. False where the rest
     ///   is left to the periodic loop, and the engine reads that as the end
-    ///   of this chain of runs: a run that still needs a follow-up but gets
-    ///   none at once (a cursor held by a message that keeps failing asks
-    ///   for one after every run) must not keep the store maintenance
+    ///   of this chain of runs: a run that staged a continuation but gets
+    ///   none at once (the limit) must not keep the store maintenance
     ///   waiting for a continuation that is not coming.
     private func scheduleImmediateFollowUp(
         after reason: String,

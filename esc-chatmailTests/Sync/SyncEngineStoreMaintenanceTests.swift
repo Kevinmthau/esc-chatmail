@@ -95,7 +95,7 @@ final class SyncEngineStoreMaintenanceTests: XCTestCase {
             dataCleanupService: cleanupService,
             conversationManager: conversationManager,
             coreDataStack: coreDataStack,
-            networkMonitor: NetworkMonitorService(),
+            networkMonitor: NetworkMonitorService(manualStatus: nil),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock()
         )

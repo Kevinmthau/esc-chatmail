@@ -53,7 +53,7 @@ final class SyncEngineStorageAdmissionTests: XCTestCase {
             dataCleanupService: DataCleanupService(),
             conversationManager: conversationManager,
             coreDataStack: coreDataStack,
-            networkMonitor: NetworkMonitorService(),
+            networkMonitor: NetworkMonitorService(manualStatus: nil),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock(),
             availableStorageBytes: readingAvailableBytes

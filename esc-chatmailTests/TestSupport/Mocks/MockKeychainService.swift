@@ -28,6 +28,7 @@ final class MockKeychainService: KeychainServiceProtocol, @unchecked Sendable {
 
     private var _errorToThrow: Error?
     private var saveErrorsByKey: [String: Error] = [:]
+    private var loadErrorsByKey: [String: Error] = [:]
     private var deleteErrorsByKey: [String: Error] = [:]
 
     /// Optional error to throw on next operation (resets after throwing)
@@ -61,6 +62,7 @@ final class MockKeychainService: KeychainServiceProtocol, @unchecked Sendable {
             _deleteCallCount = 0
             _errorToThrow = nil
             saveErrorsByKey.removeAll()
+            loadErrorsByKey.removeAll()
             deleteErrorsByKey.removeAll()
             _onLoad = nil
             _onDelete = nil
@@ -87,6 +89,9 @@ final class MockKeychainService: KeychainServiceProtocol, @unchecked Sendable {
     func load(for key: String) throws -> Data {
         let (data, hook): (Data, (() -> Void)?) = try lock.withLock {
             _loadCallCount += 1
+            if let error = loadErrorsByKey.removeValue(forKey: key) {
+                throw error
+            }
             if let error = _errorToThrow {
                 _errorToThrow = nil
                 throw error
@@ -183,6 +188,12 @@ final class MockKeychainService: KeychainServiceProtocol, @unchecked Sendable {
 extension MockKeychainService {
     func failNextSave(for key: String, with error: Error) {
         lock.withLock { saveErrorsByKey[key] = error }
+    }
+
+    /// Fails the next read of `key` alone, where `errorToThrow` fails whatever is read
+    /// next: a test can let a launch's first reads through and fail a later one.
+    func failNextLoad(for key: String, with error: Error) {
+        lock.withLock { loadErrorsByKey[key] = error }
     }
 
     func failNextDelete(for key: String, with error: Error) {

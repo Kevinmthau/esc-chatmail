@@ -141,6 +141,14 @@ struct SyncConfig {
     /// This prevents sync from getting permanently stuck on unfetchable messages
     static let maxConsecutiveSyncFailures = 3
 
+    /// The least time between two strikes toward `maxConsecutiveSyncFailures` on
+    /// the incremental slice path (`SyncFailureStrikePolicy`): three strikes span
+    /// ten minutes at least. A failing run sooner than this after the last strike
+    /// holds the cursor and spends none, so one chain of back-to-back runs during
+    /// a burst of 429s or 5xx no longer abandons its IDs (architecture review
+    /// 2026-11, sync-engine#2). Unmeasured: the review's "about 5-10 min".
+    static let minimumSyncFailureStrikeSpacing: TimeInterval = 300
+
     /// Maximum number of retry attempts for an abandoned message before giving up on it
     static let maxAbandonedMessageRetries = 5
 
@@ -152,6 +160,14 @@ struct SyncConfig {
 
     /// Ceiling on the drain backoff between abandoned-message retries (12 hours)
     static let abandonedRetryBackoffCap: TimeInterval = 43_200
+
+    /// How long an abandoned message may keep failing in the drain, for any
+    /// reason, before the conversation list counts it as not downloaded
+    /// (`AbandonedSyncMessage.undownloadablePredicate(now:)`): three days. A
+    /// transient failure spends no retry, so a message that always answers
+    /// 5xx or times out never becomes exhausted; this is what brings it to
+    /// the user (architecture review 2026-11, sync-persist-path#6). Unmeasured.
+    static let abandonedMessageStalledAge: TimeInterval = 3 * 86_400
 
     /// UserDefaults key for tracking consecutive sync failures
     static let consecutiveFailuresKey = "syncConsecutiveFailures"

@@ -135,6 +135,31 @@ final class AccountPersisterTests: XCTestCase {
         XCTAssertEqual(stored, "history-old", "The cursor commits with the run's save, never with the stager")
     }
 
+    /// A cursor staged at the value the row already has leaves the context
+    /// with nothing to save, so a run with no new history commits nothing for
+    /// it (architecture review 2026-11, background-energy#4).
+    ///
+    /// Revert-check: the `guard account.historyId != historyId` in
+    /// `AccountPersister.setAccountHistoryId` (the equal assignment marks the
+    /// row updated and the context has changes).
+    func testSetAccountHistoryId_atTheStoredValue_leavesTheContextUnchanged() async throws {
+        let seedContext = stack.makeMainQueueViewContext()
+        _ = AccountBuilder()
+            .withEmail("test@example.com")
+            .withHistoryId("history-same")
+            .build(in: seedContext)
+        try seedContext.save()
+
+        let context = stack.newBackgroundContext()
+        try await sut.setAccountHistoryId("history-same", in: context)
+        let unchanged = await context.perform { !context.hasChanges }
+        try await sut.setAccountHistoryId("history-next", in: context)
+        let changed = await context.perform { context.hasChanges }
+
+        XCTAssertTrue(unchanged, "The cursor it already has is no change")
+        XCTAssertTrue(changed, "A cursor that moves is still staged")
+    }
+
     private func fetchAccountHistoryId(email: String) async -> String? {
         let context = stack.newBackgroundContext()
         return await context.perform {

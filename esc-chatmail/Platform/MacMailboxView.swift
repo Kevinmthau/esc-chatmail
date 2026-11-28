@@ -18,6 +18,7 @@ struct MacMailboxView: View {
     @ObservedObject private var authSession: AuthSession
     @StateObject private var viewModel: ConversationListViewModel
     @StateObject private var abandonedActions: AbandonedPendingActionsModel
+    @StateObject private var exhaustedMessages: ExhaustedSyncMessagesModel
     private let deps: Dependencies
     private let viewContext: NSManagedObjectContext
     /// Built once at init, as in `ConversationListView`: it holds nothing per-conversation.
@@ -46,6 +47,9 @@ struct MacMailboxView: View {
         _abandonedActions = StateObject(
             wrappedValue: AbandonedPendingActionsModel(manager: resolvedDeps.pendingActionsManager)
         )
+        _exhaustedMessages = StateObject(
+            wrappedValue: ExhaustedSyncMessagesModel(deps: resolvedDeps)
+        )
     }
 
     var body: some View {
@@ -55,6 +59,7 @@ struct MacMailboxView: View {
             MacConversationSidebar(
                 viewModel: viewModel,
                 abandonedActions: abandonedActions,
+                exhaustedMessages: exhaustedMessages,
                 syncEngine: deps.syncEngine,
                 selection: $selection,
                 currentUserEmail: authSession.userEmail ?? "",
@@ -130,6 +135,7 @@ struct MacMailboxView: View {
         .conversationListLifecycle(
             viewModel: viewModel,
             abandonedActions: abandonedActions,
+            exhaustedMessages: exhaustedMessages,
             viewContext: viewContext,
             authSession: authSession
         )

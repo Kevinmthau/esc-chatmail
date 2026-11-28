@@ -13,9 +13,14 @@ protocol PendingActionsManagerProtocol: Actor {
     ///   - payload: Optional additional data for the action
     func queueAction(type: PendingAction.ActionType, messageId: String, payload: [String: Any]?) async
 
-    /// Queues an action while the caller owns the shared account-work run.
-    /// This keeps an optimistic local mutation and its durable enqueue inside
-    /// one teardown boundary without recursively acquiring the coordinator.
+    /// Tells the manager of an action whose row the caller staged in its own
+    /// context (`PendingActionEnqueue.stageMessageAction`) and committed in
+    /// the save of the local change it describes, while the caller owns the
+    /// shared account-work run. It inserts nothing: it schedules processing.
+    /// Call it only after that save succeeded. The row and the change are one
+    /// save so that a process killed between two saves can no longer keep a
+    /// change Gmail is never told of (architecture review 2026-11,
+    /// outbound-and-actions#4).
     ///
     /// A required witness, with no protocol-extension default (neither has its
     /// conversation counterpart below): until 2026-11-27 a default forwarded a
@@ -29,9 +34,7 @@ protocol PendingActionsManagerProtocol: Actor {
     /// review 2026-11, invariant-enforcement#2). A conformer that forgets it
     /// now fails to compile.
     func queueAction(
-        type: PendingAction.ActionType,
-        messageId: String,
-        payload: [String: Any]?,
+        _ action: PendingActionEnqueue.StagedMessageAction,
         within syncRun: SyncRun
     ) async
 
@@ -43,11 +46,10 @@ protocol PendingActionsManagerProtocol: Actor {
     ///   - messageIds: The Gmail message IDs in the conversation
     func queueConversationAction(type: PendingAction.ActionType, sourceConversationId: UUID, messageIds: [String]) async
 
-    /// Conversation-action counterpart to `queueAction(...within:)`.
+    /// Conversation-action counterpart to `queueAction(_:within:)`, for a row
+    /// staged with `PendingActionEnqueue.stageConversationAction`.
     func queueConversationAction(
-        type: PendingAction.ActionType,
-        sourceConversationId: UUID,
-        messageIds: [String],
+        _ action: PendingActionEnqueue.StagedConversationAction,
         within syncRun: SyncRun
     ) async
 

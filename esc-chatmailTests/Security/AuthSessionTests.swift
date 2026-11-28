@@ -1847,7 +1847,10 @@ final class AuthSessionTests: XCTestCase {
     // a read failure to `AuthError.localAccountIsolationFailed`. With the old
     // `exists()`-backed property the failure reads as "no marker", the empty account
     // list inspects clean, and preparation returns without throwing — publishing an
-    // account over a store whose pending reset could not be proven absent.
+    // account over a store whose pending reset could not be proven absent. The stage
+    // assertion fails if that catch throws another stage than `.markerUnreadable`, which
+    // a launch restore reads as "nothing was changed" (`AuthRestorePreparationPolicy`),
+    // and the keychain assertions if anything is written before it.
     func testAccountPreparationFailsClosedWhenCleanupMarkerReadIsIndeterminate() async {
         struct MarkerReadFailure: Error {}
         let keychain = MockKeychainService()
@@ -1859,18 +1862,280 @@ final class AuthSessionTests: XCTestCase {
             fetchStoredAccountEmails: { [] }
         )
 
-        do {
+        let stage = await isolationStage(thrownBy: {
             try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
-            XCTFail("An indeterminate marker read must block account publication")
-        } catch let error as AuthError {
-            guard case .localAccountIsolationFailed = error else {
-                return XCTFail("Unexpected auth error: \(error)")
-            }
-        } catch {
-            XCTFail("Unexpected error: \(error)")
-        }
+        })
 
+        XCTAssertEqual(stage, .markerUnreadable, "An indeterminate marker read must block account publication")
         XCTAssertEqual(resetScript.attemptCount, 0)
+        XCTAssertEqual(keychain.saveCallCount, 0, "Nothing is written before the marker is read")
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    // MARK: - Account preparation stages (architecture review 2026-11, account-boundary-auth#4)
+
+    // Revert-check: fails if the `inspectLocalMailboxStore()` catch of
+    // `prepareLocalStoreForAuthenticatedAccount` throws another stage than
+    // `.storeUninspectable`, or if anything is written to the keychain before the store
+    // has been inspected.
+    func testAccountPreparation_storeInspectionFails_throwsStoreUninspectableWithoutKeychainWrite() async {
+        struct InspectionFailure: Error {}
+        let keychain = MockKeychainService()
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { throw InspectionFailure() }
+        )
+
+        let stage = await isolationStage(thrownBy: {
+            try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+        })
+
+        XCTAssertEqual(stage, .storeUninspectable)
+        XCTAssertEqual(resetScript.attemptCount, 0)
+        XCTAssertEqual(keychain.saveCallCount, 0)
+        XCTAssertEqual(keychain.deleteCallCount, 0)
+    }
+
+    // Revert-check: fails if the persistence of the reset marker goes back into the
+    // reset's own do/catch (it then throws `.resetFailed`), or its catch throws another
+    // stage than `.resetRequired`.
+    func testAccountPreparation_resetMarkerCannotBeWritten_throwsResetRequiredBeforeTheReset() async {
+        struct MarkerWriteFailure: Error {}
+        let keychain = MockKeychainService()
+        keychain.failNextSave(
+            for: KeychainService.Key.localStoreResetRequired.rawValue,
+            with: MarkerWriteFailure()
+        )
+        let resetScript = AuthSessionStoreResetScript()
+        let session = makeAuthSession(
+            keychainService: keychain,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        let stage = await isolationStage(thrownBy: {
+            try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+        })
+
+        XCTAssertEqual(stage, .resetRequired)
+        XCTAssertEqual(resetScript.attemptCount, 0, "No reset runs without its durable marker")
+    }
+
+    // Revert-check: fails if a failed `performDurableLocalCleanup()` in
+    // `prepareLocalStoreForAuthenticatedAccount` is thrown under another stage than
+    // `.resetFailed`.
+    func testAccountPreparation_storeResetFails_throwsResetFailed() async {
+        let resetScript = AuthSessionStoreResetScript(failuresBeforeSuccess: 1)
+        let session = makeAuthSession(
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        let stage = await isolationStage(thrownBy: {
+            try await session.prepareLocalStoreForAuthenticatedAccount("new@example.com")
+        })
+
+        XCTAssertEqual(stage, .resetFailed)
+        XCTAssertEqual(resetScript.attemptCount, 1)
+    }
+
+    // Revert-check: fails if the `removeMailboxFilesLeftByStoreRecovery()` catch of
+    // `prepareLocalStoreForAuthenticatedAccount` throws another stage than
+    // `.recoveryFileRemovalFailed`.
+    func testAccountPreparation_recoveryFileRemovalFails_throwsRecoveryFileRemovalFailed() async {
+        let fixture = RecoveryResetFixture(
+            markerSet: true,
+            keychainEmail: "person@example.com",
+            htmlCleanupFailures: 1
+        )
+        let session = fixture.makeSession(in: self)
+
+        let stage = await isolationStage(thrownBy: {
+            try await session.prepareLocalStoreForAuthenticatedAccount("person@example.com")
+        })
+
+        XCTAssertEqual(stage, .recoveryFileRemovalFailed)
+        XCTAssertEqual(fixture.htmlCleanup.attemptCount, 1)
+        XCTAssertEqual(fixture.storeReset.attemptCount, 0)
+    }
+
+    // MARK: - Launch restore over a refused preparation (account-boundary-auth#4)
+
+    // A launch restore whose preparation could not read the reset marker changed nothing:
+    // it keeps the Google session and holds the account for a later attempt. Until
+    // 2026-11-27 its catch cleared the session, and the user signed in again over an
+    // intact mailbox, with the sync timestamps gone.
+    // Revert-check: fails if the restore callback's preparation catch clears the session
+    // for every refusal (`clearFailedGoogleSession()` without asking
+    // `AuthRestorePreparationPolicy`), if `restoreDisposition(after:)` maps
+    // `.markerUnreadable` to `.discardCredentials`, or if the `.retryKeepingCredentials`
+    // case stops setting `heldFailure`.
+    func testRestore_resetMarkerUnreadableDuringPreparation_keepsCredentialsAndHoldsAccount() async {
+        let restore = RestorePreparationFixture()
+        let keychain = restore.keychain
+        let session = makeRestoringSession(restore, beforeAnswering: {
+            // The launch's own read of the marker has passed; the preparation's fails.
+            keychain.failNextLoad(
+                for: KeychainService.Key.localStoreResetRequired.rawValue,
+                with: KeychainError.unhandledError(status: errSecInteractionNotAllowed)
+            )
+        })
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        assertRestoreKeptCredentialsAndHeld(session, restore)
+    }
+
+    // Revert-check: fails if `restoreDisposition(after:)` maps `.storeUninspectable` to
+    // `.discardCredentials`, or if the restore callback's preparation catch clears the
+    // session for every refusal.
+    func testRestore_storeUninspectableDuringPreparation_keepsCredentialsAndHoldsAccount() async {
+        struct InspectionFailure: Error {}
+        let restore = RestorePreparationFixture()
+        let session = makeRestoringSession(restore, fetchStoredAccountEmails: { throw InspectionFailure() })
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        assertRestoreKeptCredentialsAndHeld(session, restore)
+    }
+
+    // A reset that did not finish has already changed things, and its marker signs the
+    // user out at the next launch by design: the restore still rejects the session.
+    // Revert-check: fails if `restoreDisposition(after:)` maps `.resetFailed` to
+    // `.retryKeepingCredentials`, or if the catch's `.discardCredentials` case stops
+    // calling `clearFailedGoogleSession()`.
+    func testRestore_storeResetFailsDuringPreparation_clearsGoogleSession() async {
+        let restore = RestorePreparationFixture()
+        let resetScript = AuthSessionStoreResetScript(failuresBeforeSuccess: 1)
+        let session = makeRestoringSession(
+            restore,
+            resetCoreDataStore: { try resetScript.reset() },
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertEqual(resetScript.attemptCount, 1)
+        assertRestoreClearedGoogleSession(session, restore)
+    }
+
+    // Revert-check: fails if `restoreDisposition(afterPreparationFailure:)` keeps the
+    // credentials for `AuthError.missingAccountEmail`.
+    func testRestore_restoredUserWithNoEmail_clearsGoogleSession() async {
+        let restore = RestorePreparationFixture()
+        let session = makeRestoringSession(restore, restoredEmail: nil)
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        assertRestoreClearedGoogleSession(session, restore)
+    }
+
+    // Credential persistence is never asked of the policy: once its marker may be
+    // persisted, the next launch rejects the session by design.
+    // Revert-check: fails if the persistence catch in the restore callback stops calling
+    // `clearFailedGoogleSession()`.
+    func testRestore_credentialPersistenceFails_clearsGoogleSession() async {
+        struct TokenSaveFailure: Error {}
+        let restore = RestorePreparationFixture()
+        restore.tokenManager.saveError = TokenSaveFailure()
+        let session = makeRestoringSession(restore)
+
+        let outcome = await session.restorePreviousSignIn()
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertEqual(restore.tokenManager.saveTokensCallCount, 1)
+        assertRestoreClearedGoogleSession(session, restore)
+    }
+
+    // A sign-out queued while the preparation was suspended in its reset owns the
+    // teardown: the reset ends with its `CancellationError`, wrapped as `.resetFailed`,
+    // and the restore must clear nothing itself.
+    // Revert-check: fails if the restore callback's preparation catch stops asking
+    // `isAccountRemovalRequested` before the policy (the policy's `.resetFailed` then calls
+    // `clearFailedGoogleSession()`, a second Google sign-out racing the sign-out's own).
+    func testRestore_signOutQueuedDuringPreparation_leavesTheTeardownToTheSignOut() async {
+        let restore = RestorePreparationFixture()
+        let resetGate = AuthSessionStoreResetGate()
+        let session = makeRestoringSession(
+            restore,
+            resetCoreDataStore: { await resetGate.reset() },
+            fetchStoredAccountEmails: { ["old@example.com"] }
+        )
+
+        let restoreTask = Task { @MainActor in await session.restorePreviousSignIn() }
+        await resetGate.waitUntilFirstResetStarted()
+        let saveCountBeforeSignOut = restore.keychain.saveCallCount
+        let signOutTask = Task { @MainActor in await session.signOut() }
+        // `signOut()` writes its marker and registers its request before its first
+        // suspension, so the save is the registration's witness.
+        await waitUntil { restore.keychain.saveCallCount > saveCountBeforeSignOut }
+        await resetGate.releaseFirstReset()
+
+        let outcome = await restoreTask.value
+        let didSignOut = await signOutTask.value
+
+        XCTAssertEqual(outcome, .retryableFailure)
+        XCTAssertTrue(didSignOut)
+        XCTAssertEqual(
+            restore.events.events.filter { $0 == "google-sign-out" },
+            ["google-sign-out"],
+            "Only the sign-out signs Google out"
+        )
+        XCTAssertNil(session.heldAccount)
+        XCTAssertFalse(session.isAuthenticated)
+    }
+
+    // The restore's preparation catch asks whether a sign-out is queued before anything
+    // else, and only then the policy; and the policy is asked nowhere else, so interactive
+    // sign-in stays all-or-none. Comment lines are skipped.
+    // HONEST SCOPE: this reads source text. The runtime halves are the restore tests
+    // above; interactive sign-in's preparation refusals are not run, because a
+    // `GIDSignInResult` cannot be made (its `init` is unavailable).
+    // Revert-check: fails if the catch's `isAccountRemovalRequested` guard is dropped or
+    // moved after the policy's switch, if the preparation shares its do block with the
+    // credential persistence again, or if another call of
+    // `AuthRestorePreparationPolicy.restoreDisposition` is added to the app.
+    func testRestorePreparationCatch_asksForQueuedSignOutThenThePolicy() throws {
+        let code = try codeLinesWithoutComments("esc-chatmail/Services/Security/AuthSession.swift")
+        let preparation = try XCTUnwrap(code.firstIndex(
+            of: "try await self.prepareLocalStoreForAuthenticatedAccount(user.profile?.email)"
+        ))
+        XCTAssertEqual(code[preparation + 1], "} catch {", "The preparation is alone in its do block")
+        let catchStart = preparation + 1
+        let removalGuard = try XCTUnwrap(code[catchStart...].firstIndex(
+            of: "guard !self.isAccountRemovalRequested else {"
+        ))
+        let policy = try XCTUnwrap(code[catchStart...].firstIndex {
+            $0.contains("AuthRestorePreparationPolicy.restoreDisposition(afterPreparationFailure: error)")
+        })
+        let firstClear = try XCTUnwrap(code[catchStart...].firstIndex {
+            $0.contains("self.clearFailedGoogleSession()")
+        })
+        XCTAssertLessThan(removalGuard, policy)
+        XCTAssertLessThan(policy, firstClear)
+        XCTAssertEqual(
+            Array(code[(removalGuard + 1)...(removalGuard + 3)]),
+            ["restoredUser.restoreOutcome = .retryableFailure", "return", "}"],
+            "A queued sign-out returns with nothing cleared"
+        )
+
+        var callers: [String] = []
+        for path in try repositorySwiftFilePaths(under: "esc-chatmail")
+        where !path.hasSuffix("/AuthRestorePreparationPolicy.swift") {
+            let calls = try codeLinesWithoutComments(path)
+                .filter { $0.contains("AuthRestorePreparationPolicy.restoreDisposition") }
+                .count
+            if calls > 0 {
+                callers.append("\(path) \(calls)")
+            }
+        }
+        XCTAssertEqual(callers, ["esc-chatmail/Services/Security/AuthSession.swift 1"])
     }
 
     func testAccountPreparationClearsParticipantCachesBeforeReopeningMismatchedStore() async throws {
@@ -2457,8 +2722,9 @@ final class AuthSessionTests: XCTestCase {
     // Revert-check: `AuthSession.isStoreRecoveryOfAccount` taking an unreadable keychain
     // for the account being prepared. A keychain that cannot be read is not proof that the
     // files are this account's, so they get the full cleanup, as before the exception.
-    // (Throwing instead would not defer the decision: the restore's catch clears the failed
-    // Google session, which deletes the keychain's account.)
+    // (Throwing instead was ruled out when every refused preparation cleared the failed
+    // Google session; a nothing-changed stage now keeps it, and whether this read should be
+    // one is open: see `AuthSession.isStoreRecoveryOfAccount`.)
     func testAccountPreparation_recoveryMarkerButKeychainUnreadable_runsFullCleanup() async throws {
         let fixture = RecoveryResetFixture(markerSet: true, keychainEmail: "person@example.com")
         let session = fixture.makeSession(
@@ -3689,6 +3955,145 @@ final class AuthSessionTests: XCTestCase {
     private func makeDefaults() -> UserDefaults {
         UserDefaults(suiteName: "AuthSessionTests.\(UUID().uuidString)")!
     }
+
+    /// The stage `body` threw `AuthError.localAccountIsolationFailed` with; nil, and a
+    /// failure, for any other ending.
+    private func isolationStage(
+        thrownBy body: () async throws -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async -> LocalAccountIsolationStage? {
+        do {
+            try await body()
+            XCTFail("Expected the account preparation to refuse", file: file, line: line)
+            return nil
+        } catch {
+            guard let stage = (error as? AuthError)?.localAccountIsolationStage else {
+                XCTFail("Unexpected error: \(error)", file: file, line: line)
+                return nil
+            }
+            return stage
+        }
+    }
+
+    /// A launch restore over `restore`'s earlier launch, whose SDK restore answers with a
+    /// `StubGoogleUser` for `restoredEmail`. `beforeAnswering` runs first, after the
+    /// launch's own reads of the markers.
+    private func makeRestoringSession(
+        _ restore: RestorePreparationFixture,
+        restoredEmail: String? = RestorePreparationFixture.accountEmail,
+        beforeAnswering: @escaping @MainActor @Sendable () -> Void = {},
+        resetCoreDataStore: @escaping @Sendable () async throws -> Void = {},
+        fetchStoredAccountEmails: @escaping @Sendable () async throws -> [String] = {
+            [RestorePreparationFixture.accountEmail]
+        }
+    ) -> AuthSession {
+        let tokenManager = restore.tokenManager
+        let events = restore.events
+        return makeAuthSession(
+            tokenManagerProvider: { tokenManager },
+            keychainService: restore.keychain,
+            hasPreviousGoogleSignIn: { true },
+            googleSignInKeychainPresence: { .present },
+            restorePreviousGoogleSignIn: { completion in
+                beforeAnswering()
+                completion(StubGoogleUser(email: restoredEmail), nil)
+            },
+            signOutGoogleSession: { events.record("google-sign-out") },
+            userDefaults: restore.defaults,
+            resetCoreDataStore: resetCoreDataStore,
+            fetchStoredAccountEmails: fetchStoredAccountEmails
+        )
+    }
+
+    /// The restore kept everything of the earlier launch and held the account.
+    private func assertRestoreKeptCredentialsAndHeld(
+        _ session: AuthSession,
+        _ restore: RestorePreparationFixture,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(restore.events.events, [], "The SDK session stays", file: file, line: line)
+        XCTAssertEqual(restore.tokenManager.clearTokensCallCount, 0, file: file, line: line)
+        XCTAssertEqual(
+            restore.tokenManager.saveTokensCallCount,
+            0,
+            "Nothing of the restored session is persisted before its mailbox is checked",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            restore.keychain.saveCallCount,
+            0,
+            "No keychain write: no cleanup marker, no signed-out verdict",
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(restore.keychain.deleteCallCount, 0, file: file, line: line)
+        XCTAssertTrue(
+            restore.keychain.exists(for: KeychainService.Key.googleUserEmail.rawValue),
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(
+            restore.defaults.double(forKey: SyncConfig.lastSuccessfulSyncTimeKey),
+            restore.lastSuccessfulSyncTime,
+            "The sync timestamps stay",
+            file: file,
+            line: line
+        )
+        XCTAssertFalse(session.isAuthenticated, file: file, line: line)
+        XCTAssertFalse(session.isDurablySignedOut(), file: file, line: line)
+        XCTAssertEqual(
+            session.heldAccount,
+            HeldAccount(email: RestorePreparationFixture.accountEmail, failure: .couldNotRestore),
+            file: file,
+            line: line
+        )
+    }
+
+    /// The restore rejected the session through `clearFailedGoogleSession()`.
+    private func assertRestoreClearedGoogleSession(
+        _ session: AuthSession,
+        _ restore: RestorePreparationFixture,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(restore.events.events, ["google-sign-out"], file: file, line: line)
+        XCTAssertGreaterThanOrEqual(restore.tokenManager.clearTokensCallCount, 1, file: file, line: line)
+        XCTAssertTrue(
+            restore.keychain.exists(for: KeychainService.Key.durableSignedOut.rawValue),
+            "The signed-out verdict is persisted",
+            file: file,
+            line: line
+        )
+        XCTAssertNil(session.heldAccount, file: file, line: line)
+        XCTAssertFalse(session.isAuthenticated, file: file, line: line)
+    }
+
+    private func codeLinesWithoutComments(_ path: String) throws -> [String] {
+        try repositorySource(path)
+            .components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("//") }
+    }
+}
+
+/// A launch restore's earlier launch: the app's keychain names the account, the sync
+/// timestamps are set, and the SDK holds a session for the same account.
+private final class RestorePreparationFixture {
+    static let accountEmail = "person@example.com"
+
+    let keychain = MockKeychainService()
+    let tokenManager = MockTokenManager()
+    let defaults = UserDefaults(suiteName: "AuthSessionTests.restorePreparation.\(UUID().uuidString)")!
+    let events = AuthSessionCleanupRecorder()
+    let lastSuccessfulSyncTime = Date().timeIntervalSince1970 - 600
+
+    init() {
+        keychain.preloadStrings([KeychainService.Key.googleUserEmail.rawValue: Self.accountEmail])
+        defaults.set(lastSuccessfulSyncTime, forKey: SyncConfig.lastSuccessfulSyncTimeKey)
+    }
 }
 
 private final class AuthSessionHeldTombstones: @unchecked Sendable {
@@ -4089,12 +4494,13 @@ private final class RecoveryResetFixture {
     let keychain = MockKeychainService()
     let storeReset = AuthSessionStoreResetScript()
     let fileCleanup = AuthSessionFileCleanupScript(failuresBeforeSuccess: 0)
-    let htmlCleanup = AuthSessionHTMLCleanupScript(failuresBeforeSuccess: 0)
+    let htmlCleanup: AuthSessionHTMLCleanupScript
     let mailboxStart = Date().timeIntervalSince1970 - 90 * 86_400
     private let hasRows: Bool
 
-    init(markerSet: Bool, keychainEmail: String, hasRows: Bool = false) {
+    init(markerSet: Bool, keychainEmail: String, hasRows: Bool = false, htmlCleanupFailures: Int = 0) {
         self.hasRows = hasRows
+        htmlCleanup = AuthSessionHTMLCleanupScript(failuresBeforeSuccess: htmlCleanupFailures)
         defaults.set(mailboxStart, forKey: SyncConfig.mailboxStartTimestampKey)
         if markerSet {
             StoreRecoveryResetMarker.mark(in: defaults)

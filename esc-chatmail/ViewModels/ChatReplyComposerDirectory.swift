@@ -33,9 +33,24 @@ import CoreData
 /// tap), and only the send's own transaction removes it. A composer opened in
 /// that window restored that text, so the sent reply reappeared, ready to be
 /// sent twice, or was doubled when a failed send handed it over too.
+///
+/// And it is what the Mac's quit asks about drafts: it makes the saves the
+/// on-screen composers' debounce still owes (`flushPresentedDraftsForTermination`),
+/// and its `draftWriteTracker` counts every draft write its composers have
+/// scheduled, which the quit waits for as it waits for sends
+/// (`MacAppDelegate.applicationShouldTerminate`, `AppTerminationWait`).
 @MainActor
 final class ChatReplyComposerDirectory {
     static let shared = ChatReplyComposerDirectory()
+
+    /// The gated draft writes of this directory's composers
+    /// (`ChatViewModel.startReplyDraftSave`, `ChatViewModel.handOffUnsentReply`).
+    /// Per directory, so a test's view models never count toward another's.
+    let draftWriteTracker: ReplyDraftWriteTracker
+
+    init() {
+        draftWriteTracker = ReplyDraftWriteTracker()
+    }
 
     /// One reply send from the tap until its content has a durable owner
     /// again: the optimistic message, the open composer that took it back, or
@@ -102,6 +117,38 @@ final class ChatReplyComposerDirectory {
     func withdrawnDraftOwner(for conversationObjectID: NSManagedObjectID) -> ChatViewModel? {
         guard presentedComposers[conversationObjectID] == nil else { return nil }
         return draftOwners[conversationObjectID]?.composer()
+    }
+
+    /// The quit is about to ask whether a draft write is outstanding: each
+    /// on-screen composer with a change its 350 ms debounce has not handed to
+    /// a save yet starts that save now
+    /// (`ChatViewModel.saveReplyDraftChangeForTermination`).
+    ///
+    /// Without this, Cmd-Q, or closing the mailbox window (which quits), within
+    /// 350 ms of the last keystroke lost what was typed since the last save.
+    /// The debounce cannot be left to fire during the quit's wait: a quit
+    /// with nothing outstanding does not wait at all, and while one does,
+    /// AppKit runs the main run loop in `NSModalPanelRunLoopMode`, where the
+    /// debounce's `RunLoop.main` timer probably does not fire (not measured).
+    ///
+    /// The saves are the composers' own and keep every guard a save has: each
+    /// starts in `startReplyDraftSave`, is made only by a composer on screen,
+    /// waits for the cleanup-sensitive gate, and reads the composer there,
+    /// where it writes nothing while the composer is sending, when another
+    /// composer owns the draft, or for another account. A composer whose
+    /// latest change a save has already read is left alone, so a quit writes
+    /// nothing the debounce would not have: an empty composer opened while
+    /// an earlier screen's reply was still unpersisted would otherwise remove
+    /// the stored copy of that reply (`hasUnpersistedSend`).
+    ///
+    /// A composer off screen is not asked. It started its save when it left
+    /// (`ChatViewModel.composerDidDisappear`), and `draftWriteTracker` still
+    /// counts that save if it has not run.
+    func flushPresentedDraftsForTermination() {
+        let composers = presentedComposers.values.compactMap { $0.composer() }
+        for composer in composers {
+            composer.saveReplyDraftChangeForTermination()
+        }
     }
 
     /// Registers a reply send in its tap turn, before anything awaits.

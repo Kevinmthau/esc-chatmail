@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import os.signpost
 
 // MARK: - Sync UI State
@@ -200,57 +199,6 @@ final class CoreDataPerformanceLogger: Sendable {
                "📊 SYNC COMPLETE: %d messages, %d conversations in %.2fs (%.0f msg/s)",
                messagesProcessed, conversationsUpdated, totalDuration,
                totalDuration > 0 ? Double(messagesProcessed) / totalDuration : 0)
-    }
-}
-
-// MARK: - Network Monitor
-
-/// Actor for managing network connectivity monitoring
-/// Provides thread-safe access to network reachability state
-actor NetworkMonitorService {
-    private let networkMonitor = NWPathMonitor()
-    private nonisolated let monitorQueue = DispatchQueue(label: "NetworkMonitor")
-    private var _isReachable = true
-
-    init() {
-        Self.setupNetworkMonitoring(
-            monitor: networkMonitor,
-            queue: monitorQueue,
-            onStatusChange: { [weak self] isReachable, status, isExpensive in
-                Task { [weak self] in
-                    await self?.setReachable(isReachable)
-                }
-                if !isExpensive && isReachable {
-                    Log.debug("Network is reachable", category: .general)
-                } else {
-                    Log.debug("Network status: \(status), expensive: \(isExpensive)", category: .general)
-                }
-            }
-        )
-    }
-
-    deinit {
-        networkMonitor.cancel()
-    }
-
-    /// Static helper to set up network monitoring without actor isolation issues
-    private static func setupNetworkMonitoring(
-        monitor: NWPathMonitor,
-        queue: DispatchQueue,
-        onStatusChange: @escaping @Sendable (Bool, NWPath.Status, Bool) -> Void
-    ) {
-        monitor.pathUpdateHandler = { path in
-            onStatusChange(path.status == .satisfied, path.status, path.isExpensive)
-        }
-        monitor.start(queue: queue)
-    }
-
-    private func setReachable(_ reachable: Bool) {
-        _isReachable = reachable
-    }
-
-    func isNetworkAvailable() -> Bool {
-        return _isReachable
     }
 }
 

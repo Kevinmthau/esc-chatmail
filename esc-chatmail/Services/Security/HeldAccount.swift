@@ -23,7 +23,10 @@ struct HeldAccount: Equatable, Sendable {
         case cannotConnect
         /// The restore stopped for a reason of this device's that a later attempt can
         /// get past: GoogleSignIn's keychain item could not be read (with the app's
-        /// keychain naming an account), or a reopen step failed (`.transientFailure`).
+        /// keychain naming an account), the mailbox could not be checked before
+        /// publishing and nothing was changed (`AuthRestorePreparationPolicy`: the reset
+        /// marker unreadable, the store uninspectable), or a reopen step failed
+        /// (`.transientFailure`).
         case couldNotRestore
     }
 
