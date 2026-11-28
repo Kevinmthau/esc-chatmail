@@ -294,6 +294,89 @@ final class CIDSchemeHandlerTests: XCTestCase {
         XCTAssertEqual(handler.unavailableImageCount, 1)
     }
 
+    /// An inline image's bytes are read off the main thread and answered on it
+    /// (architecture review 2026-11, `web-content-rendering#4`, step 4), for a draft's own
+    /// resource and for a message attachment's stored file.
+    ///
+    /// Revert-check: reading through `loadData` in place of `await readOffMainActor(…)` in
+    /// `handleRequest` fails this.
+    func testInlineImageBytes_areReadOffTheMainThread_andAnsweredOnIt() async throws {
+        let reads = ThreadRecord()
+        let answers = ThreadRecord()
+        let message = MessageBuilder()
+            .withId("message-cid-read-off-main")
+            .withAttachments()
+            .build(in: context)
+        let attachmentId = "att-cid-read-off-main"
+        let localPath = AttachmentPaths.originalPath(messageId: message.id, attachmentId: attachmentId, ext: "png")
+        AttachmentBuilder()
+            .withId(attachmentId)
+            .withFilename("stored.png")
+            .withMimeType("image/png")
+            .withContentId("stored@example.com")
+            .downloaded()
+            .withLocalURL(localPath)
+            .forMessage(message)
+            .build(in: context)
+        try saveViewContext()
+        let stack = testStack!
+        let handler = CIDSchemeHandler(
+            message: message,
+            localResources: [.init(contentID: "draft@example.com", localURL: "draft/path.png", mimeType: "image/png")],
+            apiClient: MockGmailAPIClient(),
+            makeBackgroundContext: { stack.newBackgroundContext() },
+            loadData: { _ in
+                reads.record(Thread.isMainThread)
+                return Data([0x89, 0x50, 0x4E, 0x47])
+            }
+        )
+
+        for contentID in ["draft@example.com", "stored@example.com"] {
+            let finished = expectation(description: "\(contentID) answered")
+            let task = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:\(contentID)"))) {
+                answers.record(Thread.isMainThread)
+                finished.fulfill()
+            }
+            handler.webView(WKWebView(), start: task)
+            await fulfillment(of: [finished], timeout: 2.0)
+            XCTAssertEqual(task.response?.mimeType, "image/png")
+        }
+
+        XCTAssertEqual(reads.values, [false, false], "Both reads ran off the main thread")
+        XCTAssertEqual(answers.values, [true, true], "Both answers came on the main thread")
+    }
+
+    /// A task WebKit stops while its bytes are read is never answered: the check of the task and
+    /// the answer stay together on the main actor, after the read.
+    ///
+    /// HONEST SCOPE: this pins the stop as a whole. No single line's removal fails it: without the
+    /// `activeTasks.isActive` check after the read, `respond` checks the task again. The absence of
+    /// callbacks is read over a bounded window.
+    func testTaskStoppedDuringTheRead_receivesNoCallbacks() async throws {
+        let readStarted = expectation(description: "read started")
+        let release = DispatchSemaphore(value: 0)
+        let handler = CIDSchemeHandler(
+            message: nil,
+            localResources: [.init(contentID: "slow@example.com", localURL: "slow/path.png", mimeType: "image/png")],
+            apiClient: MockGmailAPIClient(),
+            loadData: { _ in
+                readStarted.fulfill()
+                release.wait()
+                return Data([1, 2, 3])
+            }
+        )
+        let task = MockURLSchemeTask(url: try XCTUnwrap(URL(string: "cid:slow@example.com"))) {}
+        let webView = WKWebView()
+
+        handler.webView(webView, start: task)
+        await fulfillment(of: [readStarted], timeout: 2.0)
+        handler.webView(webView, stop: task)
+        release.signal()
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(task.callbackCount, 0)
+    }
+
     func testStoppedTaskReceivesNoCallbacksAfterDelayedFallbackCompletes() async throws {
         let message = MessageBuilder()
             .withId("message-cid-cancel")
@@ -736,6 +819,20 @@ final class CIDSchemeHandlerTests: XCTestCase {
                 sizeEstimate: data.count
             )
         )
+    }
+}
+
+/// Which threads a callback ran on, in order. `@unchecked Sendable`: `lock` guards `recorded`.
+private final class ThreadRecord: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [Bool] = []
+
+    func record(_ isMainThread: Bool) {
+        lock.withLock { recorded.append(isMainThread) }
+    }
+
+    var values: [Bool] {
+        lock.withLock { recorded }
     }
 }
 
