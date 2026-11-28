@@ -215,7 +215,9 @@ final class SyncEngineRunLeaseTests: XCTestCase {
             dataCleanupService: cleanupService,
             conversationManager: conversationManager,
             coreDataStack: coreDataStack,
-            networkMonitor: NetworkMonitorService(),
+            // Never a live path: a host whose path reads unsatisfied would
+            // skip the run before it is admitted, and no lease would begin.
+            networkMonitor: NetworkMonitorService(manualStatus: nil),
             syncRunCoordinator: syncRunCoordinator,
             clock: FakeSyncClock(),
             // The disk this test runs on is no part of it.
