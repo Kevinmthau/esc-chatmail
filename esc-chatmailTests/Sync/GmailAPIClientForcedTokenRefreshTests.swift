@@ -330,30 +330,43 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
         XCTAssertEqual(stepped.sendCount, 1, "The kept token is served from the cache, with no further request")
     }
 
-    // Revert-check: fails if `TokenManager.isRetryableError` counts
-    // `.refreshedIDTokenRefused` as retryable (three token requests, the
-    // preflight's cost before this change), or if
-    // `GmailAPIClient.apiError(forTokenAcquisitionFailure:)` maps it to
-    // `credentialsRevoked` (the user asked to sign in again over a clock).
-    // HONEST SCOPE: `MockTokenRefresher` throws the classified error itself.
-    // That GoogleSignIn's own refresh throws it for AppAuth's -15 is pinned by
-    // `GoogleTokenRefresherTests`.
+    // Revert-check: fails if `GoogleTokenRefresher.refreshTokens()` wraps
+    // GoogleSignIn's error as `refreshFailed` again instead of asking
+    // `GoogleTokenRefreshFailure.error(for:)`, or if
+    // `TokenManager.isRetryableError` counts `.refreshedIDTokenRefused` as
+    // retryable (three token requests either way, the preflight's cost before
+    // this change), or if `GmailAPIClient.apiError(forTokenAcquisitionFailure:)`
+    // maps it to `credentialsRevoked` (the user asked to sign in again over a
+    // clock).
+    // HONEST SCOPE: the real `GoogleTokenRefresher` asks a `StubGoogleUser`,
+    // whose `refreshTokensIfNeeded` answers with AppAuth's -15 in place of
+    // GoogleSignIn's own, which makes the token request. That GoogleSignIn
+    // hands the -15 on unchanged was read from its source, not run.
     func testGetMessage_plainRefreshRefusedForTheDeviceClock_costsOneTokenRequestAndSendsNothing() async throws {
         authSession.isAuthenticated = true
+        let user = StubGoogleUser(
+            email: "user@example.com",
+            refreshError: NSError(
+                domain: "org.openid.appauth.general",
+                code: -15,
+                userInfo: [NSLocalizedDescriptionKey: "Issued at time is more than 600 seconds before or after the current time"]
+            )
+        )
+        authSession.currentUser = user
+        let manager = TokenManager(
+            keychainService: keychain,
+            authSession: authSession,
+            tokenRefresher: GoogleTokenRefresher(authSession: authSession)
+        )
         // A clock set ahead past the token's expiry: `TokenManager` reads the
         // token as expired, and so does GoogleSignIn, which asks Google.
-        try tokenManager.saveTokens(
+        manager.adoptTokens(
             access: Self.rejectedToken,
-            refresh: "refresh-token",
             expirationDate: Date().addingTimeInterval(-60)
         )
-        refresher.errorToThrow = TokenManagerError.refreshedIDTokenRefused(NSError(
-            domain: "org.openid.appauth.general",
-            code: -15,
-            userInfo: [NSLocalizedDescriptionKey: "Issued at time is more than 600 seconds before or after the current time"]
-        ))
+        let generation = manager.cacheEpoch()
         StubURLProtocol.script = [.data(200, Self.messageBody)]
-        let client = makeClient(tokenManager: tokenManager)
+        let client = makeClient(tokenManager: manager)
 
         do {
             _ = try await client.getMessage(id: "m1")
@@ -366,16 +379,15 @@ final class GmailAPIClientForcedTokenRefreshTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
 
-        XCTAssertEqual(refresher.callCount, 1, "One token request: the refusal is not retried")
-        XCTAssertEqual(refresher.forcedCallCount, 0)
+        XCTAssertEqual(user.refreshCallCount, 1, "One token request: the refusal is not retried")
         XCTAssertEqual(StubURLProtocol.requestCount, 0, "No request is sent without a token")
         XCTAssertFalse(authSession.requiresReauthentication, "Nobody is asked to sign in again")
         XCTAssertTrue(authSession.canAccessMailbox)
-        let stored = try keychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
+        XCTAssertEqual(
+            manager.cacheEpoch(),
+            generation,
+            "The credentials are kept: nothing cleared the tokens or retired the sign-in"
         )
-        XCTAssertEqual(stored.accessToken, Self.rejectedToken, "The credentials are kept")
     }
 
     // MARK: - Concurrent 401s on one token

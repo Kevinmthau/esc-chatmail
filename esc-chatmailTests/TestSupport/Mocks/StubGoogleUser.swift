@@ -29,6 +29,10 @@ final class StubGoogleUser: GIDGoogleUser {
     private let stubAccessToken: GIDToken
     private let stubRefreshToken: GIDToken
     private let refreshError: Error?
+    /// Guards `_refreshCallCount`: `GoogleTokenRefresher` asks for the refresh off the
+    /// main actor, and a test reads the count on it.
+    private let refreshCallLock = NSLock()
+    private var _refreshCallCount = 0
 
     /// A user with the Gmail scope granted, whose profile has `email` (no profile at all
     /// for nil).
@@ -58,7 +62,14 @@ final class StubGoogleUser: GIDGoogleUser {
     override var accessToken: GIDToken { stubAccessToken }
     override var refreshToken: GIDToken { stubRefreshToken }
 
+    /// How many times `refreshTokensIfNeeded` was asked: with `refreshError`, how many
+    /// token requests GoogleSignIn would have made.
+    var refreshCallCount: Int {
+        refreshCallLock.withLock { _refreshCallCount }
+    }
+
     override func refreshTokensIfNeeded(completion: @escaping (GIDGoogleUser?, (any Error)?) -> Void) {
+        refreshCallLock.withLock { _refreshCallCount += 1 }
         guard let refreshError else {
             super.refreshTokensIfNeeded(completion: completion)
             return
