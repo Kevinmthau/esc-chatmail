@@ -549,8 +549,9 @@ extension FullEmailOpening {
     /// original is prepared with `.preferHTML`, which skips the tracking-pixel pass the preview
     /// runs, and the CSP has no `img-src`. Pre-rendered for every rich row that rested on screen
     /// for 200 ms, it told senders that the user had read mail the user only scrolled past.
-    /// A web view is made only once the user opens the email (`prepaintAfterExplicitOpen`,
-    /// `prewarmOnOpen`), so the first open of an email renders live and a reopen is still adopted.
+    /// The pool's web views are the reader's own: the first open of an email renders it live, and
+    /// the reader hands that view to the pool as it closes (`adoptClosedReaderWebView`), so a
+    /// reopen is still adopted.
     ///
     /// Deliberately an extension method and not a requirement, so no conformer can give it a width.
     func warmVisibleRow(request: OriginalEmailWarmRequest, message: Message?) async {
@@ -612,6 +613,33 @@ protocol FullEmailWebViewAdopting: AnyObject {
     /// still shows the view and reloads its own content into it (one still hosted off screen is
     /// torn down as usual). The prepared payload is kept.
     func discard(messageId: String, webView: WKWebView)
+
+    /// Takes the web view of a reader that rendered live, as it closes, so the next open of the
+    /// same email adopts it (`FullEmailWebViewManager.adoptClosedReaderWebView`). False when the
+    /// pool will not keep it; the reader then scrubs its view as before.
+    func adoptClosedReaderWebView(
+        messageId: String,
+        sourceSignature: String,
+        wrappedHTML: String,
+        message: Message?,
+        width: CGFloat,
+        webView: LayoutAwareWKWebView,
+        cidHandler: CIDSchemeHandler
+    ) -> Bool
+}
+
+extension FullEmailWebViewAdopting {
+    func adoptClosedReaderWebView(
+        messageId: String,
+        sourceSignature: String,
+        wrappedHTML: String,
+        message: Message?,
+        width: CGFloat,
+        webView: LayoutAwareWKWebView,
+        cidHandler: CIDSchemeHandler
+    ) -> Bool {
+        false
+    }
 }
 
 // MARK: - Live full-reader account boundary
@@ -977,9 +1005,12 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 ///
 /// Prepared HTML warming always runs. A visible row warms the HTML only (`warmVisibleRow`, which
 /// passes no width), so nothing loads the original's remote resources for mail the user has not
-/// opened. Off-screen `WKWebView` pre-rendering starts only after the user opens the full original
-/// email (`prepaintAfterExplicitOpen`, `prewarmOnOpen` with the reader's measured width), making
-/// later opens eligible for checkout. It is on by default and governed by
+/// opened. The pool's web views are the reader's own: a reader that rendered an email live hands its
+/// painted view over as it closes (`adoptClosedReaderWebView`), and a reader that adopted one checks
+/// it back in, so a reopen is adopted and no open renders a second copy off screen.
+/// `prepaintAfterExplicitOpen` and a `warm` given a width can still render one, but since
+/// `web-content-rendering#2`'s step 4 nothing in the app asks for that. Adoption is on by default
+/// and governed by
 /// `FullEmailWebViewAdoptionPolicy`, whose only switch is the kill switch
 /// (`-ESCDisableFullEmailWebViewAdoption` / `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`).
 @MainActor
@@ -1138,10 +1169,13 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
     /// payload ready for the reader. Given a width, and unless the adoption kill switch is set
     /// (`FullEmailWebViewAdoptionPolicy.isEnabled` is false), also pre-renders an off-screen WebView.
-    /// Only an open's own warm passes a width: a visible row calls `warmVisibleRow`, which passes
+    /// No caller in the app passes a width now: a visible row calls `warmVisibleRow`, which passes
     /// none, because a WebView fetches every remote resource of the original (its open pixels
     /// included: the original is not run through the preview's tracking-pixel pass, and the CSP has
-    /// no `img-src`). Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
+    /// no `img-src`), and an open's prewarm passes none either, because the reader renders the
+    /// email live and hands its view to the pool (`adoptClosedReaderWebView`). A width remembered
+    /// for the remote-image fallback's re-warm comes from an earlier warm, so it is nil too. Cheap
+    /// to call repeatedly: it no-ops when up-to-date state is already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
         guard acceptsAccountWork else { return }
         let warmOperationID = UUID()
@@ -1256,9 +1290,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         applyEvictions(bookkeeping.touch(request.messageId))
     }
 
-    /// Starts or promotes a matching full-interactive WebView for checkout only after the user
-    /// explicitly opens the full original email. A new prepaint cannot help the current open because
-    /// the reader only attempts checkout once, but it can make later opens instant.
+    /// Starts or promotes a matching full-interactive WebView for checkout. A new prepaint cannot
+    /// help the current open because the reader only attempts checkout once, but it can make later
+    /// opens instant. No app code calls it with a width since the reader hands its own view to the
+    /// pool (`adoptClosedReaderWebView`): an open that also prepainted rendered every email twice.
     func prepaintAfterExplicitOpen(
         request: OriginalEmailWarmRequest,
         message: Message,
@@ -1585,6 +1620,80 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         if !entry.isCheckedOut {
             teardown(entry)
         }
+    }
+
+    /// Keeps the web view of a reader that rendered an email live and has closed, so the next
+    /// open of that email adopts it instead of rendering it again (architecture review 2026-11,
+    /// `web-content-rendering#2`, step 4). Before, the open itself pre-rendered a second copy off
+    /// screen while the live reader showed the first (`prepaintAfterExplicitOpen`, at each width the
+    /// reader was laid out at): two renders, and two loads of every remote resource, for each
+    /// open. The view the user saw is the pooled view now, so the adopted
+    /// render is the live one by construction.
+    ///
+    /// The pool takes it only as it would have made it: for the message's current prepared
+    /// payload (same source signature and the same wrapped HTML, which is what the next open's
+    /// `preparedOpenArtifact` hands the reader, so its checkout key matches), with adoption on,
+    /// account work open, and no checked-out entry for the message. An idle entry for the message
+    /// is replaced. The reader's coordinator asks only for a view whose current content has been
+    /// confirmed painted and needs no reload (`FullEmailReaderWebView.Coordinator`). The view gets
+    /// the pool's own delegate, so a WebContent termination off screen drops it as for any pooled
+    /// view, and it is torn down, released and scrubbed like one.
+    func adoptClosedReaderWebView(
+        messageId: String,
+        sourceSignature: String,
+        wrappedHTML: String,
+        message: Message?,
+        width: CGFloat,
+        webView: LayoutAwareWKWebView,
+        cidHandler: CIDSchemeHandler
+    ) -> Bool {
+        guard acceptsAccountWork,
+              EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
+              width > 1,
+              let prepared = preparedPayloads.entry(for: messageId),
+              prepared.payload.presentation == .html,
+              prepared.payload.sourceSignature == sourceSignature,
+              prepared.payload.html == wrappedHTML else {
+            return false
+        }
+        if let existing = entries[messageId] {
+            guard !existing.isCheckedOut else { return false }
+            teardown(existing)
+            entries.removeValue(forKey: messageId)
+        }
+
+        let key = makePreRenderKey(
+            messageId: messageId,
+            sourceSignature: sourceSignature,
+            wrappedHTML: wrappedHTML,
+            message: message,
+            width: width
+        )
+        let delegate = WarmNavigationDelegate()
+        let entry = Entry(
+            key: key,
+            request: prepared.request,
+            payload: prepared.payload,
+            prepaintSource: .explicitOpen,
+            webView: webView,
+            cidHandler: cidHandler,
+            delegate: delegate
+        )
+        entry.didFinishInitialLoad = true
+        delegate.onFinish = { [weak self, weak entry] in
+            self?.finalizeWarm(entry)
+        }
+        delegate.onTerminate = { [weak self, weak entry] in
+            self?.handleWarmWebContentTermination(entry)
+        }
+        webView.navigationDelegate = delegate
+        webView.onLayoutChange = nil
+        cidHandler.message = nil
+        webView.resetScrollPosition()
+        host.host(webView, width: CGFloat(key.widthBucket))
+        entries[messageId] = entry
+        applyEvictions(bookkeeping.touch(messageId))
+        return entries[messageId] === entry
     }
 
     // MARK: Invalidation

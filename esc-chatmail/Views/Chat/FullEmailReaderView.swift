@@ -17,14 +17,14 @@ struct FullEmailReaderView: View {
 
     var body: some View {
         GeometryReader { geometry in
+            // The reader renders nothing off screen at its width (architecture review 2026-11,
+            // `web-content-rendering#2`, step 4): a second copy beside the live one cost every open
+            // two renders and two loads of each remote resource. A reopen is still adopted,
+            // because the reader hands the view it rendered to the pool as it closes
+            // (`FullEmailWebViewAdopting.adoptClosedReaderWebView`), and an open with nothing
+            // prepared has its HTML prepared by `FullEmailReaderCoordinator.openSession`.
             content(readerWidth: geometry.size.width)
                 .frame(width: geometry.size.width, height: geometry.size.height)
-                .onAppear {
-                    session.prepareForMeasuredReaderWidth(geometry.size.width)
-                }
-                .onChange(of: geometry.size.width) { _, newWidth in
-                    session.prepareForMeasuredReaderWidth(newWidth)
-                }
         }
         .presentationDragIndicator(.visible)
         .onReceive(NotificationCenter.default.publisher(for: HTMLContentLoader.remoteImageAttachmentFallbackDidWarmNotification)) { notification in
@@ -44,14 +44,18 @@ struct FullEmailReaderView: View {
     @ViewBuilder
     private func content(readerWidth: CGFloat) -> some View {
         switch session.readerState {
-        case .preparedArtifact(let artifact, placeholder: _):
+        // One case for both: every prepared open moves to `.loadedArtifact` when its load
+        // resolves (`FullEmailOpenSession.applyLoadedSource`), and as two cases of the switch the
+        // move rebuilt the reader's web view. SwiftUI makes the new view before it dismantles the
+        // old one (measured in a hosted probe, iOS 27.0 simulator, 2026-11-28), so the new view's
+        // checkout missed the entry the old one still held and the adopted email rendered live a
+        // second time, loading its remote resources again.
+        case .preparedArtifact(let artifact, placeholder: _), .loadedArtifact(let artifact, placeholder: _):
             loadedContent(artifact: artifact, readerWidth: readerWidth)
         case .loading(let placeholder):
             loadingContent(placeholder: placeholder, isRecovering: false)
         case .recovering(let placeholder):
             loadingContent(placeholder: placeholder, isRecovering: true)
-        case .loadedArtifact(let artifact, placeholder: _):
-            loadedContent(artifact: artifact, readerWidth: readerWidth)
         case .retryableFailure(let placeholder, reason: _):
             failureContent(placeholder: placeholder, allowsRetry: true)
         case .unrecoverableFailure(let placeholder, reason: _):
@@ -117,11 +121,9 @@ struct FullEmailReaderView: View {
             }
             .onAppear {
                 handleLoadedContentSignature(contentSignature)
-                session.prepareForMeasuredReaderWidth(readerWidth)
             }
             .onChange(of: contentSignature) { _, newSignature in
                 handleLoadedContentSignature(newSignature)
-                session.prepareForMeasuredReaderWidth(readerWidth)
             }
         } else {
             Color.clear

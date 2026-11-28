@@ -29,7 +29,13 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         super.tearDown()
     }
 
-    func testOpenSession_readyPreparedArtifactCreatesPresentableSessionAndPrepaintsAfterMeasuredWidth() {
+    /// An open with its artifact prepared renders nothing off screen and prewarms nothing
+    /// (architecture review 2026-11, `web-content-rendering#2`, step 4): the reader hands its own
+    /// view to the pool as it closes instead (`FullEmailWebViewAdopting.adoptClosedReaderWebView`).
+    ///
+    /// Revert-check: dropping `if prepared == nil` around `openSession`'s `prewarmOnOpen` fails
+    /// this.
+    func testOpenSession_readyPreparedArtifact_isPresentableAndRendersNothingOffScreen() async {
         let message = makeMessage(
             id: "prepared-message",
             subject: "Prepared subject",
@@ -53,54 +59,13 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
         XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
         XCTAssertEqual(opener.preparedPayloadRequests.first?.request.messageId, "prepared-message")
         XCTAssertNil(opener.preparedPayloadRequests.first?.width)
+
         XCTAssertTrue(opener.prepaintRequests.isEmpty)
-
-        session.prepareForMeasuredReaderWidth(390)
-
-        XCTAssertEqual(opener.prepaintRequests.count, 1)
-        XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.message.id, "prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.artifact, artifact)
-        XCTAssertEqual(opener.prepaintRequests.first?.width, 390)
         XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
-    func testOpenSession_preparedArtifactOnlyPrepaintsOncePerMeasuredWidth() {
-        let message = makeMessage(
-            id: "warming-prepared-message",
-            subject: "Prepared subject",
-            senderEmail: "sender@example.com",
-            senderName: "Sender",
-            snippet: "Prepared preview"
-        )
-        let artifact = makeArtifact(message: message)
-        let opener = MockFullEmailReaderOpener(
-            preparedArtifact: artifact,
-            checkoutAvailability: .warming
-        )
-        let coordinator = FullEmailReaderCoordinator(fullEmailOpener: opener)
-
-        let session = coordinator.openSession(for: message)
-
-        XCTAssertTrue(session.message === message)
-        XCTAssertEqual(session.initialArtifact, artifact)
-        XCTAssertEqual(session.readerState, .preparedArtifact(artifact, placeholder: session.immediatePlaceholder))
-        XCTAssertEqual(opener.preparedPayloadRequests.count, 1)
-        XCTAssertTrue(opener.prepaintRequests.isEmpty)
-
-        session.prepareForMeasuredReaderWidth(390.2)
-        session.prepareForMeasuredReaderWidth(390.4)
-        session.prepareForMeasuredReaderWidth(391)
-
-        XCTAssertEqual(opener.prepaintRequests.count, 2)
-        XCTAssertEqual(opener.prepaintRequests.first?.request.messageId, "warming-prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.message.id, "warming-prepared-message")
-        XCTAssertEqual(opener.prepaintRequests.first?.artifact, artifact)
-        XCTAssertEqual(opener.prepaintRequests.first?.width, 390.2)
-        XCTAssertTrue(opener.prewarmedMessages.isEmpty)
-    }
-
-    func testOpenSession_prepaintsUpdatedArtifactAtPreviouslyMeasuredWidth() async {
+    /// An artifact the session loads to replace the prepared one is not pre-rendered either.
+    func testOpenSession_updatedArtifact_isNotRenderedOffScreen() async {
         let message = makeMessage(
             id: "updated-artifact-prepaint",
             subject: "Prepared subject",
@@ -143,15 +108,11 @@ final class FullEmailReaderCoordinatorTests: XCTestCase {
             onSourceLoaded: { _, _ in }
         )
 
-        session.prepareForMeasuredReaderWidth(390)
         _ = await session.loadOriginalEmail(for: session.loadRequest)
-        session.prepareForMeasuredReaderWidth(390)
 
-        XCTAssertEqual(opener.prepaintRequests.count, 2)
-        XCTAssertEqual(opener.prepaintRequests[0].artifact, initialArtifact)
-        XCTAssertEqual(opener.prepaintRequests[1].artifact.sourceSignature, "updated-source")
-        XCTAssertEqual(opener.prepaintRequests[1].artifact.body, .html(updatedHTML))
-        XCTAssertEqual(opener.prepaintRequests[1].width, 390)
+        XCTAssertEqual(session.readerState.artifact?.sourceSignature, "updated-source")
+        XCTAssertTrue(opener.prepaintRequests.isEmpty)
+        XCTAssertTrue(opener.prewarmedMessages.isEmpty)
     }
 
     func testOpenSession_payloadMissCreatesPlaceholderAndStartsPrewarmFollowUp() {

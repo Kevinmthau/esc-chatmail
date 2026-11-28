@@ -169,12 +169,6 @@ private enum OriginalEmailTimedLoadResult {
     case timedOut
 }
 
-private struct PrepaintedReaderArtifactWidthKey: Hashable {
-    let sourceSignature: String
-    let renderSignature: String
-    let widthBucket: Int
-}
-
 struct OriginalEmailLoadIdentity: Equatable, Sendable {
     let baseLoadKey: String
 
@@ -284,14 +278,12 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
     private let loadTimeout: TimeInterval
     private let recoveringDelay: TimeInterval
     private weak var fullEmailOpener: (any FullEmailOpening)?
-    private var fullEmailAccountGeneration: FullEmailAccountWorkGeneration?
     private var onSourceLoaded: (@MainActor (Message, OriginalEmailSource) -> Void)?
     private var activeBaseLoadKey: String?
     private var activeLoadTaskKey: String?
     private var timedOutSourceObservationTask: Task<Void, Never>?
     private var timedOutSourceTaskID: UUID?
     private var readerStartLogged = false
-    private var prepaintedArtifactWidthKeys: Set<PrepaintedReaderArtifactWidthKey> = []
     private var activeSourceTasks: [UUID: Task<OriginalEmailSource?, Never>] = [:]
     private(set) var isInvalidatedForAccountTransition = false
 
@@ -360,7 +352,6 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         self.retainedImmediatePlaceholder = immediatePlaceholder
         self.retainedWebViewAdoptionProvider = fullEmailOpener as? any FullEmailWebViewAdopting
         self.fullEmailOpener = fullEmailOpener
-        self.fullEmailAccountGeneration = fullEmailOpener?.captureAccountWorkGeneration()
         self.originalEmailSourceLoader = originalEmailSourceLoader
         self.loadTimeout = originalEmailLoadTimeout
         self.recoveringDelay = recoveringDelay
@@ -425,39 +416,6 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         }
 
         return source
-    }
-
-    func prepareForMeasuredReaderWidth(_ width: CGFloat) {
-        guard !isInvalidatedForAccountTransition,
-              width > 1,
-              let message else {
-            return
-        }
-        guard let artifact = readerState.artifact else {
-            fullEmailOpener?.prewarmOnOpen(message: message, width: width)
-            return
-        }
-
-        guard case .html = artifact.body else {
-            return
-        }
-
-        let prepaintKey = PrepaintedReaderArtifactWidthKey(
-            sourceSignature: artifact.sourceSignature,
-            renderSignature: artifact.renderSignature,
-            widthBucket: Int(width.rounded())
-        )
-        guard prepaintedArtifactWidthKeys.insert(prepaintKey).inserted else {
-            return
-        }
-
-        fullEmailOpener?.prepaintAfterExplicitOpen(
-            request: request,
-            message: message,
-            artifact: artifact,
-            width: width,
-            expectedAccountGeneration: fullEmailAccountGeneration
-        )
     }
 
     @discardableResult
@@ -740,7 +698,6 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         activeHTMLSourceSignature = nil
         activeBaseLoadKey = nil
         activeLoadTaskKey = nil
-        prepaintedArtifactWidthKeys.removeAll(keepingCapacity: false)
         readerStartLogged = false
 
         message = nil
@@ -750,7 +707,6 @@ final class FullEmailOpenSession: ObservableObject, Identifiable {
         retainedImmediatePlaceholder = nil
         retainedWebViewAdoptionProvider = nil
         fullEmailOpener = nil
-        fullEmailAccountGeneration = nil
         onSourceLoaded = nil
 
         return sourceTasks

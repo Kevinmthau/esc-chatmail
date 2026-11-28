@@ -804,7 +804,6 @@ final class FullEmailWebViewManagerPreparedPayloadEvictionTests: XCTestCase {
 
         manager.reopenAccountWork()
         session.retry()
-        session.prepareForMeasuredReaderWidth(390)
         XCTAssertEqual(session.readerState, .invalidated)
         XCTAssertFalse(manager.hasPreparedPayloadForTesting(messageId: message.id))
     }

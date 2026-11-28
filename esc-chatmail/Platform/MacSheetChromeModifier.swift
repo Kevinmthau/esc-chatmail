@@ -20,8 +20,9 @@ import SwiftUI
 ///   ideal. A reader whose email is ready makes its WebView in the first layout, and a
 ///   pre-rendered WebView is adopted only at the width it was rendered at
 ///   (`FullEmailWebViewPreRenderKey`), so no open could adopt one.
-/// - The sheet's window could be resized, and the reader asks for a new pre-render at every
-///   whole point of width it is laid out at (`FullEmailOpenSession.prepareForMeasuredReaderWidth`).
+/// - The sheet's window could be resized, and a reader's view is handed to the pool and adopted
+///   at the width it was laid out at (`FullEmailWebViewManager.adoptClosedReaderWebView`), so a
+///   reopen after a resize to another whole point of width renders again.
 /// - `appSheet(item:)` reuses the sheet's window when one item follows another (Participants,
 ///   then the Contacts sheet), and a fitted window kept what it had: the Contacts sheet could
 ///   be resized, and a sheet with a size opened at the size of the one before it.

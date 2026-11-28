@@ -88,7 +88,13 @@ struct FullEmailReaderWebView: WebViewRepresentable {
     }
 
     static func dismantleWebView(_ webView: WKWebView, coordinator: Coordinator) {
-        let wasRehosted = coordinator.reclaimPrerenderedWebViewIfNeeded(webView)
+        // An adopted view goes back to the pool by its checkin and by nothing else: one the pool no
+        // longer takes is scrubbed, never offered as a live render, which it was not. A view this
+        // reader rendered live is offered to the pool, so the next open of the email adopts what
+        // the user just saw instead of rendering again.
+        let wasRehosted = coordinator.showsAdoptedPrerenderedWebView
+            ? coordinator.reclaimPrerenderedWebViewIfNeeded(webView)
+            : coordinator.handOverLiveWebViewIfPossible(webView)
         if wasRehosted {
             coordinator.detachAfterSuccessfulCheckin()
         } else {
@@ -157,6 +163,11 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         var needsReload: Bool {
             coordination.needsReload(content: parent.htmlContent, reloadSignature: reloadSignature())
+        }
+
+        /// The reader shows a view it adopted from the pool, not one it rendered.
+        var showsAdoptedPrerenderedWebView: Bool {
+            adoptedPrerenderedMessageId != nil
         }
 
         var hasAdoptedPrerenderedWebViewForTesting: Bool {
@@ -267,6 +278,16 @@ struct FullEmailReaderWebView: WebViewRepresentable {
 
         func loadContent(in webView: WKWebView) {
             guard !isInvalidated, !isLoading else { return }
+            // A view adopted from the pool that loads other content (a changed source, an
+            // attachment that arrived) is no longer the pool's pre-render of its key: the pool
+            // drops the entry, the reader keeps the view, as after a WebContent termination, and
+            // at its close the view is offered as a live render, which the hand-over checks
+            // against the current payload, instead of being checked in under the key of content
+            // it no longer shows.
+            if let messageId = adoptedPrerenderedMessageId {
+                adoptedPrerenderedMessageId = nil
+                parent.webViewAdoptionProvider?.discard(messageId: messageId, webView: webView)
+            }
             isLoading = true
             shouldReloadAfterCurrentLoad = false
             recordLoadedSignature()
@@ -345,7 +366,10 @@ struct FullEmailReaderWebView: WebViewRepresentable {
         }
 
         /// Returns an adopted pre-rendered WebView to the pool when the reader is dismantled, so a
-        /// re-open stays instant. No-op for freshly-created (non-adopted) WebViews.
+        /// re-open stays instant. No-op for freshly-created (non-adopted) WebViews. It clears the
+        /// adoption marker before the checkin, so after a refused checkin the view reads as not
+        /// adopted; `dismantleWebView` therefore decides from `showsAdoptedPrerenderedWebView`
+        /// before calling this and never offers such a view as a live one.
         @discardableResult
         func reclaimPrerenderedWebViewIfNeeded(_ webView: WKWebView) -> Bool {
             guard let messageId = adoptedPrerenderedMessageId else {
@@ -353,6 +377,38 @@ struct FullEmailReaderWebView: WebViewRepresentable {
             }
             adoptedPrerenderedMessageId = nil
             return parent.webViewAdoptionProvider?.checkin(messageId: messageId, webView: webView) == true
+        }
+
+        /// Offers this reader's own web view to the pool as the reader closes
+        /// (`FullEmailWebViewAdopting.adoptClosedReaderWebView`). Only a view this reader rendered
+        /// live, whose current content's paint was confirmed and which needs no reload (an
+        /// attachment that arrived after the load would change its key), and only with the
+        /// reader's width, message and source signature known. True when the pool took it: the
+        /// caller then detaches this coordinator without scrubbing the view, which is the pool's.
+        @discardableResult
+        func handOverLiveWebViewIfPossible(_ webView: WKWebView) -> Bool {
+            guard !isInvalidated,
+                  adoptedPrerenderedMessageId == nil,
+                  hasConfirmedPaintForCurrentLoad,
+                  !isLoading,
+                  !needsReload,
+                  let layoutAwareWebView = webView as? LayoutAwareWKWebView,
+                  let message = parent.message,
+                  let sourceSignature = parent.sourceSignature,
+                  parent.readerWidth > 1,
+                  let cidHandler,
+                  let provider = parent.webViewAdoptionProvider else {
+                return false
+            }
+            return provider.adoptClosedReaderWebView(
+                messageId: message.id,
+                sourceSignature: sourceSignature,
+                wrappedHTML: parent.htmlContent,
+                message: message,
+                width: parent.readerWidth,
+                webView: layoutAwareWebView,
+                cidHandler: cidHandler
+            )
         }
 
         func completeAdoptionCallbacksIfActive() {
