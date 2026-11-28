@@ -13,11 +13,15 @@ final class ExternalURLOpenerTests: XCTestCase {
     private var queried: [URL] = []
     private var opened: [URL] = []
 
+    /// The schemes these tests give the opener as the app's own, apart from the test host's bundle.
+    private let appURLSchemes: Set<String> = ["com.googleusercontent.apps.123-abc"]
+
     private func open(_ string: String, on platform: AppPlatform, systemCanOpen: Bool) throws {
         let url = try XCTUnwrap(URL(string: string))
         ExternalURLOpener.open(
             url,
             on: platform,
+            appURLSchemes: appURLSchemes,
             systemCanOpen: {
                 queried.append($0)
                 return systemCanOpen
@@ -90,5 +94,34 @@ final class ExternalURLOpenerTests: XCTestCase {
         try open("smb://fileserver.example.com/share", on: .iOS, systemCanOpen: true)
 
         XCTAssertEqual(opened, [URL(string: "smb://fileserver.example.com/share")!])
+    }
+
+    /// iOS's `canOpenURL` accepts the app's own Google sign-in redirect scheme, so the opener
+    /// refuses it before asking (architecture review 2026-11, `security-privacy#6`): a link in an
+    /// email must not reach the app's sign-in redirect handling. Other schemes the query accepts
+    /// still open (`testOpen_oniOS_otherScheme_systemAccepts_reachesSystem`).
+    ///
+    /// Revert-check: removing the app-scheme guard from the `.iOS` case of
+    /// `ExternalURLOpener.open(_:on:appURLSchemes:systemCanOpen:systemOpen:)` fails this.
+    func testOpen_oniOS_appsOwnURLScheme_isRefusedBeforeAskingSystem() throws {
+        try open("com.googleusercontent.apps.123-abc:/oauth2redirect?code=stolen", on: .iOS, systemCanOpen: true)
+        try open("COM.GOOGLEUSERCONTENT.APPS.123-ABC:/oauth2redirect", on: .iOS, systemCanOpen: true)
+
+        XCTAssertEqual(opened, [])
+        XCTAssertEqual(queried, [])
+    }
+
+    /// The app's own schemes are read from its Info.plist, where the redirect scheme is a build
+    /// setting: the test host's bundle registers the resolved `GOOGLE_REDIRECT_URI`, and the
+    /// default the opener uses is that set.
+    ///
+    /// Revert-check: reading `CFBundleURLSchemes` from anything but `CFBundleURLTypes`' entries (an
+    /// empty set) fails this.
+    func testAppURLSchemes_areTheBundlesRegisteredSchemes() {
+        let schemes = EmailLinkSchemePolicy.appURLSchemes(in: .main)
+
+        XCTAssertFalse(schemes.isEmpty)
+        XCTAssertTrue(schemes.allSatisfy { $0.hasPrefix("com.googleusercontent.apps.") }, "\(schemes)")
+        XCTAssertEqual(EmailLinkSchemePolicy.appURLSchemes, schemes)
     }
 }

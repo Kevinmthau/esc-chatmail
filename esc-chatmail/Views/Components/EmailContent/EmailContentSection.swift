@@ -105,8 +105,9 @@ struct EmailContentSection: View {
             await loadHTML(generation: generation)
         }
         // Warm the full original-email HTML while the bubble is visible, so tapping can present
-        // prepared content immediately. Active WebView adoption is policy-gated inside the manager.
-        // Debounced + capacity-bounded (LRU) inside the manager; auto-cancels when the row scrolls away.
+        // prepared content immediately. The HTML only: no WebView is built for mail the user has
+        // not opened (`FullEmailOpening.warmVisibleRow`). Debounced + capacity-bounded (LRU) inside
+        // the manager; auto-cancels when the row scrolls away.
         .task(id: warmFullEmailKey) {
             await warmFullEmailWebViewIfNeeded()
         }
@@ -126,8 +127,9 @@ struct EmailContentSection: View {
 
     /// Warms the wrapped full original-email HTML via `FullEmailWebViewManager` so a tap can skip cold
     /// preparation. Debounced so fast scrolling does not do work for rows that immediately leave; the
-    /// manager bounds total warmed payloads, de-dupes already-warm content, and skips active WebView
-    /// warming only when the adoption kill switch (`FullEmailWebViewAdoptionPolicy`) is set.
+    /// manager bounds total warmed payloads and de-dupes already-warm content. It builds no WebView:
+    /// one would fetch the original's remote images and open pixels for mail the user only scrolled
+    /// past (architecture review 2026-11, `security-privacy#3`; `EmailContentSectionWarmSourceTests`).
     private func warmFullEmailWebViewIfNeeded() async {
         guard await Task.sleepUnlessCancelled(nanoseconds: 200_000_000) else {
             return
@@ -135,10 +137,9 @@ struct EmailContentSection: View {
         guard EmailReaderRenderingConfiguration.enablesPreparedHTMLWarmup else {
             return
         }
-        await fullEmailOpener.warm(
+        await fullEmailOpener.warmVisibleRow(
             request: Self.originalEmailWarmRequest(for: message),
-            message: resolvedMessageForInlineAttachments,
-            width: EmailReaderRenderingConfiguration.currentVisibleRowWarmWidthEstimate()
+            message: resolvedMessageForInlineAttachments
         )
     }
 

@@ -45,6 +45,20 @@ extension MessagePersister {
         return Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
+    /// `fetchLabelsByIds`, but a read that fails throws instead of answering an
+    /// empty dictionary. For a caller that diffs against the answer
+    /// (`ExistingMessageLabelDiff`), where an empty answer would read as "none
+    /// of Gmail's labels has a row" and strip the message's labels.
+    /// Call inside the context's `perform`.
+    nonisolated func fetchLabelsByIdsOrThrow(_ ids: Set<String>, in context: NSManagedObjectContext) throws -> [String: Label] {
+        guard !ids.isEmpty else { return [:] }
+        let request = Label.fetchRequest()
+        request.predicate = NSPredicate(format: "id IN %@", ids)
+        let labels = try context.fetch(request)
+        // The same duplicate tolerance as `fetchLabelsByIds`.
+        return Dictionary(labels.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+    }
+
     /// Saves labels from Gmail API to Core Data with upsert logic
     /// Labels are upserted by ID to prevent duplicate Label rows
     func saveLabels(_ gmailLabels: [GmailLabel], in context: NSManagedObjectContext) async {

@@ -45,7 +45,8 @@ enum AuthRestorePreparationPolicy {
             // past with exactly these credentials.
             return .retryKeepingCredentials
         case .resetRequired:
-            // The store is not this account's to open, and a retry would reset it unasked.
+            // The store is not this account's to open: a retry would reset another
+            // account's mail unasked, or open a mailbox an earlier reset left half removed.
             // The user signs in again, and that sign-in's preparation resets the store.
             return .discardCredentials
         case .resetFailed, .recoveryFileRemovalFailed:

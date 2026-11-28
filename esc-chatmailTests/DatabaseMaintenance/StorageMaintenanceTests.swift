@@ -83,7 +83,7 @@ final class StorageMaintenanceTests: XCTestCase {
         XCTAssertEqual(reader.htmlFileSignature(for: messageId), "missing")
     }
 
-    func testHTMLContentHandler_cleanupOrphanedFiles_preservesValidMessageFiles() {
+    func testHTMLContentHandler_cleanupOrphanedFiles_preservesValidMessageFiles() throws {
         let handler = HTMLContentHandler()
         let keepMessageId = "storage-keep-\(UUID().uuidString)"
         let removeMessageId = "storage-remove-\(UUID().uuidString)"
@@ -102,7 +102,15 @@ final class StorageMaintenanceTests: XCTestCase {
         var validMessageIds = existingMessageIds
         validMessageIds.insert(keepMessageId)
 
-        handler.cleanupOrphanedFiles(validMessageIds: validMessageIds)
+        // Answers for every body already in the host's real `Messages`, so the sweep
+        // removes only the one this test wrote to be removed.
+        let generation = try XCTUnwrap(handler.captureAccountGeneration())
+        let outcome = handler.cleanupOrphanedFiles(
+            expectedGeneration: generation,
+            liveMessageIDs: { $0.intersection(validMessageIds) }
+        )
+
+        XCTAssertEqual(outcome, .completed)
 
         XCTAssertTrue(handler.htmlFileExists(for: keepMessageId))
         XCTAssertFalse(handler.htmlFileExists(for: removeMessageId))

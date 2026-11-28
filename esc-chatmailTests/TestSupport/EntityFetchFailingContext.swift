@@ -7,14 +7,19 @@ import CoreData
 /// orchestrator run without failing the reads that come before it.
 ///
 /// `@unchecked Sendable`: like `ScriptedSaveContext`, the mutable state
-/// (`_failedFetches`, `_succeededFetches`, `_failsFetches`) is guarded by
+/// (`_failedFetches`, `_succeededFetches`, `_failsFetches`,
+/// `_passedFirstFetches`) is guarded by
 /// `lock`; Core Data's own state stays on the context's private queue.
 final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendable {
     private let lock = NSLock()
     private var _failedFetches = 0
     private var _succeededFetches = 0
     private var _failsFetches = true
+    private var _passedFirstFetches = 0
     private let failingEntityName: String
+    /// How many fetches of the entity go through before the failures start:
+    /// a test that fails a later read of a sequence lets the earlier ones by.
+    private let succeedingFirst: Int
 
     /// `concurrencyType` is private-queue unless the code under test touches its context
     /// directly from the main actor (`ConversationListViewModel` fetches on the context it
@@ -22,9 +27,11 @@ final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendab
     init(
         failingEntityName: String,
         coordinator: NSPersistentStoreCoordinator,
-        concurrencyType: NSManagedObjectContextConcurrencyType = .privateQueueConcurrencyType
+        concurrencyType: NSManagedObjectContextConcurrencyType = .privateQueueConcurrencyType,
+        succeedingFirst: Int = 0
     ) {
         self.failingEntityName = failingEntityName
+        self.succeedingFirst = succeedingFirst
         super.init(concurrencyType: concurrencyType)
         persistentStoreCoordinator = coordinator
         mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
@@ -68,6 +75,14 @@ final class EntityFetchFailingContext: NSManagedObjectContext, @unchecked Sendab
     /// `fetch(_:)` overlay calls through to this underscored `__execute(_:)`.
     override func __execute(_ request: NSFetchRequest<NSFetchRequestResult>) throws -> [Any] {
         guard request.entityName == failingEntityName else {
+            return try super.__execute(request)
+        }
+        let passesAsOneOfTheFirst: Bool = lock.withLock {
+            guard _passedFirstFetches < succeedingFirst else { return false }
+            _passedFirstFetches += 1
+            return true
+        }
+        if passesAsOneOfTheFirst {
             return try super.__execute(request)
         }
         guard failsFetches else {

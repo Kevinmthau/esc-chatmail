@@ -41,7 +41,7 @@ final class TokenManagerCacheTests: XCTestCase {
     }
 
     func testGetCurrentToken_servesFromMemoryWithoutKeychainReads() async throws {
-        try manager.saveTokens(access: "cached-token", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
+        manager.adoptTokens(access: "cached-token", expirationDate: Date().addingTimeInterval(3600))
         let readsAfterSave = keychain.loadCallCount
 
         for _ in 0..<3 {
@@ -53,28 +53,35 @@ final class TokenManagerCacheTests: XCTestCase {
         XCTAssertEqual(refresher.callCount, 0)
     }
 
-    func testGetCurrentToken_coldCacheReadsKeychainOnceThenCaches() async throws {
-        // Seed the keychain through a first manager; a second manager shares
-        // the keychain but starts with a cold cache (fresh launch).
-        try manager.saveTokens(access: "persisted-token", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
+    // Revert-check: fails if `getCurrentToken` reads the keychain on a cold
+    // cache again. A launch fills the cache through the restore's adoption,
+    // and a cache that is empty all the same is filled by the refresh, which
+    // asks GoogleSignIn, never by a copy in the keychain (architecture review
+    // 2026-11, `account-boundary-auth#4`).
+    func testGetCurrentToken_coldCache_isFilledByTheRefreshNeverByTheKeychain() async throws {
+        // A second manager shares the keychain, which holds an earlier build's
+        // items, and starts with a cold cache (a fresh launch).
+        try LegacyTokenItems.seed(in: keychain, accessToken: "persisted-token")
         let coldManager = TokenManager(
             keychainService: keychain,
             authSession: authSession,
             tokenRefresher: refresher
         )
+        refresher.accessToken = "from-google-sign-in"
+        refresher.expirationDate = Date().addingTimeInterval(3600)
         let readsBefore = keychain.loadCallCount
 
         let first = try await coldManager.getCurrentToken()
-        XCTAssertEqual(first, "persisted-token")
-        XCTAssertEqual(keychain.loadCallCount, readsBefore + 1, "cold cache pays exactly one keychain read")
+        XCTAssertEqual(first, "from-google-sign-in")
 
         let second = try await coldManager.getCurrentToken()
-        XCTAssertEqual(second, "persisted-token")
-        XCTAssertEqual(keychain.loadCallCount, readsBefore + 1, "the read validates the cache for subsequent requests")
+        XCTAssertEqual(second, "from-google-sign-in")
+        XCTAssertEqual(refresher.callCount, 1, "the refresh validates the cache for subsequent requests")
+        XCTAssertEqual(keychain.loadCallCount, readsBefore, "a cold cache reads nothing from the keychain")
     }
 
     func testClearTokens_invalidatesTheFastPath() async throws {
-        try manager.saveTokens(access: "cached-token", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
+        manager.adoptTokens(access: "cached-token", expirationDate: Date().addingTimeInterval(3600))
         _ = try await manager.getCurrentToken()
 
         try manager.clearTokens()
@@ -85,64 +92,28 @@ final class TokenManagerCacheTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(refresher.callCount, 1)
     }
 
-    func testClearTokensRacingKeychainRead_doesNotRepopulateCache() async throws {
-        // Sign-out race: getCurrentToken misses the cache and reads the
-        // keychain; clearTokens lands after the read returned the old value
-        // but before the cache populate. The racing request may still see
-        // the old token once (the pre-existing one-request bound), but the
-        // cache must stay empty — otherwise the signed-out account's token
-        // is served from memory until expiry (~55 minutes).
-        try manager.saveTokens(access: "old-token", refresh: "r", expirationDate: Date().addingTimeInterval(3600))
-        let coldManager = TokenManager(
-            keychainService: keychain,
-            authSession: authSession,
-            tokenRefresher: refresher
-        )
-        keychain.onLoad = { [weak keychain, weak coldManager] in
-            keychain?.onLoad = nil
-            try? coldManager?.clearTokens()
-        }
-
-        let raced = try await coldManager.getCurrentToken()
-        XCTAssertEqual(raced, "old-token", "the racing request itself may serve the pre-clear token once")
-
-        // Post-clear requests must fall through to refresh (keychain is
-        // empty), not the memory cache; a repopulated cache serves old-token.
-        refresher.errorToThrow = TokenManagerError.invalidCredentials
-        do {
-            let leaked = try await coldManager.getCurrentToken()
-            XCTFail("cache served the signed-out account's token: \(leaked)")
-        } catch {
-            // Expected: no cached token, no keychain entry, refresh fails.
-        }
-        XCTAssertEqual(refresher.callCount, 1, "second request must reach the refresher, not the memory cache")
-    }
-
-    func testSaveTokensGatedOnRetiredEpoch_writesNothing() throws {
+    func testAdoptTokensGatedOnRetiredEpoch_changesNothing() throws {
         // A refresh that finishes after sign-out carries the retired
-        // generation's epoch; its save must write neither cache nor keychain,
-        // or isAuthenticated() would report the signed-out account back true
-        // (surviving relaunch via the keychain).
-        try manager.saveTokens(access: "old", refresh: "old-r", expirationDate: Date().addingTimeInterval(3600))
+        // generation's epoch; its adoption must not fill the cache, or the
+        // next request would be handed the signed-out account's token.
+        manager.adoptTokens(access: "old", expirationDate: Date().addingTimeInterval(3600))
         let epoch = manager.cacheEpoch()
-        try manager.clearTokens() // bumps the epoch, deletes the keychain
+        try manager.clearTokens() // bumps the epoch, clears the cache
 
-        let applied = try manager.saveTokens(
+        let applied = manager.adoptTokens(
             access: "refreshed",
-            refresh: "refreshed-r",
             expirationDate: Date().addingTimeInterval(3600),
             ifCacheEpochMatches: epoch
         )
 
-        XCTAssertFalse(applied, "a save gated on a retired sign-in generation must not apply")
+        XCTAssertFalse(applied, "an adoption gated on a retired sign-in generation must not apply")
         XCTAssertFalse(manager.isAuthenticated())
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+        XCTAssertEqual(keychain.saveCallCount, 0)
     }
 
     // Revert-check: the CancellationError expectation fails if performTokenRefresh
-    // stops throwing when `saveTokens(_:refresh:expirationDate:ifCacheEpochMatches:)`
-    // reports `saved == false` — the pre-branch code logged and handed the
+    // stops throwing when `adoptTokens(access:expirationDate:ifCacheEpochMatches:)`
+    // reports `adopted == false` — the pre-branch code logged and handed the
     // triggering request its token once. A retired generation must yield no
     // usable token at all; this is TokenManager's half of the same
     // retired-generation rejection TokenRefreshCoordinator applies to callers
@@ -152,7 +123,7 @@ final class TokenManagerCacheTests: XCTestCase {
         // window), and sign-out lands mid-refresh — after performTokenRefresh
         // snapshots the epoch, before it saves. The retired request must be
         // canceled so it cannot execute account work with any returned token.
-        try manager.saveTokens(access: "old", refresh: "old-r", expirationDate: Date().addingTimeInterval(60))
+        manager.adoptTokens(access: "old", expirationDate: Date().addingTimeInterval(60))
         refresher.accessToken = "refreshed"
         refresher.refreshToken = "refreshed-r"
         refresher.expirationDate = Date().addingTimeInterval(3600)
@@ -167,31 +138,28 @@ final class TokenManagerCacheTests: XCTestCase {
             // Expected.
         }
 
-        // The refresh's saveTokens saw the bumped epoch and dropped: keychain
-        // empty, not authenticated, so no BGTask relaunch resurrects the account.
+        // The refresh's adoption saw the bumped epoch and dropped: nothing
+        // cached, and nothing written for a later launch to find.
         XCTAssertFalse(manager.isAuthenticated())
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleAccessToken.rawValue))
-        XCTAssertFalse(keychain.exists(for: KeychainService.Key.googleRefreshToken.rawValue))
+        XCTAssertEqual(keychain.saveCallCount, 0)
     }
 
-    // Revert-check: fails if saveTokens drops the `if epoch == nil { _cacheEpoch &+= 1 }`
-    // bump on ungated (interactive/restore) saves. Without it the in-flight
-    // refresh's gated save still matches its snapshotted epoch, so the retired
-    // account's "stale-refresh" tokens overwrite the replacement sign-in's in
-    // the keychain and the next getCurrentToken serves the wrong account's token.
+    // Revert-check: fails if adoptTokens drops the `if epoch == nil { _cacheEpoch &+= 1 }`
+    // bump on ungated (interactive/restore) adoptions. Without it the in-flight
+    // refresh's gated adoption still matches its snapshotted epoch, so the retired
+    // account's "stale-refresh" token overwrites the replacement sign-in's in
+    // the cache and the next getCurrentToken serves the wrong account's token.
     func testRefreshCompletingAfterReplacementSignInDoesNotOverwriteNewTokens() async throws {
-        try manager.saveTokens(
+        manager.adoptTokens(
             access: "old",
-            refresh: "old-r",
             expirationDate: Date().addingTimeInterval(60)
         )
         refresher.accessToken = "stale-refresh"
         refresher.refreshToken = "stale-refresh-r"
         refresher.expirationDate = Date().addingTimeInterval(3_600)
         refresher.onRefresh = { [weak manager] in
-            try? manager?.saveTokens(
+            manager?.adoptTokens(
                 access: "replacement",
-                refresh: "replacement-r",
                 expirationDate: Date().addingTimeInterval(3_600)
             )
         }
@@ -203,18 +171,13 @@ final class TokenManagerCacheTests: XCTestCase {
             // Expected.
         }
 
-        let stored = try keychain.loadCodable(
-            TokenInfo.self,
-            for: KeychainService.Key.googleAccessToken.rawValue
-        )
-        XCTAssertEqual(stored.accessToken, "replacement")
         let currentToken = try await manager.getCurrentToken()
         XCTAssertEqual(currentToken, "replacement")
     }
 
     func testExpiringSoonCachedToken_triggersRefreshInsteadOfServingStale() async throws {
         // Inside the 5-minute expiring-soon window: the cache must not serve it.
-        try manager.saveTokens(access: "stale-token", refresh: "r", expirationDate: Date().addingTimeInterval(60))
+        manager.adoptTokens(access: "stale-token", expirationDate: Date().addingTimeInterval(60))
         refresher.accessToken = "fresh-token"
         refresher.expirationDate = Date().addingTimeInterval(3600)
 

@@ -310,7 +310,13 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
     static let shared = AuthSession()
     static let localStoreResetRequiredKey = "auth.localStoreResetRequired.v1"
     static let credentialCleanupRequiredKey = "auth.credentialCleanupRequired.v1"
-    
+    /// Set once `persistSessionForBackgroundAccess` has written the account's
+    /// address with background-readable access on this install, after which an
+    /// unchanged address is no longer rewritten (`needsMarkedCredentialWrite`).
+    /// Not account data: it describes the keychain item's accessibility, which
+    /// every later write sets the same way.
+    nonisolated static let userEmailWrittenForBackgroundAccessKey = "auth.userEmailWrittenForBackgroundAccess.v1"
+
     @Published var isAuthenticated = false
     @Published var currentUser: GIDGoogleUser?
     @Published var userEmail: String?
@@ -744,14 +750,16 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                         do {
                             try self.persistSessionForBackgroundAccess(
                                 accessToken: user.accessToken.tokenString,
-                                refreshToken: user.refreshToken.tokenString,
                                 expirationDate: user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
                                 email: user.profile?.email
                             )
                         } catch {
-                            // Not asked of the policy: once the credential transaction's
-                            // marker may be persisted, the next launch rejects this
-                            // session by design, so the outcome stays a rejection.
+                            // Not asked of the policy: the next launch rejects this
+                            // session by design either way. A failed write in the
+                            // marked transaction leaves its marker, and a failed
+                            // removal of the verdict leaves the verdict, which the
+                            // next restore signs out on. So the outcome stays a
+                            // rejection.
                             Log.error("Failed to persist the restored session's credentials", category: .auth, error: error)
                             restoredUser.didClearGoogleSession = true
                             _ = self.clearFailedGoogleSession()
@@ -774,10 +782,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
             await resetPendingActionRetryState()
             resetSyncStorageState()
             let reopenOutcome = await reopenAccountWork(after: outboundTransition)
-            // The restore callback already persisted background-readable
-            // credentials and cleared the cleanup marker, so every refusal
-            // leaves them live. Only a latched refusal makes this restore their
-            // sole owner; the policy explains the other two.
+            // The restore callback already stored the session's address,
+            // consumed the signed-out verdict and adopted its token, so every
+            // refusal leaves the session live. Only a latched refusal makes this
+            // restore its sole owner; the policy explains the other two.
             switch AuthRestoreReopenPolicy.restoreDispositionAfterReopen(reopenOutcome) {
             case .publishSession:
                 didReopenAccountWork = true
@@ -929,11 +937,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
                             throw CancellationError()
                         }
 
-                        // Save tokens and account email with background-readable access so
-                        // BGTask cold starts can recover legacy sessions before Sign-In restore runs.
+                        // Store the account's address, consume the signed-out
+                        // verdict and adopt the access token in memory; the
+                        // tokens themselves stay GoogleSignIn's, in its keychain.
                         try self.persistSessionForBackgroundAccess(
                             accessToken: result.user.accessToken.tokenString,
-                            refreshToken: result.user.refreshToken.tokenString,
                             expirationDate: result.user.accessToken.expirationDate ?? Date().addingTimeInterval(3600),
                             email: result.user.profile?.email
                         )
@@ -1498,7 +1506,11 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
     /// App-owned credentials support background access only after the Google
     /// SDK session has restored. Presence therefore identifies remnants to
-    /// clean, while any non-item-not-found error remains indeterminate.
+    /// clean, while any non-item-not-found error remains indeterminate. The
+    /// two token items are written by no build since 2026-11-28
+    /// (`TokenManager.adoptTokens`) and stay here on purpose: an earlier
+    /// build's are deleted only once a session is adopted or cleared, and one
+    /// that cannot be read must still keep this probe indeterminate.
     private func hasPersistedBackgroundCredentialMaterial() throws -> Bool {
         for key in [
             KeychainService.Key.googleAccessToken,
@@ -1588,28 +1600,98 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
         }
     }
 
+    /// Makes a restored or signed-in session the one the app works for: its
+    /// address in the keychain, where a launch reads it before any session is
+    /// published (`currentOrPersistedUserEmail`, the isolation gate's
+    /// recovery check), the durable signed-out verdict consumed, and its
+    /// access token adopted by `TokenManager`, in memory only.
+    ///
+    /// Until 2026-11-28 every restore also wrote both tokens to the app's own
+    /// keychain items and rewrote the address, inside the cleanup marker's
+    /// transaction: about nine keychain calls on the main actor at every
+    /// launch, and a kill between the marker's write and its removal signed
+    /// the user out at the next launch (architecture review 2026-11,
+    /// `account-boundary-auth#4`). Now the tokens are not written, and the
+    /// address is written only where `needsMarkedCredentialWrite` says so, so
+    /// an ordinary launch reads the cleanup marker and the address and removes
+    /// the verdict, both normally already gone (with `TokenManager`'s
+    /// once-a-process deletes of the items earlier builds wrote): no write,
+    /// and no transaction for a kill to interrupt.
     func persistSessionForBackgroundAccess(
         accessToken: String,
-        refreshToken: String?,
         expirationDate: Date,
         email: String?
     ) throws {
-        // This marker turns the otherwise multi-key credential write into a
-        // crash-safe transaction. A launch interrupted after any partial write
-        // clears the rejected credentials before considering SDK restore state.
-        try persistCredentialCleanupRequirement()
-        try tokenManager.saveTokens(
-            access: accessToken,
-            refresh: refreshToken,
-            expirationDate: expirationDate
-        )
-        try persistUserEmailForBackgroundAccess(email)
-        // The app-owned sign-out verdict outlives GoogleSignIn keychain errors.
-        // Consume it only after the replacement session is fully persisted;
-        // if deletion fails, the credential transaction remains marked and the
-        // caller rejects this partial sign-in rather than silently disabling BG sync.
-        try clearDurableSignedOutState()
-        try clearCredentialCleanupRequirement()
+        if let email, needsMarkedCredentialWrite(email) {
+            // This marker turns the two-key write (the address, then the
+            // verdict's removal) into a crash-safe transaction. A launch
+            // interrupted after a partial write clears the rejected session
+            // before considering SDK restore state.
+            try persistCredentialCleanupRequirement()
+            try persistUserEmailForBackgroundAccess(email)
+            // The app-owned sign-out verdict outlives GoogleSignIn keychain errors.
+            // Consume it only after the replacement session is fully persisted;
+            // if deletion fails, the credential transaction remains marked and the
+            // caller rejects this partial sign-in rather than silently disabling BG sync.
+            try clearDurableSignedOutState()
+            try clearCredentialCleanupRequirement()
+            userDefaults.set(true, forKey: Self.userEmailWrittenForBackgroundAccessKey)
+        } else {
+            // The address is already this session's and no cleanup marker is
+            // set, so the verdict's removal is the only write, and one
+            // operation needs no marker. It is made every time, never only
+            // after reading a verdict: a launch that found the verdict and
+            // could not delete the address (`resumeDurableSignedOutStateIfNeeded`,
+            // whose `performDurableCredentialCleanup` throws then) leaves both
+            // with no marker, and a sign-in as the same account must consume
+            // it. A failed removal throws, and the caller rejects the session.
+            try clearDurableSignedOutState()
+        }
+        // Last, after everything that can fail, so a refused session's token
+        // is never the one requests are given. The adoption retires the
+        // previous credentials' refreshes (`TokenManager`'s epoch).
+        tokenManager.adoptTokens(access: accessToken, expirationDate: expirationDate)
+    }
+
+    /// Whether `persistSessionForBackgroundAccess` writes the address again,
+    /// inside the cleanup marker's transaction, rather than only removing the
+    /// verdict. Three things make it, cheapest first:
+    ///
+    /// - Once an install (`userEmailWrittenForBackgroundAccessKey`): an
+    ///   address a build before April 2026 stored with another accessibility
+    ///   is readable only while the device is unlocked. Every launch since
+    ///   then rewrote it with `afterFirstUnlockThisDeviceOnly` (3ee46556), so
+    ///   the first foreground launch healed it, and nothing else would now:
+    ///   a locked background launch could not read it, would try the rewrite
+    ///   and fail, and the caller would sign the user out.
+    /// - A credential-cleanup marker that is set, or cannot be read. Only this
+    ///   transaction's end consumes one, and a cleanup that could not delete
+    ///   the address leaves one beside it (`clearFailedGoogleSession`, an
+    ///   interrupted credential cleanup): left in place, the next launch
+    ///   finishes that cleanup and signs this session out.
+    /// - A stored address that differs or cannot be read.
+    private func needsMarkedCredentialWrite(_ email: String) -> Bool {
+        if !userDefaults.bool(forKey: Self.userEmailWrittenForBackgroundAccessKey) {
+            return true
+        }
+        if (try? hasPersistedCredentialCleanupRequirement()) != false {
+            return true
+        }
+        return !persistedUserEmailMatches(email)
+    }
+
+    /// Whether the keychain already holds `email` as the session's address.
+    /// One that is missing or cannot be read is not, and is written again, as
+    /// every restore wrote it before.
+    private func persistedUserEmailMatches(_ email: String) -> Bool {
+        do {
+            return try keychainService.loadString(for: KeychainService.Key.googleUserEmail.rawValue) == email
+        } catch KeychainError.itemNotFound {
+            return false
+        } catch {
+            Log.warning("Could not read the stored account address; writing it again", category: .auth)
+            return false
+        }
     }
 
     func persistUserEmailForBackgroundAccess(_ email: String?) throws {
@@ -1662,9 +1744,10 @@ final class AuthSession: ObservableObject, @unchecked Sendable {
 
     /// Discards a restored session whose account-scoped reopen latched closed.
     ///
-    /// A restore stages live credentials before the reopen sequence runs, so a
-    /// refused reopen leaves background-readable tokens for an account that was
-    /// never published. Call this **only** for the disposition
+    /// A restore stages live credentials before the reopen sequence runs (the
+    /// account's address, the consumed verdict, the adopted token), so a
+    /// refused reopen leaves them for an account that was never published.
+    /// Call this **only** for the disposition
     /// `AuthRestoreReopenPolicy` maps to `.discardCredentials`: the other
     /// refusal causes are either retryable with exactly these credentials or
     /// already owned by a superseding sign-out. The caller runs this while
