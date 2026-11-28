@@ -538,6 +538,8 @@ protocol FullEmailOpening: AnyObject {
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async
 
     func prewarmOnOpen(message: Message, width: CGFloat?)
+
+    func releaseIdleWebViews()
 }
 
 extension FullEmailOpening {
@@ -586,6 +588,8 @@ extension FullEmailOpening {
     func prewarmOnOpen(message: Message, width: CGFloat?) {}
 
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {}
+
+    func releaseIdleWebViews() {}
 }
 
 @MainActor
@@ -920,6 +924,12 @@ struct FullEmailRemoteImageFallbackBookkeeping: Equatable {
     mutating func removeAllWarmContexts() {
         warmContexts.removeAll()
     }
+
+    /// Keeps every remembered warm request and drops its width, so a fallback re-warm prepares the
+    /// payload again and builds no web view (`FullEmailWebViewManager.releaseIdleWebViews`).
+    mutating func forgetWarmWidths() {
+        warmContexts = warmContexts.mapValues { WarmContext(request: $0.request, width: nil) }
+    }
 }
 
 struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
@@ -1026,6 +1036,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     private let loader: OriginalEmailSourceLoader
     /// Held for the manager's lifetime: its `deinit` ends the observation.
     private let memoryPressureEventSource: MemoryPressureEventSource
+    /// Held for the manager's lifetime, as `memoryPressureEventSource` is.
+    private let backgroundEventSource: AppBackgroundEventSource
+    /// Bumped by every `releaseIdleWebViews`. A warm that was suspended across a release builds
+    /// no web view when it resumes (its payload is still stored), or a chat closed during the
+    /// warm, or the app backgrounded, would get a view the release was meant to free.
+    private var idleReleaseGeneration: UInt64 = 0
     private let host = OffscreenWebViewHost()
     private var entries: [String: Entry] = [:]
     private var preparedPayloads = FullEmailPreparedOpenPayloadBookkeeping()
@@ -1052,12 +1068,14 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     init(
         capacity: Int = 4,
         loader: OriginalEmailSourceLoader = .shared,
-        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource()
+        memoryPressureEventSource: MemoryPressureEventSource = MemoryPressureEventSource(),
+        backgroundEventSource: AppBackgroundEventSource = AppBackgroundEventSource()
     ) {
         self.capacity = max(1, capacity)
         self.loader = loader
         self.bookkeeping = FullEmailWebViewPoolBookkeeping(capacity: capacity)
         self.memoryPressureEventSource = memoryPressureEventSource
+        self.backgroundEventSource = backgroundEventSource
 
         // Low memory drops every idle pre-rendered WebView and prepared payload (`clear()` keeps a
         // checked-out reader). The source delivers UIKit's memory warning on iOS and a dispatch
@@ -1066,6 +1084,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         // callback rather than one task hop later.
         memoryPressureEventSource.start { [weak self] in
             self?.clear()
+        }
+
+        // Backgrounded on iOS, the pool holds up to four off-screen web views and their WebContent
+        // processes for nothing; the prepared payloads stay, so a reopen still skips preparation.
+        backgroundEventSource.start { [weak self] in
+            self?.releaseIdleWebViews()
         }
 
         NotificationCenter.default.addObserver(
@@ -1109,6 +1133,7 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         guard acceptsAccountWork else { return }
         let warmOperationID = UUID()
         let generation = accountGeneration
+        let releaseGeneration = idleReleaseGeneration
         activeWarmOperations.insert(warmOperationID)
         defer { finishWarmOperation(warmOperationID) }
 
@@ -1173,7 +1198,8 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
         guard EmailReaderRenderingConfiguration.enablesOffscreenWebViewAdoption,
               let width,
-              width > 1 else {
+              width > 1,
+              releaseGeneration == idleReleaseGeneration else {
             return
         }
 
@@ -1547,6 +1573,23 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
         forgetRemoteImageFallbackWarmContext(messageId: messageId)
         preparedPayloads.remove(messageId)
         removeEntry(messageId: messageId)
+    }
+
+    /// Tears down every pooled web view the reader does not hold (architecture review 2026-11,
+    /// `web-content-rendering#2`): called when the app enters the background on iOS
+    /// (`AppBackgroundEventSource`) and when a chat leaves the screen (`ChatView`). Unlike
+    /// `clear()`, the prepared payloads and their LRU slots stay, so a reopen still skips the
+    /// HTML preparation and only renders live. The remembered warm widths are forgotten, or the
+    /// remote-image fallback's re-warm would build the released view again, in the background
+    /// too. A checked-out entry is the reader's and stays, and is re-hosted at its checkin as
+    /// usual.
+    func releaseIdleWebViews() {
+        idleReleaseGeneration &+= 1
+        for entry in entries.values where !entry.isCheckedOut {
+            teardown(entry)
+        }
+        entries = entries.filter { $0.value.isCheckedOut }
+        remoteImageFallbackBookkeeping.forgetWarmWidths()
     }
 
     func clear() {
@@ -1969,6 +2012,10 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
 
     var acceptsAccountWorkForTesting: Bool {
         acceptsAccountWork
+    }
+
+    var activeWarmOperationCountForTesting: Int {
+        activeWarmOperations.count
     }
 
     func beginWarmOperationForTesting() -> UUID {

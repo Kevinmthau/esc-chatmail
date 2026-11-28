@@ -250,6 +250,9 @@ struct ChatView: View {
         }
         .onDisappear {
             viewModel.composerDidDisappear()
+            // The reader's pre-rendered web views are for this chat's emails; leaving it frees
+            // them, keeping their prepared HTML (`FullEmailWebViewManager.releaseIdleWebViews`).
+            chatDependencies.fullEmailOpener.releaseIdleWebViews()
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { viewModel.scheduleReplyDraftSave() }
