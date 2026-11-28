@@ -362,7 +362,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
         XCTAssertEqual(records.first?.retryCount, Int16(SyncConfig.maxAbandonedMessageRetries))
         let state = try await storedState(id: "flaky")
         XCTAssertEqual(state, AbandonedSyncMessage.State.exhausted.rawValue)
-        let exhausted = await sut.fetchExhaustedMessageIds()
+        let exhausted = await sut.fetchUndownloadableMessageIds()
         XCTAssertEqual(exhausted, ["flaky"], "The banner counts it")
     }
 
@@ -408,6 +408,35 @@ final class AbandonedMessageRetryTests: XCTestCase {
         XCTAssertEqual(ids, [], "It waits out the backoff")
     }
 
+    /// The wait after a transient failure grows with the row's age, from the
+    /// base backoff to its cap, so a message that always answers 5xx is asked
+    /// about less and less often, where a fixed 15 minutes asked 96 times a
+    /// day for good.
+    ///
+    /// Revert-check: the age term of
+    /// `SyncFailureTracker.transientRetryBackoffInterval` (`ageWait` set to the
+    /// base backoff). The older rows then wait 15 minutes too.
+    func testRecordOutcome_transientFailure_waitsAsLongAsTheRowHasBeenAbandoned() async throws {
+        let now = clock.now()
+        try await seedAbandonedMessage(id: "fresh", abandonedAt: now)
+        try await seedAbandonedMessage(id: "an-hour-old", abandonedAt: now.addingTimeInterval(-3_600))
+        try await seedAbandonedMessage(id: "two-days-old", abandonedAt: now.addingTimeInterval(-2 * 86_400))
+
+        try await applyRetryOutcome(
+            recoveredIds: [],
+            goneIds: [],
+            failedIds: [],
+            transientlyFailedIds: ["fresh", "an-hour-old", "two-days-old"]
+        )
+
+        let fresh = try await storedNextRetryAt(id: "fresh")
+        let hourOld = try await storedNextRetryAt(id: "an-hour-old")
+        let twoDaysOld = try await storedNextRetryAt(id: "two-days-old")
+        XCTAssertEqual(fresh, now.addingTimeInterval(SyncConfig.abandonedRetryBackoffBase))
+        XCTAssertEqual(hourOld, now.addingTimeInterval(3_600))
+        XCTAssertEqual(twoDaysOld, now.addingTimeInterval(SyncConfig.abandonedRetryBackoffCap))
+    }
+
     // MARK: - Exhausted rows
 
     /// The banner counts the rows the drain gave up on by their retry count,
@@ -438,9 +467,89 @@ final class AbandonedMessageRetryTests: XCTestCase {
             id: "still-draining", retryCount: cap - 1, state: AbandonedSyncMessage.State.abandoned.rawValue
         )
 
-        let ids = await sut.fetchExhaustedMessageIds()
+        let ids = await sut.fetchUndownloadableMessageIds()
 
         XCTAssertEqual(ids, ["exhausted", "reabandoned", "legacy"])
+    }
+
+    /// A row that has failed in the drain and was abandoned more than
+    /// `abandonedMessageStalledAge` ago is counted too: a transient failure
+    /// never exhausts a row, so a message that always answers 5xx would
+    /// otherwise never reach the user. A row the drain has not tried yet, a
+    /// younger failing row and a deferred row are not.
+    ///
+    /// Revert-check: the stalled disjunct of
+    /// `AbandonedSyncMessage.undownloadablePredicate(now:)` (`nextRetryAt != nil
+    /// AND abandonedAt <= %@`) removed. The stalled row is then not counted.
+    func testFetchUndownloadable_countsRowsStalledPastTheBound() async throws {
+        let now = clock.now()
+        let longAgo = now.addingTimeInterval(-SyncConfig.abandonedMessageStalledAge - 3_600)
+        let later = now.addingTimeInterval(3_600)
+        try await seedAbandonedMessage(
+            id: "stalled", abandonedAt: longAgo,
+            state: AbandonedSyncMessage.State.abandoned.rawValue, nextRetryAt: later
+        )
+        try await seedAbandonedMessage(
+            id: "never-tried", abandonedAt: longAgo, state: AbandonedSyncMessage.State.abandoned.rawValue
+        )
+        try await seedAbandonedMessage(
+            id: "failing-a-day", abandonedAt: now.addingTimeInterval(-86_400),
+            state: AbandonedSyncMessage.State.abandoned.rawValue, nextRetryAt: later
+        )
+        try await seedAbandonedMessage(
+            id: "deferred", abandonedAt: longAgo,
+            state: AbandonedSyncMessage.State.deferred.rawValue, nextRetryAt: later
+        )
+
+        let ids = await sut.fetchUndownloadableMessageIds()
+
+        XCTAssertEqual(ids, ["stalled"])
+    }
+
+    /// Retry gives a stalled row back due now, so the drain asks at once
+    /// rather than at the end of its 12-hour wait.
+    ///
+    /// Revert-check: `retryUndownloadableMessages`'s predicate set to
+    /// `AbandonedSyncMessage.exhaustedPredicate`. The stalled row then keeps
+    /// its wait and is not offered.
+    func testRetryUndownloadable_givesAStalledRowBackDueNow() async throws {
+        let now = clock.now()
+        try await seedAbandonedMessage(
+            id: "stalled",
+            abandonedAt: now.addingTimeInterval(-SyncConfig.abandonedMessageStalledAge - 3_600),
+            state: AbandonedSyncMessage.State.abandoned.rawValue,
+            nextRetryAt: now.addingTimeInterval(SyncConfig.abandonedRetryBackoffCap)
+        )
+        let waiting = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(waiting, [], "Positive control: it waits out its backoff")
+
+        let outcome = await sut.retryUndownloadableMessages()
+
+        XCTAssertEqual(outcome, .gaveBack)
+        let ids = await sut.fetchRetryableAbandonedMessageIds()
+        XCTAssertEqual(ids, ["stalled"])
+    }
+
+    /// The clearing pass sees a message the run stored in its own context and
+    /// has not saved yet: the missed-message check stores mail late in a run.
+    ///
+    /// Revert-check: the Message read in `stageClearingStoredExhaustedMessages`
+    /// back to a `.dictionaryResultType` fetch, which ignores the context's
+    /// unsaved inserts. The row is then cleared one run late.
+    func testStageClearing_seesAMessageStoredInTheSameContextAndNotSaved() async throws {
+        try await seedAbandonedMessage(
+            id: "stored-this-run",
+            retryCount: Int16(SyncConfig.maxAbandonedMessageRetries),
+            state: AbandonedSyncMessage.State.exhausted.rawValue
+        )
+        let context = coreDataStack.newBackgroundContext()
+        await context.perform {
+            _ = MessageBuilder().withId("stored-this-run").build(in: context)
+        }
+
+        let cleared = await sut.stageClearingStoredExhaustedMessages(in: context)
+
+        XCTAssertEqual(cleared, 1)
     }
 
     /// An exhausted row stays out of the drain, as earlier builds' `retryCount <`
@@ -485,7 +594,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
     /// after it had latched its empty fast path over them.
     ///
     /// Revert-check: `mayHaveRetryableAbandonedMessages = true` in
-    /// `SyncFailureTracker.retryExhaustedMessages` removed. The drain then
+    /// `SyncFailureTracker.retryUndownloadableMessages` removed. The drain then
     /// keeps answering from its latch and never offers the row.
     func testRetryExhaustedMessages_givesTheRowsBackToTheDrain() async throws {
         try await seedAbandonedMessage(
@@ -496,14 +605,14 @@ final class AbandonedMessageRetryTests: XCTestCase {
         let latched = await sut.fetchRetryableAbandonedMessageIds()
         XCTAssertEqual(latched, [], "Positive control: the drain sees nothing to retry and latches")
 
-        let gaveBack = await sut.retryExhaustedMessages()
+        let gaveBack = await sut.retryUndownloadableMessages()
 
-        XCTAssertTrue(gaveBack)
+        XCTAssertEqual(gaveBack, .gaveBack)
         let ids = await sut.fetchRetryableAbandonedMessageIds()
         XCTAssertEqual(ids, ["given-back"])
         let records = try await storedRecords()
         XCTAssertEqual(records.first?.retryCount, 0, "It has its whole budget again")
-        let exhausted = await sut.fetchExhaustedMessageIds()
+        let exhausted = await sut.fetchUndownloadableMessageIds()
         XCTAssertEqual(exhausted, [])
     }
 
@@ -523,11 +632,11 @@ final class AbandonedMessageRetryTests: XCTestCase {
         )
         await syncRunCoordinator.beginQuiescence()
 
-        let gaveBack = await sut.retryExhaustedMessages()
-        let read = await sut.fetchExhaustedMessageIds()
+        let gaveBack = await sut.retryUndownloadableMessages()
+        let read = await sut.fetchUndownloadableMessageIds()
         await syncRunCoordinator.endQuiescence()
 
-        XCTAssertFalse(gaveBack)
+        XCTAssertEqual(gaveBack, .failed)
         XCTAssertNil(read, "No answer is not an empty ledger")
         let state = try await storedState(id: "exhausted")
         XCTAssertEqual(state, AbandonedSyncMessage.State.exhausted.rawValue)
@@ -550,7 +659,7 @@ final class AbandonedMessageRetryTests: XCTestCase {
         let ids = await sut.fetchRetryableAbandonedMessageIds()
 
         XCTAssertEqual(ids, ["legacy"])
-        let exhausted = await sut.fetchExhaustedMessageIds()
+        let exhausted = await sut.fetchUndownloadableMessageIds()
         XCTAssertEqual(exhausted, ["exhausted"])
     }
 

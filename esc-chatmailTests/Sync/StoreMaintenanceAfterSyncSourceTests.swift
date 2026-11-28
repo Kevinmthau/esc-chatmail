@@ -66,7 +66,8 @@ final class StoreMaintenanceAfterSyncSourceTests: XCTestCase {
     // forced runs at once, which spend the escape hatch's strikes in one
     // chain (architecture review 2026-11, sync-engine#2). What the signal is
     // for each kind of run is pinned in `IncrementalSyncCursorTests`
-    // (`testHeldRun_hasNoDurableContinuation_butStillNeedsFollowUp` and its
+    // (`testFetchFailuresFreezeCursorBelowEscapeThreshold`,
+    // `testTruncatedSliceThatHolds_hasNoDurableContinuation` and their
     // neighbours).
     func testSyncEngine_foreground_leavesTheRunBoundaryToAQueuedContinuation() throws {
         let source = try repositorySource("esc-chatmail/Services/Sync/SyncEngine.swift")

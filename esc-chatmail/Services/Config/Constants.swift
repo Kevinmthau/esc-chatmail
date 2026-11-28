@@ -161,6 +161,14 @@ struct SyncConfig {
     /// Ceiling on the drain backoff between abandoned-message retries (12 hours)
     static let abandonedRetryBackoffCap: TimeInterval = 43_200
 
+    /// How long an abandoned message may keep failing in the drain, for any
+    /// reason, before the conversation list counts it as not downloaded
+    /// (`AbandonedSyncMessage.undownloadablePredicate(now:)`): three days. A
+    /// transient failure spends no retry, so a message that always answers
+    /// 5xx or times out never becomes exhausted; this is what brings it to
+    /// the user (architecture review 2026-11, sync-persist-path#6). Unmeasured.
+    static let abandonedMessageStalledAge: TimeInterval = 3 * 86_400
+
     /// UserDefaults key for tracking consecutive sync failures
     static let consecutiveFailuresKey = "syncConsecutiveFailures"
 

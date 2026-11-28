@@ -63,23 +63,33 @@ final class ExhaustedSyncMessagesModel: ObservableObject {
         let generation = readGeneration
         let manager = self.manager
         Task { [weak self] in
-            let ids = await manager.fetchExhaustedMessageIds()
+            let ids = await manager.fetchUndownloadableMessageIds()
             self?.publish(ids, readGeneration: generation)
         }
     }
 
     /// Hides the banner at once, gives the rows back and asks for a sync; the
-    /// sync's completion re-reads, so a message that fails again five times
-    /// brings the banner back.
+    /// sync's completion re-reads, so a message that keeps failing brings the
+    /// banner back. A Retry that wrote nothing (`.failed`) puts the banner
+    /// back at once, unless a newer read has published since.
     func retryAll() {
         readGeneration &+= 1
+        let retryGeneration = readGeneration
+        let hiddenSummary = summary
         summary = nil
         let manager = self.manager
         Task { [weak self] in
-            let gaveBack = await manager.retryExhaustedMessages()
+            let outcome = await manager.retryUndownloadableMessages()
             guard let self else { return }
-            if gaveBack {
+            switch outcome {
+            case .gaveBack:
                 self.requestSync()
+            case .failed:
+                if self.readGeneration == retryGeneration {
+                    self.summary = hiddenSummary
+                }
+            case .nothingToGiveBack:
+                break
             }
             self.refresh()
         }

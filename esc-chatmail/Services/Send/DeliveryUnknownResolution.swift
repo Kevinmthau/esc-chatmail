@@ -64,11 +64,16 @@ enum DeliveryUnknownResolution {
 
     /// The store's own witnesses that Gmail never committed this send, asked
     /// before an empty search is taken as "Not sent". Either one says no:
-    /// - a sync ledger row (`AbandonedSyncMessage`, deferred or abandoned)
-    ///   recorded since the send: a message sync could not store, which may be
-    ///   this send's echo, and the history witness cannot see it (a row whose
-    ///   retries ran out is deleted, and an unprocessable message leaves none,
-    ///   so this covers only failures still on record);
+    /// - a sync ledger row (`AbandonedSyncMessage`, in any state) recorded
+    ///   since the send: a message sync could not store, which may be this
+    ///   send's echo, and the history witness cannot see it. A row the drain
+    ///   gave up on is kept, `exhausted`, and goes on holding the verdict until
+    ///   its message is stored, a Retry from the banner resolves it (stored or
+    ///   gone) or it is cleared (architecture review 2026-11,
+    ///   sync-persist-path#6): a false "Not sent" invites a duplicate resend,
+    ///   and "Delivery unknown" a little longer costs nothing. Never narrow
+    ///   this to rows the drain still retries. An unprocessable message leaves
+    ///   no row, so this covers only failures on record;
     /// - a stored message, anywhere, carrying this send's own Message-ID: its
     ///   echo, kept without consuming the record;
     /// - a message from the user in the send's own conversation, dated within

@@ -49,13 +49,16 @@ struct AbandonedRetryFetchResult {
     let fetched: [GmailMessage]
     /// The server returned 404 — the message no longer exists server-side
     let goneIds: [String]
-    /// Failed for a reason that is this message's (a 4xx other than 404, an
-    /// undecodable response): spends one of the drain's retries.
+    /// Failed for a reason the fetcher does not retry (a 4xx other than 404,
+    /// an undecodable response, and any transport error `isRetriableError`
+    /// does not name, a TLS failure or `dataNotAllowed` among them): spends
+    /// one of the drain's retries, as every failure did before.
     let failedIds: [String]
-    /// Failed for a reason that says nothing about the message (a timeout, a
-    /// network error, a 5xx, a 429): stamps the drain's backoff and spends no
-    /// retry (`SyncFailureTracker.stageAbandonedRetryOutcome`; architecture
-    /// review 2026-11, sync-persist-path#6).
+    /// Failed for a reason the fetcher would retry, which says nothing about
+    /// the message (a timeout, a dropped or refused connection, a 5xx, a 429):
+    /// stamps the drain's backoff and spends no retry
+    /// (`SyncFailureTracker.stageAbandonedRetryOutcome`; architecture review
+    /// 2026-11, sync-persist-path#6).
     let transientlyFailedIds: [String]
 
     static let empty = AbandonedRetryFetchResult(fetched: [], goneIds: [], failedIds: [], transientlyFailedIds: [])

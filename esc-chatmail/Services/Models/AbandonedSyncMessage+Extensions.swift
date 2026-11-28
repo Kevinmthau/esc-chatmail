@@ -15,9 +15,12 @@ import CoreData
 /// predicate. Re-capturing a row as deferred clears it.
 ///
 /// `retryCount` counts the drain's message-scoped failures only (a 4xx, an
-/// undecodable or unprocessable payload, a failed persist). A timeout, a
-/// network error, a 5xx or a 429 says nothing about the message and only
-/// stamps the backoff.
+/// undecodable or unprocessable payload, a failed persist, and any transport
+/// error `MessageFetcher.isRetriableError` does not name, a TLS failure
+/// included). A timeout, a dropped or refused connection, a 5xx or a 429
+/// says nothing about the message: it spends nothing and waits as long as
+/// the row has been abandoned, from 15 minutes to 12 hours
+/// (`SyncFailureTracker.transientRetryBackoffInterval`).
 extension AbandonedSyncMessage {
     @NSManaged public var id: UUID
     @NSManaged public var gmailMessageId: String
@@ -65,6 +68,24 @@ extension AbandonedSyncMessage {
             format: "retryCount >= %d AND (state == nil OR state != %@)",
             SyncConfig.maxAbandonedMessageRetries,
             State.deferred.rawValue
+        )
+    }
+
+    /// The rows the conversation list counts as not downloaded: the exhausted
+    /// ones, and the stalled ones, which the drain still retries but which
+    /// have failed there (`nextRetryAt` is set only by a failed drain attempt)
+    /// and were abandoned more than `SyncConfig.abandonedMessageStalledAge`
+    /// ago. A transient failure spends no retry, so a message that always
+    /// answers 5xx is never exhausted and only this brings it to the user. A
+    /// row the drain has not tried yet (an app not opened for days) is not
+    /// stalled. The drain's own predicate is untouched: a stalled row is still
+    /// offered whenever its backoff runs out.
+    static func undownloadablePredicate(now: Date) -> NSPredicate {
+        NSPredicate(
+            format: "(state == nil OR state != %@) AND (retryCount >= %d OR (nextRetryAt != nil AND abandonedAt <= %@))",
+            State.deferred.rawValue,
+            SyncConfig.maxAbandonedMessageRetries,
+            now.addingTimeInterval(-SyncConfig.abandonedMessageStalledAge) as NSDate
         )
     }
 

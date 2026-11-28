@@ -6,7 +6,7 @@ import Foundation
 /// hosted suites).
 actor StubExhaustedSyncMessagesManager: ExhaustedSyncMessagesManaging {
     private var exhaustedIds: [String]?
-    private var retryAnswer: Bool
+    private var retryAnswer: ExhaustedSyncMessagesRetryOutcome
     private(set) var retryCalls = 0
     private var fetches = 0
 
@@ -14,7 +14,7 @@ actor StubExhaustedSyncMessagesManager: ExhaustedSyncMessagesManaging {
         fetches
     }
 
-    init(exhaustedIds: [String]? = [], retryAnswer: Bool = false) {
+    init(exhaustedIds: [String]? = [], retryAnswer: ExhaustedSyncMessagesRetryOutcome = .nothingToGiveBack) {
         self.exhaustedIds = exhaustedIds
         self.retryAnswer = retryAnswer
     }
@@ -23,12 +23,12 @@ actor StubExhaustedSyncMessagesManager: ExhaustedSyncMessagesManaging {
         exhaustedIds = ids
     }
 
-    func fetchExhaustedMessageIds() async -> [String]? {
+    func fetchUndownloadableMessageIds() async -> [String]? {
         fetches += 1
         return exhaustedIds
     }
 
-    func retryExhaustedMessages() async -> Bool {
+    func retryUndownloadableMessages() async -> ExhaustedSyncMessagesRetryOutcome {
         retryCalls += 1
         return retryAnswer
     }

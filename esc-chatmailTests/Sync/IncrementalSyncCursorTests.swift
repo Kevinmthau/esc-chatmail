@@ -1594,7 +1594,7 @@ final class IncrementalSyncCursorTests: XCTestCase {
         let row = await fetchLedgerRows().first { $0.gmailMessageId == "abandoned-undecodable" }
         XCTAssertEqual(row?.state, AbandonedSyncMessage.State.exhausted.rawValue)
         XCTAssertEqual(row?.retryCount, cap)
-        let exhausted = await failureTracker.fetchExhaustedMessageIds()
+        let exhausted = await failureTracker.fetchUndownloadableMessageIds()
         XCTAssertEqual(exhausted, ["abandoned-undecodable"])
     }
 

@@ -451,7 +451,7 @@ actor SyncFailureTracker {
     /// Returns abandoned message IDs that are still worth retrying, oldest first.
     /// IDs whose retryCount has reached `SyncConfig.maxAbandonedMessageRetries`
     /// are the exhausted rows, excluded until the user's Retry gives them back
-    /// (`retryExhaustedMessages`), and kept out of the paced count too, or the
+    /// (`retryUndownloadableMessages`), and kept out of the paced count too, or the
     /// skip-the-fetch fast path would never latch once one exists. Deferred rows are excluded: they are still covered
     /// by the frozen cursor, so the normal re-scan of the same history window
     /// already retries them — offering them here would fetch them twice per run.
@@ -558,17 +558,24 @@ actor SyncFailureTracker {
     /// server-side-deleted messages are removed from tracking.
     ///
     /// Only a message-scoped failure (`failedIds`: a 4xx, an undecodable or
-    /// unprocessable payload, a failed persist) spends the row's retryCount. A
+    /// unprocessable payload, a failed persist, a transport error
+    /// `MessageFetcher.isRetriableError` does not name) spends the row's retryCount. A
     /// row whose count reaches `SyncConfig.maxAbandonedMessageRetries` becomes
     /// `exhausted`, kept with the count at the cap: the drain's `retryCount <`
     /// term excludes it, and the conversation list's banner counts it. It was
     /// deleted, with only a log line, until 2026-11 (sync-persist-path#6).
     ///
-    /// A transient failure (`transientlyFailedIds`: a timeout, a network error,
-    /// a 5xx, a 429) says nothing about the message: it stamps the backoff a
-    /// spent attempt would and spends nothing, so an outage no longer
-    /// exhausts the rows it meets. If the save later fails, the staged changes
-    /// die with the context and every record stays for the next drain.
+    /// A transient failure (`transientlyFailedIds`: a timeout, a dropped or
+    /// refused connection, a 5xx, a 429) says nothing about the message: it
+    /// spends nothing, so an outage no longer exhausts the rows it meets, and
+    /// it waits as long as the row has been abandoned
+    /// (`transientRetryBackoffInterval`), so a message that always fails this
+    /// way is asked about less and less often, twice a day at most after its
+    /// first day, and is never exhausted: after
+    /// `SyncConfig.abandonedMessageStalledAge` the banner counts it
+    /// (`AbandonedSyncMessage.undownloadablePredicate(now:)`). If the save
+    /// later fails, the staged changes die with the context and every record
+    /// stays for the next drain.
     func stageAbandonedRetryOutcome(
         recoveredIds: [String],
         goneIds: [String],
@@ -621,10 +628,15 @@ actor SyncFailureTracker {
                             )
                         }
                     } else {
-                        // Transient: the wait a spent attempt would get, and
-                        // no attempt spent.
+                        // Transient: no attempt spent, and a wait that grows
+                        // with the row's age. A fixed wait asked every 15
+                        // minutes, for good, about a message that always fails.
                         record.nextRetryAt = now.addingTimeInterval(
-                            Self.retryBackoffInterval(forRetryCount: Int(record.retryCount) + 1)
+                            Self.transientRetryBackoffInterval(
+                                abandonedAt: record.abandonedAt,
+                                retryCount: Int(record.retryCount),
+                                now: now
+                            )
                         )
                     }
                 }
@@ -637,11 +649,14 @@ actor SyncFailureTracker {
     // MARK: - Exhausted Sync Messages
 
     /// Stages, in the run's context, the removal of every exhausted row whose
-    /// message is now stored (by this run, staged in the same context, or by
-    /// an earlier one: the missed-message check, a history recovery's listing,
-    /// a re-scan). The row's mail is in the app, so the banner no longer
-    /// counts it. Commits with the run's save or dies with it. A ledger or
-    /// message read that fails removes nothing.
+    /// message is now stored (by this run, staged in the same context and not
+    /// yet saved, or by an earlier one: the missed-message check, a history
+    /// recovery's listing, a re-scan). The row's mail is in the app, if not
+    /// always its latest update (a stored row whose later update failed counts
+    /// as stored), so the banner no longer counts it. Commits with the run's
+    /// save or dies with it. A ledger or message read that fails removes
+    /// nothing. A stalled row is left to the drain, which deletes it when it
+    /// stores the message.
     ///
     /// - Returns: how many rows were staged for removal, or nil when a read failed.
     @discardableResult
@@ -652,11 +667,13 @@ actor SyncFailureTracker {
                 request.predicate = AbandonedSyncMessage.exhaustedPredicate
                 let rows = try context.fetch(request)
                 guard !rows.isEmpty else { return 0 }
-                let messageRequest = NSFetchRequest<NSDictionary>(entityName: "Message")
-                messageRequest.resultType = .dictionaryResultType
-                messageRequest.propertiesToFetch = ["id"]
+                // An object fetch, never a dictionary one: a dictionary result
+                // ignores the context's unsaved inserts, so a message this run
+                // stored was seen one run late.
+                let messageRequest = Message.fetchRequest()
                 messageRequest.predicate = NSPredicate(format: "id IN %@", rows.map(\.gmailMessageId))
-                let storedIds = Set(try context.fetch(messageRequest).compactMap { $0["id"] as? String })
+                messageRequest.includesPendingChanges = true
+                let storedIds = Set(try context.fetch(messageRequest).map(\.id))
                 var cleared = 0
                 for row in rows where storedIds.contains(row.gmailMessageId) {
                     context.delete(row)
@@ -670,14 +687,16 @@ actor SyncFailureTracker {
         }
     }
 
-    /// The Gmail IDs of every exhausted row, oldest first, read under the
-    /// account-work lease (`ExhaustedSyncMessagesManaging`).
-    func fetchExhaustedMessageIds() async -> [String]? {
-        await withAccountWorkLease { _ in
+    /// The Gmail IDs of every row the banner counts (exhausted or stalled,
+    /// `AbandonedSyncMessage.undownloadablePredicate(now:)`), oldest first,
+    /// read under the account-work lease (`ExhaustedSyncMessagesManaging`).
+    func fetchUndownloadableMessageIds() async -> [String]? {
+        let now = clock.now()
+        return await withAccountWorkLease { (_: SyncRun) async -> [String]? in
             let context = self.coreDataStack.newBackgroundContext()
             return await context.perform {
                 let request = AbandonedSyncMessage.fetchRequest()
-                request.predicate = AbandonedSyncMessage.exhaustedPredicate
+                request.predicate = AbandonedSyncMessage.undownloadablePredicate(now: now)
                 request.sortDescriptors = [NSSortDescriptor(key: "abandonedAt", ascending: true)]
                 do {
                     return try context.fetch(request).map(\.gmailMessageId)
@@ -689,45 +708,60 @@ actor SyncFailureTracker {
         } ?? nil
     }
 
-    /// Gives every exhausted row back to the drain: `abandoned`, its retry
-    /// count spent nothing, due now. Written on a context of its own and saved
+    /// Gives every row the banner counts back to the drain: `abandoned`, its
+    /// retry count spent nothing, due now. `abandonedAt` is left as it was: the
+    /// delivery-unknown probe reads it as when the row was recorded
+    /// (`DeliveryUnknownResolution.storeAgreesItWasNotSent`), and a stalled row
+    /// that fails again is counted again at once. Written on a context of its own and saved
     /// under the account-work lease, never the exclusive run: a lease holder
     /// never waits behind a sync, and the lease keeps the write inside the
     /// account boundary (teardown drains it before the store is reset). A sync
     /// run saving the same row after this wins its own changed properties
     /// (`NSMergeByPropertyObjectTrumpMergePolicy`), so a row the run had just
     /// exhausted again stays exhausted and the banner shows it again.
-    func retryExhaustedMessages() async -> Bool {
-        let gaveBack: Bool = await withAccountWorkLease { lease in
+    func retryUndownloadableMessages() async -> ExhaustedSyncMessagesRetryOutcome {
+        let now = clock.now()
+        let outcome: ExhaustedSyncMessagesRetryOutcome = await withAccountWorkLease {
+            (lease: SyncRun) async -> ExhaustedSyncMessagesRetryOutcome in
             let context = self.coreDataStack.newBackgroundContext()
             let coordinator = self.syncRunCoordinator
-            let rows: [NSManagedObjectID] = await context.perform {
+            // A read that fails is a failed Retry, never nothing to give back:
+            // the banner was hidden for the Retry and must come back.
+            let givenBack: Int? = await context.perform {
                 let request = AbandonedSyncMessage.fetchRequest()
-                request.predicate = AbandonedSyncMessage.exhaustedPredicate
-                for row in (try? context.fetch(request)) ?? [] {
-                    row.state = AbandonedSyncMessage.State.abandoned.rawValue
-                    row.retryCount = 0
-                    row.nextRetryAt = nil
-                    row.reason = "Retried by the user"
+                request.predicate = AbandonedSyncMessage.undownloadablePredicate(now: now)
+                do {
+                    let rows = try context.fetch(request)
+                    for row in rows {
+                        row.state = AbandonedSyncMessage.State.abandoned.rawValue
+                        row.retryCount = 0
+                        row.nextRetryAt = nil
+                        row.reason = "Retried by the user"
+                    }
+                    return rows.count
+                } catch {
+                    Log.error("Failed to read sync messages to give back", category: .sync, error: error)
+                    return nil
                 }
-                return context.insertedObjects.union(context.updatedObjects).map(\.objectID)
             }
-            guard !rows.isEmpty, await coordinator.isActiveRun(lease) else { return false }
+            guard let givenBack else { return .failed }
+            guard givenBack > 0 else { return .nothingToGiveBack }
+            guard await coordinator.isActiveRun(lease) else { return .failed }
             return await context.perform {
                 do {
                     try context.save()
-                    Log.info("Gave \(rows.count) exhausted sync messages back to the drain", category: .sync)
-                    return true
+                    Log.info("Gave \(givenBack) undownloaded sync messages back to the drain", category: .sync)
+                    return .gaveBack
                 } catch {
-                    Log.error("Failed to give exhausted sync messages back", category: .sync, error: error)
-                    return false
+                    Log.error("Failed to give undownloaded sync messages back", category: .sync, error: error)
+                    return .failed
                 }
             }
-        } ?? false
-        if gaveBack {
+        } ?? .failed
+        if outcome == .gaveBack {
             mayHaveRetryableAbandonedMessages = true
         }
-        return gaveBack
+        return outcome
     }
 
     /// Runs `operation` under a non-exclusive account-work lease, or answers
@@ -755,5 +789,24 @@ actor SyncFailureTracker {
         let exponent = max(0, retryCount - 1)
         let interval = SyncConfig.abandonedRetryBackoffBase * pow(4, Double(exponent))
         return min(interval, SyncConfig.abandonedRetryBackoffCap)
+    }
+
+    /// The wait after a transient drain failure, which spends no retry: as
+    /// long as the row has been abandoned, from the base backoff (15 minutes)
+    /// to its cap (12 hours), and never less than the next spent attempt would
+    /// wait. Each failure thereby roughly doubles the time since abandonment
+    /// (15 min, 30, 1 h, 2 h ... then every 12 h), where a fixed wait asked
+    /// about a message that always fails every 15 minutes for good. A clock
+    /// behind `abandonedAt` reads as a fresh row and waits the base.
+    nonisolated static func transientRetryBackoffInterval(
+        abandonedAt: Date,
+        retryCount: Int,
+        now: Date
+    ) -> TimeInterval {
+        let age = now.timeIntervalSince(abandonedAt)
+        let ageWait = age.isFinite
+            ? min(max(age, SyncConfig.abandonedRetryBackoffBase), SyncConfig.abandonedRetryBackoffCap)
+            : SyncConfig.abandonedRetryBackoffBase
+        return max(ageWait, retryBackoffInterval(forRetryCount: retryCount + 1))
     }
 }

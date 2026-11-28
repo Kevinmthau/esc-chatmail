@@ -129,7 +129,7 @@ final class ExhaustedSyncMessagesModelTests: XCTestCase {
     /// the `if gaveBack` dropped fails the second.
     func testRetryAll_hidesTheBanner_andAsksForASyncOnlyWhenRowsWereGivenBack() async throws {
         var syncRequests = 0
-        let manager = StubExhaustedSyncMessagesManager(exhaustedIds: ["18c0ffee"], retryAnswer: true)
+        let manager = StubExhaustedSyncMessagesManager(exhaustedIds: ["18c0ffee"], retryAnswer: .gaveBack)
         let model = makeModel(manager: manager, requestSync: { syncRequests += 1 })
         model.refresh()
         try await waitUntil { model.summary != nil }
@@ -142,12 +142,33 @@ final class ExhaustedSyncMessagesModelTests: XCTestCase {
         let retryCalls = await manager.retryCalls
         XCTAssertEqual(retryCalls, 1)
 
-        let nothingToGiveBack = StubExhaustedSyncMessagesManager(exhaustedIds: [], retryAnswer: false)
+        let nothingToGiveBack = StubExhaustedSyncMessagesManager(exhaustedIds: [], retryAnswer: .nothingToGiveBack)
         let idleModel = makeModel(manager: nothingToGiveBack, requestSync: { syncRequests += 1 })
         idleModel.retryAll()
         try await waitUntil { await nothingToGiveBack.retryCalls == 1 }
         try await Task.sleep(nanoseconds: 50_000_000)
         XCTAssertEqual(syncRequests, 1)
+    }
+
+    /// A Retry that wrote nothing puts the banner back at once: the rows are
+    /// still there, and the read that follows may not be able to say so.
+    ///
+    /// Revert-check: the `.failed` case's `self.summary = hiddenSummary` in
+    /// `ExhaustedSyncMessagesModel.retryAll` removed.
+    func testRetryAll_thatFailed_putsTheBannerBack() async throws {
+        let manager = StubExhaustedSyncMessagesManager(exhaustedIds: ["18c0ffee"], retryAnswer: .failed)
+        let model = makeModel(manager: manager)
+        model.refresh()
+        try await waitUntil { model.summary != nil }
+        let shown = model.summary
+
+        // The ledger cannot be read now either.
+        await manager.setExhaustedIds(nil)
+        model.retryAll()
+        XCTAssertNil(model.summary)
+
+        try await waitUntil { model.summary != nil }
+        XCTAssertEqual(model.summary, shown)
     }
 
     func testGmailURL_isTheFirstMessageInTheSignedInAccount() async throws {

@@ -194,7 +194,10 @@ final class SyncEngine: ObservableObject, Sendable {
             coreDataStack: coreDataStack,
             authenticatedAccountEmail: {
                 AuthSession.shared.currentOrPersistedUserEmail()
-            }
+            },
+            // The engine's clock spaces the escape hatch's strikes too
+            // (`SyncFailureStrikePolicy`).
+            clock: clock
         )
     }
 
