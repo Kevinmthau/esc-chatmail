@@ -53,7 +53,7 @@ final class ConversationListStoreTests: XCTestCase {
 
         var store = ConversationListStore()
         // Deliberately not sort order: the store must trust the caller's order.
-        store.replaceAll(with: [bob, alice, carol])
+        store.replaceAll(with: [bob, alice, carol], isComplete: true)
 
         XCTAssertEqual(visibleIDs(of: store), [bob.objectID, alice.objectID, carol.objectID])
     }
@@ -68,7 +68,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol])
+        store.replaceAll(with: [alice, bob, carol], isComplete: true)
 
         bob.lastMessageDate = Date(timeIntervalSince1970: 400)
         var removed = applyUpdate(&store, updated: [bob])
@@ -92,7 +92,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol])
+        store.replaceAll(with: [alice, bob, carol], isComplete: true)
         let initialItems = store.visibleItems
 
         bob.snippet = "updated beta"
@@ -118,7 +118,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob])
+        store.replaceAll(with: [alice, bob], isComplete: true)
 
         bob.archivedAt = Date(timeIntervalSince1970: 500)
         let removed = applyUpdate(&store, updated: [bob])
@@ -137,7 +137,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol])
+        store.replaceAll(with: [alice, bob, carol], isComplete: true)
 
         let removed = applyUpdate(&store, deleted: [carol.objectID])
 
@@ -162,7 +162,7 @@ final class ConversationListStoreTests: XCTestCase {
         let matchesUnread: (Conversation) -> Bool = { $0.inboxUnreadCount > 0 }
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob])
+        store.replaceAll(with: [alice, bob], isComplete: true)
 
         bob.inboxUnreadCount = 0
         let removed = applyUpdate(&store, updated: [bob], matchesVisibility: matchesUnread)
@@ -183,7 +183,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol, dave])
+        store.replaceAll(with: [alice, bob, carol, dave], isComplete: true)
 
         let trimmed = store.trimVisibleItems(to: 2)
 
@@ -321,7 +321,7 @@ final class ConversationListStoreTests: XCTestCase {
         try saveViewContext()
 
         var store = ConversationListStore()
-        store.replaceAll(with: [alice, bob, carol, dave, erin])
+        store.replaceAll(with: [alice, bob, carol, dave, erin], isComplete: true)
         assertVisibleItemsSorted(store)
 
         // Move one row, archive one, delete one, insert a new one.
@@ -354,6 +354,120 @@ final class ConversationListStoreTests: XCTestCase {
         XCTAssertTrue(store.visibleItems.isEmpty)
     }
 
+    // MARK: - The window's edge
+
+    /// A window from a fetch that found more rows ends at its last row. A changed row
+    /// that sorts past that edge is not added (a page or the backfill reaches it in
+    /// order); one that sorts before it is, and the trim back to the limit moves the edge
+    /// to the new last row.
+    // Revert-check: the `.open(after: let boundary?)` comparison in `admits(sortKey:)`
+    // (answering true adds Carol after Bob, and later Bob after Dave).
+    func testOpenEdge_rowPastTheEdge_isNotAdded_rowBeforeItIsAdmitted() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        let bob = makeConversation(name: "Bob", date: 200)
+        let carol = makeConversation(name: "Carol", date: 100)
+        try saveViewContext()
+        var store = ConversationListStore()
+        store.replaceAll(with: [alice, bob], isComplete: false)
+        XCTAssertEqual(store.edge, .open(after: store.visibleItems.last?.sortKey))
+
+        carol.snippet = "new mail, still the oldest"
+        XCTAssertEqual(applyUpdate(&store, updated: [carol]), [])
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, bob.objectID])
+
+        let dave = makeConversation(name: "Dave", date: 250)
+        _ = applyUpdate(&store, updated: [dave])
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, dave.objectID, bob.objectID])
+        _ = store.trimVisibleItems(to: 2)
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, dave.objectID])
+        XCTAssertEqual(store.edge, .open(after: store.visibleItems.last?.sortKey))
+
+        bob.snippet = "past the edge now"
+        _ = applyUpdate(&store, updated: [bob])
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, dave.objectID])
+    }
+
+    /// The prefix gap of conversation-list-ui#3: a window row that moves past the edge
+    /// (here unpinned, so it sorts by its old date) leaves the window and is reported, so
+    /// the rows that now sort before it come first when the window is filled again.
+    // Revert-check: `.leaves` in `admittance(of:isSourceConversation:)` for a row the
+    // window holds (answering `.admitted` for it keeps Old at the window's end, ahead of
+    // Carol, which sorts before it and is not loaded).
+    func testOpenEdge_windowRowMovesPastTheEdge_leavesTheWindow() throws {
+        let old = ConversationBuilder().withDisplayName("Old").visible().setPinned()
+            .withLastMessageDate(Date(timeIntervalSince1970: 50)).build(in: context)
+        let alice = makeConversation(name: "Alice", date: 300)
+        let bob = makeConversation(name: "Bob", date: 200)
+        _ = makeConversation(name: "Carol", date: 100)
+        try saveViewContext()
+        var store = ConversationListStore()
+        store.replaceAll(with: [old, alice, bob], isComplete: false)
+
+        old.pinned = false
+        let removed = applyUpdate(&store, updated: [old])
+
+        XCTAssertEqual(removed, [old.objectID])
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, bob.objectID])
+    }
+
+    /// A complete window admits every changed row; a trim then proves rows exist past
+    /// it, and opens the edge at the new last row.
+    func testCompleteEdge_admitsAnyRow_andATrimOpensItAtTheLastRow() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        let bob = makeConversation(name: "Bob", date: 200)
+        try saveViewContext()
+        var store = ConversationListStore()
+        store.replaceAll(with: [alice, bob], isComplete: true)
+
+        let carol = makeConversation(name: "Carol", date: 100)
+        _ = applyUpdate(&store, updated: [carol])
+        XCTAssertEqual(visibleIDs(of: store), [alice.objectID, bob.objectID, carol.objectID])
+        XCTAssertTrue(store.isComplete)
+
+        _ = store.trimVisibleItems(to: 2)
+        XCTAssertFalse(store.isComplete)
+        XCTAssertEqual(store.edge, .open(after: store.visibleItems.last?.sortKey))
+        XCTAssertEqual(store.visibleItems.last?.id, bob.objectID)
+    }
+
+    /// An emptied store (an invalidate-all) knows no prefix, so it admits nothing until
+    /// a fetch fills it: a row it took in could sort anywhere among rows it never read.
+    // Revert-check: `.open(after: nil)` in `admits(sortKey:)` (answering true adds Bob).
+    func testEmptiedStore_admitsNothingUntilAFetch() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        let bob = makeConversation(name: "Bob", date: 200)
+        try saveViewContext()
+        var store = ConversationListStore()
+        store.replaceAll(with: [alice], isComplete: true)
+
+        store.removeAll()
+        _ = applyUpdate(&store, updated: [bob])
+
+        XCTAssertEqual(store.edge, .open(after: nil))
+        XCTAssertEqual(visibleIDs(of: store), [])
+    }
+
+    /// A failed fetch opens a complete window at its last row (it can no longer say it
+    /// holds every row), and leaves an open edge where it was.
+    // Revert-check: `markOpen()`'s assignment (a no-op leaves the window complete, so
+    // paging and the backfill would stay shut after a failed reload).
+    func testMarkOpen_completeWindowEndsAtItsLastRow_openEdgeIsKept() throws {
+        let alice = makeConversation(name: "Alice", date: 300)
+        let bob = makeConversation(name: "Bob", date: 200)
+        try saveViewContext()
+        var store = ConversationListStore()
+        store.replaceAll(with: [alice, bob], isComplete: true)
+
+        store.markOpen()
+        let bobKey = store.visibleItems.last?.sortKey
+        XCTAssertEqual(store.edge, .open(after: bobKey))
+
+        _ = store.trimVisibleItems(to: 1)
+        let aliceKey = store.visibleItems.last?.sortKey
+        store.markOpen()
+        XCTAssertEqual(store.edge, .open(after: aliceKey))
+    }
+
     // MARK: - Rows the list cannot show
 
     /// A tombstone, the fault of a row another context deleted from the store before it
@@ -376,7 +490,7 @@ final class ConversationListStoreTests: XCTestCase {
         let rows = try makeTombstoneOnSQLite()
         var store = ConversationListStore()
 
-        store.replaceAll(with: [rows.tombstone, rows.live])
+        store.replaceAll(with: [rows.tombstone, rows.live], isComplete: true)
 
         XCTAssertEqual(visibleIDs(of: store), [rows.live.objectID])
     }
@@ -412,7 +526,7 @@ final class ConversationListStoreTests: XCTestCase {
 
         var store = ConversationListStore()
         if windowBeforeDelete {
-            store.replaceAll(with: [doomed, live])
+            store.replaceAll(with: [doomed, live], isComplete: true)
         }
         sqliteContext.refresh(doomed, mergeChanges: false)
         XCTAssertTrue(doomed.isFault, "Precondition: the row is held only as a fault")

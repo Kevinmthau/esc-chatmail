@@ -29,8 +29,23 @@ enum ConversationListChangeFetch {
         return request
     }
 
-    /// The conversations a sibling context's save inserted or updated. Pending changes are
-    /// included, so an unsaved edit the observed context holds still decides the row.
+    /// The conversations a sibling context's save inserted or updated, materialized with
+    /// their own attributes and nothing of their participants: what the list needs to ask
+    /// `ConversationListStore.admittance` before it reads any participant (architecture
+    /// review 2026-11, conversation-list-ui#5). Materialized at fetch time for the same
+    /// reason as `materializedConversations`; pending changes are included, so an unsaved
+    /// edit the observed context holds still decides the row's place.
+    static func savedConversationsForAdmission(withIDs objectIDs: Set<NSManagedObjectID>) -> NSFetchRequest<Conversation> {
+        let request = NSFetchRequest<Conversation>(entityName: "Conversation")
+        request.predicate = NSPredicate(format: "self IN %@", Array(objectIDs))
+        request.includesPendingChanges = true
+        request.returnsObjectsAsFaults = false
+        return request
+    }
+
+    /// The admitted conversations of a sibling context's save, with what the snapshot
+    /// build walks. Pending changes are included, so an unsaved edit the observed context
+    /// holds still decides the row.
     static func savedConversations(withIDs objectIDs: Set<NSManagedObjectID>) -> NSFetchRequest<Conversation> {
         materializedConversations(
             matching: NSPredicate(format: "self IN %@", Array(objectIDs)),

@@ -63,6 +63,18 @@ struct ConversationListItem: Identifiable, Equatable {
             self.stableID = stableID
         }
 
+        /// The key of a conversation the list can show, nil for one it cannot
+        /// (`ConversationListItem.listableID(of:)`): `init(conversation:)` reads the
+        /// non-optional `id`, which traps on a tombstone.
+        init?(listableConversation conversation: Conversation) {
+            guard let stableID = ConversationListItem.listableID(of: conversation) else { return nil }
+            self.init(
+                pinned: conversation.pinned,
+                lastMessageDate: conversation.lastMessageDate,
+                stableID: stableID
+            )
+        }
+
         /// Builds the key straight from a managed `Conversation` — the
         /// counterpart of `ConversationListItem.sortKey` for rows that have
         /// no list item yet (`ConversationWindowProvider`'s pending/persisted

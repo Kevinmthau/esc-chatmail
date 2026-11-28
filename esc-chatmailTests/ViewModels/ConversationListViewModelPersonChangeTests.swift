@@ -220,9 +220,9 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
             person.hasFault(forRelationshipNamed: "conversationParticipations"),
             "The merged change must not walk every conversation the Person joined"
         )
-        // The conversation the message went to is a changed Conversation of the save, which
-        // the sibling-save path fetches whatever its place in the list (the admission test
-        // of conversation-list-ui#5 is not built yet); the other 199 are the Person's alone.
+        // The conversation the message went to is a changed Conversation of the save, whose
+        // own attributes the sibling-save path reads to place it (`conversationsToApply`'s
+        // first read, which then leaves it out); the other 199 are the Person's alone.
         XCTAssertEqual(
             fixture.archivedIDs.dropFirst().filter { viewContext.registeredObject(for: $0) != nil },
             [],
@@ -279,21 +279,11 @@ final class ConversationListViewModelPersonChangeTests: XCTestCase {
         return builder.build(in: viewContext)
     }
 
-    /// The launch passes `onAppear(in:)` schedules are marked done: they sweep this
-    /// suite's store and save conversations (the name refresh renames them), and those
-    /// saves reach the list through the sibling-save fetch, which would register rows and
-    /// change snapshots under the assertions of the tests that await.
+    /// The launch passes are marked done
+    /// (`InMemoryMigrationFlagStore.withConversationListLaunchPassesDone`): their saves
+    /// would register rows and change snapshots under the tests that await.
     private func makeViewModel(windowLimit: Int) -> ConversationListViewModel {
-        let migrationFlags = InMemoryMigrationFlagStore()
-        for key in [
-            ConversationLaunchRepairCoordinator.conversationNameRefreshMigrationKey,
-            ConversationLaunchRepairCoordinator.conversationPreviewRepairMigrationKey,
-            ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey,
-            ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey,
-            ConversationLaunchRepairCoordinator.richContentVerdictBackfillMigrationKey
-        ] {
-            migrationFlags.set(true, forKey: key)
-        }
+        let migrationFlags = InMemoryMigrationFlagStore.withConversationListLaunchPassesDone()
         return ConversationListViewModel(
             dependencies: .forTesting(stack: stack, viewContext: viewContext, migrationFlags: migrationFlags),
             windowProvider: ConversationWindowProvider(

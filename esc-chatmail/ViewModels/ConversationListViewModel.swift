@@ -72,7 +72,6 @@ final class ConversationListViewModel: ObservableObject {
     var listStore = ConversationListStore()
     private let windowProvider: ConversationWindowProvider
     private var loadedConversationLimit: Int
-    private var hasLoadedAllConversationWindow = false
     /// Set when a window fetch failed and the window on screen is the one from before
     /// it: the next `.syncCompleted` reloads, and only then (`retryOwedWindowReload`),
     /// never every sync, which would refetch the whole window on the main thread after
@@ -420,12 +419,9 @@ final class ConversationListViewModel: ObservableObject {
             matchesVisibility: matchesVisibleConversation(_:)
         )
 
-        let trimmedIDs = listStore.trimVisibleItems(to: loadedConversationLimit)
-        if !trimmedIDs.isEmpty {
-            // A non-empty trim proves the store holds rows beyond the window, so
-            // paging must reopen even when a short initial fetch latched "all loaded".
-            hasLoadedAllConversationWindow = false
-        }
+        // A non-empty trim opens the store's edge, which reopens paging even when a
+        // short initial fetch had found the window complete.
+        _ = listStore.trimVisibleItems(to: loadedConversationLimit)
 
         if backfillConversationWindowIfNeeded() {
             return
@@ -547,7 +543,6 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     private func recomputeFilteredConversations() {
-        hasLoadedAllConversationWindow = false
         loadedConversationLimit = windowProvider.initialLimit
         // A different query rebuilds the window from scratch: forget the
         // prefetch ledger so the new window's rows warm again.
@@ -571,7 +566,7 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     func loadMoreIfNeeded(currentItem item: ConversationListItem) {
-        guard !hasLoadedAllConversationWindow else { return }
+        guard !listStore.isComplete else { return }
         // Page only when the appearing row sits within preloadThreshold of the
         // window's end; a row that is no longer in the window pages nothing.
         let pagingTriggerItems = filteredConversationItems.suffix(windowProvider.preloadThreshold)
@@ -626,20 +621,20 @@ final class ConversationListViewModel: ObservableObject {
                 error: error
             )
             windowReloadOwed = true
-            hasLoadedAllConversationWindow = false
             if afterQueryChange {
-                listStore.replaceAll(with: [])
+                listStore.replaceAll(with: [], isComplete: false)
                 publishVisibleItems()
+            } else {
+                listStore.markOpen()
             }
             return false
         }
         windowReloadOwed = false
-        hasLoadedAllConversationWindow = window.count < loadedConversationLimit
         // Captured before replaceAll so the prefetch below targets only the
         // rows entering the window on this reload (paging's appended tail, a
         // live insert) instead of re-submitting the whole window every time.
         let previouslyVisibleIDs = Set(listStore.visibleItems.map(\.id))
-        listStore.replaceAll(with: window)
+        listStore.replaceAll(with: window, isComplete: window.count < loadedConversationLimit)
         publishVisibleItems()
         let newlyVisibleItems = listStore.visibleItems.filter { !previouslyVisibleIDs.contains($0.id) }
         prefetchPersonData(from: newlyVisibleItems)
@@ -653,12 +648,11 @@ final class ConversationListViewModel: ObservableObject {
     }
 
     /// The observed context was reset wholesale (`NSInvalidatedAllObjectsKey`), so the
-    /// window is gone: paging reopens and a reload is owed. Nothing is fetched here: the
-    /// reset runs between the store's destroy and its reload, where a fetch traps;
-    /// `onAppear` or the next sync's end refetches. Internal (not private) for the
-    /// `+ChangeObservation` facet.
+    /// window is gone (`ConversationListStore.removeAll` opened its edge, so paging
+    /// reopens) and a reload is owed. Nothing is fetched here: the reset runs between
+    /// the store's destroy and its reload, where a fetch traps; `onAppear` or the next
+    /// sync's end refetches. Internal (not private) for the `+ChangeObservation` facet.
     func noteWindowInvalidated() {
-        hasLoadedAllConversationWindow = false
         windowReloadOwed = true
     }
 
@@ -671,7 +665,7 @@ final class ConversationListViewModel: ObservableObject {
     @discardableResult
     private func backfillConversationWindowIfNeeded() -> Bool {
         guard observedConversationContext != nil,
-              !hasLoadedAllConversationWindow,
+              !listStore.isComplete,
               listStore.visibleItems.count < loadedConversationLimit else {
             return false
         }
@@ -687,7 +681,9 @@ final class ConversationListViewModel: ObservableObject {
         )
     }
 
-    private func isSourceConversation(_ conversation: Conversation) -> Bool {
+    /// Internal (not private) so the `+ChangeObservation` facet's sibling-save path
+    /// can ask `ConversationListStore.admittance` before it prefetches participants.
+    func isSourceConversation(_ conversation: Conversation) -> Bool {
         conversation.archivedAt == nil
     }
 

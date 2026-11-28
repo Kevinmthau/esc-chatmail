@@ -691,6 +691,59 @@ final class ConversationListViewModelTests: XCTestCase {
         )
     }
 
+    /// An old pinned row at the top of a full, incomplete window is unpinned, so it sorts by
+    /// its old date, past rows the window never loaded. The window must still be what a
+    /// fresh fetch would show. Before, the row stayed at the window's end ahead of those
+    /// rows, and only a later full reload healed the gap (architecture review 2026-11,
+    /// conversation-list-ui#3).
+    // Revert-check: `.leaves` in `ConversationListStore.admittance(of:isSourceConversation:)`
+    // for a row the window holds (answering `.admitted` shows [Alice, Bob, Old]).
+    func testUnpinningAnOldRow_pastTheWindow_keepsTheWindowAFreshFetchsPrefix() throws {
+        let old = ConversationBuilder()
+            .withDisplayName("Old")
+            .withSnippet("pinned long ago")
+            .visible()
+            .setPinned()
+            .withLastMessageDate(Date(timeIntervalSince1970: 1))
+            .withCreatedAt(Date())
+            .build(in: viewContext)
+        let alice = makeConversation(name: "Alice", snippet: "alpha", date: 300)
+        let bob = makeConversation(name: "Bob", snippet: "beta", date: 200)
+        let carol = makeConversation(name: "Carol", snippet: "gamma", date: 100)
+        try viewContext.save()
+        let windowProvider = ConversationWindowProvider(
+            configuration: ConversationListWindowConfiguration(
+                initialLimit: 3,
+                pageSize: 1,
+                preloadThreshold: 1,
+                contactFilterCandidateMultiplier: 5
+            )
+        )
+        let viewModel = makeViewModel(windowProvider: windowProvider)
+        viewModel.onAppear(in: viewContext)
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), [old.objectID, alice.objectID, bob.objectID])
+
+        old.pinned = false
+        viewContext.processPendingChanges()
+
+        let freshPrefix = try windowProvider.fetchWindow(
+            in: viewContext,
+            limit: 3,
+            searchText: "",
+            filter: .all,
+            matchesVisibility: { _ in true }
+        ).map(\.objectID)
+        XCTAssertEqual(freshPrefix, [alice.objectID, bob.objectID, carol.objectID])
+        XCTAssertEqual(filteredConversationIDs(in: viewModel), freshPrefix)
+
+        let last = try XCTUnwrap(viewModel.filteredConversationItems.last)
+        viewModel.loadMoreIfNeeded(currentItem: last)
+        XCTAssertEqual(
+            filteredConversationIDs(in: viewModel),
+            [alice.objectID, bob.objectID, carol.objectID, old.objectID]
+        )
+    }
+
     // Revert-check: publishVisibleItems must call
     // ConversationSelectionService.retainSelection(within:). A row that stops
     // matching the filter leaves the store through upsertConversation, which

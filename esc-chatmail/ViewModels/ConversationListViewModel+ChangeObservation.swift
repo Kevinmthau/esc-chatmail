@@ -170,35 +170,76 @@ extension ConversationListViewModel {
         let deletedIDs = conversationSaveObjectIDs(forKey: NSDeletedObjectIDsKey, in: notification)
 
         context.performAndWait {
-            // One batch fetch instead of a per-ID existingObject(with:) loop,
-            // materialized with the participants → person chain the snapshot
-            // build walks (`ConversationListChangeFetch.materializedConversations`
-            // says why each setting is what it is). Rows a later save already
-            // deleted simply do not return — the same drop existingObject's
-            // throw produced; the delete's own notification removes the row.
-            let changedIDs = insertedIDs.union(updatedIDs)
-            var updatedConversations: [Conversation] = []
-            if !changedIDs.isEmpty {
-                do {
-                    updatedConversations = try context.fetch(
-                        ConversationListChangeFetch.savedConversations(withIDs: changedIDs)
-                    )
-                } catch {
-                    Log.error("Failed to fetch sibling-save conversations", category: .conversation, error: error)
-                }
-            }
-
             // performAndWait executes on the calling thread — main, per the
             // .receive(on:) above — while holding the context's queue, so
             // this is main-actor work serialized against merge blocks and
             // the objectsDidChange sink that fires inside them.
             MainActor.assumeIsolated {
                 applyConversationChanges(
-                    updatedConversations: updatedConversations,
+                    updatedConversations: conversationsToApply(
+                        savedIDs: insertedIDs.union(updatedIDs),
+                        in: context
+                    ),
                     deletedIDs: deletedIDs
                 )
             }
         }
+    }
+
+    /// The saved conversations the list must apply, read in two steps so that the
+    /// rows a save touches past the window cost no participant read on the main
+    /// thread.
+    ///
+    /// First every changed row, materialized without its participants, which is
+    /// enough for `ConversationListStore.admittance`: archived, sort key, and whether
+    /// the window holds it. Then the participant prefetch for the admitted rows alone,
+    /// which the snapshot build needs. A row the window holds that the change takes
+    /// out goes to the store from the first read, which removes it without reading
+    /// anything more. Until 2026-11-28 every changed row was fetched with its
+    /// participants and persons and snapshotted before the trim dropped the ones past
+    /// the window: up to a page of 500 rows per save of a catch-up sync
+    /// (architecture review 2026-11, conversation-list-ui#5).
+    ///
+    /// Both reads include pending changes, so an unsaved edit this context holds (an
+    /// optimistic send's new `lastMessageDate`) still decides a row's place. Rows a
+    /// later save already deleted simply do not return — the same drop existingObject's
+    /// throw produced; the delete's own notification removes the row.
+    private func conversationsToApply(
+        savedIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) -> [Conversation] {
+        guard !savedIDs.isEmpty else { return [] }
+
+        let changedRows: [Conversation]
+        do {
+            changedRows = try context.fetch(
+                ConversationListChangeFetch.savedConversationsForAdmission(withIDs: savedIDs)
+            )
+        } catch {
+            Log.error("Failed to fetch sibling-save conversations", category: .conversation, error: error)
+            return []
+        }
+
+        var toApply: [Conversation] = []
+        var admittedIDs = Set<NSManagedObjectID>()
+        for row in changedRows {
+            switch listStore.admittance(of: row, isSourceConversation: isSourceConversation(_:)) {
+            case .admitted:
+                admittedIDs.insert(row.objectID)
+            case .leaves:
+                toApply.append(row)
+            case .outside:
+                continue
+            }
+        }
+        guard !admittedIDs.isEmpty else { return toApply }
+
+        do {
+            toApply += try context.fetch(ConversationListChangeFetch.savedConversations(withIDs: admittedIDs))
+        } catch {
+            Log.error("Failed to fetch sibling-save conversations", category: .conversation, error: error)
+        }
+        return toApply
     }
 
     // MARK: - Notification Payload Helpers

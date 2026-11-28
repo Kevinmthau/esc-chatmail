@@ -47,3 +47,27 @@ final class InMemoryMigrationFlagStore: MigrationFlagStore {
         flags[defaultName] = value
     }
 }
+
+extension InMemoryMigrationFlagStore {
+    /// A store whose one-shot conversation-list launch passes are marked done, for a
+    /// list suite that must not have them run: with test-owned storage they sweep the
+    /// suite's store and save conversations (the name refresh renames rows that have
+    /// participants), and those saves reach the list through the sibling-save path,
+    /// which registers rows and changes snapshots under a test that awaits. The list-
+    /// title repair runs every launch regardless, and touches list conversations only.
+    /// `@MainActor` because two of the keys are the coordinator's main-actor statics.
+    @MainActor
+    static func withConversationListLaunchPassesDone() -> InMemoryMigrationFlagStore {
+        let store = InMemoryMigrationFlagStore()
+        for key in [
+            ConversationLaunchRepairCoordinator.conversationNameRefreshMigrationKey,
+            ConversationLaunchRepairCoordinator.conversationPreviewRepairMigrationKey,
+            ConversationLaunchRepairCoordinator.chatPreviewRepairMigrationKey,
+            ConversationLaunchRepairCoordinator.blankChatPreviewBackfillMigrationKey,
+            ConversationLaunchRepairCoordinator.richContentVerdictBackfillMigrationKey
+        ] {
+            store.set(true, forKey: key)
+        }
+        return store
+    }
+}
