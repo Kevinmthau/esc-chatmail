@@ -293,7 +293,15 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// anchor can scroll without waiting for layout of a row it just loaded.
     private let isMessagePublished: MessagePublicationCheck
     private let markConversationAsReadIfNeeded: () -> Void
-    private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> Void
+    /// Marks the arrivals it is handed read where they are unread INBOX messages, and returns
+    /// those it marked: the ones `announceArrivals` is told of.
+    private let markUnreadInboxMessagesAsReadIfNeeded: ([NSManagedObjectID]) -> [NSManagedObjectID]
+    /// Announces, to VoiceOver, the arrivals the chat has just marked read
+    /// (`ChatAnnouncer.announceArrivals`; architecture review 2026-11,
+    /// gap-accessibility-architecture#2). Told the IDs in the turn they are marked.
+    private let announceArrivals: ([NSManagedObjectID]) -> Void
+    /// Speaks the chat's announcements, and holds their spacing.
+    private let announcer: ChatAnnouncer
     private let initializeReplyingTo: (Message?) -> Void
     private let updateReplyingToIfNewSubject: (Message?) -> Void
     private let loadResolvedDisplayName: () -> Void
@@ -414,6 +422,7 @@ final class ChatMessagesCoordinator: ObservableObject {
         viewModel: ChatViewModel,
         chatDependencies: ChatDependencies,
         initialPresentationAnchor: InitialPresentationAnchor,
+        announcer: ChatAnnouncer? = nil,
         sleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep,
         now: @escaping Now = { ProcessInfo.processInfo.systemUptime },
         watchdogSleep: @escaping Sleep = ChatMessagesCoordinator.systemSleep
@@ -433,6 +442,16 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.markUnreadInboxMessagesAsReadIfNeeded = { messageObjectIDs in
             viewModel.markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: messageObjectIDs)
         }
+        // Nil for the app's own: VoiceOver's (a default argument cannot make one, since it is
+        // evaluated off the main actor).
+        let announcer = announcer ?? ChatAnnouncer()
+        // The announcement is built from the published rows' values in this turn, the turn
+        // the arrivals are marked, never from a store read or a later task.
+        self.announceArrivals = { messageObjectIDs in
+            let marked = Set(messageObjectIDs)
+            announcer.announceArrivals(scrollState.visibleMessages.filter { marked.contains($0.objectID) })
+        }
+        self.announcer = announcer
         self.initializeReplyingTo = { lastMessage in
             viewModel.initializeReplyingTo(lastMessage: lastMessage)
         }
@@ -464,6 +483,8 @@ final class ChatMessagesCoordinator: ObservableObject {
         loadLatestWindowIfNeeded: @escaping LatestWindowLoader,
         markConversationAsReadIfNeeded: @escaping () -> Void,
         markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void = { _ in },
+        announceArrivals: @escaping ([NSManagedObjectID]) -> Void = { _ in },
+        announcer: ChatAnnouncer? = nil,
         initializeReplyingTo: @escaping (Message?) -> Void,
         updateReplyingToIfNewSubject: @escaping (Message?) -> Void,
         loadResolvedDisplayName: @escaping () -> Void,
@@ -482,7 +503,14 @@ final class ChatMessagesCoordinator: ObservableObject {
         self.ensureVisibleMessage = ensureVisibleMessage
         self.isMessagePublished = isMessagePublished
         self.markConversationAsReadIfNeeded = markConversationAsReadIfNeeded
-        self.markUnreadInboxMessagesAsReadIfNeeded = markUnreadInboxMessagesAsReadIfNeeded
+        // A test's closure marks every ID it is handed.
+        self.markUnreadInboxMessagesAsReadIfNeeded = { messageObjectIDs in
+            markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs)
+            return messageObjectIDs
+        }
+        self.announceArrivals = announceArrivals
+        // Nil for one that speaks nothing.
+        self.announcer = announcer ?? ChatAnnouncer(post: { _ in })
         self.initializeReplyingTo = initializeReplyingTo
         self.updateReplyingToIfNewSubject = updateReplyingToIfNewSubject
         self.loadResolvedDisplayName = loadResolvedDisplayName
@@ -676,7 +704,28 @@ final class ChatMessagesCoordinator: ObservableObject {
 
         var seenMessageIDs = Set<NSManagedObjectID>()
         let verifiedMessageIDs = pendingMessageIDs.filter { seenMessageIDs.insert($0).inserted }
-        markUnreadInboxMessagesAsReadIfNeeded(verifiedMessageIDs)
+        // Exactly what was marked, in the turn it was marked: a VoiceOver user hears the mail
+        // that Gmail is about to be told they read (architecture review 2026-11,
+        // gap-accessibility-architecture#2). The user's own echo is never unread, so never
+        // marked, so never announced.
+        let markedMessageIDs = markUnreadInboxMessagesAsReadIfNeeded(verifiedMessageIDs)
+        if !markedMessageIDs.isEmpty {
+            announceArrivals(markedMessageIDs)
+        }
+    }
+
+    /// The user's own rows' send statuses changed between two passes of the transcript
+    /// (`ChatTranscriptAnnouncementPolicy.ownSendStatuses`): announces each reply that left
+    /// `.sending` for Not sent, Delivery unknown or Send failed, while someone can be looking
+    /// at this chat. Send outcomes themselves are the send path's; this only speaks what the
+    /// rows already show.
+    func handleOwnSendStatusesChange(
+        old: [ChatMessageDisplayIdentity: MessageSendStatusPresentation],
+        new: [ChatMessageDisplayIdentity: MessageSendStatusPresentation],
+        isChatActiveAndUncovered: Bool
+    ) {
+        guard isReadyToShow, isVisible, isChatActiveAndUncovered else { return }
+        announcer.announceSendOutcomes(old: old, new: new)
     }
 
     /// Advances the initial reveal only from actual bottom-anchor geometry.

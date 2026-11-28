@@ -1235,6 +1235,99 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
         XCTAssertEqual(markedArrivalIDs, [[arrivalID]])
     }
 
+    /// An arrival marked read at the bottom of the open chat is announced, in the same turn,
+    /// as exactly the IDs that were marked (architecture review 2026-11,
+    /// gap-accessibility-architecture#2).
+    ///
+    /// Revert-check: dropping the `announceArrivals(markedMessageIDs)` call in
+    /// `ChatMessagesCoordinator.handleLatestWindowLayout` leaves the announcements empty.
+    func testArrivalAtLatestVisibleWindow_announcesExactlyTheIDsMarkedRead() {
+        var markedArrivalIDs: [[NSManagedObjectID]] = []
+        var announcedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { markedArrivalIDs.append($0) },
+            announceArrivals: { announcedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("announced-arrival")
+        handleEmptyAppear(coordinator)
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        handleRefreshAndLayout(coordinator, event: event, messageIDsInLatestWindow: [arrivalID])
+
+        XCTAssertEqual(markedArrivalIDs, [[arrivalID]])
+        XCTAssertEqual(announcedArrivalIDs, markedArrivalIDs)
+    }
+
+    /// An arrival the chat does not mark read (the chat covered, or in the background) is not
+    /// announced either.
+    ///
+    /// Revert-check: announcing before the `isChatActiveAndUncovered` guard in
+    /// `ChatMessagesCoordinator.handleLatestWindowLayout` fails this.
+    func testArrivalWhileCovered_announcesNothing() {
+        var announcedArrivalIDs: [[NSManagedObjectID]] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            announceArrivals: { announcedArrivalIDs.append($0) }
+        )
+        let arrivalID = makeMessageObjectID("covered-arrival")
+        handleEmptyAppear(coordinator)
+        let event = VirtualScrollInsertedMessageEvent(id: UUID(), messageIDs: [arrivalID])
+        coordinator.handleInsertedVisibleMessageEvent(
+            event,
+            isChatActiveAndUncovered: true,
+            isShowingLatestWindow: true,
+            isBottomAnchorVisible: true
+        )
+
+        handleRefreshAndLayout(
+            coordinator,
+            event: event,
+            messageIDsInLatestWindow: [arrivalID],
+            isChatActiveAtLayout: false
+        )
+
+        XCTAssertTrue(announcedArrivalIDs.isEmpty)
+    }
+
+    /// A reply of the user's that leaves `.sending` for Not sent is announced while someone
+    /// can be looking at the chat, and not while it is covered.
+    ///
+    /// Revert-check: dropping `isChatActiveAndUncovered` from the guard in
+    /// `ChatMessagesCoordinator.handleOwnSendStatusesChange` fails the second assertion;
+    /// dropping the `announcer.announceSendOutcomes` call fails the first.
+    func testOwnSendStatusChange_announcesAFailedReplyOnlyWhileUncovered() {
+        var spoken: [String] = []
+        let coordinator = makeUnreadCoordinator(
+            markConversationAsReadIfNeeded: {},
+            markUnreadInboxMessagesAsReadIfNeeded: { _ in },
+            announcer: ChatAnnouncer(post: { spoken.append($0) })
+        )
+        handleEmptyAppear(coordinator)
+        let reply = ChatMessageDisplayIdentity.outboundSend(optimisticMessageID: "reply-\(UUID().uuidString)")
+
+        coordinator.handleOwnSendStatusesChange(
+            old: [reply: .sending],
+            new: [reply: .notSent],
+            isChatActiveAndUncovered: true
+        )
+        XCTAssertEqual(spoken, ["Your message was not sent"])
+
+        coordinator.handleOwnSendStatusesChange(
+            old: [reply: .sending],
+            new: [reply: .deliveryUnknown],
+            isChatActiveAndUncovered: false
+        )
+        XCTAssertEqual(spoken, ["Your message was not sent"])
+    }
+
     func testArrivalWhileScrolledUpDoesNotMarkUnreadAsRead() {
         var markedArrivalIDs: [[NSManagedObjectID]] = []
         let coordinator = makeUnreadCoordinator(
@@ -8181,6 +8274,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
     private func makeUnreadCoordinator(
         markConversationAsReadIfNeeded: @escaping () -> Void,
         markUnreadInboxMessagesAsReadIfNeeded: @escaping ([NSManagedObjectID]) -> Void,
+        announceArrivals: @escaping ([NSManagedObjectID]) -> Void = { _ in },
+        announcer: ChatAnnouncer? = nil,
         sleep: @escaping ChatMessagesCoordinator.Sleep = { _ in },
         now: @escaping ChatMessagesCoordinator.Now = {
             ProcessInfo.processInfo.systemUptime
@@ -8197,6 +8292,8 @@ final class ChatMessagesCoordinatorTests: XCTestCase {
             loadLatestWindowIfNeeded: { _ in },
             markConversationAsReadIfNeeded: markConversationAsReadIfNeeded,
             markUnreadInboxMessagesAsReadIfNeeded: markUnreadInboxMessagesAsReadIfNeeded,
+            announceArrivals: announceArrivals,
+            announcer: announcer,
             initializeReplyingTo: { _ in },
             updateReplyingToIfNewSubject: { _ in },
             loadResolvedDisplayName: {},

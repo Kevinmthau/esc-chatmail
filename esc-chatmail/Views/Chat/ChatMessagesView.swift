@@ -123,6 +123,9 @@ struct ChatMessagesView: View {
             let displayedMessageIDs = displayedMessages.map(\.objectID)
             let groupingMessages = senderGroupingMessages(for: displayedMessages)
             let groupingMessageIDs = groupingMessages.map(\.objectID)
+            // The user's own rows' send states, keyed by display identity, for the
+            // announcement of a reply that failed (`ChatTranscriptAnnouncementPolicy`).
+            let ownSendStatuses = ChatTranscriptAnnouncementPolicy.ownSendStatuses(rows: displayedMessages)
             let keyboardOffset = keyboardAvoidanceOffset()
             let bottomInsetComponents = ChatBottomInsetPolicy.Components(
                 replyBarHeight: replyBarHeight,
@@ -207,6 +210,13 @@ struct ChatMessagesView: View {
             }
             .onChange(of: displayedMessageIDs) { _, _ in
                 validateReplyTargetAfterMessageCollectionChange()
+            }
+            .onChange(of: ownSendStatuses) { oldStatuses, newStatuses in
+                coordinator.handleOwnSendStatusesChange(
+                    old: oldStatuses,
+                    new: newStatuses,
+                    isChatActiveAndUncovered: isChatActiveAndUncovered
+                )
             }
             .onChange(of: scrollState.isInitialLoadComplete) { _, isComplete in
                 handleInitialWindowLoaded(isComplete: isComplete, proxy: proxy)

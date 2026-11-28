@@ -462,12 +462,16 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: [NSManagedObjectID]) {
+    /// Marks those of `messageObjectIDs` that are unread INBOX messages read, and returns them:
+    /// the arrivals the open chat announces (`ChatMessagesCoordinator.handleLatestWindowLayout`).
+    @discardableResult
+    func markUnreadInboxMessagesAsReadIfNeeded(messageObjectIDs: [NSManagedObjectID]) -> [NSManagedObjectID] {
         let unreadMessageIDs = messageActions.snapshotUnreadInboxMessageObjectIDs(
             messageObjectIDs: messageObjectIDs
         )
-        guard !unreadMessageIDs.isEmpty else { return }
+        guard !unreadMessageIDs.isEmpty else { return [] }
         markConversationAsRead(messageObjectIDs: unreadMessageIDs)
+        return unreadMessageIDs
     }
 
     func latestVisibleMessage() -> Message? {
