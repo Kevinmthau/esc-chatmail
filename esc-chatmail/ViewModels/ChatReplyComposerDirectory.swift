@@ -120,9 +120,10 @@ final class ChatReplyComposerDirectory {
     }
 
     /// The quit is about to ask whether a draft write is outstanding: each
-    /// on-screen composer with a change its 350 ms debounce has not handed to
-    /// a save yet starts that save now
-    /// (`ChatViewModel.saveReplyDraftChangeForTermination`).
+    /// on-screen composer that still owes the store a save starts it now
+    /// (`ChatViewModel.saveReplyDraftChangeForTermination`): a change its
+    /// 350 ms debounce has not handed to a save yet, a save that read it and
+    /// failed, or files still importing.
     ///
     /// Without this, Cmd-Q, or closing the mailbox window (which quits), within
     /// 350 ms of the last keystroke lost what was typed since the last save.
@@ -135,11 +136,21 @@ final class ChatReplyComposerDirectory {
     /// starts in `startReplyDraftSave`, is made only by a composer on screen,
     /// waits for the cleanup-sensitive gate, and reads the composer there,
     /// where it writes nothing while the composer is sending, when another
-    /// composer owns the draft, or for another account. A composer whose
-    /// latest change a save has already read is left alone, so a quit writes
-    /// nothing the debounce would not have: an empty composer opened while
-    /// an earlier screen's reply was still unpersisted would otherwise remove
-    /// the stored copy of that reply (`hasUnpersistedSend`).
+    /// composer owns the draft, or for another account. A composer that a
+    /// save has read as it is, is left alone: the flush makes the saves the
+    /// composers owe sooner and no others. Saved anyway, an empty composer
+    /// opened while an earlier screen's reply was still unpersisted would
+    /// remove the stored copy of that reply (`hasUnpersistedSend`).
+    ///
+    /// HONEST SCOPE: in the app that keeps the stored copy only until the
+    /// chat's load gives the empty composer an automatic reply target
+    /// (`ChatViewModel.initializeReplyingTo`). That is a change, so 350 ms
+    /// later the debounce makes the same empty save, as it did before this
+    /// flush existed, and so do the composer's disappearance and the scene
+    /// leaving `.active` (`ChatView`), which save whatever the composer holds.
+    /// The reply is lost only if the process dies before it is persisted: a
+    /// send that fails gives it to the open composer, or merges it into the
+    /// stored draft (`ChatViewModel.returnUnsentReply`).
     ///
     /// A composer off screen is not asked. It started its save when it left
     /// (`ChatViewModel.composerDidDisappear`), and `draftWriteTracker` still
