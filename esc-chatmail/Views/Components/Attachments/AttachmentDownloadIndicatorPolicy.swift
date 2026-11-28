@@ -37,7 +37,9 @@ enum AttachmentDownloadIndicatorPolicy {
         if state == .uploading || (state == .queued && isUserAdded) {
             return .uploading
         }
-        if isRefusedForSpace, !isUserAdded {
+        // Only while the row has no file: a sibling's recovery can store a refused part's file
+        // after the refusal, and a badge over a ready image would be stale.
+        if isRefusedForSpace, !isUserAdded, !isReady {
             return .refusedForSpace
         }
         if state == .failed {

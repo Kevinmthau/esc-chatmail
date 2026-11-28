@@ -913,10 +913,10 @@ extension MessagePersister {
     ) {
         guard let remoteAttachmentID = remoteAttachment.id else { return }
 
-        let filenameExtension = (info.filename as NSString).pathExtension.lowercased()
-        let originalExtension = filenameExtension.isEmpty
-            ? AttachmentPaths.fileExtension(for: info.mimeType)
-            : filenameExtension
+        let originalExtension = AttachmentPaths.storedFileExtension(
+            filename: info.filename,
+            mimeType: info.mimeType
+        )
         let remoteOriginalPath = AttachmentPaths.originalPath(
             messageId: remoteMessageID,
             attachmentId: remoteAttachmentID,
@@ -1046,10 +1046,10 @@ extension MessagePersister {
     ) {
         AttachmentPaths.setupDirectories()
 
-        let filenameExtension = (attachmentInfo.filename as NSString).pathExtension.lowercased()
-        let originalExtension = filenameExtension.isEmpty
-            ? AttachmentPaths.fileExtension(for: attachmentInfo.mimeType)
-            : filenameExtension
+        let originalExtension = AttachmentPaths.storedFileExtension(
+            filename: attachmentInfo.filename,
+            mimeType: attachmentInfo.mimeType
+        )
         let remoteOriginalPath = AttachmentPaths.originalPath(
             messageId: remoteMessageID,
             attachmentId: attachmentInfo.id,
