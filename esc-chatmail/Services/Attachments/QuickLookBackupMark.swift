@@ -12,9 +12,11 @@ import Foundation
 ///
 /// A file left without its mark, because the app was ended with Quick Look open, is in
 /// backups until the daily orphan sweep, which marks every downloaded file it finds without
-/// one (`AttachmentDownloader.leaveOutOfBackupsIfDownloaded`). Only a file in `Attachments`
-/// carries a mark of its own. A preview in `Previews` is left out by its directory's mark,
-/// which a copy does not carry, and is left alone.
+/// one (`AttachmentDownloader.leaveOutOfBackupsIfDownloaded`). A preview in `Previews` is left
+/// out by its directory's mark, which a copy does not carry; a preview stored as a clone of its
+/// original (`AttachmentPaths.storeClone`) also carries the original's own mark, because
+/// `clonefile` and `copyItem` both copy it (measured on macOS 27.2), and `handOver` takes that
+/// off too while Quick Look shows it.
 ///
 /// HONEST SCOPE: whether a destination of the share sheet copies the mark was not measured.
 /// This makes the question moot for a share made while Quick Look is open, which is the only

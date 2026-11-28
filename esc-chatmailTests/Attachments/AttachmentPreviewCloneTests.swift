@@ -65,6 +65,26 @@ final class AttachmentPreviewCloneTests: XCTestCase {
         XCTAssertEqual(APFSCloneProbe.mayShareBlocks(destinationURL), true)
     }
 
+    // Revert-check: the `setAttributes([.modificationDate: Date()], …)` on the staging file in
+    // `AttachmentPaths.storeClone`. Without it the clone keeps its older original's date, and
+    // the orphan sweep's grace period reads a preview made now as one made then.
+    func testStoreClone_ofAnOlderFile_isDatedNow() throws {
+        let source = try storeFile(Data("older original".utf8), named: "dated-source")
+        let sourceURL = try XCTUnwrap(AttachmentPaths.fullURL(for: source))
+        try FileManager.default.setAttributes([.modificationDate: Date.distantPast], ofItemAtPath: sourceURL.path)
+        let destination = AttachmentPaths.previewPath(idOrUUID: "clone-dated-\(UUID().uuidString)")
+        pathsToRemove.append(destination)
+        let before = Date().addingTimeInterval(-1)
+
+        XCTAssertEqual(AttachmentPaths.storeClone(ofFileAt: source, at: destination), .saved)
+
+        let destinationURL = try XCTUnwrap(AttachmentPaths.fullURL(for: destination))
+        let modified = try XCTUnwrap(
+            try destinationURL.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+        )
+        XCTAssertGreaterThanOrEqual(modified, before)
+    }
+
     func testStoreClone_replacesAFileAlreadyThere_andLeavesNoStagingFile() throws {
         let source = try storeFile(Data("new preview".utf8), named: "replacing-source")
         let destination = AttachmentPaths.previewPath(idOrUUID: "clone-replaced-\(UUID().uuidString)")
