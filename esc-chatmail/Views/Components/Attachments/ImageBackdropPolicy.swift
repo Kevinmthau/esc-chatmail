@@ -69,8 +69,10 @@ enum ImageBackdropPolicy: Equatable {
         return presentation == .compact ? MessageBubbleStyle.standard.recipientBubbleColor() : nil
     }
 
-    /// Off the main actor once there is a bitmap to read: a thumbnail decodes lazily, on its
-    /// first draw. An image whose format has no alpha channel answers without one.
+    /// Off the main actor: a thumbnail `AttachmentCacheActor` decoded is already a bitmap
+    /// (`kCGImageSourceShouldCacheImmediately`), but an image made lazily (the
+    /// `PlatformImage(data:)` fallback, a downsampled grid image) is decoded here on its first
+    /// read. An image whose format has no alpha channel answers without one.
     ///
     /// A verdict stays with the image it read, so a row scrolling back into view reuses it through
     /// the instance `AttachmentCacheActor` hands back. It can't outlive that instance, or cross an

@@ -127,6 +127,146 @@ final class AttachmentThumbnailDecodeSizeTests: XCTestCase {
     }
 }
 
+extension AttachmentThumbnailDecodeSizeTests {
+    // MARK: - The photo bubble's decode size
+
+    // Revert-check: `max(maxWidth, widestMaxWidth ?? 0)` in
+    // `ImageAttachmentLayout.previewDecodeSize`. Decode for the narrow column's current width and
+    // a window widened to the style's 400 points draws the image upscaled until it remounts.
+    func testPreviewDecodeSize_inANarrowMacColumn_coversTheStylesFixedWidth() throws {
+        let decodeSize = ImageAttachmentLayout.previewDecodeSize(
+            pixelWidth: 1_600,
+            pixelHeight: 1_200,
+            maxWidth: 124,
+            widestMaxWidth: MessageBubbleStyle.mac.imageMaxWidth,
+            displayScale: 2,
+            largestDisplayScale: 2,
+            presentation: .standard
+        )
+
+        XCTAssertEqual(decodeSize, ThumbnailDecodeSize(points: CGSize(width: 400, height: 300), displayScale: 2))
+    }
+
+    // Revert-check: `max(displayScale, largestDisplayScale)` in
+    // `ImageAttachmentLayout.previewDecodeSize`. Decode for a 1x window's scale and the image is
+    // drawn at half its pixels once the window moves onto a Retina display.
+    func testPreviewDecodeSize_onA1xDisplay_isDecodedForTheLargestConnectedScale() throws {
+        let decodeSize = ImageAttachmentLayout.previewDecodeSize(
+            pixelWidth: 1_600,
+            pixelHeight: 1_200,
+            maxWidth: 400,
+            widestMaxWidth: 400,
+            displayScale: 1,
+            largestDisplayScale: 2,
+            presentation: .standard
+        )
+
+        XCTAssertEqual(decodeSize?.pixelWidth, 896)
+        XCTAssertEqual(decodeSize, ThumbnailDecodeSize(points: CGSize(width: 400, height: 300), displayScale: 2))
+    }
+
+    func testPreviewDecodeSize_withNoFixedWidth_isTheFrameTheBubbleHas() throws {
+        let frame = ImageAttachmentLayout.size(
+            pixelWidth: 1_600,
+            pixelHeight: 1_200,
+            maxWidth: 280,
+            displayScale: 3,
+            presentation: .standard
+        )
+
+        let decodeSize = ImageAttachmentLayout.previewDecodeSize(
+            pixelWidth: 1_600,
+            pixelHeight: 1_200,
+            maxWidth: 280,
+            widestMaxWidth: nil,
+            displayScale: 3,
+            largestDisplayScale: 3,
+            presentation: .standard
+        )
+
+        XCTAssertEqual(decodeSize, ThumbnailDecodeSize(points: frame, displayScale: 3))
+    }
+
+    // MARK: - What the decode measures and costs
+
+    // Revert-check: `ImageProcessor.orientedPixelSize(of:)` in
+    // `AttachmentCacheActor.decodedThumbnail`. Measure the photo unturned and a portrait frame
+    // decodes it at 1,195 pixels on its longer side where 896 cover it.
+    func testLoadThumbnail_ofAPhotoTurnedByItsEXIFOrientation_coversTheFrameAsShown() async throws {
+        let jpeg = try Self.jpeg(width: 1_600, height: 1_200, exifOrientation: 6)
+        let cache = AttachmentCacheActor(loadAttachmentData: { _ in jpeg })
+        let portrait = try XCTUnwrap(ThumbnailDecodeSize(points: CGSize(width: 210, height: 280), displayScale: 3))
+
+        let image = await cache.loadThumbnail(for: "local_oriented", from: "Previews/local_oriented.jpg", decodeSize: portrait)
+
+        let pixelSize = try XCTUnwrap(image).pixelSize
+        XCTAssertEqual(pixelSize.height, 896)
+        XCTAssertEqual(pixelSize.width, 672)
+    }
+
+    // Revert-check: the `bytesPerRow * height` branch of `PlatformImage.estimatedCacheCost`.
+    // Without it a 16-bit-per-channel bitmap is charged half what it holds.
+    func testEstimatedCacheCost_ofASixteenBitBitmap_isWhatItsRowsHold() throws {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: 100,
+            height: 50,
+            bitsPerComponent: 16,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue
+        ))
+        let bitmap = try XCTUnwrap(context.makeImage())
+
+        let cost = PlatformImage(cgImage: bitmap).estimatedCacheCost
+
+        XCTAssertEqual(cost, bitmap.bytesPerRow * 50)
+        XCTAssertGreaterThanOrEqual(cost, 100 * 50 * 8)
+    }
+
+    // MARK: - From source
+
+    // HONEST SCOPE: from source text. Each view's decode size changes no outcome a test can see
+    // without memory measurements: drop one and the preview decodes whole, as it did. And the
+    // forced decode (`kCGImageSourceShouldCacheImmediately`) only moves where the decode runs:
+    // without it the decode happens on the main thread at the image's first draw.
+    func testPreviewViews_passTheirFrame_andTheCacheForcesTheDecode() throws {
+        let bubble = try repositorySource("esc-chatmail/Views/Components/Attachments/ImageAttachmentBubble.swift")
+        XCTAssertTrue(bubble.contains("decodeSize: previewDecodeSize"))
+        XCTAssertTrue(bubble.contains("let widestMaxWidth = MessageBubbleStyle.mac.imageMaxWidth"))
+        XCTAssertTrue(bubble.contains("let largestDisplayScale = PlatformScreen.scale"))
+        let card = try repositorySource("esc-chatmail/Views/Components/Attachments/PDFAttachmentCard.swift")
+        XCTAssertEqual(card.components(separatedBy: "decodeSize: thumbnailDecodeSize").count - 1, 2)
+        let draft = try repositorySource("esc-chatmail/Views/Components/DraftAttachmentThumbnail.swift")
+        XCTAssertTrue(draft.contains("decodeSize: ThumbnailDecodeSize(points: Self.thumbnailFrame, displayScale: displayScale)"))
+
+        let cache = try repositorySource("esc-chatmail/Services/Caching/AttachmentCacheActor.swift")
+        let start = try XCTUnwrap(cache.range(of: "nonisolated static func decodedThumbnail("))
+        let end = try XCTUnwrap(cache.range(of: "\n    }\n", range: start.upperBound..<cache.endIndex))
+        XCTAssertTrue(cache[start.lowerBound..<end.upperBound].contains("kCGImageSourceShouldCacheImmediately: true"))
+    }
+
+    private static func jpeg(width: Int, height: Int, exifOrientation: Int) throws -> Data {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ))
+        context.setFillColor(CGColor(red: 0.2, green: 0.5, blue: 0.8, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        let image = try XCTUnwrap(context.makeImage())
+        let data = NSMutableData()
+        let destination = try XCTUnwrap(CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, [kCGImagePropertyOrientation: exifOrientation] as CFDictionary)
+        XCTAssertTrue(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+}
+
 private final class LoadCounter: @unchecked Sendable {
     /// Guarded by `lock`.
     private var count = 0

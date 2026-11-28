@@ -283,6 +283,11 @@ final class LRUCacheActorTests: XCTestCase {
         await cache.set("a", value: "a", sizeBytes: 90)
         await cache.remove("a")
         await cache.set("b", value: "b", sizeBytes: 90)
+        await cache.set("e", value: "e", sizeBytes: 10)
+        // Revert-check: `removeEntry(forKey:)` in `LRUCacheActor.remove`. With a bare
+        // `storage.removeValue` the removed entry's 90 bytes stay counted and "b" is evicted.
+        let afterRemove = await cache.getStatistics()
+        XCTAssertEqual(afterRemove.currentItemCount, 2)
         await cache.clear()
         await cache.set("c", value: "c", sizeBytes: 90)
         await cache.set("d", value: "d", sizeBytes: 10)

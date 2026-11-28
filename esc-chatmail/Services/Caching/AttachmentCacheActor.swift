@@ -377,7 +377,11 @@ actor AttachmentCacheActor: MemoryWarningHandler {
             return PlatformImage(data: data)
         }
         guard ImageProcessor.isWithinDecodeBudget(sourcePixelSize) else { return nil }
-        let longerSide = decodeSize?.longerSide(forSourceOf: sourcePixelSize)
+        // Covering is measured against the image as it is shown: a photo turned a quarter turn
+        // by its EXIF orientation swaps its axes, and measured unturned it was decoded larger
+        // than its frame needs.
+        let shownPixelSize = ImageProcessor.orientedPixelSize(of: source) ?? sourcePixelSize
+        let longerSide = decodeSize?.longerSide(forSourceOf: shownPixelSize)
             ?? max(sourcePixelSize.width, sourcePixelSize.height)
         let options = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,

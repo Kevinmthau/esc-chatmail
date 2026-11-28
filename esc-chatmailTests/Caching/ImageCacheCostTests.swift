@@ -78,10 +78,15 @@ final class ImageCacheCostTests: XCTestCase {
 
     // MARK: - Formula
 
-    func testEstimatedCacheCost_usesPixelDimensions() {
+    /// What the bitmap's rows hold: 10pt × 20pt at 2× is 20 × 40 pixels, 3,200 bytes at 4 a
+    /// pixel, and more where the renderer pads its rows (measured on the iOS 27.0 simulator:
+    /// 96 bytes a row, 3,840 in all).
+    func testEstimatedCacheCost_isWhatTheBitmapsRowsHold_atLeastFourBytesAPixel() throws {
         let image = makeImage(width: 10, height: 20, scale: 2)
-        // 10pt × 20pt at 2× scale → 4 bytes per pixel × scale² = 3200
-        XCTAssertEqual(image.estimatedCacheCost, 10 * 20 * 4 * 2 * 2)
+        let bitmap = try XCTUnwrap(image.cgImage)
+
+        XCTAssertEqual(image.estimatedCacheCost, bitmap.bytesPerRow * bitmap.height)
+        XCTAssertGreaterThanOrEqual(image.estimatedCacheCost, 10 * 20 * 4 * 2 * 2)
     }
 
     func testCachedPhotoCost_isCompressedDataSize() {
