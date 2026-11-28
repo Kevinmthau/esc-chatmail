@@ -315,6 +315,17 @@ struct NetworkConfig {
     /// (`GmailAPIClient.createSendSession`).
     static let sendResourceTimeout: TimeInterval = 300.0
 
+    /// The idle timer of a received attachment's transfer (`GmailAPIClient.transferSession`):
+    /// how long it may go with no byte arriving before it fails.
+    static let attachmentTransferIdleTimeout: TimeInterval = 60.0
+
+    /// The whole-transfer cap of a received attachment (`GmailAPIClient.transferSession`), in
+    /// place of the read session's 60 s, which no attachment of more than about 5 MB could meet
+    /// on a 1 Mbit/s link. 20 minutes moves about 25 MB of response at 200 kbit/s. It stays
+    /// under the orphan sweep's grace period (`AttachmentDownloader.orphanSweepRecentFileGracePeriod`,
+    /// one hour), so a transfer's staging files are never swept while it runs.
+    static let attachmentTransferResourceTimeout: TimeInterval = 20 * 60
+
     /// Maximum retry attempts for API requests
     static let maxRetries = 3
 

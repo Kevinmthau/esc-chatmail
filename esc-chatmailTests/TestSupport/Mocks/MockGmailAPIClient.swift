@@ -603,6 +603,16 @@ final class MockGmailAPIClient: GmailAPIClientProtocol, @unchecked Sendable {
             throw APIError.notFound("Attachment \(attachmentId)")
         }
     }
+
+    /// The bytes `getAttachment` answers, written to a new file in `directory`. It is
+    /// `getAttachment` itself underneath: the same call count, calls, operation, delay, error and
+    /// responses, so a test of the downloader scripts either the same way.
+    func downloadAttachmentFile(messageId: String, attachmentId: String, into directory: URL) async throws -> URL {
+        let data = try await getAttachment(messageId: messageId, attachmentId: attachmentId)
+        let file = directory.appendingPathComponent("incoming_\(UUID().uuidString)")
+        try data.write(to: file)
+        return file
+    }
 }
 
 // MARK: - Test Helpers

@@ -418,6 +418,20 @@ struct AttachmentPaths {
         return result
     }
 
+    /// Moves a downloaded file (`GmailAPIClient.downloadAttachmentFile`, staged in `Attachments`)
+    /// to `relativePath`, replacing what is there, and gives it its backup mark. A rename on one
+    /// volume, so the bytes are not written again and the destination is never a file cut short.
+    static func storeDownloadedFile(at downloadedFile: URL, as relativePath: String) -> AttachmentWriteResult {
+        guard let destination = fullURL(for: relativePath) else { return .failed }
+        guard rename(downloadedFile.path, destination.path) == 0 else {
+            let error = NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            Log.error("Failed to move a downloaded attachment into place", category: .attachment, error: error)
+            return AttachmentWriteResult(classifying: error)
+        }
+        applyBackupPolicy(toFileAt: relativePath)
+        return .saved
+    }
+
     static func loadData(from relativePath: String?) -> Data? {
         guard let url = fullURL(for: relativePath) else { return nil }
         return FileSystemErrorHandler.loadData(from: url, category: .attachment)

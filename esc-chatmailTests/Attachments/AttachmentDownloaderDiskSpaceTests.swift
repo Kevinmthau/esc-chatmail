@@ -144,14 +144,20 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
         let downloader = makeDownloader(
             apiClient: apiClient,
             availableBytes: nil,
-            writeAttachmentData: { _, _ in .outOfSpace }
+            storeDownloadedFile: { _, _ in .outOfSpace }
         )
+        let stagedBefore = try stagedDownloads()
 
         await downloader.downloadAttachment(
             attachmentObjectID: fixture.objectID,
             messageId: fixture.messageID,
             in: testStack.newBackgroundContext()
         )
+
+        // Revert-check: the `defer` that removes the downloaded file in
+        // `AttachmentDownloader.performAttachmentDownload`. Without it the file the download
+        // staged is left in `Attachments` when it cannot be moved into place.
+        XCTAssertEqual(try stagedDownloads(), stagedBefore)
 
         let row = try await fetchRow(fixture.objectID)
         XCTAssertEqual(apiClient.getAttachmentCallCountSnapshot(), 1, "A full disk is not retried")
@@ -205,7 +211,8 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
         let downloader = makeDownloader(
             apiClient: apiClient,
             availableBytes: nil,
-            writeAttachmentData: { _, _ in .failed }
+            writeAttachmentData: { _, _ in .failed },
+            storeDownloadedFile: { _, _ in .failed }
         )
 
         await downloader.downloadAttachment(
@@ -316,6 +323,9 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
         },
         storeAttachmentClone: @escaping @Sendable (String, String) -> AttachmentWriteResult = { source, destination in
             AttachmentPaths.storeClone(ofFileAt: source, at: destination)
+        },
+        storeDownloadedFile: @escaping @Sendable (URL, String) -> AttachmentWriteResult = { file, path in
+            AttachmentPaths.storeDownloadedFile(at: file, as: path)
         }
     ) -> AttachmentDownloader {
         AttachmentDownloader(
@@ -323,7 +333,8 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
             coreDataStack: CoreDataStack(persistentContainerForTesting: testStack.persistentContainer),
             availableStorageBytes: { availableBytes },
             writeAttachmentData: writeAttachmentData,
-            storeAttachmentClone: storeAttachmentClone
+            storeAttachmentClone: storeAttachmentClone,
+            storeDownloadedFile: storeDownloadedFile
         )
     }
 
@@ -336,6 +347,14 @@ final class AttachmentDownloaderDiskSpaceTests: XCTestCase {
             }
             return (attachment.state, attachment.lastDownloadFailedAt, attachment.localURL)
         }
+    }
+
+    /// The files a download staged in `Attachments` (`incoming_…`).
+    private func stagedDownloads() throws -> Set<String> {
+        let attachments = try XCTUnwrap(AttachmentPaths.fullURL(for: AttachmentPaths.attachmentsFolder))
+        return Set(try FileManager.default.contentsOfDirectory(atPath: attachments.path).filter {
+            $0.hasPrefix("incoming_")
+        })
     }
 
     @MainActor
