@@ -93,6 +93,8 @@
         "MailboxCommandsMenuTests",
         "MailboxCommandsSourceTests",
         "MailboxMenuPolicyTests",
+        "MessageBubbleEquatableSourceTests",
+        "MessageBubbleInputsTests",
         "MessageBubbleRowPolicyTests",
         "MessageBubbleStyleTests",
         "MessageSendStatusLinePolicyTests",

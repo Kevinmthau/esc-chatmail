@@ -105,7 +105,7 @@ final class ChatMessageRowModelTests: XCTestCase {
             return MessageBubbleLoadContext(
                 messageID: row.id,
                 contentSignature: row.loadSignatureComponents.signature(
-                    htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                    sourceRevision: 0, contactRefreshToken: 0
                 ),
                 prefetchedSenderName: nil, senderRequest: nil,
                 contentRequest: row.makeContentRequest()
@@ -962,10 +962,10 @@ final class ChatMessageRowModelTests: XCTestCase {
         XCTAssertEqual(richRow.loadSignatureComponents, notRichRow.loadSignatureComponents)
         XCTAssertEqual(
             richRow.loadSignatureComponents.signature(
-                htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                sourceRevision: 0, contactRefreshToken: 0
             ),
             notRichRow.loadSignatureComponents.signature(
-                htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                sourceRevision: 0, contactRefreshToken: 0
             )
         )
     }
@@ -990,7 +990,7 @@ final class ChatMessageRowModelTests: XCTestCase {
             return MessageBubbleLoadContext(
                 messageID: row.id,
                 contentSignature: row.loadSignatureComponents.signature(
-                    htmlSourceSignature: "unchanged", contactRefreshToken: 0
+                    sourceRevision: 0, contactRefreshToken: 0
                 ),
                 prefetchedSenderName: nil, senderRequest: nil,
                 contentRequest: row.makeContentRequest()

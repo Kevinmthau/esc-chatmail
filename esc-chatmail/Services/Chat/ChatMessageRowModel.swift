@@ -40,8 +40,12 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         self.attachmentFingerprint = MessageBubbleAttachmentSnapshot.analysisFingerprint(for: attachmentSnapshots)
     }
 
+    /// The bubble's load signature: these components, plus the two values that change a row's
+    /// load without changing the row. `sourceRevision` counts changes of the message's HTML
+    /// source on disk (`MessageBubbleViewModel.sourceRevision`), so a recovered or rewritten
+    /// body reloads a row whose stored fields stayed the same; nothing here reads the file.
     func signature(
-        htmlSourceSignature: String,
+        sourceRevision: Int,
         contactRefreshToken: Int
     ) -> String {
         [
@@ -51,7 +55,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
             Self.describe(cleanedSnippetFingerprint),
             Self.describe(snippetFingerprint),
             String(hasHTMLSource),
-            "source:\(htmlSourceSignature)",
+            "source:\(sourceRevision)",
             "contacts:\(contactRefreshToken)",
             "senderEmail:\(Self.describe(senderEmailFingerprint))",
             "senderName:\(Self.describe(senderDisplayNameFingerprint))",
@@ -68,7 +72,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
         cleanedSnippet: String? = nil,
         snippet: String?,
         hasHTMLSource: Bool,
-        htmlSourceSignature: String,
+        sourceRevision: Int,
         contactRefreshToken: Int,
         senderEmail: String? = nil,
         senderDisplayName: String? = nil,
@@ -89,7 +93,7 @@ struct MessageBubbleLoadSignatureComponents: Equatable {
             senderAvatarURL: senderAvatarURL,
             attachmentSnapshots: attachmentSnapshots
         ).signature(
-            htmlSourceSignature: htmlSourceSignature,
+            sourceRevision: sourceRevision,
             contactRefreshToken: contactRefreshToken
         )
     }

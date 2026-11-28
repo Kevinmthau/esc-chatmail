@@ -556,7 +556,9 @@ final class ChatMessagesCoordinator: ObservableObject {
         isVisible = false
         postRevealBottomFollowState = .inactive
         compensatedShiftHold = nil
-        isUserScrollTakeoverActive = false
+        if isUserScrollTakeoverActive {
+            isUserScrollTakeoverActive = false
+        }
         isTrackedUserScrollInteractionActive = false
         isTrackedScrollPhaseUserDriven = false
         consecutivePastContentEndCorrections = 0
@@ -1313,7 +1315,11 @@ final class ChatMessagesCoordinator: ObservableObject {
     /// takes control of the scroll view.
     func handleUserScrollInteraction() {
         userScrollInteractionRevision &+= 1
-        isUserScrollTakeoverActive = true
+        // Assigned only on a change: it is published, the chat session forwards every publish
+        // to the transcript's body, and this runs at the start of every drag.
+        if !isUserScrollTakeoverActive {
+            isUserScrollTakeoverActive = true
+        }
         taskManager.cancel(TaskKey.scrollTakeoverRelease)
         handleUserScrollPhaseBegan()
         let wasFollowingPostRevealBottom: Bool

@@ -61,6 +61,8 @@ struct ChatMessagesView: View {
     let onOpenFullMessage: (NSManagedObjectID, EmailReaderOpenSource) -> Void
 
     @StateObject private var session: ChatMessagesSession
+    /// What the rows' closures call (`ChatTranscriptRowActions`): made once, with the session.
+    @StateObject private var rowActions: ChatTranscriptRowActions
     @State private var replyBarHeight: CGFloat = 0
     /// Height of the transcript's trailing spacer. Follows
     /// `ChatBottomInsetPolicy.Components.inset` through
@@ -105,6 +107,13 @@ struct ChatMessagesView: View {
                 conversation: conversation,
                 viewModel: viewModel,
                 chatDependencies: chatDependencies
+            )
+        )
+        _rowActions = StateObject(
+            wrappedValue: ChatTranscriptRowActions(
+                viewModel: viewModel,
+                focus: isTextFieldFocused,
+                openFullMessage: onOpenFullMessage
             )
         )
     }
@@ -374,11 +383,22 @@ struct ChatMessagesView: View {
                         transcriptWidth: viewportWidth,
                         isNewestInTranscript: index == newestRowIndex,
                         style: bubbleStyle,
-                        onOpenFullMessage: onOpenFullMessage,
-                        onSendRecoveryAction: { action in
-                            performSendRecovery(action, messageObjectID: message.messageObjectID)
+                        // Both closures capture the chat's row actions and this row's own ID,
+                        // and nothing else of this pass: a row whose inputs are unchanged is not
+                        // rebuilt (`.equatable()` below) and keeps them.
+                        onOpenFullMessage: { [rowActions] messageObjectID, source in
+                            rowActions.openFullMessage(messageObjectID, source: source)
+                        },
+                        onSendRecoveryAction: { [rowActions, messageObjectID = message.messageObjectID] action in
+                            rowActions.performSendRecovery(action, messageObjectID: messageObjectID)
                         }
                     )
+                    // A pass of this body re-runs only the rows whose inputs changed
+                    // (`MessageBubbleInputs`): the session forwards every scroll-state and
+                    // coordinator publish here, and a drag, the keyboard or one row's change
+                    // re-ran every realized row's body (architecture review 2026-11,
+                    // chat-transcript-ui#4).
+                    .equatable()
                     .modifier(
                         ChatRowEntranceEffect(
                             animatesEntrance: localSendAppendedMessageIDs.contains(message.objectID)
@@ -999,14 +1019,14 @@ struct ChatMessagesView: View {
     private func messageContextMenu(for message: ChatMessageRowModel) -> some View {
         if message.outboundSendDeliveryState == .notSent {
             Button("Edit and resend", systemImage: "square.and.pencil") {
-                performSendRecovery(.editAndResend, messageObjectID: message.messageObjectID)
+                rowActions.performSendRecovery(.editAndResend, messageObjectID: message.messageObjectID)
             }
             Button("View send error", systemImage: "exclamationmark.circle") {
                 viewModel.showReplyFailure(messageObjectID: message.messageObjectID)
             }
         } else if message.outboundSendDeliveryState == .deliveryUnknown {
             Button("Check delivery", systemImage: "arrow.clockwise") {
-                performSendRecovery(.checkDelivery, messageObjectID: message.messageObjectID)
+                rowActions.performSendRecovery(.checkDelivery, messageObjectID: message.messageObjectID)
             }
         }
         // A just-sent bubble awaiting its echo is refused as a reply target
@@ -1024,23 +1044,6 @@ struct ChatMessagesView: View {
             Button(action: { onOpenFullMessage(message.messageObjectID, .contextMenu) }) {
                 SwiftUI.Label("View original email", systemImage: "doc.richtext")
             }
-        }
-    }
-
-    /// The one route from a failed-send affordance (long-press menu, or the bubble's recovery
-    /// dialog) into the view model's existing recovery paths. Neither adds a send path: Edit and
-    /// Resend only refills the composer, and Check Delivery only re-reads Gmail.
-    private func performSendRecovery(
-        _ action: FailedSendRecoveryPolicy.Action,
-        messageObjectID: NSManagedObjectID
-    ) {
-        switch action {
-        case .editAndResend:
-            if viewModel.editFailedReply(messageObjectID: messageObjectID), viewModel.destination == nil {
-                isTextFieldFocused.wrappedValue = true
-            }
-        case .checkDelivery:
-            viewModel.checkReplyDelivery(messageObjectID: messageObjectID)
         }
     }
 
