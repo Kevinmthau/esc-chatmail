@@ -3689,17 +3689,86 @@ final class ChatViewModelTests: XCTestCase {
         let reopened = fixture.reopenChat()
         XCTAssertEqual(reopened.replyText, "")
 
+        // HONEST SCOPE: the reopened composer is never loaded, so no
+        // automatic reply target is set in it. In the app the chat's load
+        // sets one (`ChatViewModel.initializeReplyingTo`), which is a change,
+        // and 350 ms later the debounce makes the empty save this pins the
+        // flush not making (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`).
+        // So this pins only that the flush adds no save the composer's own
+        // saves would not make.
         fixture.composerDirectory.flushPresentedDraftsForTermination()
         await waitUntil { !tracker.hasOutstandingWrites }
 
-        // Revert-check: dropping `composerChangedSinceDraftRead` from the
-        // guard in `ChatViewModel.saveReplyDraftChangeForTermination` has the
-        // quit save the empty composer, which removes the stored copy of the
-        // reply being sent, a save no pause in typing would have made.
+        // Revert-check: replacing the condition after `!replyDraftSaveIsOwed`
+        // in `ChatViewModel.saveReplyDraftChangeForTermination` with `true`
+        // has the quit save the empty composer, which removes the stored copy
+        // of the reply being sent: a save nothing in the composer asked for.
         XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, "Being sent at quit")
 
         coordinator.resumePersistence()
         _ = await sendTask.value
+    }
+
+    func testReplyDraft_flushedForTermination_fileFinishedImportingSinceTheLastSave_savesIt() async throws {
+        let fixture = makeReopenableChatFixture()
+        let viewModel = fixture.openChat()
+        let tracker = fixture.composerDirectory.draftWriteTracker
+        // A document import put its placeholder in the composer, and a save
+        // read it, leaving the unfinished file out as every save does.
+        let attachmentID = "local_composer-\(UUID().uuidString)"
+        let importing = AttachmentBuilder()
+            .withId(attachmentID)
+            .withFilename("report.pdf")
+            .build(in: fixture.context)
+        viewModel.replyText = "The report, and the slides next"
+        viewModel.composerState.attachments = [importing]
+        viewModel.composerState.isProcessingAttachments = true
+        await viewModel.saveReplyDraft()
+        XCTAssertEqual(try fixture.draftStore.load(conversationID: fixture.conversation.id)?.1, [])
+        // The importer finishes the file in place while the next one is still
+        // importing, and the composer publishes nothing
+        // (`DocumentAttachmentImporter`).
+        importing.localURL = AttachmentPaths.originalPath(idOrUUID: attachmentID, ext: "pdf")
+
+        fixture.composerDirectory.flushPresentedDraftsForTermination()
+
+        // Revert-check: dropping `|| composerState.isProcessingAttachments`
+        // from the guard in `ChatViewModel.saveReplyDraftChangeForTermination`
+        // starts no save, and the finished file is in no draft after the quit.
+        XCTAssertTrue(tracker.hasOutstandingWrites)
+        await waitUntil { !tracker.hasOutstandingWrites }
+        XCTAssertEqual(try fixture.draftStore.load(conversationID: fixture.conversation.id)?.1, [importing])
+    }
+
+    func testReplyDraft_flushedForTermination_saveThatReadTheComposerAndThrew_isMadeAgain() async throws {
+        let fixture = makeReopenableChatFixture()
+        try fixture.context.save()
+        let viewModel = fixture.openChat()
+        let tracker = fixture.composerDirectory.draftWriteTracker
+        viewModel.replyText = "Not stored yet"
+        // The save reads the composer and throws. Here the conversation is
+        // deleted under it; any error the write throws ends the same way.
+        fixture.context.delete(fixture.conversation)
+        await viewModel.saveReplyDraft()
+        XCTAssertEqual(
+            viewModel.sendErrorAlert?.title,
+            "Couldn’t Save Draft",
+            "The save must have failed, or this is not the case under test"
+        )
+        // What made it fail has passed.
+        fixture.context.rollback()
+
+        fixture.composerDirectory.flushPresentedDraftsForTermination()
+
+        // Revert-check: dropping `composerChangedSinceDraftRead = true` from
+        // the `catch` in `ChatViewModel.saveReplyDraftWithoutCleanupInterleaving`
+        // starts no save, and the quit leaves with the text in no draft.
+        XCTAssertTrue(tracker.hasOutstandingWrites)
+        await waitUntil { !tracker.hasOutstandingWrites }
+        XCTAssertEqual(
+            try fixture.draftStore.load(conversationID: fixture.conversation.id)?.0.text,
+            "Not stored yet"
+        )
     }
 
     func testReplyDraft_saveWaitingBehindTheCleanupGate_countsUntilItsTaskReturnsEvenWhenReplaced() async throws {

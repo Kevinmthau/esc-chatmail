@@ -22,11 +22,12 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
     /// together. Nothing is cancelled or resent either way, and no draft is
     /// written outside a composer's own save (`AppTerminationWait`).
     ///
-    /// First it has each on-screen composer start the save its 350 ms
-    /// debounce still owes (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`),
-    /// so the decision counts the words typed just before Cmd-Q or the
-    /// window's close. The saves wait for the cleanup-sensitive gate like any
-    /// other.
+    /// First it has each on-screen composer start the save it still owes
+    /// (`ChatReplyComposerDirectory.flushPresentedDraftsForTermination`): the
+    /// one its 350 ms debounce has not made yet, one that failed, or one for
+    /// files still importing. So the decision counts the words typed just
+    /// before Cmd-Q or the window's close. The saves wait for the
+    /// cleanup-sensitive gate like any other.
     ///
     /// While the reply is pending AppKit runs the main run loop in
     /// `NSModalPanelRunLoopMode`, one of the common modes that drain the main

@@ -14,10 +14,12 @@ import Foundation
 /// as every quit did before drafts were waited for.
 ///
 /// Sends and drafts share one deadline and are waited for until both are idle
-/// at once, because each can start the other's work: a send's release
-/// schedules a draft save (`ChatViewModel.sendReply`'s deferred save,
-/// `saveComposerLeftWhileSending`), and a failed send's reply is merged into
-/// the stored draft (`handOffUnsentReply`).
+/// at once, because a send starts draft writes, while it is still outstanding
+/// or in the main-actor turn that ends it: its release schedules a draft save
+/// (`ChatViewModel.sendReply`'s deferred save, `saveComposerLeftWhileSending`),
+/// and a reply it gives back is merged into the stored draft
+/// (`handOffUnsentReply`). It does not go the other way: no draft write
+/// starts a send.
 enum AppTerminationWait {
     enum Outcome: Equatable, Sendable {
         /// Nothing was outstanding, or the last of it finished in time.
