@@ -12,17 +12,65 @@ struct VirtualScrollMessagePage: @unchecked Sendable {
     /// looked it up. The scroll state keeps it, so its later page loads ask
     /// for the messages by it without looking the conversation up again.
     let conversationObjectID: NSManagedObjectID?
+    /// The row just above the page's range and the row just below it, read in
+    /// the same query as `messageIDs` (one row more on each side) where the
+    /// dataset has them; nil otherwise, and from any loader that does not
+    /// read them. Kept apart from `messageIDs`, which the window loads and
+    /// preloads check against the range's exact count and against the window
+    /// for overlap. The window keeps them (`MessageWindow.previousNeighborID`)
+    /// so the transcript's grouping reads those rows by ID, not by an OFFSET
+    /// fetch on the main thread.
+    let previousNeighborID: NSManagedObjectID?
+    let nextNeighborID: NSManagedObjectID?
 
     init(
         messageIDs: [NSManagedObjectID],
         totalCount: Int,
         fetchErrorDescription: String? = nil,
-        conversationObjectID: NSManagedObjectID? = nil
+        conversationObjectID: NSManagedObjectID? = nil,
+        previousNeighborID: NSManagedObjectID? = nil,
+        nextNeighborID: NSManagedObjectID? = nil
     ) {
         self.messageIDs = messageIDs
         self.totalCount = totalCount
         self.fetchErrorDescription = fetchErrorDescription
         self.conversationObjectID = conversationObjectID
+        self.previousNeighborID = previousNeighborID
+        self.nextNeighborID = nextNeighborID
+    }
+
+    /// The range a page load fetches for `range`: one row more on each side
+    /// where there is one (no row above index 0), so the same query reads the
+    /// page's neighbours. An empty range (a count-only load) fetches nothing.
+    static func neighborFetchRange(for range: Range<Int>) -> Range<Int> {
+        guard !range.isEmpty else { return range }
+        return max(0, range.lowerBound - 1)..<(range.upperBound + 1)
+    }
+
+    /// Splits what a load fetched over `neighborFetchRange(for: range)` into
+    /// the page's rows and its neighbours. The row above is the first fetched
+    /// where the range does not start at 0; the row below is whatever was
+    /// fetched past the range's count, which the dataset's end leaves out.
+    /// A dataset that shrank under the load yields fewer rows than the range,
+    /// as an unwidened fetch would, and the callers' exact-count checks
+    /// refuse it as before.
+    static func splittingNeighbors<Element>(
+        _ fetched: [Element],
+        requestedRange range: Range<Int>
+    ) -> (previous: Element?, rows: [Element], next: Element?) {
+        guard !range.isEmpty else { return (nil, fetched, nil) }
+        var rows = fetched[...]
+        var previous: Element?
+        if range.lowerBound > 0, let first = rows.first {
+            previous = first
+            rows = rows.dropFirst()
+        }
+        var next: Element?
+        if rows.count > range.count, let last = rows.last {
+            next = last
+            rows = rows.dropLast()
+        }
+        return (previous, Array(rows), next)
     }
 }
 
@@ -647,6 +695,17 @@ final class VirtualScrollState: ObservableObject {
         viewContextChangesCancellable = nil
         syncCompletedCancellable?.cancel()
         syncCompletedCancellable = nil
+        // Nothing evicts a cached row while the chat is off screen (a full-screen Quick Look,
+        // a push), so none is trusted after it: an attachment that finished downloading or a
+        // send state that changed meanwhile would come back as the old row model wherever a
+        // load reuses cached rows. A scroll slide reuses them
+        // (`resolveRowsReusingCacheThrowing`) and can supersede the full re-map `resume()`
+        // schedules, which the slide's reuse then skipped. Dropped here rather than in
+        // `resume()`, so it holds whichever of the rows' `onAppear` and the chat's comes
+        // first. The published rows stay on screen; the first load after this re-maps every
+        // row it publishes.
+        resolvedRowsByID.removeAll()
+        resolvedRowsByAbsoluteIndex.removeAll()
     }
 
     /// Restores observation and any interrupted initial load when the chat reappears.

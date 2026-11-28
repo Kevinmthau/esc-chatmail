@@ -314,10 +314,19 @@ extension VirtualScrollState {
                 startIndex: loadStartIndex,
                 endIndex: loadEndIndex,
                 preferPendingConversationMessages: preferPendingConversationMessages,
-                // An extension re-publishes rows already on screen; mapping
-                // only the new ones avoids re-fetching and re-mapping the
-                // whole window on the main actor.
-                reusesCachedRows: extendsWindow
+                // A slide and an extension both re-publish rows already on
+                // screen; mapping only the new ones avoids re-fetching and
+                // re-mapping the whole window on the main actor at every
+                // step of a scroll, 37 of a 40-row replace's rows
+                // (architecture review 2026-11, chat-transcript-ui#2). Only
+                // the current window's cached rows are reused, which
+                // `handleViewContextChange` keeps fresh
+                // (`resolveRowsReusingCacheThrowing`). Both callers are
+                // scroll positions; every dataset reload, and this load's
+                // own retries after a dataset change, re-map every row,
+                // which is the healing path for rows changed without a
+                // precise notification.
+                reusesCachedRows: true
             )
         }
         return extendsWindow
@@ -558,7 +567,9 @@ extension VirtualScrollState {
             startIndex: publishedStartIndex,
             endIndex: loadedEndIndex,
             messageIDs: page.messageIDs,
-            isLoading: false
+            isLoading: false,
+            previousNeighborID: page.previousNeighborID,
+            nextNeighborID: page.nextNeighborID
         )
 
         totalMessageCount = page.totalCount
@@ -733,11 +744,15 @@ extension VirtualScrollState {
             }
 
             currentWindow.messageIDs.append(contentsOf: page.messageIDs)
+            // The page's row below is the extended window's; the row above
+            // stays the window's, or a front trim drops a new one.
             currentWindow = MessageWindow(
                 startIndex: currentWindow.startIndex,
                 endIndex: startIndex + page.messageIDs.count,
                 messageIDs: currentWindow.messageIDs,
-                isLoading: false
+                isLoading: false,
+                previousNeighborID: currentWindow.previousNeighborID,
+                nextNeighborID: page.nextNeighborID
             ).frontTrimmed(to: self.configuration.maxWindowSize)
 
             self.totalMessageCount = page.totalCount
@@ -747,7 +762,7 @@ extension VirtualScrollState {
         }
     }
 
-    private func preloadPrevious() {
+    func preloadPrevious() {
         guard let window = messageWindow,
               window.startIndex > 0 else { return }
 
@@ -832,11 +847,15 @@ extension VirtualScrollState {
             // Back-trim against the window cap: the user is scrolling UP, so
             // the trimmed rows are far below the viewport and their removal
             // cannot shift visible content.
+            // The page's row above is the extended window's; the row below
+            // stays the window's, or a back trim drops a new one.
             currentWindow = MessageWindow(
                 startIndex: startIndex,
                 endIndex: currentWindow.endIndex,
                 messageIDs: currentWindow.messageIDs,
-                isLoading: false
+                isLoading: false,
+                previousNeighborID: page.previousNeighborID,
+                nextNeighborID: currentWindow.nextNeighborID
             ).backTrimmed(to: self.configuration.maxWindowSize)
 
             self.totalMessageCount = page.totalCount

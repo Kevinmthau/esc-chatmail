@@ -103,6 +103,68 @@ final class ScaleQueryPlanTests: XCTestCase {
         XCTAssertTrue(Self.isDrivenByTheConversation(plans.count), "\(plans.count)")
     }
 
+    /// The row just past a historical window, which the transcript's grouping
+    /// reads on every publish of that window (`VirtualScrollState.rowForGrouping`,
+    /// from `ChatMessagesView`'s body), is fetched by the ID the window's load
+    /// read beside its rows: one search of the primary key on the main
+    /// thread, where it was an OFFSET fetch that walked the chat's messages
+    /// to the window's depth, 10,000 of them here (architecture review
+    /// 2026-11, chat-transcript-ui#2).
+    ///
+    /// Revert-check: dropping the `neighborID` lookup in
+    /// `VirtualScrollState.rowForGrouping` sends the read to the OFFSET
+    /// fetch: `SELECT 0, t0.Z_PK … LIMIT 1 OFFSET 10040`, a
+    /// `SEARCH t0 USING INDEX Z_Message_byConversationAndDateIndex` that
+    /// steps through the chat's rows to that offset, then a load of the row it
+    /// found by its key (measured on the iOS 27.0 simulator, both statistics
+    /// states).
+    @MainActor
+    func testTranscriptGroupingRowPastAHistoricalWindow_isOneSearchOfThePrimaryKey() async throws {
+        for statistics in Self.bothStatistics {
+            let (stack, manifest) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let conversationID = manifest.largestConversationID.uuidString
+            let start = manifest.largestConversationMessageCount / 2
+            let end = start + 40
+            let expected = await VirtualScrollState.loadMessagePage(
+                conversationId: conversationID,
+                range: end..<(end + 1),
+                in: stack.newBackgroundContext()
+            )
+            let expectedID = try XCTUnwrap(expected.messageIDs.first, "\(statistics)")
+
+            let state = VirtualScrollState(
+                conversationId: conversationID,
+                viewContext: stack.makeMainQueueViewContext(),
+                makeBackgroundContext: { stack.newBackgroundContext() },
+                autoLoad: false
+            )
+            defer { state.cleanup() }
+            let loaded = await state.loadWindow(startIndex: start, endIndex: end)
+            XCTAssertEqual(loaded?.startIndex, start, "\(statistics)")
+            XCTAssertEqual(state.messageWindow?.range, start..<end, "\(statistics)")
+
+            var row: ChatMessageRowModel?
+            let plans = try SQLiteQueryPlanRecorder.record {
+                row = state.rowForGrouping(atAbsoluteIndex: end)
+            }
+
+            XCTAssertEqual(row?.objectID, expectedID, "\(statistics)")
+            let messagePlans = plans.filter { $0.reads("ZMESSAGE") }
+            XCTAssertFalse(
+                messagePlans.contains { $0.sql.contains(" OFFSET ") },
+                "\(statistics):\n\(messagePlans)"
+            )
+            XCTAssertEqual(messagePlans.count, 1, "\(statistics):\n\(messagePlans)")
+            let plan = try XCTUnwrap(messagePlans.first, "\(statistics)")
+            XCTAssertEqual(plan.scans(of: "ZMESSAGE"), [], "\(statistics): \(plan)")
+            XCTAssertEqual(plan.indexes(on: "ZMESSAGE"), [], "No walk of an index of the chat's rows. \(statistics): \(plan)")
+            XCTAssertTrue(
+                plan.steps.contains { $0.hasPrefix("SEARCH t0 USING INTEGER PRIMARY KEY") },
+                "\(statistics): \(plan)"
+            )
+        }
+    }
+
     /// The indexes that find a conversation's messages: the relationship's
     /// own and the model's (conversation, date) and, from model 8,
     /// (conversation, isUnread) fetch indexes.
