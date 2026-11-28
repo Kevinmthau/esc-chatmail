@@ -1936,13 +1936,16 @@ final class ChatViewModelTests: XCTestCase {
 
     /// One inbound target in a visible chat, with the mock coordinator
     /// injected, for the composer-release tests below.
-    private func makeComposerSendFixture() -> (
+    private func makeComposerSendFixture(
+        serializer: ConversationRollupMutationSerializer = .shared
+    ) -> (
         coordinator: MockChatOutboundMessageCoordinator,
         context: NSManagedObjectContext,
         conversation: Conversation,
         replyTarget: Message,
         viewModel: ChatViewModel,
-        reopenChat: () -> ChatViewModel
+        reopenChat: () -> ChatViewModel,
+        composerDirectory: ChatReplyComposerDirectory
     ) {
         let coordinator = MockChatOutboundMessageCoordinator()
         let tokenManager = MockTokenManager()
@@ -1969,6 +1972,7 @@ final class ChatViewModelTests: XCTestCase {
         let viewModel = ChatViewModel(
             conversation: conversation,
             chatDependencies: deps.makeChatDependencies(),
+            conversationMutationSerializer: serializer,
             composerDirectory: composerDirectory
         )
         viewModel.replyingTo = replyTarget
@@ -1978,10 +1982,11 @@ final class ChatViewModelTests: XCTestCase {
             ChatViewModel(
                 conversation: conversation,
                 chatDependencies: deps.makeChatDependencies(),
+                conversationMutationSerializer: serializer,
                 composerDirectory: composerDirectory
             )
         }
-        return (coordinator, context, conversation, replyTarget, viewModel, reopenChat)
+        return (coordinator, context, conversation, replyTarget, viewModel, reopenChat, composerDirectory)
     }
 
     private func makeDraftAttachment(in context: NSManagedObjectContext) -> Attachment {
@@ -3089,7 +3094,8 @@ final class ChatViewModelTests: XCTestCase {
         conversation: Conversation,
         replyTarget: Message,
         draftStore: ChatReplyDraftStore,
-        openChat: () -> ChatViewModel
+        openChat: () -> ChatViewModel,
+        composerDirectory: ChatReplyComposerDirectory
     ) {
         let deps = makeDependencies(authSession: makeTestAuthSession(userEmail: "me@example.com"))
         let context = deps.viewContext
@@ -3107,7 +3113,7 @@ final class ChatViewModelTests: XCTestCase {
                 composerDirectory: composerDirectory
             )
         }
-        return (context, conversation, replyTarget, ChatReplyDraftStore(context: context), openChat)
+        return (context, conversation, replyTarget, ChatReplyDraftStore(context: context), openChat, composerDirectory)
     }
 
     func testReplyDraft_chatReopenedBeforeLeftComposerSaved_takesOverItsTextTargetAndFinalizedAttachments() async throws {
@@ -3631,6 +3637,165 @@ final class ChatViewModelTests: XCTestCase {
             selected,
             newest
         )
+    }
+
+    // MARK: - Quit-time draft flush (Mac)
+
+    // HONEST SCOPE: the quit itself (`MacAppDelegate.applicationShouldTerminate`)
+    // is not run: no Mac app may be launched here. These pin the two halves it
+    // calls, the flush and the count it then waits on.
+    func testReplyDraft_flushedForTermination_savesTextTypedWithinTheDebounce() async throws {
+        let fixture = makeReopenableChatFixture()
+        let viewModel = fixture.openChat()
+        let tracker = fixture.composerDirectory.draftWriteTracker
+        // Typed, then Cmd-Q before the 350 ms debounce has handed it to a save.
+        viewModel.replyText = "Typed just before Cmd-Q"
+        XCTAssertFalse(tracker.hasOutstandingWrites)
+
+        fixture.composerDirectory.flushPresentedDraftsForTermination()
+
+        // Revert-check: emptying `ChatReplyComposerDirectory.flushPresentedDraftsForTermination`
+        // starts no save, so the quit has nothing to wait for and nothing is
+        // stored. Deleting the `beginWrite()` from `ChatViewModel.startReplyDraftSave`
+        // makes this false while the save has still to run.
+        XCTAssertTrue(tracker.hasOutstandingWrites)
+        await waitUntil { !tracker.hasOutstandingWrites }
+        // The debounce cannot have made this save: with the flush reverted
+        // there is no suspension between the keystroke and this read.
+        XCTAssertEqual(
+            try fixture.draftStore.load(conversationID: fixture.conversation.id)?.0.text,
+            "Typed just before Cmd-Q"
+        )
+    }
+
+    func testReplyDraft_flushedForTermination_composerOpenedEmptyDuringUnpersistedSend_keepsTheStoredReply() async throws {
+        let fixture = makeComposerSendFixture()
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        let tracker = fixture.composerDirectory.draftWriteTracker
+        coordinator.suspendsBeforePersistence = true
+        // The debounced autosave stored the reply before the tap.
+        viewModel.replyText = "Being sent at quit"
+        await viewModel.saveReplyDraft()
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        // Another chat and back while the optimistic message is not durable
+        // yet: the new composer starts empty (`hasUnpersistedSend`), and
+        // nothing is typed into it before the quit.
+        viewModel.composerDidDisappear()
+        let reopened = fixture.reopenChat()
+        XCTAssertEqual(reopened.replyText, "")
+
+        fixture.composerDirectory.flushPresentedDraftsForTermination()
+        await waitUntil { !tracker.hasOutstandingWrites }
+
+        // Revert-check: dropping `composerChangedSinceDraftRead` from the
+        // guard in `ChatViewModel.saveReplyDraftChangeForTermination` has the
+        // quit save the empty composer, which removes the stored copy of the
+        // reply being sent, a save no pause in typing would have made.
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, "Being sent at quit")
+
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+    }
+
+    func testReplyDraft_saveWaitingBehindTheCleanupGate_countsUntilItsTaskReturnsEvenWhenReplaced() async throws {
+        let serializer = ConversationRollupMutationSerializer()
+        let fixture = makeReopenableChatFixture(serializer: serializer)
+        let viewModel = fixture.openChat()
+        let tracker = fixture.composerDirectory.draftWriteTracker
+
+        // Something holds the queue every draft write waits in, as a sync's
+        // cleanup pass does.
+        let (queueHeld, queueHeldContinuation) = AsyncStream<Void>.makeStream()
+        let (queueRelease, queueReleaseContinuation) = AsyncStream<Void>.makeStream()
+        defer { queueReleaseContinuation.finish() }
+        let queueHolder = Task {
+            await serializer.performCleanupSensitiveMutation {
+                queueHeldContinuation.finish()
+                for await _ in queueRelease {}
+            }
+        }
+        for await _ in queueHeld {}
+
+        viewModel.replyText = "First words"
+        // As the debounce does.
+        viewModel.scheduleReplyDraftSave()
+        XCTAssertEqual(tracker.outstandingWriteCount, 1)
+
+        // The quit, with that save still waiting to read the composer.
+        viewModel.replyText = "First words, then more"
+        fixture.composerDirectory.flushPresentedDraftsForTermination()
+        // Revert-check: dropping `!replyDraftSaveIsOwed` from the guard in
+        // `ChatViewModel.saveReplyDraftChangeForTermination` replaces the
+        // waiting save with a new one at the back of the queue: two writes.
+        XCTAssertEqual(tracker.outstandingWriteCount, 1)
+
+        // A later request replaces the waiting one, which stays counted until
+        // its turn comes and it throws its cancellation.
+        viewModel.scheduleReplyDraftSave()
+        XCTAssertEqual(tracker.outstandingWriteCount, 2)
+
+        queueReleaseContinuation.finish()
+        await queueHolder.value
+        // Revert-check: ending the write in `ChatViewModel.startReplyDraftSave`'s
+        // task only when that task was not cancelled leaves the replaced save
+        // counted for good, and every quit would wait out its deadline.
+        await waitUntil { !tracker.hasOutstandingWrites }
+        XCTAssertEqual(
+            try fixture.draftStore.load(conversationID: fixture.conversation.id)?.0.text,
+            "First words, then more"
+        )
+    }
+
+    func testReplyDraft_unsentReplyMergedWithNoComposerOnScreen_countsUntilTheMergeRuns() async throws {
+        let serializer = ConversationRollupMutationSerializer()
+        let fixture = makeComposerSendFixture(serializer: serializer)
+        let viewModel = fixture.viewModel
+        let coordinator = fixture.coordinator
+        let draftStore = ChatReplyDraftStore(context: fixture.context)
+        let tracker = fixture.composerDirectory.draftWriteTracker
+        coordinator.suspendsBeforePersistence = true
+        coordinator.sendErrorBeforePersistence = MockChatSendError.preflightFailed
+        viewModel.replyText = "Not sent, chat left"
+        defer { coordinator.resumePersistence() }
+
+        let sendTask = Task { await viewModel.sendReply() }
+        await waitUntil { coordinator.suspendedBeforePersistenceCount == 1 }
+        // The chat is left while the send waits; its disappearance save
+        // (which writes nothing while the composer is sending) has run.
+        viewModel.composerDidDisappear()
+        await viewModel.waitForScheduledReplyDraftSave()
+        XCTAssertFalse(tracker.hasOutstandingWrites)
+
+        let (queueHeld, queueHeldContinuation) = AsyncStream<Void>.makeStream()
+        let (queueRelease, queueReleaseContinuation) = AsyncStream<Void>.makeStream()
+        defer { queueReleaseContinuation.finish() }
+        let queueHolder = Task {
+            await serializer.performCleanupSensitiveMutation {
+                queueHeldContinuation.finish()
+                for await _ in queueRelease {}
+            }
+        }
+        for await _ in queueHeld {}
+
+        // The send fails with no composer on screen: the reply is merged into
+        // the stored draft, behind the held queue.
+        coordinator.resumePersistence()
+        _ = await sendTask.value
+
+        // Revert-check: deleting the `beginWrite()` from
+        // `ChatViewModel.handOffUnsentReply` leaves the merge uncounted, and a
+        // quit now would not wait for it.
+        XCTAssertTrue(tracker.hasOutstandingWrites)
+
+        queueReleaseContinuation.finish()
+        await queueHolder.value
+        await waitUntil { !tracker.hasOutstandingWrites }
+        XCTAssertEqual(try draftStore.load(conversationID: fixture.conversation.id)?.0.text, "Not sent, chat left")
     }
 
     /// Polls `condition` until it holds or `timeout` elapses. The condition is

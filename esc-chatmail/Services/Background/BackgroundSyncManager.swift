@@ -483,10 +483,32 @@ final class BackgroundSyncManager {
         }
     }
 
+    /// Whether a wake that found the run boundary held schedules the 5-minute
+    /// catch-up and reports failure. Only another background task's mailbox
+    /// sync (`.background`) satisfies the wake: it runs its own budgeted slice
+    /// and schedules its own retry.
+    ///
+    /// A foreground holder satisfied it too while background runs were also
+    /// `.foregroundIncremental`. Now that they are `.background`
+    /// (`SyncEngine.performIncrementalSyncForBackground`), a foreground holder
+    /// at a background wake is a run the app started in the foreground: one
+    /// its background lease's expiration cancelled and that is still
+    /// unwinding, or one that froze at suspension without a grant. It syncs
+    /// nothing for this wake, which reported success and scheduled no
+    /// catch-up (architecture review 2026-11, background-energy#2,
+    /// startup-lifecycle#3).
+    ///
+    /// Nothing cancels that holder from here. With the lease, a foreground run
+    /// met at a wake has almost always been cancelled already, and the wake
+    /// cannot tell a stale holder from a live one: a foreground run started by
+    /// an activation that raced the wake would be cancelled under the user.
     static func shouldScheduleRetryWhenBlocked(by activeRunKind: SyncRunKind?) -> Bool {
-        activeRunKind == nil
-            || activeRunKind == .pendingActions
-            || activeRunKind == .maintenance
+        switch activeRunKind {
+        case .background:
+            return false
+        case nil, .foregroundInitial, .foregroundIncremental, .pendingActions, .maintenance:
+            return true
+        }
     }
 }
 #endif

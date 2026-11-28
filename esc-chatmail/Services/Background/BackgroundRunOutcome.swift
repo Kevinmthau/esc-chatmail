@@ -8,9 +8,10 @@ enum BackgroundRunOutcome: String, Codable, CaseIterable, Sendable {
     case completed
     /// The run stopped short; a catch-up retry was scheduled.
     case needsFollowUp
-    /// Another run held the boundary; a retry was scheduled.
+    /// Another run held the boundary (a foreground run, pending actions, maintenance or an
+    /// account transition); a retry was scheduled.
     case blockedRetrying
-    /// Another run held the boundary, and nothing needed retrying.
+    /// Another background task's mailbox sync held the boundary, so nothing needed retrying.
     case blockedNoRetry
     /// The run failed; the failure backoff was scheduled.
     case failed

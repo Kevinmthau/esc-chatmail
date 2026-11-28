@@ -373,9 +373,10 @@ final class SyncRunCoordinatorTests: XCTestCase {
 
     /// Revert-check: fails if `isActiveRun(_:)` drops its
     /// `accountWorkLeases.contains(run.id)` arm or if `endRun(_:)` stops
-    /// removing leases. `PendingActionsManager.queueAction(within:)` validates
-    /// the caller's lease through `isActiveRun(_:)`, so both halves are
-    /// load-bearing.
+    /// removing leases. `MessageActions.ownsAccountWork(_:)`, before the save
+    /// that commits an action's change and its row, and
+    /// `PendingActionsManager.queueAction(_:within:)` validate the caller's
+    /// lease through `isActiveRun(_:)`, so both halves are load-bearing.
     func testIsActiveRunValidatesAccountWorkLeaseUntilItIsReleased() async {
         let coordinator = SyncRunCoordinator()
 

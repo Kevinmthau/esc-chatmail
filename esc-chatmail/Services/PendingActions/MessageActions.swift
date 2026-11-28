@@ -57,15 +57,30 @@ final class MessageActions: ObservableObject {
     }
 
     /// Takes a non-exclusive account-work lease before any optimistic mutation
-    /// can suspend or save, then holds it through durable pending-action
-    /// enqueue. The lease does not wait for an in-progress sync run, so a user
-    /// action never queues behind initial sync, but an account transition still
-    /// cannot interleave: the lease is refused once teardown starts, and
-    /// teardown waits for an outstanding lease before replacing the store.
+    /// can suspend or save, then holds it through the one save that commits
+    /// the mutation and its pending action's row, and through telling the
+    /// manager of the row. The lease does not wait for an in-progress sync
+    /// run, so a user action never queues behind initial sync, but an account
+    /// transition still cannot interleave: the lease is refused once teardown
+    /// starts, and teardown waits for an outstanding lease before replacing
+    /// the store.
     ///
     /// Because nothing on this path parks on the exclusive boundary any more,
     /// a cancelled caller task (`ViewModelTaskManager` same-key cancel, or
     /// `cancelAll()` on disappear) can no longer discard the user's action.
+    ///
+    /// Every action below stages its row in the background context that
+    /// holds its change (`PendingActionEnqueue`), with the markers' own date
+    /// as `createdAt`, and saves both in one save: a failed save rolls both
+    /// back, and a process killed mid-action keeps both or neither. Until
+    /// 2026-11-27 the change was saved first and the manager inserted the row
+    /// afterwards in a view-context save of its own, so a kill between the
+    /// two kept a change Gmail was never told of, which label reconciliation
+    /// undid on recent mail once the marker lapsed (architecture review
+    /// 2026-11, outbound-and-actions#4). The manager is told only after that
+    /// save, still inside the conversation's turn, and only schedules
+    /// processing; nothing here drains the queue, which needs the exclusive
+    /// run that a lease holder must never wait for.
     private func performAccountWork(
         _ operation: (SyncRun) async -> Void
     ) async {
@@ -79,6 +94,20 @@ final class MessageActions: ObservableObject {
 
         await operation(syncRun)
         await syncRunCoordinator.endRun(syncRun)
+    }
+
+    /// Whether this action still owns `syncRun`, its account-work lease.
+    /// Asked once the conversation's turn is held, after the last suspension
+    /// before the save that commits the change and its action row. It is the
+    /// check `PendingActionsManager` made before it inserted the row in a save
+    /// of its own, moved with the insert, so that the change and its row are
+    /// refused together; before, the change was saved unchecked.
+    private func ownsAccountWork(_ syncRun: SyncRun) async -> Bool {
+        guard await syncRunCoordinator.isActiveRun(syncRun) else {
+            Log.error("Refusing a message action without its active account-work run", category: .message)
+            return false
+        }
+        return true
     }
 
     // MARK: - Mark Read/Unread
@@ -113,16 +142,13 @@ final class MessageActions: ObservableObject {
             let conversationKey = conversationID.uriRepresentation().absoluteString
             await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
                 guard let self,
-                      let messageId = await self.performMarkConversationAsUnread(
+                      await self.ownsAccountWork(syncRun),
+                      let committed = await self.performMarkConversationAsUnread(
                         conversationID: conversationID
                       ) else {
                     return
                 }
-                await self.queueReadStateAction(
-                    type: .markUnread,
-                    messageId: messageId,
-                    within: syncRun
-                )
+                await self.pendingActionsManager.queueAction(committed, within: syncRun)
             }
         }
     }
@@ -231,7 +257,8 @@ final class MessageActions: ObservableObject {
         let conversationKey = conversationID.uriRepresentation().absoluteString
         await rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
             guard let self,
-                  let messageId = await self.performReadStateMutation(
+                  await self.ownsAccountWork(syncRun),
+                  let committed = await self.performReadStateMutation(
                     messageID: messageID,
                     conversationID: conversationID,
                     isUnread: isUnread,
@@ -239,20 +266,20 @@ final class MessageActions: ObservableObject {
                   ) else {
                 return
             }
-            await self.queueReadStateAction(
-                type: actionType,
-                messageId: messageId,
-                within: syncRun
-            )
+            await self.pendingActionsManager.queueAction(committed, within: syncRun)
         }
     }
 
+    /// Sets one message's read state, recomputes its conversation's rollup
+    /// and stages the action's row, all in one save. Returns the row's
+    /// receipt, or nil when nothing was queued (nothing changed, a read or
+    /// the save failed, or the message has no ID to name).
     private func performReadStateMutation(
         messageID: NSManagedObjectID,
         conversationID: NSManagedObjectID,
         isUnread: Bool,
         actionType: PendingAction.ActionType
-    ) async -> String? {
+    ) async -> PendingActionEnqueue.StagedMessageAction? {
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             context.refreshAllObjects()
@@ -263,21 +290,28 @@ final class MessageActions: ObservableObject {
                 return nil
             }
 
+            let modificationDate = Date()
             message.isUnread = isUnread
-            message.localModifiedAt = Date()
-            guard Self.applyInboxRollup(to: conversation, overlaying: [message], in: context),
-                  context.saveOrLog(operation: "mark message as \(actionType.rawValue)") else {
+            message.localModifiedAt = modificationDate
+            guard Self.applyInboxRollup(to: conversation, overlaying: [message], in: context) else {
+                context.rollback()
+                return nil
+            }
+            let staged = Self.stageMessageAction(actionType, for: message, createdAt: modificationDate, in: context)
+            guard context.saveOrLog(operation: "mark message as \(actionType.rawValue)") else {
                 context.rollback()
                 return nil
             }
 
-            return message.id
+            return staged
         }
     }
 
+    /// As `performReadStateMutation`, for the conversation's newest INBOX
+    /// message.
     private func performMarkConversationAsUnread(
         conversationID: NSManagedObjectID
-    ) async -> String? {
+    ) async -> PendingActionEnqueue.StagedMessageAction? {
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
             context.refreshAllObjects()
@@ -291,15 +325,25 @@ final class MessageActions: ObservableObject {
                 return nil
             }
 
+            let modificationDate = Date()
             latestInboxMessage.isUnread = true
-            latestInboxMessage.localModifiedAt = Date()
-            guard Self.applyInboxRollup(to: conversation, overlaying: [latestInboxMessage], in: context),
-                  context.saveOrLog(operation: "mark conversation as unread") else {
+            latestInboxMessage.localModifiedAt = modificationDate
+            guard Self.applyInboxRollup(to: conversation, overlaying: [latestInboxMessage], in: context) else {
+                context.rollback()
+                return nil
+            }
+            let staged = Self.stageMessageAction(
+                .markUnread,
+                for: latestInboxMessage,
+                createdAt: modificationDate,
+                in: context
+            )
+            guard context.saveOrLog(operation: "mark conversation as unread") else {
                 context.rollback()
                 return nil
             }
 
-            return latestInboxMessage.id
+            return staged
         }
     }
 
@@ -319,7 +363,8 @@ final class MessageActions: ObservableObject {
             let conversationKey = conversationID.uriRepresentation().absoluteString
             await self.rollupMutationSerializer.perform(conversationKeys: [conversationKey]) { [weak self] in
                 guard let self,
-                      let gmailMessageId = await self.performReadStateMutation(
+                      await self.ownsAccountWork(syncRun),
+                      let committed = await self.performReadStateMutation(
                         messageID: messageID,
                         conversationID: conversationID,
                         isUnread: false,
@@ -327,11 +372,7 @@ final class MessageActions: ObservableObject {
                       ) else {
                     return
                 }
-                await self.queueReadStateAction(
-                    type: .markRead,
-                    messageId: gmailMessageId,
-                    within: syncRun
-                )
+                await self.pendingActionsManager.queueAction(committed, within: syncRun)
             }
         }
     }
@@ -351,18 +392,27 @@ final class MessageActions: ObservableObject {
         }
     }
 
+    /// Marks the batch read, recounts the conversation's unread INBOX
+    /// messages and stages one `markRead` conversation action naming the
+    /// marked messages, all in one save. Call inside the conversation's turn.
+    ///
+    /// The action names the conversation it was read in. The per-message
+    /// fallback for a batch without a conversation ID went with the two-save
+    /// enqueue: the batch saves only once its conversation was read, and
+    /// `Conversation.id` is not optional, so the fallback never ran.
     private func performMarkMessagesAsReadBatch(
         messageIDs: [NSManagedObjectID],
         conversationID: NSManagedObjectID,
         within syncRun: SyncRun
     ) async {
+        guard await ownsAccountWork(syncRun) else { return }
+
         let context = coreDataStack.newBackgroundContext()
         let unreadInboxMessageCounter = self.unreadInboxMessageCounter
 
-        let batchResult: (messageIds: [String], sourceConversationId: UUID?) = await context.perform {
+        let committed: PendingActionEnqueue.StagedConversationAction? = await context.perform {
             var markedIds: [String] = []
             let modificationDate = Date()
-            var sourceConversationId: UUID?
 
             let messagesByID = Self.fetchMessagesWithLabels(messageIDs, in: context)
             for messageID in messageIDs {
@@ -375,7 +425,6 @@ final class MessageActions: ObservableObject {
 
                 message.isUnread = false
                 message.localModifiedAt = modificationDate
-                sourceConversationId = sourceConversationId ?? message.conversation?.id
 
                 if !message.id.isEmpty {
                     markedIds.append(message.id)
@@ -384,9 +433,8 @@ final class MessageActions: ObservableObject {
 
             guard let conversation = try? context.existingObject(with: conversationID) as? Conversation else {
                 context.rollback()
-                return ([], sourceConversationId)
+                return nil
             }
-            sourceConversationId = sourceConversationId ?? conversation.id
 
             do {
                 conversation.inboxUnreadCount = Int32(
@@ -399,48 +447,44 @@ final class MessageActions: ObservableObject {
                     category: .coreData,
                     error: error
                 )
-                return ([], sourceConversationId)
+                return nil
             }
 
-            // Don't sync to Gmail if the local batch update didn't persist.
-            guard context.saveOrLog(operation: "batch mark messages as read") else {
-                return ([], sourceConversationId)
-            }
-            return (markedIds, sourceConversationId)
-        }
-
-        guard !batchResult.messageIds.isEmpty else { return }
-
-        if let sourceConversationId = batchResult.sourceConversationId {
-            await pendingActionsManager.queueConversationAction(
+            let staged = markedIds.isEmpty ? nil : PendingActionEnqueue.stageConversationAction(
                 type: .markRead,
-                sourceConversationId: sourceConversationId,
-                messageIds: batchResult.messageIds,
-                within: syncRun
+                sourceConversationId: conversation.id,
+                messageIds: markedIds,
+                createdAt: modificationDate,
+                in: context
             )
-        } else {
-            for messageId in batchResult.messageIds {
-                await pendingActionsManager.queueAction(
-                    type: .markRead,
-                    messageId: messageId,
-                    payload: nil,
-                    within: syncRun
-                )
+            // Don't sync to Gmail if the local batch update didn't persist:
+            // the action's row is in the same save, and goes with it.
+            guard context.saveOrLog(operation: "batch mark messages as read") else {
+                context.rollback()
+                return nil
             }
+            return staged
         }
+
+        guard let committed else { return }
+        await pendingActionsManager.queueConversationAction(committed, within: syncRun)
     }
 
-    private func queueReadStateAction(
-        type: PendingAction.ActionType,
-        messageId: String,
-        within syncRun: SyncRun
-    ) async {
-        guard !messageId.isEmpty else { return }
-        await pendingActionsManager.queueAction(
+    /// Stages the row of `type` for `message` in `context`, dated
+    /// `createdAt`, or nothing when the message has no ID to name. Call
+    /// inside `context.perform`, before the save that commits the change.
+    nonisolated private static func stageMessageAction(
+        _ type: PendingAction.ActionType,
+        for message: Message,
+        createdAt: Date,
+        in context: NSManagedObjectContext
+    ) -> PendingActionEnqueue.StagedMessageAction? {
+        guard !message.id.isEmpty else { return nil }
+        return PendingActionEnqueue.stageMessageAction(
             type: type,
-            messageId: messageId,
-            payload: nil,
-            within: syncRun
+            messageId: message.id,
+            createdAt: createdAt,
+            in: context
         )
     }
 
@@ -464,24 +508,21 @@ final class MessageActions: ObservableObject {
             let conversationKeys = Self.conversationKeys(for: [message.conversation?.objectID])
             await self.rollupMutationSerializer.perform(conversationKeys: conversationKeys) { [weak self] in
                 guard let self,
-                      let gmailMessageId = await self.performArchive(messageID: messageID) else {
+                      await self.ownsAccountWork(syncRun),
+                      let committed = await self.performArchive(messageID: messageID) else {
                     return
                 }
-                // Queue sync to Gmail (remove INBOX label)
-                await self.queueReadStateAction(
-                    type: .archive,
-                    messageId: gmailMessageId,
-                    within: syncRun
-                )
+                // Tell the manager of the committed Gmail action (remove INBOX)
+                await self.pendingActionsManager.queueAction(committed, within: syncRun)
             }
         }
     }
 
-    /// Removes INBOX from one message and recomputes its conversation's
-    /// rollup in the same save. Returns the message's Gmail ID, or nil when
-    /// nothing was saved (the message is gone, is not in the inbox, or a
-    /// read or the save failed).
-    private func performArchive(messageID: NSManagedObjectID) async -> String? {
+    /// Removes INBOX from one message, recomputes its conversation's rollup
+    /// and stages the `archive` action's row, all in one save. Returns the
+    /// row's receipt, or nil when nothing was queued (the message is gone, is
+    /// not in the inbox, has no ID to name, or a read or the save failed).
+    private func performArchive(messageID: NSManagedObjectID) async -> PendingActionEnqueue.StagedMessageAction? {
         let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
@@ -491,19 +532,21 @@ final class MessageActions: ObservableObject {
             }
 
             // Update local state and mark as locally modified for conflict detection
+            let modificationDate = Date()
             message.removeFromLabels(inboxLabel)
-            message.localModifiedAt = Date()
+            message.localModifiedAt = modificationDate
             if let conversation = message.conversation,
                !Self.applyInboxRollup(to: conversation, overlaying: [message], in: context) {
                 context.rollback()
                 return nil
             }
+            let staged = Self.stageMessageAction(.archive, for: message, createdAt: modificationDate, in: context)
             guard save(context, "archive message") else {
                 Log.error("Not queuing archive: local save failed", category: .message)
                 context.rollback()
                 return nil
             }
-            return message.id
+            return staged
         }
     }
 
@@ -601,10 +644,11 @@ final class MessageActions: ObservableObject {
             // `ConversationRollupMutationSerializer.performThrowingAnchoredSendMutation(conversationIDs:onEnqueued:operation:)`.
             let conversationKeys = Self.conversationKeys(for: conversationIDs)
             await self.rollupMutationSerializer.perform(conversationKeys: conversationKeys) { [weak self] in
-                guard let self else { return }
+                guard let self, await self.ownsAccountWork(syncRun) else { return }
                 guard let outcome = await self.saveConversationWideMutation(
                     mutation,
-                    to: conversationIDs
+                    to: conversationIDs,
+                    sourceConversationId: sourceConversationId
                 ) else {
                     Log.error("Not queuing \(mutation.operation): nothing was saved", category: .message)
                     return
@@ -618,30 +662,30 @@ final class MessageActions: ObservableObject {
                     category: .message
                 )
 
-                // Queue sync to Gmail
-                guard !outcome.messageIds.isEmpty else { return }
-                await self.pendingActionsManager.queueConversationAction(
-                    type: mutation.pendingActionType,
-                    sourceConversationId: sourceConversationId,
-                    messageIds: outcome.messageIds,
-                    within: syncRun
-                )
+                // Tell the manager of the committed Gmail action
+                guard let committed = outcome.committedAction else { return }
+                await self.pendingActionsManager.queueConversationAction(committed, within: syncRun)
             }
         }
     }
 
     /// What a conversation-wide action saved.
     private struct ConversationWideOutcome: Sendable {
-        /// The Gmail IDs the pending action should name.
+        /// The Gmail IDs the pending action names.
         var messageIds: [String] = []
         /// How many conversations the action changed. One the store already
         /// had it applied to is not counted.
         var changedConversationCount = 0
+        /// The action's row, committed in the same save, or nil when it
+        /// names no message (every changed row was the user's own unsent
+        /// reply, which has no Gmail ID yet).
+        var committedAction: PendingActionEnqueue.StagedConversationAction?
     }
 
     private func saveConversationWideMutation(
         _ mutation: ConversationWideMutation,
-        to conversationIDs: [NSManagedObjectID]
+        to conversationIDs: [NSManagedObjectID],
+        sourceConversationId: UUID
     ) async -> ConversationWideOutcome? {
         let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
@@ -649,24 +693,28 @@ final class MessageActions: ObservableObject {
             Self.applyConversationWideMutation(
                 mutation,
                 to: conversationIDs,
+                sourceConversationId: sourceConversationId,
                 in: context,
                 savingWith: save
             )
         }
     }
 
-    /// Applies a conversation-wide action and saves it, all in one save.
-    /// Returns what was saved, or nil when a read or the save failed or the
-    /// action does not apply. Call inside `context.perform`.
+    /// Applies a conversation-wide action and stages its pending action's
+    /// row, all in one save. Returns what was saved, or nil when a read or
+    /// the save failed or the action does not apply. Call inside
+    /// `context.perform`.
     ///
     /// Every message of each conversation is stamped `localModifiedAt`, and
     /// Report Spam adds SPAM to every one. INBOX is removed only where it is
     /// set: removing a label a message does not carry changed nothing. A
     /// conversation the store already has the action applied to is left as
-    /// it is (`isAlreadyApplied`).
+    /// it is (`isAlreadyApplied`). The row names `sourceConversationId` and
+    /// every Gmail ID the action stamped, and is dated with the stamps.
     nonisolated private static func applyConversationWideMutation(
         _ mutation: ConversationWideMutation,
         to conversationIDs: [NSManagedObjectID],
+        sourceConversationId: UUID,
         in context: NSManagedObjectContext,
         savingWith save: BackgroundSave
     ) -> ConversationWideOutcome? {
@@ -752,6 +800,15 @@ final class MessageActions: ObservableObject {
         }
 
         guard outcome.changedConversationCount > 0 else { return outcome }
+        if !outcome.messageIds.isEmpty {
+            outcome.committedAction = PendingActionEnqueue.stageConversationAction(
+                type: mutation.pendingActionType,
+                sourceConversationId: sourceConversationId,
+                messageIds: outcome.messageIds,
+                createdAt: modificationDate,
+                in: context
+            )
+        }
         guard save(context, mutation.operation) else {
             context.rollback()
             return nil
@@ -1100,30 +1157,28 @@ final class MessageActions: ObservableObject {
             let conversationKeys = Self.conversationKeys(for: [message.conversation?.objectID])
             await self.rollupMutationSerializer.perform(conversationKeys: conversationKeys) { [weak self] in
                 guard let self,
-                      let gmailMessageId = await self.performStarMutation(
+                      await self.ownsAccountWork(syncRun),
+                      let committed = await self.performStarMutation(
                         messageID: messageID,
                         isStarred: isStarred,
                         actionType: actionType
                       ) else {
                     return
                 }
-                await self.queueReadStateAction(
-                    type: actionType,
-                    messageId: gmailMessageId,
-                    within: syncRun
-                )
+                await self.pendingActionsManager.queueAction(committed, within: syncRun)
             }
         }
     }
 
-    /// Returns the message's Gmail ID, or nil when nothing was saved (the
-    /// message is gone, is already in the asked-for state, or the save
-    /// failed).
+    /// Stars or unstars the message and stages the action's row, in one
+    /// save. Returns the row's receipt, or nil when nothing was queued (the
+    /// message is gone, is already in the asked-for state, has no ID to
+    /// name, or a read or the save failed).
     private func performStarMutation(
         messageID: NSManagedObjectID,
         isStarred: Bool,
         actionType: PendingAction.ActionType
-    ) async -> String? {
+    ) async -> PendingActionEnqueue.StagedMessageAction? {
         let save = makeBackgroundSave()
         let context = coreDataStack.newBackgroundContext()
         return await context.perform {
@@ -1151,13 +1206,15 @@ final class MessageActions: ObservableObject {
                 message.removeFromLabels(existingStarLabel)
             }
 
-            message.localModifiedAt = Date()
+            let modificationDate = Date()
+            message.localModifiedAt = modificationDate
+            let staged = Self.stageMessageAction(actionType, for: message, createdAt: modificationDate, in: context)
             guard save(context, "\(actionType.rawValue) message") else {
                 Log.error("Not queuing \(actionType.rawValue): local save failed", category: .message)
                 context.rollback()
                 return nil
             }
-            return message.id
+            return staged
         }
     }
 }

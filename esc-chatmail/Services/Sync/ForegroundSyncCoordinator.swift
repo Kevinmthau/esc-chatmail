@@ -29,12 +29,18 @@ final class ForegroundSyncCoordinator {
 
     private let syncEngine: any ForegroundSyncPerforming
     private let authSession: any ForegroundSyncAuthenticationProviding
+    /// The path whose return asks for a sync: the one `SyncEngine.shared`
+    /// asks before each run (`NetworkMonitorService.shared`).
+    private let networkPath: any SyncNetworkPathMonitoring
     private let periodicInterval: TimeInterval
     private let minimumSyncGap: TimeInterval
     private let maxImmediateFollowUpRuns: Int
     private let log = LogCategory.sync.logger
 
     private var periodicTask: Task<Void, Never>?
+    /// Hears the path come back, from `start` to `stop`
+    /// (`startUsablePathObservation()`).
+    private var usablePathTask: Task<Void, Never>?
     private var deferredSyncTask: Task<Void, Never>?
     private var deferredSyncTaskID: UUID?
     private var lastSyncTriggerAt: Date?
@@ -42,12 +48,14 @@ final class ForegroundSyncCoordinator {
     init(
         syncEngine: (any ForegroundSyncPerforming)? = nil,
         authSession: (any ForegroundSyncAuthenticationProviding)? = nil,
+        networkPath: (any SyncNetworkPathMonitoring)? = nil,
         periodicInterval: TimeInterval = 60,
         minimumSyncGap: TimeInterval = 30,
         maxImmediateFollowUpRuns: Int = 3
     ) {
         self.syncEngine = syncEngine ?? SyncEngine.shared
         self.authSession = authSession ?? AuthSession.shared
+        self.networkPath = networkPath ?? NetworkMonitorService.shared
         self.periodicInterval = periodicInterval
         self.minimumSyncGap = minimumSyncGap
         self.maxImmediateFollowUpRuns = max(0, maxImmediateFollowUpRuns)
@@ -62,6 +70,7 @@ final class ForegroundSyncCoordinator {
         }
 
         let startedPeriodicLoop = startPeriodicLoopIfNeeded()
+        startUsablePathObservation()
 
         if triggerImmediateSync {
             // Only force when we are starting a fresh foreground loop (e.g. cold launch or
@@ -76,6 +85,8 @@ final class ForegroundSyncCoordinator {
     func stop(reason: String) {
         periodicTask?.cancel()
         periodicTask = nil
+        usablePathTask?.cancel()
+        usablePathTask = nil
         deferredSyncTask?.cancel()
         deferredSyncTask = nil
         deferredSyncTaskID = nil
@@ -226,6 +237,30 @@ final class ForegroundSyncCoordinator {
 
         log.debug("Foreground sync periodic loop started")
         return true
+    }
+
+    /// Asks for a sync when the path comes back after it was known to be
+    /// down (`SyncNetworkPathMonitoring.usablePathReturns()`). A run skipped
+    /// for no network used to wait for the next 60-second tick or the next
+    /// activation, while pending actions resumed at once (architecture review
+    /// 2026-11, background-energy#5).
+    ///
+    /// Subscribed in `start` and cancelled in `stop`, so the iOS app in the
+    /// background, a Mac asleep or a signed-out session starts nothing. The
+    /// request is an ordinary `triggerSync(force: false)` on the main actor,
+    /// never a call into the engine from the monitor's queue: the mailbox
+    /// gate applies, and so does the minimum gap, so a link that flaps does
+    /// not sync at every return.
+    private func startUsablePathObservation() {
+        guard usablePathTask == nil else { return }
+        let returns = networkPath.usablePathReturns()
+        usablePathTask = Task { [weak self] in
+            for await _ in returns {
+                guard let self else { return }
+                guard !Task.isCancelled, self.periodicTask != nil else { continue }
+                self.triggerSync(reason: "networkPathBecameUsable", force: false)
+            }
+        }
     }
 
     private enum SyncTriggerOutcome: Equatable {
