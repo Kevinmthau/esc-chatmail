@@ -442,6 +442,21 @@ struct AttachmentPaths {
         FileSystemErrorHandler.removeItem(at: url, category: .attachment)
     }
     
+    /// The extension a received attachment is stored under: its filename's, where that is an
+    /// extension by the export's rules (`AttachmentExportPolicy.splitExtension`: a few characters,
+    /// no space, not all digits), lowercased; otherwise its type's. The filename is the sender's,
+    /// and its extension used whole could make the stored name longer than the file system
+    /// allows, so every write of the attachment failed and a kept inline row fetched its whole
+    /// message again at every showing.
+    static func storedFileExtension(filename: String, mimeType: String) -> String {
+        let name = (filename as NSString).lastPathComponent
+        let candidate = AttachmentExportPolicy.splitExtension(of: name).pathExtension.lowercased()
+        guard !candidate.isEmpty, !candidate.contains("/"), !candidate.contains(":") else {
+            return fileExtension(for: mimeType)
+        }
+        return candidate
+    }
+
     static func fileExtension(for mimeType: String) -> String {
         switch mimeType.lowercased() {
         // Images

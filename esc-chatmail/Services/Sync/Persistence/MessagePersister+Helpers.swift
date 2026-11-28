@@ -549,8 +549,7 @@ extension MessagePersister {
             return false
         }
 
-        let filenameExt = (info.filename as NSString).pathExtension.lowercased()
-        let ext = filenameExt.isEmpty ? AttachmentPaths.fileExtension(for: info.mimeType) : filenameExt
+        let ext = AttachmentPaths.storedFileExtension(filename: info.filename, mimeType: info.mimeType)
         let originalPath = AttachmentPaths.originalPath(
             messageId: messageId,
             attachmentId: attachmentId,

@@ -15,10 +15,6 @@ struct VideoAttachmentCard: View {
 
     private let thumbnailSize = CGSize(width: 100, height: 60)
 
-    private var isLocalAttachment: Bool {
-        attachment.isLocalAttachment
-    }
-
     var body: some View {
         Button(action: onTap) {
             HStack(spacing: 12) {
@@ -113,39 +109,46 @@ struct VideoAttachmentCard: View {
 
     @ViewBuilder
     private var downloadIndicator: some View {
-        if attachment.state == .uploading || (attachment.state == .queued && isLocalAttachment) {
+        switch AttachmentDownloadIndicatorPolicy.indicator(
+            state: attachment.state,
+            attachmentId: attachment.id,
+            isReady: attachment.isReady,
+            isDownloading: downloader.isDownloading(messageId: attachment.message?.id, attachmentId: attachment.id),
+            isRefusedForSpace: downloader.isRefusedForSpace(messageId: attachment.message?.id, attachmentId: attachment.id)
+        ) {
+        case .uploading, .downloading:
             ProgressView()
                 .progressViewStyle(CircularProgressViewStyle())
                 .scaleEffect(0.8)
                 .frame(width: 24, height: 24)
-        } else if attachment.state == .failed {
-            if isLocalAttachment {
+        case .uploadFailed:
+            Image(systemName: "exclamationmark.circle.fill")
+                .font(.system(size: 22))
+                .foregroundColor(.red)
+        case .downloadFailed:
+            Button(action: {
+                Task {
+                    await downloader.retryFailedDownload(for: attachment)
+                }
+            }) {
                 Image(systemName: "exclamationmark.circle.fill")
                     .font(.system(size: 22))
                     .foregroundColor(.red)
-            } else {
-                Button(action: {
-                    Task {
-                        await downloader.retryFailedDownload(for: attachment)
-                    }
-                }) {
-                    Image(systemName: "exclamationmark.circle.fill")
-                        .font(.system(size: 22))
-                        .foregroundColor(.red)
+            }
+        case .refusedForSpace:
+            AttachmentSpaceRefusalButton {
+                Task {
+                    await downloader.retryFailedDownload(for: attachment)
                 }
             }
-        } else if downloader.isDownloading(
-            messageId: attachment.message?.id,
-            attachmentId: attachment.id
-        ) {
-            ProgressView()
-                .progressViewStyle(CircularProgressViewStyle())
-                .scaleEffect(0.8)
-                .frame(width: 24, height: 24)
-        } else if !attachment.isReady && !isLocalAttachment {
+        case .notDownloaded:
+            // Not downloaded yet - a cloud download icon (like Mail)
             Image(systemName: "icloud.and.arrow.down")
                 .font(.system(size: 22))
                 .foregroundColor(.blue)
+        case .none:
+            // When downloaded: show nothing (like Mail)
+            EmptyView()
         }
     }
 
