@@ -486,6 +486,94 @@ final class ScaleQueryPlanTests: XCTestCase {
         }
     }
 
+    // MARK: - A person's message participations
+
+    /// The cleanup passes read a person's message participations by a fetch,
+    /// `person IN %@` (`DataCleanupService.messageParticipations(of:in:)`),
+    /// and no longer through `Person.messageParticipations`, the inverse model 9
+    /// drops (architecture review 2026-11, data-model#3). A relationship read
+    /// went to the participant rows by their person; the fetch must too, and
+    /// never walk ZMESSAGEPARTICIPANT, which holds about two rows per message
+    /// of the mailbox.
+    ///
+    /// HONEST SCOPE: no one line of production code reverts this. It fails if
+    /// the fetch stops being a match on `person`, or if a model version leaves
+    /// the participant rows' person column with no index.
+    func testPersonMessageParticipationsFetch_searchesAnIndex() throws {
+        for statistics in Self.bothStatistics {
+            let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+            let context = stack.newBackgroundContext()
+            let email = ScaleStoreSeeder.personEmail(at: 4_000)
+
+            var participationCount = 0
+            let plans = try SQLiteQueryPlanRecorder.record {
+                participationCount = try context.performAndWait {
+                    let request = NSFetchRequest<Person>(entityName: "Person")
+                    request.predicate = NSPredicate(format: "email == %@", email)
+                    let person = try XCTUnwrap(try context.fetch(request).first)
+                    return try DataCleanupService.messageParticipations(of: [person], prefetchingMessages: true, in: context)[person.objectID]?.count ?? 0
+                }
+            }
+
+            XCTAssertGreaterThan(participationCount, 0, "\(statistics)")
+            let plan = try XCTUnwrap(plans.first { $0.reads("ZMESSAGEPARTICIPANT") }, "\(statistics):\n\(plans)")
+            XCTAssertEqual(plan.scans(of: "ZMESSAGEPARTICIPANT"), [], "\(statistics): \(plan)")
+            XCTAssertFalse(plan.indexes(on: "ZMESSAGEPARTICIPANT").isEmpty, "\(statistics): \(plan)")
+        }
+    }
+
+    /// The merge asks which of a loser's messages the survivor is already on
+    /// (`DataCleanupService.messageParticipationKeys(of:among:in:)`). With the
+    /// survivor in the predicate (`person == %@ AND message IN %@`), SQLite
+    /// drove that fetch from the person index for the user's own Person, about
+    /// 120,000 rows at S2, in three of the four cases the review measured: no
+    /// statistics at 3 and at 300 messages, and analyzed at 300. That is a
+    /// SEARCH, so a "no scan" assertion cannot see it: this asserts the index.
+    /// Once model 9 drops the inverse it is the cost left in the merge.
+    ///
+    /// Revert-check: the `message IN %@` predicate in
+    /// `messageParticipationKeys(of:among:in:)`. Put the person back in it and
+    /// the plan uses ZMESSAGEPARTICIPANT_ZPERSON_INDEX in three of the four
+    /// cases (no statistics at 3 and at 300 messages, analyzed at 300; iOS 27.0
+    /// simulator, 2026-11-28). Analyzed at 3 SQLite still picks the message
+    /// index, so that case alone does not catch it.
+    func testSurvivorParticipationKeysFetch_searchesTheMessageIndex() throws {
+        for statistics in Self.bothStatistics {
+            for messageCount in [3, 300] {
+                let (stack, _) = try ScaleStoreTemplate.s2.makeStack(statistics: statistics)
+                let context = stack.newBackgroundContext()
+                let ids = (0..<messageCount).map { ScaleStoreSeeder.messageID(at: $0 * 400) }
+
+                // The person and message fetches read neither ZMESSAGEPARTICIPANT
+                // nor anything the plan below is picked by, so one closure does.
+                var counts = (messages: 0, keys: 0)
+                let plans = try SQLiteQueryPlanRecorder.record {
+                    counts = try context.performAndWait {
+                        let personRequest = NSFetchRequest<Person>(entityName: "Person")
+                        personRequest.predicate = NSPredicate(format: "email == %@", ScaleStorePlan.selfEmail)
+                        let me = try XCTUnwrap(try context.fetch(personRequest).first)
+                        let messageRequest = NSFetchRequest<Message>(entityName: "Message")
+                        messageRequest.predicate = NSPredicate(format: "id IN %@", ids)
+                        let messages = try context.fetch(messageRequest)
+                        let keys = try DataCleanupService.messageParticipationKeys(of: me, among: messages, in: context)
+                        return (messages.count, keys.count)
+                    }
+                }
+
+                let label = "\(statistics), \(messageCount) messages"
+                XCTAssertEqual(counts.messages, messageCount, label)
+                XCTAssertGreaterThanOrEqual(counts.keys, messageCount, "The user is on every seeded message: \(label)")
+                let plan = try XCTUnwrap(plans.first { $0.reads("ZMESSAGEPARTICIPANT") }, "\(label):\n\(plans)")
+                XCTAssertEqual(plan.scans(of: "ZMESSAGEPARTICIPANT"), [], "\(label): \(plan)")
+                XCTAssertEqual(
+                    plan.indexes(on: "ZMESSAGEPARTICIPANT"),
+                    ["ZMESSAGEPARTICIPANT_ZMESSAGE_INDEX"],
+                    "\(label): \(plan)"
+                )
+            }
+        }
+    }
+
     // MARK: - Stored rows of deleted messages
 
     /// Before a deleted message's body file is removed, the store is asked which of a

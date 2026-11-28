@@ -230,24 +230,6 @@ enum EmailReaderRenderingConfiguration {
     static var enablesOffscreenWebViewAdoption: Bool {
         FullEmailWebViewAdoptionPolicy.allowsPrerenderedWebViewAdoption
     }
-
-    static func visibleRowWarmWidthEstimate(readerWidthEstimate: CGFloat?) -> CGFloat? {
-        guard enablesOffscreenWebViewAdoption,
-              let readerWidthEstimate,
-              readerWidthEstimate > 1 else {
-            return nil
-        }
-        return readerWidthEstimate
-    }
-
-    /// The scene's screen width on iOS, the reader's last measured width on the Mac
-    /// (`FullEmailReaderWarmWidthSource`).
-    @MainActor
-    static func currentVisibleRowWarmWidthEstimate() -> CGFloat? {
-        visibleRowWarmWidthEstimate(
-            readerWidthEstimate: FullEmailReaderWarmWidthSource.currentWidth
-        )
-    }
 }
 
 // MARK: - Pre-render key
@@ -588,6 +570,22 @@ protocol FullEmailOpening: AnyObject {
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async
 
     func prewarmOnOpen(message: Message, width: CGFloat?)
+}
+
+extension FullEmailOpening {
+    /// The warm a chat row asks for while it is on screen: the prepared HTML only, never an
+    /// off-screen `WKWebView` (architecture review 2026-11, `security-privacy#3`). A web view
+    /// loads every remote resource the original names, its open pixels included, because the
+    /// original is prepared with `.preferHTML`, which skips the tracking-pixel pass the preview
+    /// runs, and the CSP has no `img-src`. Pre-rendered for every rich row that rested on screen
+    /// for 200 ms, it told senders that the user had read mail the user only scrolled past.
+    /// A web view is made only once the user opens the email (`prepaintAfterExplicitOpen`,
+    /// `prewarmOnOpen`), so the first open of an email renders live and a reopen is still adopted.
+    ///
+    /// Deliberately an extension method and not a requirement, so no conformer can give it a width.
+    func warmVisibleRow(request: OriginalEmailWarmRequest, message: Message?) async {
+        await warm(request: request, message: message, width: nil)
+    }
 }
 
 extension FullEmailOpening {
@@ -999,12 +997,13 @@ struct FullEmailPreparedOpenPayloadBookkeeping: Equatable {
 /// Prepares full original-email HTML while chat bubbles are visible (and when a bubble is tapped),
 /// then hands that HTML to the reader so the open can skip cold sanitization/wrapping.
 ///
-/// Prepared HTML warming always runs. Active off-screen `WKWebView` adoption for scroll-time
-/// visible-row warming is on by default and governed by `FullEmailWebViewAdoptionPolicy`, whose only
-/// switch is the kill switch (`-ESCDisableFullEmailWebViewAdoption` /
-/// `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`). A separate explicit-open path can start or promote a
-/// matching WebView after the user opens the full original email, making later opens eligible for
-/// checkout.
+/// Prepared HTML warming always runs. A visible row warms the HTML only (`warmVisibleRow`, which
+/// passes no width), so nothing loads the original's remote resources for mail the user has not
+/// opened. Off-screen `WKWebView` pre-rendering starts only after the user opens the full original
+/// email (`prepaintAfterExplicitOpen`, `prewarmOnOpen` with the reader's measured width), making
+/// later opens eligible for checkout. It is on by default and governed by
+/// `FullEmailWebViewAdoptionPolicy`, whose only switch is the kill switch
+/// (`-ESCDisableFullEmailWebViewAdoption` / `ESC_DISABLE_FULL_EMAIL_WEBVIEW_ADOPTION=1`).
 @MainActor
 final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting {
     static let shared = FullEmailWebViewManager()
@@ -1132,9 +1131,12 @@ final class FullEmailWebViewManager: FullEmailOpening, FullEmailWebViewAdopting 
     }
 
     /// Resolves the locally-available wrapped original HTML (no network recovery) and keeps a prepared
-    /// payload ready for the reader. Unless the adoption kill switch is set
+    /// payload ready for the reader. Given a width, and unless the adoption kill switch is set
     /// (`FullEmailWebViewAdoptionPolicy.isEnabled` is false), also pre-renders an off-screen WebView.
-    /// Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
+    /// Only an open's own warm passes a width: a visible row calls `warmVisibleRow`, which passes
+    /// none, because a WebView fetches every remote resource of the original (its open pixels
+    /// included: the original is not run through the preview's tracking-pixel pass, and the CSP has
+    /// no `img-src`). Cheap to call repeatedly: it no-ops when up-to-date state is already warm.
     func warm(request: OriginalEmailWarmRequest, message: Message?, width: CGFloat?) async {
         guard acceptsAccountWork else { return }
         let warmOperationID = UUID()

@@ -2,7 +2,7 @@
 import UIKit
 
 /// Scene lookups for the full-email WebView pool on iOS. The Mac has no window scenes: its pool
-/// window and warm width come from `OffscreenWebViewHost` and `FullEmailReaderWarmWidthSource`.
+/// window comes from `OffscreenWebViewHost`.
 enum FullEmailWebViewMetrics {
     @MainActor
     static func activeWindowScene() -> UIWindowScene? {
