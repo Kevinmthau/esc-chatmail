@@ -11,9 +11,17 @@ struct ConversationPreviewRepairResult: Sendable {
 /// Struct is naturally Sendable since it only holds immutable references.
 struct ConversationRollupUpdater: Sendable {
     private let coreDataStack: CoreDataStack
+    /// A conversation with more stored messages than this is rolled up from
+    /// bounded queries (`ConversationRollupBoundedReader`). A test passes 0
+    /// to send every stored conversation that way.
+    private let boundedRollupThreshold: Int
 
-    init(coreDataStack: CoreDataStack = .shared) {
+    init(
+        coreDataStack: CoreDataStack = .shared,
+        boundedRollupThreshold: Int = ConversationRollupBoundedReader.messageCountThreshold
+    ) {
         self.coreDataStack = coreDataStack
+        self.boundedRollupThreshold = boundedRollupThreshold
     }
 
     // MARK: - Single Conversation Rollup
@@ -63,8 +71,79 @@ struct ConversationRollupUpdater: Sendable {
         updateDisplayNameOnly(
             for: conversation,
             myEmail: myEmail,
-            normalizedSelfAddresses: normalizedSelfAddresses
+            normalizedSelfAddresses: normalizedSelfAddresses,
+            senders: { .walking(messages) }
         )
+    }
+
+    /// The rollup of a large conversation, read with bounded queries and the
+    /// context's unsaved messages (`ConversationRollupBoundedReader`). A read
+    /// that fails walks the conversation as `updateRollups` does: a partial
+    /// answer is never applied.
+    private func updateBoundedRollups(
+        for conversation: Conversation,
+        overlay: ConversationRollupBoundedReader.Overlay?,
+        storedMessageCount: Int,
+        myEmail: String,
+        normalizedSelfAddresses: Set<String>,
+        in context: NSManagedObjectContext
+    ) {
+        let snapshot: ConversationRollupSnapshot
+        do {
+            snapshot = try ConversationRollupBoundedReader.snapshot(of: conversation, overlay: overlay, in: context)
+        } catch {
+            Log.error("Bounded rollup read failed; walking the conversation", category: .conversation, error: error)
+            updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: normalizedSelfAddresses)
+            return
+        }
+        logRollupSnapshot(snapshot, for: conversation, totalCount: storedMessageCount)
+        snapshot.apply(to: conversation)
+
+        updateDisplayNameOnly(
+            for: conversation,
+            myEmail: myEmail,
+            normalizedSelfAddresses: normalizedSelfAddresses,
+            senders: { Self.boundedSenders(of: conversation, overlay: overlay, in: context) }
+        )
+    }
+
+    /// The bounded reader's senders, or a walk of the messages when its read
+    /// failed.
+    private static func boundedSenders(
+        of conversation: Conversation,
+        overlay: ConversationRollupBoundedReader.Overlay?,
+        in context: NSManagedObjectContext
+    ) -> ConversationSenderSummary {
+        do {
+            return try ConversationRollupBoundedReader.senders(of: conversation, overlay: overlay, in: context)
+        } catch {
+            Log.error("Bounded sender read failed; walking the conversation", category: .conversation, error: error)
+            return .walking(conversation.messages ?? [])
+        }
+    }
+
+    /// Splits `conversationIDs` into the conversations to walk and those the
+    /// bounded reader rolls up, with their stored message counts. A
+    /// conversation with no stored row (a temporary ID) has all its messages
+    /// in memory and is walked; a failed count walks every one. Call on the
+    /// context's queue.
+    private func partitionForRollup(
+        _ conversationIDs: Set<NSManagedObjectID>,
+        in context: NSManagedObjectContext
+    ) -> (walked: Set<NSManagedObjectID>, bounded: [NSManagedObjectID: Int]) {
+        let permanentIDs = conversationIDs.filter { !$0.isTemporaryID }
+        guard !permanentIDs.isEmpty, ConversationRollupBoundedReader.supportsBoundedReads(in: context) else {
+            return (conversationIDs, [:])
+        }
+        let counts: [NSManagedObjectID: Int]
+        do {
+            counts = try ConversationRollupBoundedReader.storedMessageCounts(of: Array(permanentIDs), in: context)
+        } catch {
+            Log.error("Failed to count conversation messages for rollups; walking each", category: .conversation, error: error)
+            return (conversationIDs, [:])
+        }
+        let bounded = counts.filter { $0.value > boundedRollupThreshold }
+        return (conversationIDs.subtracting(bounded.keys), bounded)
     }
 
     /// The signed-in account's own addresses, normalized: `myEmail`, and the
@@ -145,28 +224,49 @@ struct ConversationRollupUpdater: Sendable {
         guard !conversationIDs.isEmpty else { return true }
 
         return await context.perform {
-            // Use batch fetch with prefetching instead of individual existingObject calls
-            // This avoids N+1 queries when accessing messages/labels/participants
-            let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
-            request.relationshipKeyPathsForPrefetching = [
+            // A conversation over the threshold is rolled up from bounded
+            // queries (`ConversationRollupBoundedReader`); the rest are walked
+            // with their messages and labels prefetched, as before. Until
+            // 2026-11-28 every touched conversation was walked, every row and
+            // its body text loaded (architecture review 2026-11, data-model#4).
+            let (walkedIDs, boundedCounts) = self.partitionForRollup(conversationIDs, in: context)
+
+            let walkedRequest = Conversation.fetchRequest()
+            walkedRequest.predicate = NSPredicate(format: "SELF IN %@", walkedIDs)
+            walkedRequest.relationshipKeyPathsForPrefetching = [
                 "messages",
                 "messages.labels",
                 "participants",
                 "participants.person"
             ]
+            let boundedRequest = Conversation.fetchRequest()
+            boundedRequest.predicate = NSPredicate(format: "SELF IN %@", Array(boundedCounts.keys))
+            boundedRequest.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
 
-            let conversations: [Conversation]
+            let walked: [Conversation]
+            let bounded: [Conversation]
             do {
-                conversations = try context.fetch(request)
+                walked = walkedIDs.isEmpty ? [] : try context.fetch(walkedRequest)
+                bounded = boundedCounts.isEmpty ? [] : try context.fetch(boundedRequest)
             } catch {
                 Log.error("Failed to batch fetch conversations for rollup update", category: .conversation, error: error)
                 return false
             }
 
             let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
-            for conversation in conversations {
+            for conversation in walked {
                 self.updateRollups(for: conversation, myEmail: myEmail, normalizedSelfAddresses: selfAddresses)
+            }
+            let overlays = bounded.isEmpty ? [:] : ConversationRollupBoundedReader.overlays(in: context)
+            for conversation in bounded {
+                self.updateBoundedRollups(
+                    for: conversation,
+                    overlay: overlays[conversation.objectID],
+                    storedMessageCount: boundedCounts[conversation.objectID] ?? 0,
+                    myEmail: myEmail,
+                    normalizedSelfAddresses: selfAddresses,
+                    in: context
+                )
             }
             return true
         }
@@ -436,7 +536,8 @@ struct ConversationRollupUpdater: Sendable {
                 self.updateDisplayNameOnly(
                     for: conversation,
                     myEmail: myEmail,
-                    normalizedSelfAddresses: selfAddresses
+                    normalizedSelfAddresses: selfAddresses,
+                    senders: { .walking(conversation.messages ?? []) }
                 )
             }
         }
@@ -456,28 +557,47 @@ struct ConversationRollupUpdater: Sendable {
         guard !conversationIDs.isEmpty else { return true }
 
         return await context.perform {
-            let request = Conversation.fetchRequest()
-            request.predicate = NSPredicate(format: "SELF IN %@", conversationIDs)
-            request.relationshipKeyPathsForPrefetching = [
+            // A large conversation's senders come from a grouped query, as for
+            // its rollup; the rest walk their prefetched messages.
+            let (walkedIDs, boundedCounts) = self.partitionForRollup(conversationIDs, in: context)
+            let walkedRequest = Conversation.fetchRequest()
+            walkedRequest.predicate = NSPredicate(format: "SELF IN %@", walkedIDs)
+            walkedRequest.relationshipKeyPathsForPrefetching = [
                 "messages",
                 "participants",
                 "participants.person"
             ]
+            let boundedRequest = Conversation.fetchRequest()
+            boundedRequest.predicate = NSPredicate(format: "SELF IN %@", Array(boundedCounts.keys))
+            boundedRequest.relationshipKeyPathsForPrefetching = ["participants", "participants.person"]
 
-            let conversations: [Conversation]
+            let walked: [Conversation]
+            let bounded: [Conversation]
             do {
-                conversations = try context.fetch(request)
+                walked = walkedIDs.isEmpty ? [] : try context.fetch(walkedRequest)
+                bounded = boundedCounts.isEmpty ? [] : try context.fetch(boundedRequest)
             } catch {
                 Log.error("Failed to fetch conversations for display-name update", category: .conversation, error: error)
                 return false
             }
 
             let selfAddresses = Self.storedSelfAddresses(in: context, myEmail: myEmail)
-            for conversation in conversations {
+            for conversation in walked {
                 self.updateDisplayNameOnly(
                     for: conversation,
                     myEmail: myEmail,
-                    normalizedSelfAddresses: selfAddresses
+                    normalizedSelfAddresses: selfAddresses,
+                    senders: { .walking(conversation.messages ?? []) }
+                )
+            }
+            let overlays = bounded.isEmpty ? [:] : ConversationRollupBoundedReader.overlays(in: context)
+            for conversation in bounded {
+                let overlay = overlays[conversation.objectID]
+                self.updateDisplayNameOnly(
+                    for: conversation,
+                    myEmail: myEmail,
+                    normalizedSelfAddresses: selfAddresses,
+                    senders: { Self.boundedSenders(of: conversation, overlay: overlay, in: context) }
                 )
             }
             return true
@@ -555,7 +675,8 @@ struct ConversationRollupUpdater: Sendable {
                 self.updateDisplayNameOnly(
                     for: conversation,
                     myEmail: myEmail,
-                    normalizedSelfAddresses: selfAddresses
+                    normalizedSelfAddresses: selfAddresses,
+                    senders: { .walking(conversation.messages ?? []) }
                 )
                 if conversation.displayName != titleBefore {
                     repairedCount += 1
@@ -586,14 +707,20 @@ struct ConversationRollupUpdater: Sendable {
             myEmail: myEmail,
             normalizedSelfAddresses: conversation.managedObjectContext.map {
                 Self.storedSelfAddresses(in: $0, myEmail: myEmail)
-            } ?? ConversationParticipantExtractor.normalizedAliasSet(from: [myEmail])
+            } ?? ConversationParticipantExtractor.normalizedAliasSet(from: [myEmail]),
+            senders: { .walking(conversation.messages ?? []) }
         )
     }
 
+    /// `senders` is asked at most once, and only where the title needs the
+    /// messages' From names: a list conversation that keeps its stored title
+    /// reads no message at all. A walk passes `.walking(messages)`, a large
+    /// conversation the bounded reader's grouped query.
     private func updateDisplayNameOnly(
         for conversation: Conversation,
         myEmail: String,
-        normalizedSelfAddresses: Set<String>
+        normalizedSelfAddresses: Set<String>,
+        senders: () -> ConversationSenderSummary
     ) {
         guard let participants = conversation.participants else { return }
 
@@ -658,7 +785,7 @@ struct ConversationRollupUpdater: Sendable {
         var seenEmails = Set<String>()
         var names: [String] = []
         var participantEmails: [String] = []
-        let headerDisplayNamesByEmail = headerDisplayNamesByEmail(from: conversation)
+        var titled: [(person: Person, normalizedEmail: String)] = []
 
         for (person, normalizedEmail) in titleCandidates {
             let email = person.email
@@ -673,23 +800,18 @@ struct ConversationRollupUpdater: Sendable {
             guard !seenEmails.contains(normalizedEmail) else { continue }
             seenEmails.insert(normalizedEmail)
             participantEmails.append(email)
+            titled.append((person, normalizedEmail))
+        }
 
-            let resolvedName = PersonDisplayNameResolver.participantDisplayName(
-                email: email,
-                contactDisplayName: nil,
-                headerDisplayName: headerDisplayNamesByEmail[normalizedEmail],
-                storedDisplayName: person.displayName
-            )
-            guard resolvedName.isReal else {
-                Log.diagnostic(
-                    .conversationRollups,
-                    "Including unresolved participant placeholder for: \(email)",
-                    category: .conversation
-                )
-                continue
-            }
-            Log.diagnostic(.conversationRollups, "Including participant: \(resolvedName.name)", category: .conversation)
-            names.append(resolvedName.name)
+        // The messages' senders, read once and only when the title needs them
+        // (after the list conversation's early return below, which reads
+        // none: architecture review 2026-11, sync-persist-path#2 stage 3).
+        var readSenders: ConversationSenderSummary?
+        func senderSummary() -> ConversationSenderSummary {
+            if let readSenders { return readSenders }
+            let summary = senders()
+            readSenders = summary
+            return summary
         }
 
         // A list conversation's title comes from its List-Id display phrase at
@@ -719,7 +841,7 @@ struct ConversationRollupUpdater: Sendable {
                 if let senderName = singleSenderDisplayName(
                     for: conversation,
                     normalizedSelfAddresses: allSelfAddresses,
-                    headerDisplayNamesByEmail: headerDisplayNamesByEmail
+                    senders: senderSummary()
                 ) {
                     if conversation.displayName != senderName {
                         conversation.displayName = senderName
@@ -731,6 +853,27 @@ struct ConversationRollupUpdater: Sendable {
                 // placeholder rather than a participant-derived join.
                 return
             }
+        }
+
+        let headerDisplayNamesByEmail = senderSummary().headerDisplayNamesByEmail
+        for (person, normalizedEmail) in titled {
+            let email = person.email
+            let resolvedName = PersonDisplayNameResolver.participantDisplayName(
+                email: email,
+                contactDisplayName: nil,
+                headerDisplayName: headerDisplayNamesByEmail[normalizedEmail],
+                storedDisplayName: person.displayName
+            )
+            guard resolvedName.isReal else {
+                Log.diagnostic(
+                    .conversationRollups,
+                    "Including unresolved participant placeholder for: \(email)",
+                    category: .conversation
+                )
+                continue
+            }
+            Log.diagnostic(.conversationRollups, "Including participant: \(resolvedName.name)", category: .conversation)
+            names.append(resolvedName.name)
         }
 
         let finalDisplayName = PersonDisplayNameResolver.conversationDisplayName(
@@ -757,18 +900,9 @@ struct ConversationRollupUpdater: Sendable {
     private func singleSenderDisplayName(
         for conversation: Conversation,
         normalizedSelfAddresses: Set<String>,
-        headerDisplayNamesByEmail: [String: String]
+        senders: ConversationSenderSummary
     ) -> String? {
-        guard let messages = conversation.messages else { return nil }
-
-        var distinctSenderEmails = Set<String>()
-        for message in messages {
-            guard let senderEmail = message.senderEmail else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
-            guard !normalizedEmail.isEmpty,
-                  !normalizedSelfAddresses.contains(normalizedEmail) else { continue }
-            distinctSenderEmails.insert(normalizedEmail)
-        }
+        let distinctSenderEmails = senders.senderEmails.subtracting(normalizedSelfAddresses)
 
         guard distinctSenderEmails.count == 1,
               let senderEmail = distinctSenderEmails.first else {
@@ -785,55 +919,9 @@ struct ConversationRollupUpdater: Sendable {
         let resolved = PersonDisplayNameResolver.participantDisplayName(
             email: senderEmail,
             contactDisplayName: nil,
-            headerDisplayName: headerDisplayNamesByEmail[senderEmail],
+            headerDisplayName: senders.headerDisplayNamesByEmail[senderEmail],
             storedDisplayName: storedDisplayName
         )
         return resolved.isReal ? resolved.name : nil
-    }
-
-    private func headerDisplayNamesByEmail(from conversation: Conversation) -> [String: String] {
-        guard let messages = conversation.messages else { return [:] }
-
-        // Newest-first so the most recent From header wins; an older, fuller
-        // variant of the same name may still upgrade it (see
-        // EmailNormalizer.mergeNewestFirstHeaderDisplayName). One unordered
-        // pass records each distinct sanitized name's newest occurrence;
-        // ranking those candidates reproduces a full newest-first scan
-        // without sorting a large thread's entire message set.
-        var candidatesByEmail: [String: [String: (date: Date, id: String)]] = [:]
-        for message in messages {
-            guard let senderEmail = message.senderEmail else { continue }
-            let normalizedEmail = EmailNormalizer.normalize(senderEmail)
-            guard !normalizedEmail.isEmpty,
-                  let displayName = PersonDisplayNameResolver.sanitizedExplicitDisplayName(
-                    message.senderName,
-                    forEmail: normalizedEmail
-                  ) else {
-                continue
-            }
-
-            let newest = candidatesByEmail[normalizedEmail]?[displayName]
-            if newest == nil
-                || message.internalDate > newest!.date
-                || (message.internalDate == newest!.date && message.id > newest!.id) {
-                candidatesByEmail[normalizedEmail, default: [:]][displayName] = (message.internalDate, message.id)
-            }
-        }
-
-        var displayNames: [String: String] = [:]
-        for (email, candidates) in candidatesByEmail {
-            let ranked = candidates.map { name, newest in
-                EmailNormalizer.HeaderDisplayNameCandidate(
-                    displayName: name,
-                    newestInternalDate: newest.date,
-                    newestMessageID: newest.id
-                )
-            }
-            if let winner = EmailNormalizer.resolveNewestFirstHeaderDisplayName(from: ranked, forEmail: email) {
-                displayNames[email] = winner
-            }
-        }
-
-        return displayNames
     }
 }

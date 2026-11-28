@@ -2,7 +2,7 @@ import Foundation
 import CoreData
 
 /// Derived conversation-list fields computed from the current message set.
-struct ConversationRollupSnapshot: Sendable {
+struct ConversationRollupSnapshot: Sendable, Equatable {
     let lastMessageDate: Date?
     let snippet: String?
     let hasInbox: Bool
@@ -16,37 +16,91 @@ struct ConversationRollupSnapshot: Sendable {
         hasSentOrFromMeMessages && !hasReceivedMessages && !hasInbox
     }
 
+    /// The rule over every message of the conversation, walked in memory.
+    /// The bounded reader (`ConversationRollupBoundedReader`) gathers the same
+    /// inputs from the store for a large conversation and folds in the
+    /// context's unsaved messages through the same `Accumulator`, so the rule
+    /// has one definition.
     static func make(from messages: Set<Message>) -> ConversationRollupSnapshot {
-        var latestVisibleMessage: Message?
-        var latestVisiblePreviewMessage: Message?
-        var latestInboxMessage: Message?
+        var accumulator = Accumulator()
+        for message in messages {
+            accumulator.add(MessageInput(message))
+        }
+        return accumulator.snapshot
+    }
+
+    /// What the rule reads of one message.
+    struct MessageInput: Equatable {
+        let id: String
+        let internalDate: Date
+        let labelIDs: Set<String>
+        let isUnread: Bool
+        let isFromMe: Bool
+        /// `Message.conversationPreviewText`.
+        let previewText: String?
+
+        init(_ message: Message) {
+            id = message.id
+            internalDate = message.internalDate
+            labelIDs = Set(message.labels?.map(\.id) ?? [])
+            isUnread = message.isUnread
+            isFromMe = message.isFromMe
+            previewText = message.conversationPreviewText
+        }
+
+        var isVisible: Bool {
+            labelIDs.isDisjoint(with: MessagePersister.excludedMailboxLabelIDs)
+        }
+
+        var isOutgoing: Bool {
+            isFromMe || labelIDs.contains("SENT")
+        }
+
+        /// Later date first, then the greater ID, so equal dates give one
+        /// answer whatever order the messages come in.
+        func isNewer(than other: MessageInput?) -> Bool {
+            guard let other else { return true }
+            if internalDate != other.internalDate {
+                return internalDate > other.internalDate
+            }
+            return id > other.id
+        }
+    }
+
+    /// The rule, one message at a time. A walk adds every message; the
+    /// bounded reader sets the fields from the store's answers and then adds
+    /// the unsaved messages.
+    struct Accumulator {
+        var latestVisible: MessageInput?
+        /// The newest visible message whose preview is not blank; it can be
+        /// older than `latestVisible`.
+        var latestVisiblePreview: MessageInput?
+        var latestInbox: MessageInput?
         var inboxUnreadCount: Int32 = 0
         var hasSentOrFromMeMessages = false
         var hasReceivedMessages = false
 
-        for message in messages {
-            let labelIDs = Set(message.labels?.map(\.id) ?? [])
-
-            if isVisibleMessage(labelIDs: labelIDs) {
-                if latestVisibleMessage == nil || message.internalDate > latestVisibleMessage!.internalDate {
-                    latestVisibleMessage = message
+        mutating func add(_ message: MessageInput) {
+            if message.isVisible {
+                if message.isNewer(than: latestVisible) {
+                    latestVisible = message
                 }
-                if MessagePreviewText.nonEmpty(message.conversationPreviewText) != nil,
-                   latestVisiblePreviewMessage == nil || message.internalDate > latestVisiblePreviewMessage!.internalDate {
-                    latestVisiblePreviewMessage = message
+                if MessagePreviewText.nonEmpty(message.previewText) != nil,
+                   message.isNewer(than: latestVisiblePreview) {
+                    latestVisiblePreview = message
                 }
             }
 
-            if labelIDs.contains("INBOX") {
+            if message.labelIDs.contains("INBOX") {
                 if message.isUnread {
                     inboxUnreadCount = min(Int32.max, inboxUnreadCount + 1)
                 }
-                if latestInboxMessage == nil || message.internalDate > latestInboxMessage!.internalDate {
-                    latestInboxMessage = message
+                if message.isNewer(than: latestInbox) {
+                    latestInbox = message
                 }
             }
 
-            if message.isFromMe || labelIDs.contains("SENT") {
+            if message.isOutgoing {
                 hasSentOrFromMeMessages = true
             }
             if !message.isFromMe {
@@ -54,21 +108,18 @@ struct ConversationRollupSnapshot: Sendable {
             }
         }
 
-        let latestVisibleLabelIDs = latestVisibleMessage.map { Set($0.labels?.map(\.id) ?? []) } ?? []
-        let latestVisibleMessageIsOutgoing = latestVisibleMessage.map {
-            $0.isFromMe || latestVisibleLabelIDs.contains("SENT")
-        } ?? false
-
-        return ConversationRollupSnapshot(
-            lastMessageDate: latestVisibleMessage?.internalDate,
-            snippet: latestVisiblePreviewMessage?.conversationPreviewText,
-            hasInbox: latestInboxMessage != nil,
-            inboxUnreadCount: inboxUnreadCount,
-            latestInboxDate: latestInboxMessage?.internalDate,
-            hasSentOrFromMeMessages: hasSentOrFromMeMessages,
-            hasReceivedMessages: hasReceivedMessages,
-            latestVisibleMessageIsOutgoing: latestVisibleMessageIsOutgoing
-        )
+        var snapshot: ConversationRollupSnapshot {
+            ConversationRollupSnapshot(
+                lastMessageDate: latestVisible?.internalDate,
+                snippet: latestVisiblePreview?.previewText,
+                hasInbox: latestInbox != nil,
+                inboxUnreadCount: inboxUnreadCount,
+                latestInboxDate: latestInbox?.internalDate,
+                hasSentOrFromMeMessages: hasSentOrFromMeMessages,
+                hasReceivedMessages: hasReceivedMessages,
+                latestVisibleMessageIsOutgoing: latestVisible?.isOutgoing ?? false
+            )
+        }
     }
 
     func apply(
@@ -112,9 +163,5 @@ struct ConversationRollupSnapshot: Sendable {
             conversation.snippet = newSnippet
         }
         routingPolicy.applyArchiveState(to: conversation, snapshot: self)
-    }
-
-    private static func isVisibleMessage(labelIDs: Set<String>) -> Bool {
-        labelIDs.isDisjoint(with: MessagePersister.excludedMailboxLabelIDs)
     }
 }
