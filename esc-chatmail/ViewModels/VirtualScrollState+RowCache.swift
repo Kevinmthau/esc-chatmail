@@ -173,8 +173,13 @@ extension VirtualScrollState {
     /// What this cannot see is a row that came to sort between the window
     /// and its neighbour while the window stayed. An insertion does that, and
     /// `handleViewContextChange` clears the neighbours when an insertion
-    /// raises the count, where it clears this memo too; a change of a stored
-    /// message's date does not, and Gmail does not change one.
+    /// raises the count, where it clears this memo too. So does a stored
+    /// message that comes into the transcript without an insertion (a label
+    /// change: taken out of Trash, Not Spam; or moved into this conversation
+    /// by a merge), and a stored message's date changing, which Gmail does
+    /// not do; those clear nothing here, until the reconciliation they ask
+    /// for loads a window with new neighbours. The OFFSET fetch's index memo
+    /// has the same gap.
     private func resolveNeighborRow(
         _ objectID: NSManagedObjectID,
         atAbsoluteIndex index: Int,

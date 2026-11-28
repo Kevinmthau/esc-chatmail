@@ -7,6 +7,10 @@ import CoreData
 /// what `VirtualScrollState` asks its view context for on the main actor, where
 /// `FetchCountingContext` (private-queue, counts alone) cannot stand in.
 ///
+/// Made through `make(retiredWith:)`, which retires it to the stack's graveyard
+/// as `makeMainQueueViewContext()` retires its own: a `VirtualScrollState`'s
+/// reconciles and preloads can outlive the test that made it.
+///
 /// Touched only on the main queue, like any main-queue context, so the record
 /// needs no lock.
 final class MainQueueFetchRecordingContext: NSManagedObjectContext, @unchecked Sendable {
@@ -19,7 +23,16 @@ final class MainQueueFetchRecordingContext: NSManagedObjectContext, @unchecked S
 
     private(set) var messageFetches: [MessageFetch] = []
 
-    init(coordinator: NSPersistentStoreCoordinator) {
+    /// A new context on `stack`'s coordinator, retired to its graveyard.
+    static func make(retiredWith stack: TestCoreDataStack) -> MainQueueFetchRecordingContext {
+        let context = MainQueueFetchRecordingContext(
+            coordinator: stack.persistentContainer.persistentStoreCoordinator
+        )
+        stack.retire(context)
+        return context
+    }
+
+    private init(coordinator: NSPersistentStoreCoordinator) {
         super.init(concurrencyType: .mainQueueConcurrencyType)
         persistentStoreCoordinator = coordinator
         automaticallyMergesChangesFromParent = false

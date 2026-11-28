@@ -19,9 +19,9 @@ struct MessageWindow {
     /// was an OFFSET fetch on the main thread whose cost grows with the
     /// window's depth (architecture review 2026-11, chat-transcript-ui#2).
     /// Nil where nothing read the row, which keeps that fetch as the fallback:
-    /// a window at the tail has no row below it, and a change that may have
-    /// moved a row between the window and its neighbour clears both
-    /// (`clearingNeighborIDs`). Not part of the window's rows: `messageIDs`
+    /// a window at the tail has no row below it, and an insertion that may
+    /// have put a row between the window and a neighbour clears that one
+    /// (`clearingNeighborIDs`, `clearingNextNeighborID`). Not part of the window's rows: `messageIDs`
     /// stays exactly `startIndex..<endIndex`.
     var previousNeighborID: NSManagedObjectID?
     var nextNeighborID: NSManagedObjectID?
@@ -65,6 +65,17 @@ struct MessageWindow {
             endIndex: endIndex,
             messageIDs: messageIDs,
             isLoading: isLoading
+        )
+    }
+
+    /// The same window with the row below it unknown and the row above it kept.
+    func clearingNextNeighborID() -> MessageWindow {
+        MessageWindow(
+            startIndex: startIndex,
+            endIndex: endIndex,
+            messageIDs: messageIDs,
+            isLoading: isLoading,
+            previousNeighborID: previousNeighborID
         )
     }
 

@@ -20,9 +20,7 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
     override func setUp() {
         super.setUp()
         stack = TestCoreDataStack()
-        viewContext = MainQueueFetchRecordingContext(
-            coordinator: stack.persistentContainer.persistentStoreCoordinator
-        )
+        viewContext = MainQueueFetchRecordingContext.make(retiredWith: stack)
     }
 
     override func tearDown() {
@@ -75,6 +73,71 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
         XCTAssertEqual(state.visibleMessages.first?.subject, "changed before the slide")
     }
 
+    // MARK: - Off screen
+
+    /// A row changed while the chat was off screen (a full-screen Quick Look
+    /// runs `cleanup()`, which stops the change observation) is shown as it is
+    /// now once the chat is back: `resume()`'s full re-map heals it. The
+    /// control for the two below.
+    func testResumeAlone_rowChangedWhileOffScreen_showsItsNewValue() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 10)
+        defer { state.cleanup() }
+        state.cleanup()
+        messages[1].subject = "changed while off screen"
+        try viewContext.save()
+
+        state.resume()
+        await waitUntil { state.visibleMessages.count == 3 && state.visibleMessages[1].subject == "changed while off screen" }
+
+        XCTAssertEqual(state.visibleMessages[1].subject, "changed while off screen")
+    }
+
+    /// The rows reappearing slide the window in the turn the chat resumes,
+    /// which supersedes `resume()`'s re-map; the slide re-maps every row,
+    /// because none of the cached ones is trusted after the chat was off
+    /// screen. Found by the PR 529 review's probe.
+    ///
+    /// Revert-check: dropping `resolvedRowsByID.removeAll()` from
+    /// `VirtualScrollState.cleanup()` keeps the old subject.
+    func testResumeThenSlide_rowChangedWhileOffScreen_showsItsNewValue() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 10)
+        defer { state.cleanup() }
+        state.cleanup()
+        messages[2].subject = "changed while off screen"
+        try viewContext.save()
+
+        state.resume()
+        state.markIndexVisible(3)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 2)
+        XCTAssertEqual(state.visibleMessages.first?.objectID, messages[2].objectID)
+        XCTAssertEqual(state.visibleMessages.first?.subject, "changed while off screen")
+    }
+
+    /// The same with the slide started before `resume()`, as when a row's
+    /// `onAppear` runs before the chat's.
+    ///
+    /// Revert-check: dropping `resolvedRowsByID.removeAll()` from
+    /// `VirtualScrollState.cleanup()` keeps the old subject.
+    func testSlideThenResume_rowChangedWhileOffScreen_showsItsNewValue() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 10)
+        defer { state.cleanup() }
+        state.cleanup()
+        messages[2].subject = "changed while off screen"
+        try viewContext.save()
+
+        state.markIndexVisible(3)
+        state.resume()
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 2 }
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        XCTAssertEqual(state.visibleRangeStartIndex, 2)
+        XCTAssertEqual(state.visibleMessages.first?.objectID, messages[2].objectID)
+        XCTAssertEqual(state.visibleMessages.first?.subject, "changed while off screen")
+    }
+
     // MARK: - Neighbours
 
     /// After a slide publishes the historical window 11..<16, the grouping's
@@ -102,6 +165,10 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
 
     /// The memo answers a second read: a body that asks on every publish
     /// fetches once per window.
+    ///
+    /// Revert-check: dropping `resolvedRowsByAbsoluteIndex[index] = row` from
+    /// the neighbour branch of `VirtualScrollState.rowForGrouping` fetches
+    /// three times.
     func testSlidWindow_groupingRowAfterIt_isFetchedOncePerWindow() async throws {
         let (state, messages) = try await makeLoadedState(messageCount: 30)
         defer { state.cleanup() }
@@ -163,8 +230,9 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
     /// load read below it is the row there now: the insertion clears the
     /// neighbours, and the read finds the new row.
     ///
-    /// Revert-check: dropping `messageWindow?.clearingNeighborIDs()` in
-    /// `VirtualScrollState.handleViewContextChange` answers the old row 16,
+    /// Revert-check: keeping the window's neighbours on that insertion
+    /// (`messageWindow` in place of `messageWindow?.clearingNextNeighborID()` in
+    /// `VirtualScrollState.handleViewContextChange`) answers the old row 16,
     /// which still sorts after the window.
     func testInsertionPastKeptHistoricalWindow_groupingRowAfterIt_isTheInsertedRow() async throws {
         let (state, messages) = try await makeLoadedState(messageCount: 30)
@@ -182,6 +250,31 @@ final class VirtualScrollStateSlideReuseTests: XCTestCase {
         XCTAssertEqual(state.messageWindow?.range, 11..<16, "The insertion past the window keeps it")
         XCTAssertEqual(state.totalMessageCount, 31)
         XCTAssertEqual(state.rowForGrouping(atAbsoluteIndex: 16)?.objectID, inserted.objectID)
+    }
+
+    /// An insertion that sorts after the window cannot come between it and the
+    /// row above it, so that neighbour is kept: on the Mac the first row's time
+    /// line reads it, and every sync arrival in a historical window sent that
+    /// read to the OFFSET fetch.
+    ///
+    /// Revert-check: clearing both neighbours for every count-raising insertion
+    /// in `VirtualScrollState.handleViewContextChange` (`clearingNeighborIDs()`
+    /// in place of `clearingNextNeighborID()`) records a fetch at offset 10.
+    func testInsertionPastKeptHistoricalWindow_groupingRowAboveIt_isStillReadByID() async throws {
+        let (state, messages) = try await makeLoadedState(messageCount: 30)
+        defer { state.cleanup() }
+        state.markIndexVisible(12)
+        await waitUntil { !state.isLoadingMore && state.visibleRangeStartIndex == 11 }
+        let conversation = try XCTUnwrap(messages[0].conversation)
+
+        let inserted = makeMessage(id: "virtual-scroll-25b", date: 25.5, conversation: conversation)
+        try viewContext.obtainPermanentIDs(for: [inserted])
+        try viewContext.save()
+        XCTAssertEqual(state.messageWindow?.range, 11..<16, "The insertion past the window keeps it")
+        viewContext.resetRecordedFetches()
+
+        XCTAssertEqual(state.rowForGrouping(atAbsoluteIndex: 10)?.objectID, messages[10].objectID)
+        XCTAssertEqual(viewContext.messageFetches.map(\.fetchOffset), [0])
     }
 
     /// A neighbour the transcript no longer selects (it was given a label the

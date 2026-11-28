@@ -695,6 +695,17 @@ final class VirtualScrollState: ObservableObject {
         viewContextChangesCancellable = nil
         syncCompletedCancellable?.cancel()
         syncCompletedCancellable = nil
+        // Nothing evicts a cached row while the chat is off screen (a full-screen Quick Look,
+        // a push), so none is trusted after it: an attachment that finished downloading or a
+        // send state that changed meanwhile would come back as the old row model wherever a
+        // load reuses cached rows. A scroll slide reuses them
+        // (`resolveRowsReusingCacheThrowing`) and can supersede the full re-map `resume()`
+        // schedules, which the slide's reuse then skipped. Dropped here rather than in
+        // `resume()`, so it holds whichever of the rows' `onAppear` and the chat's comes
+        // first. The published rows stay on screen; the first load after this re-maps every
+        // row it publishes.
+        resolvedRowsByID.removeAll()
+        resolvedRowsByAbsoluteIndex.removeAll()
     }
 
     /// Restores observation and any interrupted initial load when the chat reappears.
