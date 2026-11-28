@@ -283,7 +283,9 @@ extension VirtualScrollState {
             startIndex: loadedWindow.range.lowerBound,
             endIndex: endIndex,
             messageIDs: page.messageIDs,
-            isLoading: false
+            isLoading: false,
+            previousNeighborID: page.previousNeighborID,
+            nextNeighborID: page.nextNeighborID
         )
 
         totalMessageCount = page.totalCount

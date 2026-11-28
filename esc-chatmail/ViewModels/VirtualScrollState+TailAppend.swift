@@ -104,11 +104,14 @@ extension VirtualScrollState {
     ) {
         let appendedRows = ChatMessageRowModelMapper.map(messages)
         let appendedMessageIDs = messages.map(\.objectID)
+        // At the tail, so no row below; the row above stays the window's, or
+        // a front trim drops a new one.
         let extendedWindow = MessageWindow(
             startIndex: window.startIndex,
             endIndex: window.endIndex + appendedMessageIDs.count,
             messageIDs: window.messageIDs + appendedMessageIDs,
-            isLoading: false
+            isLoading: false,
+            previousNeighborID: window.previousNeighborID
         ).frontTrimmed(to: configuration.maxWindowSize)
 
         setMessageWindow(extendedWindow)

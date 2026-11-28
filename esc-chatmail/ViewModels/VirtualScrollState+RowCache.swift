@@ -93,6 +93,18 @@ extension VirtualScrollState {
         return resolveCachedRow(for: window.messageIDs[relativeIndex])
     }
 
+    /// The row at `index` for the transcript's grouping, which reads one row
+    /// past each edge of the window: a window row from the cache, else the
+    /// window's neighbour by its ID (`MessageWindow.neighborID`), else an
+    /// OFFSET fetch. Each answer outside the window is memoized by index, and
+    /// that memo is what `handleViewContextChange` evicts a refreshed row
+    /// from. The view's body asks for the row after the window on every
+    /// publish of a historical window (`senderGroupingMessages`), so the
+    /// OFFSET fetch, whose cost grows with the window's depth, ran on the
+    /// main thread at every scroll step (architecture review 2026-11,
+    /// chat-transcript-ui#2); with the window's neighbour it is a lookup by
+    /// ID. A latest window has no row after it, and `totalMessageCount`
+    /// bounds the read, so it never looks ahead.
     func rowForGrouping(atAbsoluteIndex index: Int) -> ChatMessageRowModel? {
         if let row = row(atAbsoluteIndex: index) {
             return row
@@ -102,17 +114,22 @@ extension VirtualScrollState {
         if let cached = resolvedRowsByAbsoluteIndex[index] {
             return cached
         }
-        guard let conversationUUID = UUID(uuidString: conversationId) else { return nil }
+        guard let transcriptPredicate = groupingTranscriptPredicate() else { return nil }
+
+        if let window = messageWindow,
+           let neighborID = window.neighborID(atAbsoluteIndex: index),
+           let row = resolveNeighborRow(
+               neighborID,
+               atAbsoluteIndex: index,
+               of: window,
+               transcriptPredicate: transcriptPredicate
+           ) {
+            resolvedRowsByAbsoluteIndex[index] = row
+            return row
+        }
 
         let request = NSFetchRequest<Message>(entityName: "Message")
-        // `currentConversationObjectID` caches permanent IDs only, so an
-        // unsaved conversation keeps the UUID form.
-        if let conversationObjectID = currentConversationObjectID(),
-           !conversationObjectID.isTemporaryID {
-            request.predicate = MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID)
-        } else {
-            request.predicate = MessagePredicates.visibleInChat(conversationId: conversationUUID)
-        }
+        request.predicate = transcriptPredicate
         request.sortDescriptors = Self.messageSortDescriptors
         request.fetchOffset = index
         request.fetchLimit = 1
@@ -128,6 +145,68 @@ extension VirtualScrollState {
         let row = ChatMessageRowModelMapper.map(message)
         resolvedRowsByID[message.objectID] = row
         resolvedRowsByAbsoluteIndex[index] = row
+        return row
+    }
+
+    /// The predicate the grouping reads rows outside the window with.
+    /// `currentConversationObjectID` caches permanent IDs only, so an unsaved
+    /// conversation keeps the UUID form.
+    private func groupingTranscriptPredicate() -> NSPredicate? {
+        guard let conversationUUID = UUID(uuidString: conversationId) else { return nil }
+        if let conversationObjectID = currentConversationObjectID(),
+           !conversationObjectID.isTemporaryID {
+            return MessagePredicates.visibleInChat(conversationObjectID: conversationObjectID)
+        }
+        return MessagePredicates.visibleInChat(conversationId: conversationUUID)
+    }
+
+    /// The window's neighbour `objectID` at `index`, mapped fresh, or nil
+    /// where it is no longer the row there as far as can be told cheaply:
+    /// the transcript no longer selects it (deleted, moved to another
+    /// conversation, given a label the chat leaves out), or it no longer
+    /// sorts beyond the window's edge row. Nil sends the caller to the OFFSET
+    /// fetch. Fetched with the transcript's predicate and the ID, not taken
+    /// from `resolvedRowsByID`: outside the window that cache keeps whatever
+    /// a superseded preload mapped, which nothing evicts
+    /// (`resolveRowsReusingCacheThrowing`).
+    ///
+    /// What this cannot see is a row that came to sort between the window
+    /// and its neighbour while the window stayed. An insertion does that, and
+    /// `handleViewContextChange` clears the neighbours when an insertion
+    /// raises the count, where it clears this memo too; a change of a stored
+    /// message's date does not, and Gmail does not change one.
+    private func resolveNeighborRow(
+        _ objectID: NSManagedObjectID,
+        atAbsoluteIndex index: Int,
+        of window: MessageWindow,
+        transcriptPredicate: NSPredicate
+    ) -> ChatMessageRowModel? {
+        let isAbove = index < window.startIndex
+        guard let edgeID = isAbove ? window.messageIDs.first : window.messageIDs.last,
+              let edgeRow = resolveCachedRow(for: edgeID) else {
+            return nil
+        }
+
+        let request = NSFetchRequest<Message>(entityName: "Message")
+        request.predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            transcriptPredicate,
+            NSPredicate(format: "SELF IN %@", [objectID])
+        ])
+        request.fetchLimit = 1
+        request.includesPendingChanges = true
+        request.relationshipKeyPathsForPrefetching = ["participants", "participants.person", "attachments"]
+
+        guard let message = try? viewContext.fetch(request).first,
+              !message.isDeleted else {
+            return nil
+        }
+        let order = compareSortOrder(message, to: edgeRow)
+        guard order == (isAbove ? .orderedAscending : .orderedDescending) else {
+            return nil
+        }
+
+        let row = ChatMessageRowModelMapper.map(message)
+        resolvedRowsByID[message.objectID] = row
         return row
     }
 
@@ -212,20 +291,25 @@ extension VirtualScrollState {
                 }
                 let predicate = transcript.predicate
 
-                let messageIDs: [NSManagedObjectID]
-                if range.isEmpty {
-                    messageIDs = []
-                } else {
+                var fetchedIDs: [NSManagedObjectID] = []
+                if !range.isEmpty {
+                    // One row more on each side, in the same query: the
+                    // page's neighbours (`VirtualScrollMessagePage`).
+                    let fetchRange = VirtualScrollMessagePage.neighborFetchRange(for: range)
                     let request = NSFetchRequest<NSManagedObjectID>(entityName: "Message")
                     request.predicate = predicate
                     request.sortDescriptors = messageSortDescriptors
-                    request.fetchOffset = range.lowerBound
-                    request.fetchLimit = range.count
+                    request.fetchOffset = fetchRange.lowerBound
+                    request.fetchLimit = fetchRange.count
                     request.fetchBatchSize = 20
                     request.includesPendingChanges = false
                     request.resultType = .managedObjectIDResultType
-                    messageIDs = try context.fetch(request)
+                    fetchedIDs = try context.fetch(request)
                 }
+                let split = VirtualScrollMessagePage.splittingNeighbors(
+                    fetchedIDs,
+                    requestedRange: range
+                )
 
                 // Keep count() on the background context so window sizing stays cheap and
                 // the main actor only resolves the IDs it actually needs to render.
@@ -235,9 +319,11 @@ extension VirtualScrollState {
                 let totalCount = try context.count(for: countRequest)
 
                 return VirtualScrollMessagePage(
-                    messageIDs: messageIDs,
+                    messageIDs: split.rows,
                     totalCount: totalCount,
-                    conversationObjectID: transcript.conversationObjectID
+                    conversationObjectID: transcript.conversationObjectID,
+                    previousNeighborID: split.previous,
+                    nextNeighborID: split.next
                 )
             } catch {
                 return VirtualScrollMessagePage(
@@ -273,19 +359,23 @@ extension VirtualScrollState {
                 let predicate = transcript?.predicate
                     ?? MessagePredicates.visibleInChat(conversationId: conversationUUID)
 
-                let messages: [Message]
-                if range.isEmpty {
-                    messages = []
-                } else {
+                var fetchedMessages: [Message] = []
+                if !range.isEmpty {
+                    // The neighbours too, as `loadMessagePage` reads them.
+                    let fetchRange = VirtualScrollMessagePage.neighborFetchRange(for: range)
                     let request = NSFetchRequest<Message>(entityName: "Message")
                     request.predicate = predicate
                     request.sortDescriptors = messageSortDescriptors
-                    request.fetchOffset = range.lowerBound
-                    request.fetchLimit = range.count
+                    request.fetchOffset = fetchRange.lowerBound
+                    request.fetchLimit = fetchRange.count
                     request.fetchBatchSize = 20
                     request.includesPendingChanges = true
-                    messages = try context.fetch(request)
+                    fetchedMessages = try context.fetch(request)
                 }
+                let split = VirtualScrollMessagePage.splittingNeighbors(
+                    fetchedMessages.map(\.objectID),
+                    requestedRange: range
+                )
 
                 let countRequest = NSFetchRequest<NSFetchRequestResult>(entityName: "Message")
                 countRequest.predicate = predicate
@@ -293,9 +383,11 @@ extension VirtualScrollState {
                 let totalCount = try context.count(for: countRequest)
 
                 return VirtualScrollMessagePage(
-                    messageIDs: messages.map(\.objectID),
+                    messageIDs: split.rows,
                     totalCount: totalCount,
-                    conversationObjectID: transcript?.conversationObjectID
+                    conversationObjectID: transcript?.conversationObjectID,
+                    previousNeighborID: split.previous,
+                    nextNeighborID: split.next
                 )
             } catch {
                 return VirtualScrollMessagePage(

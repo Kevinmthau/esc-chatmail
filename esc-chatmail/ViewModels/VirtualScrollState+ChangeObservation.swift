@@ -121,7 +121,11 @@ extension VirtualScrollState {
         }
 
         if knownTotalCount > totalMessageCount {
+            // A row inserted past a window this change keeps can land between
+            // the window and the neighbour its load read, so the neighbours
+            // go with the index memo (`MessageWindow.previousNeighborID`).
             resolvedRowsByAbsoluteIndex.removeAll()
+            messageWindow = messageWindow?.clearingNeighborIDs()
             totalMessageCount = knownTotalCount
             Log.diagnostic(
                 .chatView,
